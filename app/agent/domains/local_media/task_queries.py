@@ -164,7 +164,7 @@ def _scan_tasks(
                 found[task.id] = task
     summary = scan.get("summary") or {}
     snapshots = {
-        int(item["task_id"]): item
+        (item["task_id"]): item
         for item in summary.get("task_outcomes", [])
         if isinstance(item, dict)
         and isinstance(item.get("task_id"), int)

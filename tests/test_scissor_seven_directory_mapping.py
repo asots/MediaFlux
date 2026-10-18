@@ -1,6 +1,12 @@
 """已核验 NF 发布顺序在目录预览与自动整理中的一致性回归。"""
 from __future__ import annotations
 
+from typing import Any
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
+
 import copy
 from datetime import date, timedelta
 from unittest.mock import Mock
@@ -10,7 +16,7 @@ from app.modules.directory_scrape import DirectoryScrapeService
 from tests.support import IsolatedDatabaseTestCase
 
 
-def scissor_details():
+def scissor_details() -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
     # 2026-09-10 只读核验 TMDB 79141 及 episode group
     # 5e6c0d87396e9700138b38d2；测试使用固定公开元数据，不调用网络。
     detail = {"id": 79141, "seasons": [
@@ -61,6 +67,7 @@ class ScissorSevenDirectoryMappingTests(IsolatedDatabaseTestCase):
                     season_detail_loader=loader,
                 )
                 for item in inspection.videos:
+                    assert item.episode is not None
                     target = (0, item.episode - 10)
                     self.assertEqual(overrides[("", item.name)], target)
                     plan = mappings[item.file_id]
@@ -158,9 +165,9 @@ class ScissorSevenPlanningTests(IsolatedDatabaseTestCase):
         cloud = _MutableTreeClient(tree, infos)
         rules = OrganizeRules(target_dir_id="archive", small_file_mb=0, region_split=False,
                               year_split=False, link_strm=False, notify_enabled=False, clean_empty=False)
-        scraper = TMDBScraper(client=Client())
+        scraper = TMDBScraper(client=cast(TMDBClient, Client()))
         self.addCleanup(scraper.close)
-        service = DirectoryScrapeService(client=cloud, scraper=scraper, store=DirectoryScrapeStore(), rules_loader=lambda: rules)
+        service = DirectoryScrapeService(client=cast(GuangYaClient, cloud), scraper=scraper, store=DirectoryScrapeStore(), rules_loader=lambda: rules)
         return service, cloud, rules, scraper, detail
 
     def test_full_preview_targets_specials_without_colliding_with_existing_regular_episodes(self):
@@ -185,7 +192,7 @@ class ScissorSevenPlanningTests(IsolatedDatabaseTestCase):
         for missing in (False, True):
             with self.subTest(missing=missing):
                 _, cloud, _, scraper, detail = self._build(special_missing=missing)
-                organizer = Organizer(client=cloud, scraper=scraper)
+                organizer = Organizer(client=cast(GuangYaClient, cloud), scraper=scraper)
                 self.addCleanup(organizer.close)
                 match = scraper.match_from_tmdb("79141", "tv")
                 evidence = build_directory_episode_evidence([
@@ -215,7 +222,7 @@ class ScissorSevenPlanningTests(IsolatedDatabaseTestCase):
             for missing in (False, True):
                 with self.subTest(mode=mode, missing=missing):
                     _, cloud, rules, scraper, _ = self._build(special_missing=missing)
-                    organizer = Organizer(client=cloud, scraper=scraper)
+                    organizer = Organizer(client=cast(GuangYaClient, cloud), scraper=scraper)
                     self.addCleanup(organizer.close)
                     before = copy.deepcopy(cloud.tree)
                     original_get = scraper.client.get
@@ -243,12 +250,15 @@ class ScissorSevenPlanningTests(IsolatedDatabaseTestCase):
                     self.assertEqual((plan.source_season, plan.source_episode), (1, 11))
                     if missing:
                         self.assertEqual(plan.action, "skip")
+                        assert plan.match is not None
                         self.assertTrue(plan.match.need_confirm)
+                        assert plan.episode_mapping is not None
                         self.assertFalse(plan.episode_mapping.changed)
                     else:
                         self.assertEqual((plan.season, plan.episode), (0, 4))
                         self.assertEqual(plan.action, "move")
                         self.assertIn("S00E04", plan.new_name)
+                        assert plan.episode_mapping is not None
                         self.assertEqual(plan.episode_mapping.mode, "tmdb_special")
                     self.assertEqual(cloud.tree, before)
                     self.assertEqual(cloud.deleted, [])

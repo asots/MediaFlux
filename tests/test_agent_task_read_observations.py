@@ -1,4 +1,5 @@
 """F09：事后 READ 回执显式关联；共用配置账本、SQLite CAS 和真实 Kernel。"""
+from typing import Any
 
 import asyncio
 import json
@@ -112,7 +113,7 @@ class TaskModel(ScriptedModel):
                 outputs = [json.loads(m.content) for m in request.messages if m.role == "tool"]
                 task = next(v["task"] for v in reversed(outputs) if v.get("task"))
                 facts = [f for f in reads(task) if f["tool"] == TOOL]
-                args = {"operation": "checkpoint", "blockers": [],
+                args: dict[str, Any] = {"operation": "checkpoint", "blockers": [],
                         "evidence_ids": [f["evidence_id"] for f in task["verified_facts"]]}
                 if self.goals:
                     args["read_evidence"] = dict(zip(self.goals, [f["evidence_id"] for f in facts]))
@@ -204,7 +205,9 @@ def test_actual_receipt_requires_explicit_association_not_just_evidence_ids():
     task = checkpoint(task, {"libraries": fact["evidence_id"]})
     assert [o["state"] for o in task["obligations"]] == ["verified", "pending"]
     assert task["status"] == "partial"
-    assert task_state.task_projection(task)["remaining_obligation_ids"] == ["remaining"]
+    task_projection_result = task_state.task_projection(task)
+    assert task_projection_result is not None
+    assert task_projection_result["remaining_obligation_ids"] == ["remaining"]
 
 
 def test_read_link_does_not_require_duplicating_receipt_in_configuration_ids():

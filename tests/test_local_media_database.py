@@ -4,11 +4,18 @@ from __future__ import annotations
 import sqlite3
 import threading
 import unittest
+from typing import Iterable, cast
 
 from app import database as db
 from app.modules.local_media_models import LocalMediaSource, LocalMediaTask
 from app.modules.process_lock import CrossProcessLock
 from tests.support import IsolatedDatabaseTestCase
+
+
+def _request_snapshot(request_id: int, columns: Iterable[str]) -> tuple:
+    row = db.get_download_request(request_id)
+    assert row is not None
+    return tuple(row[column] for column in columns)
 
 
 class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
@@ -71,7 +78,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             )
             with patch.object(models, "canonical_local_media_content_path", wraps=models.canonical_local_media_content_path) as canonical:
                 result = repository._active_local_media_task_for_path(
-                    Connection(), source_id=source_id, owner=owner,
+                    cast(sqlite3.Connection, Connection()), source_id=source_id, owner=owner,
                     content_path="/tmp/stream-source/Missing.mkv",
                 )
         self.assertIsNone(result)
@@ -106,8 +113,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             name="adult-source", qb_profile="", qb_path_prefix="",
             local_root="/tmp/adult-source", media_type="nsfw", owner="admin",
         )
+        get_local_media_source_result = db.get_local_media_source(source_id, owner="admin")
+        assert get_local_media_source_result is not None
         self.assertEqual(
-            db.get_local_media_source(source_id, owner="admin").media_type,
+            get_local_media_source_result.media_type,
             "nsfw",
         )
         with self.assertRaises(ValueError):
@@ -139,8 +148,8 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
 
         source = db.get_local_media_source(source_id, owner="admin")
         task = db.get_local_media_task(task_id, owner="admin")
-        self.assertIsInstance(source, LocalMediaSource)
-        self.assertIsInstance(task, LocalMediaTask)
+        assert isinstance(source, LocalMediaSource)
+        assert isinstance(task, LocalMediaTask)
         self.assertEqual(source.mode, "move")
         self.assertEqual(
             (source.stable_seconds, source.scan_enabled, source.scan_interval_minutes),
@@ -154,7 +163,9 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertEqual(target.server_path, "//NAS/Media/Movies")
         self.assertTrue(db.claim_local_media_task(task_id, expected="waiting_stable", owner="admin"))
         self.assertFalse(db.claim_local_media_task(task_id, expected="waiting_stable", owner="admin"))
-        self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "recognizing")
+        get_local_media_task_result = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result is not None
+        self.assertEqual(get_local_media_task_result.status, "recognizing")
 
     def test_concurrent_scan_task_creation_reuses_one_active_task(self):
         source_id = db.create_local_media_source(
@@ -247,8 +258,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
                 content_path="/tmp/immutable-task-path/Other.mkv",
             )
 
+        get_local_media_task_result_2 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_2 is not None
         self.assertEqual(
-            db.get_local_media_task(task_id, owner="admin").content_path,
+            get_local_media_task_result_2.content_path,
             "/tmp/immutable-task-path/Movie.mkv",
         )
 
@@ -299,8 +312,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertEqual(linked_id, task_id)
         self.assertFalse(restarted)
         after = db.get_local_media_task(task_id, owner="admin")
+        assert after is not None
         self.assertEqual(after.qb_hash, "hash-manual-binding")
         self.assertEqual(after.content_path, "/tmp/single-track/Movie.mkv")
+        assert before is not None
         self.assertEqual(
             (
                 after.status,
@@ -340,8 +355,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             ),
         )
         self.assertEqual(len(db.list_local_media_task_items(task_id, owner="admin")), 1)
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
         self.assertEqual(
-            db.get_download_request(request_id)["local_import_target"],
+            get_download_request_result["local_import_target"],
             f"local-media-task:{task_id}",
         )
 
@@ -369,6 +386,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertFalse(restarted)
         self.assertEqual(manual_task_id, qb_task_id)
         task = db.get_local_media_task(qb_task_id, owner="admin")
+        assert task is not None
         self.assertEqual(task.qb_hash, "hash-qb-first")
         self.assertEqual(task.trigger, "qb_completed")
 
@@ -446,11 +464,13 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
 
                     task = db.get_local_media_task(task_id, owner="admin")
                     request = db.get_download_request(request_id)
+                    assert request is not None
                     self.assertEqual(request["local_import_status"], task_status)
                     self.assertEqual(request["local_import_error"], task_error)
                     self.assertEqual(
                         request["local_import_completed_at"], task_completed_at,
                     )
+                    assert task is not None
                     self.assertEqual(request["updated_at"], task.updated_at)
 
     def test_reused_task_does_not_rewrite_historical_completed_or_cancelled_requests(self):
@@ -494,13 +514,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             completed_at="2026-09-12 10:03:00",
         )
         historical_before = {
-            request_id: tuple(
-                db.get_download_request(request_id)[column]
-                for column in (
-                    "status", "local_import_status", "local_import_error",
-                    "local_import_completed_at", "completed_at", "updated_at",
-                )
-            )
+            request_id: _request_snapshot(request_id, (
+                "status", "local_import_status", "local_import_error",
+                "local_import_completed_at", "completed_at", "updated_at",
+            ))
             for request_id in (first_request, cancelled_request)
         }
 
@@ -522,13 +539,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         ))
 
         historical_after = {
-            request_id: tuple(
-                db.get_download_request(request_id)[column]
-                for column in (
-                    "status", "local_import_status", "local_import_error",
-                    "local_import_completed_at", "completed_at", "updated_at",
-                )
-            )
+            request_id: _request_snapshot(request_id, (
+                "status", "local_import_status", "local_import_error",
+                "local_import_completed_at", "completed_at", "updated_at",
+            ))
             for request_id in (first_request, cancelled_request)
         }
         self.assertEqual(historical_after, historical_before)
@@ -549,7 +563,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             "status", "local_import_status", "local_import_error",
             "local_import_completed_at", "updated_at",
         )
-        before = tuple(db.get_download_request(request_id)[column] for column in columns)
+        before = _request_snapshot(request_id, columns)
 
         self.assertFalse(db.update_local_media_task(
             task_id, owner="other", status="completed", error="wrong owner",
@@ -560,8 +574,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             completed_at="2026-09-12 11:01:00",
         ))
 
-        self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "waiting_stable")
-        after = tuple(db.get_download_request(request_id)[column] for column in columns)
+        get_local_media_task_result_3 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_3 is not None
+        self.assertEqual(get_local_media_task_result_3.status, "waiting_stable")
+        after = _request_snapshot(request_id, columns)
         self.assertEqual(after, before)
 
     def test_request_projection_failure_rolls_back_local_media_task_update(self):
@@ -601,10 +617,14 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
 
         task_after = db.get_local_media_task(task_id, owner="admin")
         request_after = db.get_download_request(request_id)
+        assert task_after is not None
+        assert task_before is not None
         self.assertEqual(
             (task_after.status, task_after.error, task_after.completed_at, task_after.version),
             (task_before.status, task_before.error, task_before.completed_at, task_before.version),
         )
+        assert request_after is not None
+        assert request_before is not None
         self.assertEqual(
             tuple(request_after[column] for column in (
                 "local_import_status", "local_import_error",
@@ -684,20 +704,21 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             "local_import_error", "local_import_completed_at", "completed_at", "updated_at",
         )
         untouched_before = {
-            request_id: tuple(db.get_download_request(request_id)[column] for column in untouched_columns)
+            request_id: _request_snapshot(request_id, untouched_columns)
             for request_id in (unrelated_completed, unrelated_cancelled)
         }
 
         db.init_db()
         for request_id, task_status, task_error, completed_at, task_updated_at in expected:
             request = db.get_download_request(request_id)
+            assert request is not None
             self.assertEqual(
                 (request["local_import_status"], request["local_import_error"],
                  request["local_import_completed_at"], request["updated_at"]),
                 (task_status, task_error, completed_at, task_updated_at),
             )
         untouched_after_first = {
-            request_id: tuple(db.get_download_request(request_id)[column] for column in untouched_columns)
+            request_id: _request_snapshot(request_id, untouched_columns)
             for request_id in (unrelated_completed, unrelated_cancelled)
         }
         self.assertEqual(untouched_after_first, untouched_before)
@@ -705,13 +726,14 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         db.init_db()
         for request_id, task_status, task_error, completed_at, task_updated_at in expected:
             request = db.get_download_request(request_id)
+            assert request is not None
             self.assertEqual(
                 (request["local_import_status"], request["local_import_error"],
                  request["local_import_completed_at"], request["updated_at"]),
                 (task_status, task_error, completed_at, task_updated_at),
             )
         untouched_after_second = {
-            request_id: tuple(db.get_download_request(request_id)[column] for column in untouched_columns)
+            request_id: _request_snapshot(request_id, untouched_columns)
             for request_id in (unrelated_completed, unrelated_cancelled)
         }
         self.assertEqual(untouched_after_second, untouched_before)
@@ -762,14 +784,19 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertFalse(restarted)
         active = db.get_local_media_task(active_id, owner="admin")
         terminal = db.get_local_media_task(terminal_id, owner="admin")
+        assert active is not None
         self.assertEqual(active.qb_hash, "hash-transfer")
+        assert before is not None
         self.assertEqual(
             (active.status, active.operation_token, active.tmdb_id, active.title, active.version),
             (before.status, before.operation_token, before.tmdb_id, before.title, before.version),
         )
+        assert terminal is not None
         self.assertEqual(terminal.qb_hash, "")
+        get_download_request_result_2 = db.get_download_request(second_request)
+        assert get_download_request_result_2 is not None
         self.assertEqual(
-            db.get_download_request(second_request)["local_import_target"],
+            get_download_request_result_2["local_import_target"],
             f"local-media-task:{active_id}",
         )
 
@@ -838,8 +865,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(str(rows[0]["qb_hash"]), "hash-concurrent-path")
         self.assertEqual(str(rows[0]["content_path"]), "/tmp/concurrent-manual-qb/Movie.mkv")
+        get_download_request_result_3 = db.get_download_request(request_id)
+        assert get_download_request_result_3 is not None
         self.assertEqual(
-            db.get_download_request(request_id)["local_import_target"],
+            get_download_request_result_3["local_import_target"],
             f"local-media-task:{task_ids[0]}",
         )
 
@@ -856,6 +885,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             )
         db.init_db()
         source = db.get_local_media_source(source_id, owner="admin")
+        assert source is not None
         self.assertEqual((source.smb_user, source.smb_pass), ("", ""))
         self.assertEqual(
             (source.stable_seconds, source.scan_enabled, source.scan_interval_minutes),
@@ -882,6 +912,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         )
         self.assertFalse(restarted)
         first_download = db.get_download_request(first_request)
+        assert first_download is not None
         self.assertEqual(
             first_download["local_import_target"], f"local-media-task:{task_id}",
         )
@@ -904,16 +935,22 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertEqual(reused_id, task_id)
         self.assertTrue(restarted)
         retried = db.get_local_media_task(task_id, owner="admin")
+        assert retried is not None
         self.assertEqual(retried.status, "waiting_stable")
         self.assertEqual(retried.content_path, "/mnt/downloads/readded/Movie.mkv")
+        assert first_attempt is not None
         self.assertNotEqual(retried.operation_token, first_attempt.operation_token)
         self.assertEqual(db.list_local_media_task_items(task_id, owner="admin"), [])
+        get_download_request_result_4 = db.get_download_request(second_request)
+        assert get_download_request_result_4 is not None
         self.assertEqual(
-            db.get_download_request(second_request)["local_import_target"],
+            get_download_request_result_4["local_import_target"],
             f"local-media-task:{task_id}",
         )
+        get_download_request_result_5 = db.get_download_request(first_request)
+        assert get_download_request_result_5 is not None
         self.assertEqual(
-            db.get_download_request(first_request)["local_import_status"], "completed",
+            get_download_request_result_5["local_import_status"], "completed",
         )
 
         db.update_local_media_task(
@@ -925,7 +962,9 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         )
         self.assertEqual(same_id, task_id)
         self.assertFalse(restarted)
-        self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "completed")
+        get_local_media_task_result_4 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_4 is not None
+        self.assertEqual(get_local_media_task_result_4.status, "completed")
 
     def test_qb_hash_is_idempotent_and_owner_isolated(self):
         source_id = db.create_local_media_source(
@@ -981,6 +1020,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             role="video", owner="admin",
         )
         completed = db.get_local_media_task(completed_id, owner="admin")
+        assert completed is not None
         db.add_local_media_operation_step(
             completed_id, completed.operation_token, 0, "move", owner="admin",
         )
@@ -995,7 +1035,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertIsNone(db.get_local_media_task(completed_id, owner="admin"))
         self.assertEqual(db.list_local_media_task_items(completed_id, owner="admin"), [])
         self.assertEqual(db.list_local_media_operation_steps(completed_id, owner="admin"), [])
-        self.assertIsNotNone(db.get_local_media_task(busy_id, owner="admin"))
+        assert (db.get_local_media_task(busy_id, owner="admin")) is not None
 
     def test_invalid_status_category_and_cross_owner_target_are_rejected(self):
         source_id = db.create_local_media_source(
@@ -1056,8 +1096,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             ),
             source_id,
         )
+        get_local_media_source_result_2 = db.get_local_media_source(source_id, owner="admin")
+        assert get_local_media_source_result_2 is not None
         self.assertEqual(
-            db.get_local_media_source(source_id, owner="admin").name,
+            get_local_media_source_result_2.name,
             "renamed-source",
         )
 
@@ -1106,6 +1148,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             numbering_mode="season_continuous",
         )
         task = db.get_local_media_task(task_id, owner="admin")
+        assert task is not None
         self.assertEqual((task.season_override, task.episode_override), (2, 7))
         self.assertEqual(task.numbering_mode, "season_continuous")
         db.add_local_media_task_item(
@@ -1116,9 +1159,12 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             task_id, owner="admin", status="requires_manual", title="旧标题", year="2025",
             recognition_summary='{"schema_version":1,"media":[]}',
         )
-        previous_token = db.get_local_media_task(task_id, owner="admin").operation_token
+        get_local_media_task_result_5 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_5 is not None
+        previous_token = get_local_media_task_result_5.operation_token
         self.assertTrue(db.reset_local_media_task(task_id, owner="admin"))
         retried = db.get_local_media_task(task_id, owner="admin")
+        assert retried is not None
         self.assertNotEqual(retried.operation_token, previous_token)
         self.assertEqual(db.list_local_media_task_items(task_id, owner="admin"), [])
         self.assertEqual(retried.recognition_summary, "")
@@ -1145,6 +1191,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         db.init_db()
 
         recovered = db.get_local_media_task(task_id, owner="admin")
+        assert recovered is not None
         self.assertEqual(recovered.status, "requires_manual")
         self.assertTrue(db.is_interrupted_local_media_write_error(recovered.error))
         self.assertFalse(recovered.completed_at)
@@ -1154,8 +1201,10 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         self.assertTrue(db.reset_local_media_task(
             task_id, owner="admin", confirm_interrupted_write=True,
         ))
+        get_local_media_task_result_6 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_6 is not None
         self.assertEqual(
-            db.get_local_media_task(task_id, owner="admin").status,
+            get_local_media_task_result_6.status,
             "waiting_stable",
         )
         self.assertEqual(db.list_local_media_task_items(task_id, owner="admin"), [])
@@ -1169,6 +1218,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             source_id, "a" * 40, "/tmp/live-writer/Movie.mkv", owner="admin",
         )
         task = db.get_local_media_task(task_id, owner="admin")
+        assert task is not None
         step_id = db.add_local_media_operation_step(
             task_id, task.operation_token, 0, "move", owner="admin",
         )
@@ -1182,6 +1232,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             db.init_db()
             active = db.get_local_media_task(task_id, owner="admin")
             active_steps = db.list_local_media_operation_steps(task_id, owner="admin")
+            assert active is not None
             self.assertEqual(active.status, "moving")
             self.assertEqual(active_steps[0]["status"], "running")
         finally:
@@ -1191,6 +1242,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         db.init_db()
         recovered = db.get_local_media_task(task_id, owner="admin")
         recovered_steps = db.list_local_media_operation_steps(task_id, owner="admin")
+        assert recovered is not None
         self.assertEqual(recovered.status, "requires_manual")
         self.assertTrue(db.is_interrupted_local_media_write_error(recovered.error))
         self.assertEqual(recovered_steps[0]["status"], "failed")
@@ -1216,6 +1268,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
 
         for task_id in task_ids:
             recovered = db.get_local_media_task(task_id, owner="admin")
+            assert recovered is not None
             self.assertEqual(recovered.status, "requires_manual")
             self.assertTrue(db.is_interrupted_local_media_write_error(recovered.error))
             self.assertEqual(
@@ -1239,6 +1292,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
 
         for task_id in task_ids:
             recovered = db.get_local_media_task(task_id, owner="admin")
+            assert recovered is not None
             self.assertEqual(recovered.status, "failed")
             self.assertIn("可重试", recovered.error)
             self.assertTrue(db.reset_local_media_task(task_id, owner="admin"))
@@ -1258,7 +1312,9 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             task_id, owner="admin", recognition_summary=summary,
         ))
         after = db.get_local_media_task(task_id, owner="admin")
+        assert after is not None
         self.assertEqual(after.recognition_summary, summary)
+        assert before is not None
         self.assertEqual(after.version, before.version + 1)
         self.assertEqual(
             db.list_local_media_tasks(owner="admin")[0].recognition_summary, summary,
@@ -1278,6 +1334,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         )
         task = db.get_local_media_task(task_id, owner="admin")
 
+        assert task is not None
         self.assertFalse(db.claim_local_media_confirmation_task(
             task_id,
             confirmed_snapshot_digest="confirmed-source-digest", owner="admin",
@@ -1299,6 +1356,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
             year="2026",
         ))
         claimed = db.get_local_media_task(task_id, owner="admin")
+        assert claimed is not None
         self.assertEqual(claimed.status, "recognizing")
         self.assertEqual((claimed.tmdb_id, claimed.media_type), ("101", "movie"))
         self.assertEqual((claimed.title, claimed.year), ("电影甲", "2026"))
@@ -1326,9 +1384,11 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
         )
         retried = db.get_local_media_task(reused_id, owner="admin")
         self.assertEqual(reused_id, task_id)
+        assert retried is not None
         self.assertEqual(retried.status, "waiting_stable")
         self.assertEqual(retried.tmdb_id, "2")
         self.assertEqual((retried.title, retried.year), ("", ""))
+        assert original is not None
         self.assertNotEqual(retried.operation_token, original.operation_token)
         self.assertEqual(db.list_local_media_task_items(task_id, owner="admin"), [])
 
@@ -1345,6 +1405,7 @@ class LocalMediaDatabaseTests(IsolatedDatabaseTestCase):
                 source_id, "/tmp/manual/Movie.mkv", snapshot_digest="preview:fixture", owner="admin", tmdb_id="2", media_type="movie"
             )
         task = db.get_local_media_task(task_id, owner="admin")
+        assert task is not None
         self.assertEqual(task.status, "recognizing")
         self.assertEqual(task.tmdb_id, "1")
 

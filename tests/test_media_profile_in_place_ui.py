@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 try:
-    from playwright.sync_api import sync_playwright, expect
+    from playwright.sync_api import expect, sync_playwright
 except ImportError:  # pragma: no cover - 可选浏览器依赖
     sync_playwright = None
 
@@ -110,6 +110,7 @@ class MediaProfileInPlaceUiContractTests(unittest.TestCase):
             </body></html>
         """
 
+        assert sync_playwright is not None
         playwright = sync_playwright().start()
         browser = None
         try:
@@ -175,6 +176,7 @@ class ResourceConfirmLayerBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from jinja2 import Environment, FileSystemLoader
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = next((path for name in ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser') if (path := shutil.which(name))), None)
         if not executable:
@@ -257,6 +259,7 @@ class ResourceConfirmLayerBrowserTests(unittest.TestCase):
                 self.assertEqual(page.locator('#appConfirmTitle').inner_text(), '提交 5 条资源？')
                 self.assertEqual(page.locator('#appConfirmMessage').inner_text(), '目标：光鸭')
                 card = page.locator('.app-confirm-dialog').bounding_box()
+                assert card is not None
                 self.assertGreaterEqual(card['x'], 0)
                 self.assertLessEqual(card['x'] + card['width'], width)
                 self.assertGreaterEqual(card['y'], 0)

@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 import sys
-import time
 import threading
+import time
 from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
+from types import TracebackType
 
 from app.config import PATHS
 from app.private_files import protect_private_stream
@@ -49,7 +50,7 @@ def log_throttled(
     message: str,
     *args: object,
     interval_seconds: float = 300.0,
-    exc_info: object = None,
+    exc_info: bool | BaseException | tuple[type[BaseException], BaseException, TracebackType | None] | tuple[None, None, None] | None = None,
 ) -> bool:
     """按 logger/key 限流重复日志，并在下次输出时汇总被抑制数量。
 
@@ -57,7 +58,7 @@ def log_throttled(
     ``期间已抑制 N 条重复日志``。返回值表示本次是否真正写入日志。
     """
     now = time.monotonic()
-    identity = (logger.name, str(key or message))
+    identity = (logger.name, (key or message))
     with _limiter_lock:
         previous = _limiter_state.get(identity)
         if previous is not None:
@@ -240,13 +241,13 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 def _is_test_process() -> bool:
     """识别未经过 ``tests/__init__.py`` 初始化的测试进程。"""
     if any(
-        str(os.environ.get(name, "")).strip().lower() in _TRUE_VALUES
+        os.environ.get(name, "").strip().lower() in _TRUE_VALUES
         for name in ("MEDIAFLUX_TESTING", "MEDIAFLUX_TEST_MODE")
     ):
         return True
     if "pytest" in sys.modules:
         return True
-    argv = [str(value or "").replace("\\", "/").lower() for value in sys.argv]
+    argv = [(value or "").replace("\\", "/").lower() for value in sys.argv]
     direct_test = any(
         "/tests/" in value
         or value.startswith("tests.")
@@ -270,7 +271,7 @@ def _file_logging_disabled() -> bool:
     """测试默认不写运行日志；显式配置始终优先，``0`` 可用于日志路径测试。"""
     configured = os.environ.get("MEDIAFLUX_DISABLE_FILE_LOGGING")
     if configured is not None:
-        return str(configured).strip().lower() in _TRUE_VALUES
+        return configured.strip().lower() in _TRUE_VALUES
     return _is_test_process()
 
 

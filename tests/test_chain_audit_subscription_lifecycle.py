@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from threading import Thread
+from typing import cast
+
 import threading
 import unittest
 from unittest.mock import patch
@@ -28,7 +31,7 @@ class SubscriptionSchedulerLifecycleTests(unittest.TestCase):
         scheduler = MediaSubscriptionScheduler()
         worker = _Thread()
         worker.alive = True
-        scheduler._workers = {1: worker}
+        scheduler._workers = {1: cast(Thread, worker)}
         self.assertFalse(scheduler.stop(timeout=0))
         with patch(
             "app.modules.media_subscription_scheduler.threading.Thread", _Thread
@@ -43,7 +46,7 @@ class SubscriptionSchedulerLifecycleTests(unittest.TestCase):
         scheduler = MediaSubscriptionScheduler()
         worker = _Thread()
         worker.alive = True
-        scheduler._workers = {1: worker}
+        scheduler._workers = {1: cast(Thread, worker)}
         self.assertFalse(scheduler.stop(timeout=0))
         worker.alive = False
         with patch(
@@ -72,7 +75,7 @@ class SubscriptionSchedulerLifecycleTests(unittest.TestCase):
 
         old = JoiningThread()
         old.alive = True
-        scheduler._thread = old
+        scheduler._thread = cast(Thread, old)
 
         def restart():
             attempted.set()
@@ -100,7 +103,7 @@ class SubscriptionSchedulerLifecycleTests(unittest.TestCase):
         self.assertFalse(stopping.is_alive())
         self.assertFalse(starting.is_alive())
         self.assertEqual(results, [True])
-        self.assertIsNotNone(scheduler._thread)
+        assert (scheduler._thread) is not None
         self.assertIsNot(scheduler._thread, old)
         self.assertTrue(scheduler._thread.is_alive())
 
@@ -144,6 +147,7 @@ class SubscriptionSchedulerLifecycleTests(unittest.TestCase):
                     worker = scheduler._workers[1]
                     try:
                         self.assertFalse(scheduler.stop(timeout=0))
+                        assert control is not None
                         control.join(1)
                         self.assertFalse(control.is_alive())
                         scheduler.start()

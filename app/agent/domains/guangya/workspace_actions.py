@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +17,7 @@ from app.agent.public_safety import sanitize_untrusted_filename
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
+    PersistedAgentContext,
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.guangya_workspace import (
@@ -290,13 +292,13 @@ def _reobserved_query_arguments(client: GuangYaClient, source: dict[str, Any], *
             continue
         current = client.file_info(str(root.get("file_id") or ""))
         check_active()
-        if (current is None or str(current.file_id) != root.get("file_id")
-                or bool(current.is_dir) != root.get("is_dir")
-                or str(current.parent_id) != root.get("parent_id")):
+        if (current is None or (current.file_id) != root.get("file_id")
+                or (current.is_dir) != root.get("is_dir")
+                or (current.parent_id) != root.get("parent_id")):
             raise AgentToolError("原观察根对象已缺失、替换或移出范围，请重新选择来源", code="observation_scope_changed")
         # 同一个父目录内的改名可按稳定 ID 定位；不按同名替代对象继续。
         parent = str(root["path"]).rsplit("/", 1)[0]
-        root["path"] = parent + "/" + str(current.name)
+        root["path"] = parent + "/" + (current.name)
         current_roots.append(root)
     arguments.pop("path", None)
     arguments.pop("paths", None)
@@ -311,12 +313,19 @@ def _create_observation(client: GuangYaClient, arguments: dict[str, Any], *, own
         return create_path_observation(client, owner=owner, path=arguments["path"], expected_roots=expected_roots)
     operation = str(arguments["operation"])
     paths = tuple(arguments.get("paths") or (arguments["path"],))
-    creator = create_multi_directory_observation if len(paths) > 1 else create_directory_observation
-    return creator(client=client, owner=owner, recursive=operation in {"tree", "search"},
+    if len(paths) > 1:
+        return create_multi_directory_observation(
+            client=client, owner=owner, paths=paths, recursive=operation in {"tree", "search"},
+            max_items=int(arguments["max_items"]), query=str(arguments.get("query") or ""),
+            kinds=arguments.get("kinds") or (), max_depth=int(arguments.get("max_depth") or 0),
+            operation=operation, expected_roots=expected_roots,
+        )
+    return create_directory_observation(
+        client=client, owner=owner, path=paths[0], recursive=operation in {"tree", "search"},
         max_items=int(arguments["max_items"]), query=str(arguments.get("query") or ""),
         kinds=arguments.get("kinds") or (), max_depth=int(arguments.get("max_depth") or 0),
         operation=operation, expected_roots=expected_roots,
-        **({"paths": paths} if len(paths) > 1 else {"path": paths[0]}))
+    )
 
 
 def _reobserve_files(client: GuangYaClient, source: dict[str, Any], *, context: ToolContext):
@@ -324,7 +333,7 @@ def _reobserve_files(client: GuangYaClient, source: dict[str, Any], *, context: 
         if context.cancelled():
             raise AgentToolError("查询已停止，未继续读取或发布新的观察", code="stopped")
 
-        if int(client.credential_generation) != source.get("credential_generation"):
+        if (client.credential_generation) != source.get("credential_generation"):
             raise AgentToolError("光鸭账号凭据已变化，必须重新建立当前账号的观察", code="observation_scope_changed")
 
     check_active()
@@ -410,7 +419,7 @@ class GuangyaWorkspaceActions:
 
     def clear_guangya_workspace_context(self, *, owner: str) -> int:
         """清除 owner 的缓存与全部短期观察引用。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return 0
         with self._lock:
@@ -420,14 +429,14 @@ class GuangyaWorkspaceActions:
     def _begin(self, owner: str) -> AgentContextWriteGuard:
         if self._repository is None:
             return AgentContextWriteGuard(0, 0)
-        begin = getattr(self._repository, "begin_context", None)
+        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
         if not callable(begin):
             return AgentContextWriteGuard(0, 0)
         return begin(owner=owner, context_type=_CONTEXT_TYPE)
 
     def _begin_update(self, owner: str) -> tuple[str, AgentContextWriteGuard]:
         if self._repository is not None:
-            begin_update = getattr(self._repository, "begin_context_update", None)
+            begin_update: Callable[..., tuple[PersistedAgentContext | None, AgentContextWriteGuard]] | None = getattr(self._repository, "begin_context_update", None)
             if callable(begin_update):
                 persisted, guard = begin_update(
                     owner=owner,
@@ -440,7 +449,7 @@ class GuangyaWorkspaceActions:
                     )
                     if not valid_observation_ref(ref):
                         ref = ""
-                if ref:
+                if ref and persisted is not None:
                     page = _safe_cursor_integer(
                         persisted.payload.get("page"), default=1, maximum=200
                     )
@@ -476,7 +485,7 @@ class GuangyaWorkspaceActions:
         }
         if self._repository is not None:
             try:
-                guarded = getattr(self._repository, "replace_latest_guarded", None)
+                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
                 if callable(guarded):
                     if flow.generation <= 0:
                         return False

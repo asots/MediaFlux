@@ -19,6 +19,7 @@ def test_explanation_does_not_own_or_refresh_plan(action):
                 AgentInput(message="改名一个对象", owner=owner, session_id=sid)
             )
         )
+        assert preview.approval is not None
         plan_id = preview.approval.plan_id
         frozen = await runtime.session.pipeline.get_pending_plan(
             owner=owner, session_id=sid
@@ -54,6 +55,7 @@ def test_explanation_does_not_own_or_refresh_plan(action):
                 owner=owner, session_id=sid, plan_id=plan_id
             )
         elif action == "expire":
+            assert frozen is not None
             runtime.now = frozen.expires_at + 1
         release.set()
         await asyncio.wait_for(task, 2)

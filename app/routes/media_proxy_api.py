@@ -4,19 +4,16 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Body, Request
 
 from app import database as db
-from app.modules.media_server_profiles import (
-    list_configured_profiles,
-    resolve_proxy_instance,
-)
 from app.modules.media_proxy import (
+    ProxyUpstreamBodyTooLarge,
     clear_signed_url_cache,
     get_media_proxy_manager,
     probe_media_proxy_instance,
-    ProxyUpstreamBodyTooLarge,
     signed_url_cache_metrics,
     validate_listen_host,
     validate_upstream_url,
@@ -25,6 +22,10 @@ from app.modules.media_proxy_forwarding import (
     decode_trusted_proxy_cidrs,
     encode_trusted_proxy_cidrs,
     normalize_trusted_proxy_cidrs,
+)
+from app.modules.media_server_profiles import (
+    list_configured_profiles,
+    resolve_proxy_instance,
 )
 from app.web import api_error, api_response, require_api_login
 
@@ -131,8 +132,9 @@ def _validated_instance(data: dict, existing=None) -> tuple[dict | None, str]:
     if config_source not in {"configured:jellyfin", "configured:emby", "custom"}:
         return None, "媒体服务器来源无效"
     try:
-        listen_host = validate_listen_host(data.get("listen_host"))
-        listen_port = int(data.get("listen_port"))
+        listen_host = validate_listen_host(str(data.get("listen_host") or "127.0.0.1"))
+        raw_port: Any = data.get("listen_port")
+        listen_port = int(raw_port)
     except (TypeError, ValueError) as exc:
         return None, str(exc)
     if listen_port < 1024 or listen_port > 65535:
@@ -168,7 +170,7 @@ def _validated_instance(data: dict, existing=None) -> tuple[dict | None, str]:
         if server_type not in {"jellyfin", "emby"}:
             return None, "服务器类型只支持 Jellyfin 或 Emby"
         try:
-            upstream_url = validate_upstream_url(data.get("upstream_url"))
+            upstream_url = validate_upstream_url(str(data.get("upstream_url") or ""))
         except ValueError as exc:
             return None, str(exc)
         api_key = str(data.get("api_key") or "").strip()
@@ -405,11 +407,11 @@ async def test_instance(instance_id: int, request: Request):
         return api_error(str(exc), 400)
     except Exception as exc:
         return api_error(f"连接失败：{exc}", 502)
-    status_code = int(result["status_code"])
+    status_code = result["status_code"]
     return api_response({
         "success": 200 <= status_code < 400,
         "status_code": status_code,
-        "elapsed_ms": int(result["latency_ms"]),
+        "elapsed_ms": result["latency_ms"],
     }, 200 if status_code < 400 else 502)
 
 

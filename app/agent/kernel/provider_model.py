@@ -138,13 +138,13 @@ _MODEL_RETRY_DELAY_SECONDS = 0.25
 def _network_idle_timeout_seconds(configured_timeout_seconds: int) -> int:
     """将配置值映射为网络空闲预算：保留 30 秒下限，并限制在 120 秒内。"""
     return min(
-        120, max(_MODEL_IDLE_TIMEOUT_FLOOR_SECONDS, int(configured_timeout_seconds))
+        120, max(_MODEL_IDLE_TIMEOUT_FLOOR_SECONDS, configured_timeout_seconds)
     )
 
 
 def _stream_deadline_seconds(network_timeout_seconds: int) -> int:
     """为整轮流式响应计算独立总时限，最长 300 秒，不等同于网络空闲预算。"""
-    return min(300, max(60, int(network_timeout_seconds) * 4))
+    return min(300, max(60, network_timeout_seconds * 4))
 
 
 def _retryable_provider_exception(exc: BaseException) -> bool:
@@ -181,11 +181,11 @@ class ProviderSettings:
     def __post_init__(self) -> None:
         parse_generation_profiles(self.generation_profiles_json)
         parse_budget_profiles(self.budget_profiles_json)
-        if not str(self.api_url or "").strip():
+        if not (self.api_url or "").strip():
             raise ValueError("api_url is required")
-        if not str(self.model or "").strip() or len(str(self.model)) > 200:
+        if not (self.model or "").strip() or len(self.model) > 200:
             raise ValueError("model is invalid")
-        if not 2 <= int(self.timeout_seconds) <= 120:
+        if not 2 <= self.timeout_seconds <= 120:
             raise ValueError("timeout_seconds out of range")
 
     @classmethod
@@ -207,11 +207,11 @@ class ProviderSettings:
         except ValueError:
             context = 128_000
         return cls(
-            api_url=str(values.get("AGENT_LLM_API_URL", "") or "").strip(),
+            api_url=(values.get("AGENT_LLM_API_URL", "") or "").strip(),
             generation_profiles_json=values.get("AGENT_LLM_GENERATION_PROFILES", ""),
-            model=str(values.get("AGENT_LLM_MODEL", "") or "").strip(),
-            api_key=str(values.get("AGENT_LLM_API_KEY", "") or "").strip(),
-            protocol=str(values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip(),
+            model=(values.get("AGENT_LLM_MODEL", "") or "").strip(),
+            api_key=(values.get("AGENT_LLM_API_KEY", "") or "").strip(),
+            protocol=(values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip(),
             timeout_seconds=max(2, min(120, timeout)),
             telegram_channel=_channel_fingerprint(values),
             context_window_tokens=max(16_384, min(2_000_000, context)),
@@ -303,10 +303,8 @@ async def iter_protocol_model_events(
         except ValueError:
             failure = "模型工具参数或原生身份无效"
         else:
-            failure = ""
-        if failure:
-            raise ModelProviderError(failure)
-        return parsed
+            return parsed
+        raise ModelProviderError(failure)
 
     async def emit_call(key: str) -> AsyncIterator[ModelEvent]:
         if key in emitted_calls:
@@ -575,8 +573,8 @@ async def iter_protocol_model_events(
                 validate_repair_layout(blocks)
             except ValueError:
                 raise ModelProviderError("参数错误回合的私有状态无效") from None
-            refs = [block.get("call_id") for block in blocks if block.get("type") == "function_call"]
-            if sorted(refs) != sorted(raw.get("call_id") for raw in calls.values()):
+            refs = [block["call_id"] for block in blocks if block.get("type") == "function_call"]
+            if sorted(refs) != sorted(raw["call_id"] for raw in calls.values()):
                 raise ModelProviderError("参数错误回合缺少完整原生关联状态")
     elif chat_reasoning:
         layout = json.dumps([{"type": "reasoning_content", "text": chat_reasoning}], ensure_ascii=False)
@@ -668,7 +666,7 @@ def _history_for_protocol(
                     history.append(native_text_message(protocol, "assistant", block["text"]))
             continue
         elif protocol == "chat_completions":
-            item = {"role": message.role, "content": message.content or None}
+            item: dict[str, Any] = {"role": message.role, "content": message.content or None}
             for block in layout:
                 if block.get("type") == "reasoning_content" and isinstance(block.get("text"), str):
                     item["reasoning_content"] = block["text"]
@@ -783,7 +781,7 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                 for protocol in protocol_attempts(configured):
                     can_fallback = False
                     cancellation.raise_if_cancelled()
-                    definitions = native_tool_definitions(protocol, list(request.tools))
+                    definitions = native_tool_definitions(protocol, [dict(tool) for tool in request.tools])
                     history = _history_for_protocol(
                         protocol, request.system_prompt, request.messages,
                         model=request.model or self.settings.model, endpoint=location.endpoint(protocol),
@@ -890,9 +888,7 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                                 read_failure = ModelProviderError("Provider 错误响应读取失败")
                                                 read_failure.__cause__ = last_error
                                         break
-                                    content_type = str(
-                                        response.headers.get("content-type") or ""
-                                    ).lower()
+                                    content_type = (response.headers.get("content-type") or "").lower()
                                     if "text/event-stream" in content_type:
                                         async for event in iter_protocol_model_events(
                                             response.aiter_bytes(), protocol=protocol,
@@ -910,20 +906,21 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
                                         raw.extend(chunk)
                                     try:
                                         envelope = json.loads(raw.decode("utf-8"))
-                                        turn = parse_native_tool_turn(envelope, protocol, allow_argument_errors=True)
+                                        try:
+                                            turn = parse_native_tool_turn(envelope, protocol, allow_argument_errors=True)
+                                        except ToolArgumentsDecodeError as exc:
+                                            if protocol == "anthropic_messages" and exc.reason == "invalid_json":
+                                                blocks = envelope["content"]
+                                                _reject_unreplayable_anthropic_arguments(
+                                                    [{"call_id": block.get("id"), "name": block.get("name"), "arguments": block.get("input")}
+                                                     for block in blocks if isinstance(block, dict) and block.get("type") == "tool_use"], blocks,
+                                                )
+                                            last_fault = exc
+                                            last_error = ModelProviderError("Provider 返回格式无效")
+                                            last_error.__cause__ = last_http_error
+                                            break
                                     except ProviderStreamError as exc:
                                         raise UncommittableModelTurn(str(exc)) from exc
-                                    except ToolArgumentsDecodeError as exc:
-                                        if protocol == "anthropic_messages" and exc.reason == "invalid_json":
-                                            blocks = envelope["content"]
-                                            _reject_unreplayable_anthropic_arguments(
-                                                [{"call_id": block.get("id"), "name": block.get("name"), "arguments": block.get("input")}
-                                                 for block in blocks if isinstance(block, dict) and block.get("type") == "tool_use"], blocks,
-                                            )
-                                        last_fault = exc
-                                        last_error = ModelProviderError("Provider 返回格式无效")
-                                        last_error.__cause__ = last_http_error
-                                        break
                                     except ValueError as exc:
                                         last_fault = exc
                                         last_error = ModelProviderError(

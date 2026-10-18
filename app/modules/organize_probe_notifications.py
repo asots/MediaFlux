@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from typing import Any, Iterable
 
 from app.config import get
 from app.logger import get_logger
@@ -43,7 +44,7 @@ def normalize_notification_context(value: object) -> dict:
     ids = value.get("download_request_ids") or []
     if not isinstance(raw_refs, list) or not isinstance(ids, list):
         return _closed_notification_context()
-    refs = {}
+    refs: dict[tuple[str, str, str], dict[str, Any]] = {}
     for ref in raw_refs:
         if not isinstance(ref, dict):
             continue
@@ -89,8 +90,8 @@ def build_notification_context(
     默认 chat 也在此刻解析并冻结；冻结为空时禁止以后借用新默认 chat。
     下载任务读取已持久化 request 的路由，不把整个多源任务广播到一个 chat。
     """
-    chat = str(chat_id or get("TG_CHAT_ID", "") or "").strip()
-    task = str(task_id or (operation_token if not confirmation_token else "") or "").strip()
+    chat = (chat_id or get("TG_CHAT_ID", "") or "").strip()
+    task = (task_id or (operation_token if not confirmation_token else "") or "").strip()
     refs = list(notification_threads or [])
     ids = list(download_request_ids or [])
     if ids and not chat_id and not confirmation_token:
@@ -99,28 +100,28 @@ def build_notification_context(
         chat = ""
     if task and not ids:
         refs.append({"topic": "organize", "thread_key": f"organize:{task}", "task_id": task,
-                     "chat_id": chat, "topic_enabled": bool(topic_enabled)})
+                     "chat_id": chat, "topic_enabled": topic_enabled})
     if confirmation_token:
         refs.append({"topic": "confirmation", "thread_key": f"confirmation:{confirmation_token}",
-                     "token": str(confirmation_token), "chat_id": chat, "topic_enabled": bool(topic_enabled)})
+                     "token": confirmation_token, "chat_id": chat, "topic_enabled": topic_enabled})
     if ids:
         from app import database as db
         from app.modules.telegram_download_lifecycle import _chat_id
         for request_id in ids:
             try:
-                row = db.get_download_request(int(request_id))
+                row = db.get_download_request(request_id)
                 if row is None:
                     continue
-                recipient = str(_chat_id(row) or get("TG_CHAT_ID", "") or "").strip()
+                recipient = (_chat_id(row) or get("TG_CHAT_ID", "") or "").strip()
             except Exception as exc:  # noqa: BLE001 -- 失败路由静默保留，不能扩大接收范围或反驱动业务。
                 logger.warning("冻结下载补全通知路由失败 type=%s", type(exc).__name__)
                 continue
-            refs.append({"topic": "download", "thread_key": f"download:{int(request_id)}",
-                         "request_id": str(int(request_id)), "chat_id": recipient,
-                         "topic_enabled": bool(topic_enabled)})
+            refs.append({"topic": "download", "thread_key": f"download:{request_id}",
+                         "request_id": str(request_id), "chat_id": recipient,
+                         "topic_enabled": topic_enabled})
     return normalize_notification_context({
         "version": 1, "task_id": task, "chat_id": chat,
-        "notify_enabled": bool(notify_enabled), "topic_enabled": bool(topic_enabled),
+        "notify_enabled": notify_enabled, "topic_enabled": topic_enabled,
         "notification_threads": refs, "download_request_ids": ids,
     })
 
@@ -135,7 +136,7 @@ def apply_notification_context(stats: dict, context: object) -> None:
 
 def tag_probe_changes(changes: list[dict], context: object, *, notify_enabled: bool) -> list[dict]:
     context = normalize_notification_context(context)
-    return [{**item, PROBE_CONTEXT_KEY: context, "_probe_notify_enabled": bool(notify_enabled)} for item in changes]
+    return [{**item, PROBE_CONTEXT_KEY: context, "_probe_notify_enabled": notify_enabled} for item in changes]
 
 
 def merge_notification_scopes(*groups) -> list[dict]:
@@ -147,7 +148,7 @@ def merge_notification_scopes(*groups) -> list[dict]:
     return list(merged.values())
 
 
-def probe_scopes_from_changes(changes: object) -> list[dict]:
+def probe_scopes_from_changes(changes: Iterable[object] | None) -> list[dict]:
     return merge_notification_scopes([
         {"probe": True, "context": normalize_notification_context(item[PROBE_CONTEXT_KEY]),
          "notify_override": item.get("_probe_notify_enabled", True) is True}
@@ -256,7 +257,7 @@ def publish_probe_scope(scope: dict, *, strm_status: str, media_refresh: str,
             scoped_failed = bool(scoped_partial or scoped_error)
             # unknown 可以保存新期望内容；通知中心保持 unknown，不重新发送。
             # 后台单项成功没有资格清掉父事务的待操作/异常结论。
-            if not failed and (previous.event.state == "partial" or previous.event.title.startswith(("⚠️", "⏳"))):
+            if not failed and (previous.event.state == "partial" or str(previous.event.title).startswith(("⚠️", "⏳"))):
                 handled = True
                 continue
             safe_error = "后台规格补全后的 STRM 同步异常，请在 Web 运行记录中查看。" if scoped_failed else ""
@@ -302,7 +303,7 @@ def publish_probe_scope(scope: dict, *, strm_status: str, media_refresh: str,
         if not refs:
             if not context:
                 # 无来源/私聊证据的旧任务，仅允许默认管理范围的脱敏异常。
-                missing_chats.add(str(get("TG_CHAT_ID", "") or "").strip())
+                missing_chats.add((get("TG_CHAT_ID", "") or "").strip())
             elif context["chat_id"]:
                 missing_chats.add(context["chat_id"])
         identity = hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()[:24]

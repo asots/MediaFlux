@@ -286,14 +286,21 @@ def _assess_eight_constraints(
                 positions = payload.get("positions")  # 实际过滤结果，不是 arguments.positions。
                 by_position = {item.get("position"): item for item in (snapshot or {}).get("candidates", [])}
                 valid = document.get("ok") is True and snapshot is not None and isinstance(positions, list)
-                valid = valid and all(position in by_position and position in arguments.get("positions", []) for position in positions)
+                if valid:
+                    assert isinstance(positions, list)
+                    valid = all(position in by_position and position in arguments.get("positions", []) for position in positions)
                 numbers = {item["position"]: item for item in document.get("candidate_numbers", [])}
                 if "candidate_numbers" in document and valid:
+                    assert isinstance(positions, list)
                     valid = set(numbers) == set(positions) and all(
                         numbers[position].get("title") == by_position[position].get("title") for position in positions
                     )
-                selected = [{**by_position[position], "technical_evidence": numbers.get(position, {}).get(
-                    "technical_evidence", by_position[position]["technical_evidence"])} for position in positions] if valid else []
+                if valid:
+                    assert isinstance(positions, list)
+                    selected = [{**by_position[position], "technical_evidence": numbers.get(position, {}).get(
+                        "technical_evidence", by_position[position]["technical_evidence"])} for position in positions]
+                else:
+                    selected = []
                 scoped = valid and scope_matches(source_query) and scope_matches(query)
                 delivered_valid = (scoped and query_consistent and (not query_observed or quality_matches(query))
                                    and all(matches(item) for item in selected))
@@ -304,6 +311,7 @@ def _assess_eight_constraints(
                     support.setdefault(key, []).append(index)
                 returned_ref = document.get("reference_arguments", {}).get("resource_candidates_ref")
                 if valid and query_consistent and returned_ref:
+                    assert snapshot is not None
                     snapshots[returned_ref] = {**snapshot, "arguments": query, "query_observed": query_observed}
                 deliveries.append({"tool_index": index, "requested_positions": arguments.get("positions"),
                                    "effective_query": query if query_observed else None,
@@ -1291,7 +1299,7 @@ def evaluate(
     lifecycle = evaluate_lifecycle(lifecycle_path)
     cohorts = {}
     for kind in PROVENANCE_KINDS:
-        items = [item for item in outcomes if item.provenance["kind"] == kind]
+        items = [item for item in outcomes if item.provenance is not None and item.provenance["kind"] == kind]
         count = len(items)
         hits = sum(item.passed for item in items)
         cohorts[kind] = {

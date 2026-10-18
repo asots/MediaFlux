@@ -141,7 +141,7 @@ class StrmChangeQueueStateTests(IsolatedDatabaseTestCase):
             [_change(file_id="f1")], not_before_seconds=30,
         )
         first_delay = db.seconds_until_next_strm_change_target()
-        self.assertIsNotNone(first_delay)
+        assert (first_delay) is not None
         self.assertGreater(first_delay, 20)
         self.assertEqual(db.claim_strm_change_targets(owner="early"), [])
 
@@ -149,7 +149,7 @@ class StrmChangeQueueStateTests(IsolatedDatabaseTestCase):
             [_change(file_id="f2")], not_before_seconds=8,
         )
         reset_delay = db.seconds_until_next_strm_change_target()
-        self.assertIsNotNone(reset_delay)
+        assert (reset_delay) is not None
         self.assertGreater(reset_delay, 3)
         self.assertLess(reset_delay, first_delay)
 
@@ -163,8 +163,8 @@ class StrmChangeQueueStateTests(IsolatedDatabaseTestCase):
         )
         after = db.seconds_until_next_strm_change_target()
 
-        self.assertIsNotNone(before)
-        self.assertIsNotNone(after)
+        assert (before) is not None
+        assert (after) is not None
         self.assertGreater(after, 20)
         self.assertLessEqual(abs(after - before), 1.0)
 
@@ -183,7 +183,7 @@ class StrmChangeQueueStateTests(IsolatedDatabaseTestCase):
         rows = [dict(row) for row in db.list_strm_change_queue()]
         self.assertEqual(len({row["next_attempt_at"] for row in rows}), 1)
         delay = db.seconds_until_next_strm_change_target()
-        self.assertIsNotNone(delay)
+        assert (delay) is not None
         self.assertGreater(delay, 3)
         self.assertLess(delay, 12)
 
@@ -231,7 +231,7 @@ class StrmChangeQueueStateTests(IsolatedDatabaseTestCase):
         self.assertEqual(state, "queued")
         self.assertEqual(db.claim_strm_change_targets(owner="too-early"), [])
         delay = db.seconds_until_next_strm_change_target()
-        self.assertIsNotNone(delay)
+        assert (delay) is not None
         self.assertGreater(delay, 3)
 
     def test_completing_a_clean_target_marks_completed(self):
@@ -320,7 +320,7 @@ class StrmChangeQueueWorkerTests(IsolatedDatabaseTestCase):
 
         delay = db.seconds_until_next_strm_change_target()
 
-        self.assertIsNotNone(delay)
+        assert (delay) is not None
         self.assertGreater(delay, 20)
         self.assertLessEqual(delay, 30)
 

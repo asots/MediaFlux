@@ -10,7 +10,7 @@ import math
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
@@ -113,8 +113,8 @@ class DoubanPublicPage:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "items", tuple(dict(item) for item in (self.items or ())))
-        object.__setattr__(self, "has_more", bool(self.has_more))
-        object.__setattr__(self, "source", str(self.source or "public"))
+        object.__setattr__(self, "has_more", self.has_more)
+        object.__setattr__(self, "source", (self.source or "public"))
 
 
 class _PlainTextParser(HTMLParser):
@@ -149,7 +149,7 @@ class _ListHTMLParser(HTMLParser):
 
     @staticmethod
     def _attrs(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
-        return {str(key).lower(): str(value or "") for key, value in attrs}
+        return {key.lower(): (value or "") for key, value in attrs}
 
     @staticmethod
     def _classes(attrs: Mapping[str, str]) -> set[str]:
@@ -209,17 +209,17 @@ class _ListHTMLParser(HTMLParser):
             or tag == "tr"
         )
         if recognized_container:
-            candidate: dict[str, Any] = {}
+            container_candidate: dict[str, Any] = {}
             if data_subject.isdigit():
-                candidate["id"] = data_subject
+                container_candidate["id"] = data_subject
             for attr, key in (
                 ("data-title", "title"),
                 ("data-score", "rating"),
                 ("data-release", "release_date"),
             ):
                 if values.get(attr):
-                    candidate[key] = values[attr]
-            frame["candidate"] = candidate
+                    container_candidate[key] = values[attr]
+            frame["candidate"] = container_candidate
 
         href = values.get("href", "")
         subject_id = _subject_id_from_url(href)
@@ -311,7 +311,7 @@ class _DetailHTMLParser(HTMLParser):
 
     @staticmethod
     def _attrs(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
-        return {str(key).lower(): str(value or "") for key, value in attrs}
+        return {key.lower(): (value or "") for key, value in attrs}
 
     @staticmethod
     def _append(values: dict[str, str], key: str, value: str) -> None:
@@ -613,7 +613,7 @@ def _html_detail(parser: _DetailHTMLParser) -> dict[str, Any]:
 def _header(headers: Mapping[str, Any], name: str) -> str:
     wanted = name.lower()
     for key, value in (headers or {}).items():
-        if str(key).lower() == wanted:
+        if key.lower() == wanted:
             return str(value or "")
     return ""
 
@@ -646,8 +646,8 @@ class DoubanPublicClient:
     ):
         self.session = session or requests.Session()
         self.timeout = _validate_timeout(timeout)
-        self.page_size = max(1, min(int(page_size), 20))
-        self.max_response_bytes = int(max_response_bytes)
+        self.page_size = max(1, min(page_size, 20))
+        self.max_response_bytes = max_response_bytes
         self.min_interval = float(min_interval)
         if self.max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be positive")
@@ -689,7 +689,7 @@ class DoubanPublicClient:
 
     @staticmethod
     def _redirect_target(current_url: str, location: str) -> str:
-        target = urljoin(current_url, str(location or "").strip())
+        target = urljoin(current_url, (location or "").strip())
         parsed = None
         invalid_port = False
         try:
@@ -731,7 +731,7 @@ class DoubanPublicClient:
 
         chunks: list[bytes] = []
         size = 0
-        iterator = getattr(response, "iter_content", None)
+        iterator: Callable[..., Iterable[bytes | bytearray | str]] | None = getattr(response, "iter_content", None)
         if not callable(iterator):
             raise ProviderInvalidResponse("豆瓣公共响应不可读取")
         for chunk in iterator(chunk_size=64 * 1024):
@@ -827,22 +827,19 @@ class DoubanPublicClient:
 
     @staticmethod
     def _validate_list_request(category: str, media_type: str, page: int) -> tuple[str, str, int]:
-        normalized_category = str(category or "").strip().lower()
-        normalized_type = str(media_type or "").strip().lower()
-        try:
-            normalized_page = int(page)
-        except (TypeError, ValueError) as exc:
-            raise _pre_network_invalid_response("豆瓣公共页码无效") from exc
+        normalized_category = (category or "").strip().lower()
+        normalized_type = (media_type or "").strip().lower()
+
         if normalized_type not in {"movie", "tv"}:
             raise _pre_network_invalid_response("豆瓣公共媒体类型无效")
-        if normalized_page < 1:
+        if page < 1:
             raise _pre_network_invalid_response("豆瓣公共页码无效")
         if normalized_category not in _JSON_CATEGORIES and normalized_category not in _HTML_PATHS:
             raise _pre_network_invalid_response("不支持的豆瓣公共分类")
         required_type = _CATEGORY_MEDIA_TYPES.get(normalized_category)
         if required_type and normalized_type != required_type:
             raise _pre_network_invalid_response("豆瓣公共分类与媒体类型不匹配")
-        return normalized_category, normalized_type, normalized_page
+        return normalized_category, normalized_type, page
 
     def list_items(
         self,
@@ -1010,8 +1007,8 @@ class DoubanPublicClient:
         )
 
     def get_detail(self, external_id: str, media_type: str) -> dict[str, Any]:
-        subject_id = str(external_id or "").strip()
-        normalized_type = str(media_type or "").strip().lower()
+        subject_id = (external_id or "").strip()
+        normalized_type = (media_type or "").strip().lower()
         if not subject_id.isdigit():
             raise _pre_network_invalid_response("豆瓣公共条目 ID 无效")
         if normalized_type not in {"movie", "tv"}:

@@ -1,4 +1,5 @@
 """Native/SQLite task snapshots consumed independently of turn completion."""
+from typing import cast
 
 import asyncio
 import json
@@ -71,7 +72,7 @@ def native_snapshots():
                     request, "task-consumer-session-0001"
                 )
             assert response.status_code == 200
-            api = json.loads(response.body)
+            api = json.loads(cast(bytearray | bytes | str, response.body))
             assert api["task"] == events[-1].payload["task"]
             results.append(
                 {

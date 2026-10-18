@@ -130,7 +130,7 @@ def web_capability_status() -> dict[str, str]:
             "status": "disabled",
             "reason": "公开网页搜索/读取已接入，但Web Search开关当前关闭。",
         }
-    if not str(config.get("TAVILY_API_KEY", "") or "").strip():
+    if not (config.get("TAVILY_API_KEY", "") or "").strip():
         return {
             "status": "configuration_missing",
             "reason": "公开网页搜索/读取已接入，但尚未配置Tavily API Key。",

@@ -142,7 +142,9 @@ class GCIDRetryDurabilityAuditTests(IsolatedDatabaseTestCase):
         self.assertTrue(replayed)
         self.assertEqual(current["status"], "running")
         self.assertFalse(current["can_retry"])
-        self.assertEqual(db.get_gcid_import_task(task_id)["status"], "running")
+        get_gcid_import_task_result = db.get_gcid_import_task(task_id)
+        assert get_gcid_import_task_result is not None
+        self.assertEqual(get_gcid_import_task_result["status"], "running")
 
     def test_replayed_reply_rereads_after_another_process_claims(self):
         task_id = self._task()
@@ -256,7 +258,9 @@ class GCIDRetryDurabilityAuditTests(IsolatedDatabaseTestCase):
                         gate.start.set()
                     for token, gate in zip(tokens, gates):
                         _wait_for_phase(gate.before_claim, token + " before real CAS")
-                    self.assertEqual(db.get_gcid_import_task(task_id)["status"], "failed")
+                    get_gcid_import_task_result_2 = db.get_gcid_import_task(task_id)
+                    assert get_gcid_import_task_result_2 is not None
+                    self.assertEqual(get_gcid_import_task_result_2["status"], "failed")
                     claim_release.set()
                     claim_results = [
                         _process_result(claims, "real CAS result") for _ in workers
@@ -270,7 +274,9 @@ class GCIDRetryDurabilityAuditTests(IsolatedDatabaseTestCase):
                 owner = tokens.index(winner)
                 follower = 1 - owner
                 _wait_for_phase(gates[owner].executing, winner + " owns execute gate")
-                self.assertEqual(db.get_gcid_import_task(task_id)["status"], "running")
+                get_gcid_import_task_result_3 = db.get_gcid_import_task(task_id)
+                assert get_gcid_import_task_result_3 is not None
+                self.assertEqual(get_gcid_import_task_result_3["status"], "running")
                 self.assertFalse(Path(marker).exists())
                 if not collide:
                     self.assertEqual(_process_result(claims, "A real CAS"), (winner, True))
@@ -298,7 +304,9 @@ class GCIDRetryDurabilityAuditTests(IsolatedDatabaseTestCase):
                 if not collide:
                     self.assertEqual(calls, ["process-a"])
                     self.assertEqual(early, ("process-b", "running", True))
-                self.assertEqual(db.get_gcid_import_task(task_id)["status"], "success")
+                get_gcid_import_task_result_4 = db.get_gcid_import_task(task_id)
+                assert get_gcid_import_task_result_4 is not None
+                self.assertEqual(get_gcid_import_task_result_4["status"], "success")
                 self.assertEqual(
                     [item["status"] for item in db.list_gcid_import_items(task_id)],
                     ["success"],

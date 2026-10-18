@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 import copy
 import hashlib
@@ -68,7 +69,7 @@ class AgentKernelEvalTests(unittest.TestCase):
         self.assertEqual(digest, "5575a8f13071cdb27a41de14d34ea7f3769ec0d1f5272cb2ea51d22c5310c926")
 
     def test_optional_provenance_and_legacy_normalization(self) -> None:
-        row = {"id": " x ", "message": " query ", "required": ["library.search", " library.search "]}
+        row: dict[str, Any] = {"id": " x ", "message": " query ", "required": ["library.search", " library.search "]}
         legacy = eval_agent.load_cases(self.write_cases([row]))[0]
         self.assertEqual((legacy.case_id, legacy.message, legacy.required), ("x", "query", ("library.search",)))
         self.assertEqual(legacy.provenance, {"kind": "legacy_unverified"})
@@ -85,6 +86,7 @@ class AgentKernelEvalTests(unittest.TestCase):
         case = eval_agent.load_cases(self.write_cases([row]))[0]
         self.assertEqual(case.required, ("library.search", "library.count_series_episodes"))
         provenance = case.provenance
+        assert provenance is not None
         self.assertEqual(provenance["kind"], "simulated_user_real_model")
         self.assertEqual(provenance["source_commit"], "abb81acda678b26048e6c85e9f813aeb8f8020e2")
         excerpt = provenance["excerpt"]

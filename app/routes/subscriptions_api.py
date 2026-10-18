@@ -10,7 +10,10 @@ from app.discovery.models import ProviderError
 from app.discovery.service import get_discovery_service
 from app.logger import get_logger
 from app.modules.media_subscription_scheduler import get_media_subscription_scheduler
-from app.modules.media_subscriptions import MediaSubscriptionError, get_media_subscription_service
+from app.modules.media_subscriptions import (
+    MediaSubscriptionError,
+    get_media_subscription_service,
+)
 from app.routes.discovery_image import encode_poster_token
 from app.web import api_error, api_response, require_api_login
 
@@ -44,7 +47,7 @@ def _body(value: Any) -> dict[str, Any]:
 
 
 def _optional_bool(value: str) -> bool | None:
-    normalized = str(value or "").strip().lower()
+    normalized = (value or "").strip().lower()
     if not normalized:
         return None
     if normalized in {"1", "true", "yes", "on"}:
@@ -92,11 +95,11 @@ def subscription_stats(request: Request):
     rss = db.get_rss_stats()
     return api_response({
         **media,
-        "rss_total": int(rss.get("subscription_total", 0)),
-        "rss_active": int(rss.get("active_subscriptions", 0)),
-        "rss_pending": int(rss.get("pending_total", 0)),
-        "rss_entry_total": int(rss.get("entry_total", 0)),
-        "total": int(media.get("media_total", 0)) + int(rss.get("subscription_total", 0)),
+        "rss_total": rss.get("subscription_total", 0),
+        "rss_active": rss.get("active_subscriptions", 0),
+        "rss_pending": rss.get("pending_total", 0),
+        "rss_entry_total": rss.get("entry_total", 0),
+        "total": media.get("media_total", 0) + rss.get("subscription_total", 0),
     })
 
 
@@ -108,7 +111,7 @@ def list_media_subscriptions(
 ):
     require_api_login(request)
     try:
-        normalized_status = str(status or "").strip().lower()
+        normalized_status = (status or "").strip().lower()
         if normalized_status not in _ALLOWED_LIST_STATUS:
             raise MediaSubscriptionError("status 查询参数无效")
         return api_response(get_media_subscription_service().list_subscriptions(
@@ -197,7 +200,7 @@ async def download_media_candidate(
         if candidate_id <= 0:
             raise MediaSubscriptionError("candidate_id 无效")
         candidate = db.get_media_subscription_candidate(candidate_id)
-        if candidate is None or int(candidate["subscription_id"]) != int(subscription_id):
+        if candidate is None or int(candidate["subscription_id"]) != subscription_id:
             raise MediaSubscriptionError("候选资源不存在", status_code=404, code="not_found")
         result = await get_media_subscription_service().download_candidate(
             candidate_id,

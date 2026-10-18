@@ -53,10 +53,11 @@ class TodaySummaryDeliveryAuditTests(IsolatedDatabaseTestCase):
         event = delivery.notification
         assert event is not None
         fields = dict(event.fields)
+        assert isinstance(fields["下载"], str)
         self.assertIn("成功 80", fields["下载"])
         self.assertIn("失败 1", fields["下载"])
-        self.assertIn("全部", event.footer)
-        self.assertNotIn("每类最多 50", event.footer)
+        self.assertIn("全部", str(event.footer))
+        self.assertNotIn("每类最多 50", str(event.footer))
         self.assertLessEqual(len(result.data["content_titles"]), 8)
 
     def test_errors_only_includes_older_failure_without_unrelated_titles(self) -> None:
@@ -97,6 +98,7 @@ class TodaySummaryDeliveryAuditTests(IsolatedDatabaseTestCase):
             self.assertEqual(automation.drain_automation_rules(now=self.clock), 1)
             self.assertEqual(automation.drain_automation_rules(now=self.clock), 0)
         publish.assert_called_once()
+        assert rule is not None
         self.assertIn(rule["id"], publish.call_args.args[0])
         self.assertEqual(dict(publish.call_args.args[1].fields)["下载"], "失败 1")
         self.assertFalse(publish.call_args.kwargs["deliver_now"])

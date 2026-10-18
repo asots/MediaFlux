@@ -1,10 +1,10 @@
 """Turn-local correction evidence for rejected writes, never execution authority."""
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass, replace
 import json
 import secrets
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .capabilities import ToolEffect
@@ -93,6 +93,7 @@ def issue(tool, arguments, context, validate=None, error_type=Exception, *, coll
             repairable = True
             return
         try:
+            assert validate is not None
             validate(value, schema)
         except error_type:
             if isinstance(value, dict):
@@ -150,6 +151,7 @@ def issue(tool, arguments, context, validate=None, error_type=Exception, *, coll
     exact = ""
     if offered and equivalent != arguments:
         try:
+            assert validate is not None
             validate(equivalent, schema)
         except error_type:
             pass

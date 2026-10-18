@@ -1,4 +1,6 @@
 """MediaFlux lifecycle contracts: ordering, failure identity and real audit storage."""
+from typing import cast
+from app.agent.domains.library.missing_workflow_runtime import MissingMediaWorkflowRuntime
 import asyncio
 from contextlib import ExitStack
 from copy import deepcopy
@@ -32,7 +34,7 @@ def plan_fixture():
     )
 
 
-def normalize(value):
+def normalize(value: object) -> object:
     if isinstance(value, ToolResult):
         return normalize(value.to_dict())
     if isinstance(value, dict):
@@ -114,7 +116,7 @@ def capture_hook(terminal, fault):
             emit("contract")
             return super()._contract(plan)
 
-    lifecycle = Lifecycle(missing_media_runtime=None if fault == "no-runtime" else Runtime())
+    lifecycle = Lifecycle(missing_media_runtime=cast(MissingMediaWorkflowRuntime | None, None if fault == "no-runtime" else Runtime()))
     with ExitStack() as stack:
         for function, name in (("record_confirmed_result", "audit-completed"),
                                ("record_confirmation_error", "audit-failed"),
@@ -132,7 +134,9 @@ def capture_hook(terminal, fault):
             assert exc.__cause__ is (cause if exc is sentinel else None)
             outcome = {"error": exception_record(exc)}
     assert plan == original
-    return {"trace": trace, "outcome": outcome, "value": normalize(value)}
+    normalized = normalize(value)
+    assert isinstance(normalized, dict)
+    return {"trace": trace, "outcome": outcome, "value": normalized}
 
 
 @pytest.mark.parametrize("terminal", ["prepare_failed", "completed", "failed", "interrupted", "cancelled"])
@@ -173,7 +177,7 @@ def test_followup_and_contract_clone_boundaries_are_not_deepened():
         def release_followups(self, *, owner, followups):
             assert followups is plan.metadata[FOLLOWUPS]
             seen.append(owner)
-    lifecycle = target.MediaFluxEffectLifecycle(missing_media_runtime=Runtime())
+    lifecycle = target.MediaFluxEffectLifecycle(missing_media_runtime=cast(MissingMediaWorkflowRuntime, Runtime()))
     def audit(**kwargs):
         assert kwargs["confirmation_contract"] is not plan.confirmation_contract["audit_contract"]
         assert kwargs["confirmation_contract"]["nested"] is plan.confirmation_contract["audit_contract"]["nested"]

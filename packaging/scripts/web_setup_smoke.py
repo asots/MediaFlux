@@ -29,7 +29,9 @@ def main() -> None:
             return response
 
     def csrf(page):
-        return re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+        match = re.search(r'name="csrf_token" value="([^"]+)"', page)
+        assert match is not None, "Setup page did not contain a CSRF token"
+        return match.group(1)
 
     with request("/setup") as response:
         assert response.code == 200

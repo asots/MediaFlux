@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import hashlib
 import tempfile
 import threading
 import time
 import unittest
 import uuid
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, ExitStack, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -213,7 +216,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 )
 
                 first_a = sync_strm(
-                    source_a, base_url, root, client=client,
+                    source_a, base_url, root, client=cast(GuangYaClient, client),
                     rel_prefix=by_id[source_a]["rel_prefix"], source_name="同名",
                     clean_empty_dirs=False,
                 )
@@ -227,7 +230,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
 
                 # 旧 owner 先搬到新 prefix 并清理旧路径后，A 下一轮才能安全恢复。
                 moved_b = sync_strm(
-                    source_b, base_url, root, client=client,
+                    source_b, base_url, root, client=cast(GuangYaClient, client),
                     rel_prefix=by_id[source_b]["rel_prefix"], source_name="同名",
                     clean_empty_dirs=False,
                 )
@@ -246,7 +249,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 )
 
                 recovered_a = sync_strm(
-                    source_a, base_url, root, client=client,
+                    source_a, base_url, root, client=cast(GuangYaClient, client),
                     rel_prefix=by_id[source_a]["rel_prefix"], source_name="同名",
                     clean_empty_dirs=False,
                 )
@@ -312,7 +315,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 for plan in plans:
                     source_id = plan["id"]
                     first_pass[source_id] = sync_strm(
-                        source_id, base_url, root, client=client,
+                        source_id, base_url, root, client=cast(GuangYaClient, client),
                         rel_prefix=plan["rel_prefix"], source_name=plan["name"],
                         clean_empty_dirs=False,
                     )
@@ -331,7 +334,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
 
                 second_pass = {
                     plan["id"]: sync_strm(
-                        plan["id"], base_url, root, client=client,
+                        plan["id"], base_url, root, client=cast(GuangYaClient, client),
                         rel_prefix=plan["rel_prefix"], source_name=plan["name"],
                         clean_empty_dirs=False,
                     )
@@ -344,7 +347,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 # 缺失修复只重建该来源；另外两个来源的文件和索引保持不变。
                 paths[source_c].unlink()
                 repaired = sync_strm(
-                    source_c, base_url, root, client=client,
+                    source_c, base_url, root, client=cast(GuangYaClient, client),
                     rel_prefix=by_id[source_c]["rel_prefix"],
                     source_name=by_id[source_c]["name"], clean_empty_dirs=False,
                 )
@@ -356,7 +359,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 # 删除来源 B 的远端文件，只清理 B 的目标与命名空间。
                 client.tree[source_b] = []
                 removed = sync_strm(
-                    source_b, base_url, root, client=client,
+                    source_b, base_url, root, client=cast(GuangYaClient, client),
                     rel_prefix=by_id[source_b]["rel_prefix"],
                     source_name=by_id[source_b]["name"], clean_empty_dirs=False,
                 )
@@ -448,7 +451,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 )
 
                 result = sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     clean_invalid=False,
                 )
                 new_path = Path(root) / STRM_SUBDIR / "Movie.strm"
@@ -486,7 +489,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         client = _TreeClient({source_id: [dangerous_dir], "dir-1": [video]})
         try:
             with tempfile.TemporaryDirectory() as root:
-                result = sync_strm(source_id, "http://example", root, client=client)
+                result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
                 self.assertEqual(result["generated"], 1)
                 generated = list((Path(root) / STRM_SUBDIR).rglob("*.strm"))
                 self.assertEqual(len(generated), 1)
@@ -508,7 +511,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         })
         try:
             with tempfile.TemporaryDirectory() as root:
-                result = sync_strm(source_id, "http://example", root, client=client)
+                result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
                 generated = list((Path(root) / STRM_SUBDIR).rglob("*.strm"))
                 self.assertEqual(len(generated), 1)
                 self.assertEqual(result["duplicates_skipped"], 1)
@@ -528,7 +531,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         client = _TreeClient({source_id: files})
         try:
             with tempfile.TemporaryDirectory() as root:
-                result = sync_strm(source_id, "http://example", root, client=client)
+                result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
                 target = Path(root) / STRM_SUBDIR / "Movie.strm"
                 self.assertEqual(result["total"], 3)
                 self.assertEqual(result["generated"], 1)
@@ -574,7 +577,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                     source_id,
                     "http://example",
                     root,
-                    client=client,
+                    client=cast(GuangYaClient, client),
                     on_progress=on_progress,
                     should_stop=lambda: phase["generate"],
                 )
@@ -594,9 +597,9 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         client = _TreeClient(tree)
         try:
             with tempfile.TemporaryDirectory() as root:
-                sync_strm(source_id, "http://example", root, client=client)
+                sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
                 tree[source_id] = [GuangYaFile("new", "Movie.mkv", False, 200, "new", source_id)]
-                result = sync_strm(source_id, "http://example", root, client=client)
+                result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
 
                 target = Path(root) / STRM_SUBDIR / "Movie.strm"
                 self.assertTrue(target.exists())
@@ -689,7 +692,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                     source_id,
                     "http://example",
                     root,
-                    client=client,
+                    client=cast(GuangYaClient, client),
                     metadata_exts={"nfo"},
                 )
             self.assertTrue(call_threads)
@@ -715,7 +718,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 client = _TreeClient(tree)
                 try:
                     with tempfile.TemporaryDirectory() as root:
-                        first = sync_strm(source_id, "http://example", root, client=client)
+                        first = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
                         self.assertEqual(first["generated"], 1)
                         target = Path(root) / STRM_SUBDIR / "Movie.strm"
                         old_text = target.read_text(encoding="utf-8")
@@ -723,7 +726,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                             GuangYaFile("new", "Movie.mkv", False, 200, "new-etag", source_id)
                         ]
 
-                        patches = []
+                        patches: list[AbstractContextManager[object]] = []
                         if stage == "generate":
                             patches.append(patch("app.modules.strm.generate_strm", side_effect=OSError("generate failed")))
                         elif stage == "replace":
@@ -750,20 +753,15 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                                 side_effect=fail_conflict_transaction,
                             ))
 
-                        entered = []
-                        try:
+                        with ExitStack() as patch_stack:
                             for current_patch in patches:
-                                entered.append(current_patch)
-                                current_patch.start()
+                                patch_stack.enter_context(current_patch)
                             try:
-                                result = sync_strm(source_id, "http://example", root, client=client)
+                                result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
                                 raised = None
                             except Exception as exc:
                                 result = {}
                                 raised = exc
-                        finally:
-                            for current_patch in reversed(entered):
-                                current_patch.stop()
 
                         self.assertIsNone(raised, f"{stage} 不应把事务异常抛出: {raised}")
                         self.assertTrue(result.get("clean_skipped"), stage)
@@ -787,7 +785,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         original_unlink = Path.unlink
         try:
             with tempfile.TemporaryDirectory() as root:
-                sync_strm(source_id, "http://example", root, client=client)
+                sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
                 old_path = Path(root) / STRM_SUBDIR / "Old.strm"
                 old_text = old_path.read_text(encoding="utf-8")
                 new_path = Path(root) / STRM_SUBDIR / "New.strm"
@@ -801,7 +799,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                     return original_unlink(path_obj, *args, **kwargs)
 
                 with patch.object(Path, "unlink", new=fail_old_unlink):
-                    result = sync_strm(source_id, "http://example", root, client=client)
+                    result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
 
                 self.assertTrue(result["clean_skipped"])
                 self.assertTrue(old_path.exists())
@@ -849,7 +847,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         try:
             with tempfile.TemporaryDirectory() as root:
                 result = sync_strm(
-                    source_id, "http://example", root, client=client, clean_invalid=False,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client), clean_invalid=False,
                 )
             self.assertEqual(result["generated"], 1)
             self.assertEqual(result["directories"], 2)
@@ -871,7 +869,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         try:
             with tempfile.TemporaryDirectory() as root:
                 result = sync_strm(
-                    source_id, "http://example", root, client=client, clean_invalid=False,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client), clean_invalid=False,
                 )
             self.assertEqual(result["directories"], depth + 1)
             self.assertEqual(result["failed"], 0)
@@ -1001,7 +999,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         })
         try:
             with tempfile.TemporaryDirectory() as root:
-                result = sync_strm(source_id, "http://example", root, client=client)
+                result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
                 generated = list((Path(root) / STRM_SUBDIR).rglob("*.strm"))
                 self.assertEqual(result["generated"], 2)
                 self.assertEqual(len(generated), 2)
@@ -1028,7 +1026,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 "app.modules.strm.requests.get", side_effect=fake_get
             ):
                 first = sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts={"jpg"},
                 )
                 self.assertEqual(first["metadata_queued"], 1)
@@ -1040,7 +1038,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                     GuangYaFile("meta-new", "poster.jpg", False, 8, "etag-new", source_id)
                 ]
                 second = sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts={"jpg"},
                 )
                 self.assertEqual(second["metadata_queued"], 1)
@@ -1074,7 +1072,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 "app.modules.strm.requests.get", side_effect=fake_get
             ):
                 sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts={"jpg"},
                 )
                 self.assertEqual(_drain_metadata_jobs(client, root, {"jpg"}), 1)
@@ -1093,7 +1091,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                     "app.modules.strm.db.upsert_strm_index", side_effect=fail_new_upsert
                 ):
                     result = sync_strm(
-                        source_id, "http://example", root, client=client,
+                        source_id, "http://example", root, client=cast(GuangYaClient, client),
                         metadata_exts={"jpg"},
                     )
                     self.assertEqual(result["metadata_queued"], 1)
@@ -1126,7 +1124,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 "app.modules.strm.requests.get", return_value=_Response(b"data")
             ):
                 enabled = sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts={"jpg"},
                 )
                 self.assertEqual(enabled["metadata_queued"], 1)
@@ -1135,7 +1133,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 self.assertTrue(target.exists())
 
                 disabled = sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts=set(),
                 )
 
@@ -1153,7 +1151,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         source_id = f"source-{uuid.uuid4().hex}"
         video_key = f"guangya:{source_id}"
         metadata_key = f"guangya-meta:{source_id}"
-        tree = {
+        tree: dict[str, list[GuangYaFile] | Exception] = {
             source_id: [
                 GuangYaFile("video", "Movie.mkv", False, 100, "video-etag", source_id),
                 GuangYaFile("poster", "poster.jpg", False, 4, "meta-etag", source_id),
@@ -1167,7 +1165,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 "app.modules.strm.requests.get", return_value=_Response(b"data")
             ):
                 sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts={"jpg"},
                 )
                 self.assertEqual(_drain_metadata_jobs(client, root, {"jpg"}), 1)
@@ -1176,7 +1174,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 tree[source_id] = []
 
                 result = sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts={"jpg"},
                 )
 
@@ -1194,7 +1192,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
         source_id = f"source-{uuid.uuid4().hex}"
         video_key = f"guangya:{source_id}"
         metadata_key = f"guangya-meta:{source_id}"
-        tree = {
+        tree: dict[str, list[GuangYaFile] | Exception] = {
             source_id: [
                 GuangYaFile("video", "Movie.mkv", False, 100, "video-etag", source_id),
                 GuangYaFile("poster", "poster.jpg", False, 4, "meta-etag", source_id),
@@ -1208,7 +1206,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 "app.modules.strm.requests.get", return_value=_Response(b"data")
             ):
                 sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts={"jpg"},
                 )
                 self.assertEqual(_drain_metadata_jobs(client, root, {"jpg"}), 1)
@@ -1220,7 +1218,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 tree["broken-dir"] = RuntimeError("scan failed")
 
                 result = sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts={"jpg"},
                 )
 
@@ -1257,7 +1255,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 )
 
                 result = sync_strm(
-                    source_id, "http://example", root, client=client,
+                    source_id, "http://example", root, client=cast(GuangYaClient, client),
                     metadata_exts=set(),
                 )
 
@@ -1309,7 +1307,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 stale_path.write_text("old", encoding="utf-8")
                 db.upsert_strm_index(source_key, stale_id, "e", 1, "Stale.mkv", str(stale_path))
 
-                result = sync_strm(source_id, "http://example", root, client=client)
+                result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
 
                 self.assertTrue(result["clean_skipped"])
                 self.assertTrue(result["scan_incomplete"])
@@ -1337,7 +1335,7 @@ class StrmHardeningTests(IsolatedDatabaseTestCase):
                 db.upsert_strm_index(source_key, "stale", "e", 1, "Stale.mkv", str(stale_path))
 
                 with patch("app.modules.strm._scan_limits", return_value=(100, 1, 100, 60)):
-                    result = sync_strm(source_id, "http://example", root, client=client)
+                    result = sync_strm(source_id, "http://example", root, client=cast(GuangYaClient, client))
 
                 self.assertTrue(result["scan_incomplete"])
                 self.assertEqual(result["scan_limit_reason"], "entries")

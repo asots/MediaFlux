@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.tmdb import TMDBClient
+
 import json
 import subprocess
 import tempfile
@@ -65,7 +68,9 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         )
 
         self.assertFalse(db.claim_download_request_organize(request_id))
-        self.assertEqual(db.get_download_request(request_id)["organize_status"], "requires_manual")
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["organize_status"], "requires_manual")
         self.assertIn("stage", db.list_protected_guangya_staging_ids())
 
     def test_moved_staging_cannot_reuse_a_previous_stable_snapshot(self):
@@ -112,6 +117,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             target_name="下载 / MF-stage-bound",
         ))
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["gy_target_dir"], "stage-bound")
         self.assertEqual(row["gy_staging_parent_dir"], "parent")
         self.assertEqual(row["gy_staging_cleanup_status"], "pending")
@@ -209,8 +215,8 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
     def test_empty_directory_cleanup_requires_explicit_safe_capability(self):
         delete_empty = Mock()
         organizer = Organizer(
-            client=SimpleNamespace(delete_empty_directory=delete_empty),
-            scraper=object(),
+            client=cast(GuangYaClient, SimpleNamespace(delete_empty_directory=delete_empty)),
+            scraper=cast(TMDBScraper, object()),
         )
 
         report = organizer._clean_empty_dirs_report([
@@ -316,7 +322,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             for index in range(3)
         ]
         snapshot_client = SimpleNamespace(list_dir=Mock(return_value=files))
-        _, settled_snapshot = tracker._scan_staging_snapshot(snapshot_client, "staging")
+        _, settled_snapshot = tracker._scan_staging_snapshot(cast(GuangYaClient, snapshot_client), "staging")
         row = {
             "id": 72, "title": "Batch", "status": "downloading", "chat_id": "100",
             "qb_status": "", "gy_status": "downloading", "qb_task_id": "",
@@ -396,7 +402,9 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             {"id": "b", "name": "磁力任务", "target_dir": "staging-21", "raw": {}},
         ]
 
-        self.assertEqual(DownloadTracker._match_gy(row, tasks)["id"], "b")
+        match_gy_result = DownloadTracker._match_gy(row, tasks)
+        assert match_gy_result is not None
+        self.assertEqual(match_gy_result["id"], "b")
 
     def test_tracker_promotes_single_staged_item_when_auto_organize_is_unconfigured(self):
         tracker = DownloadTracker()
@@ -552,7 +560,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         client_cls.assert_not_called()
         self.assertEqual(update.call_args.kwargs["organize_status"], "queued")
         self.assertIn("正在运行", update.call_args.kwargs["organize_error"])
-        self.assertIsNotNone(update.call_args.kwargs["organize_next_retry_at"])
+        assert (update.call_args.kwargs["organize_next_retry_at"]) is not None
 
     def test_tracker_does_not_write_stale_staging_snapshot(self):
         tracker = DownloadTracker()
@@ -673,6 +681,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         plan = organizer._plan_one(file, "", OrganizeRules(), automatic=True)
 
         self.assertEqual(plan.action, "skip")
+        assert plan.match is not None
         self.assertTrue(plan.match.need_confirm)
         self.assertIn("90%", plan.note)
 
@@ -735,7 +744,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             config_error="",
             session=None,
         )
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
         scraper.match_mode = "strict"
         scraper.get_detail = Mock(return_value={
             "id": 9001,
@@ -750,7 +759,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
     def test_verified_low_score_episode_can_pass_only_in_automatic_planning(self):
         match = self._verified_episode_match()
         scraper = self._proof_scraper(match)
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Example.Show.S01E03.1080p.mkv", False, 100, "etag", "source"
         )
@@ -763,6 +772,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         )
 
         self.assertNotEqual(automatic.action, "skip")
+        assert automatic.match is not None
         self.assertEqual(automatic.match.status, "matched")
         self.assertFalse(automatic.match.need_confirm)
         self.assertEqual((automatic.season, automatic.episode), (1, 3))
@@ -773,6 +783,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             3,
         )
         self.assertEqual(manual.action, "skip")
+        assert manual.match is not None
         self.assertTrue(manual.match.need_confirm)
 
     def test_automatic_final_position_refreshes_stale_tmdb_detail_once(self):
@@ -789,7 +800,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             need_confirm=False,
         )
         scraper = self._proof_scraper(match)
-        scraper.get_detail.side_effect = [
+        cast(Mock, scraper.get_detail).side_effect = [
             {
                 "id": 9001,
                 "genres": [],
@@ -803,7 +814,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
                 "seasons": [{"season_number": 1, "episode_count": 13}],
             },
         ]
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Example.Show.S01E13.1080p.mkv", False, 100, "etag", "source"
         )
@@ -814,10 +825,11 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
 
         self.assertNotEqual(plan.action, "skip")
         self.assertEqual((plan.season, plan.episode), (1, 13))
+        assert plan.match is not None
         self.assertTrue(plan.match.metadata["tmdb_detail_force_refreshed"])
-        self.assertEqual(scraper.get_detail.call_count, 2)
+        self.assertEqual(cast(Mock, scraper.get_detail).call_count, 2)
         self.assertEqual(
-            scraper.get_detail.call_args_list[-1].kwargs.get("force_refresh"), True
+            cast(Mock, scraper.get_detail).call_args_list[-1].kwargs.get("force_refresh"), True
         )
 
     def test_verified_bare_episode_proof_uses_tmdb_validated_season_one(self):
@@ -827,7 +839,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         proof["recognition_threshold"] = 0.6
         proof["source_position"] = {"season": None, "episode": 3}
         scraper = self._proof_scraper(match)
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Example Show - 03 [1080p].mkv", False, 100, "etag", "source"
         )
@@ -838,6 +850,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
 
         self.assertNotEqual(plan.action, "skip")
         self.assertEqual((plan.season, plan.episode), (1, 3))
+        assert plan.match is not None
         self.assertEqual(plan.match.status, "matched")
         self.assertFalse(plan.match.need_confirm)
 
@@ -881,7 +894,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
                 {"season_number": 2, "episode_count": 1100},
             ],
         })
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Example Show - 1173 [1080p].mkv", False, 100, "etag", "source"
         )
@@ -894,6 +907,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         self.assertIsNone(match.metadata["episode_mapping"]["source_season"])
         self.assertEqual(match.metadata["episode_mapping"]["source_episode"], 1173)
         self.assertEqual((plan.season, plan.episode), (2, 1073))
+        assert plan.match is not None
         self.assertEqual(plan.match.status, "matched")
         self.assertFalse(plan.match.need_confirm)
 
@@ -921,7 +935,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             config_error="",
             session=None,
         )
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
         scraper.get_detail = Mock(return_value={
             "id": 278043,
             "name": "正相反的你与我",
@@ -946,7 +960,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             status="matched",
             need_confirm=False,
         )
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f",
             "You.and.I.Are.Polar.Opposites.S02E06.tmdb278043.mkv",
@@ -962,6 +976,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         self.assertEqual((plan.season, plan.episode), (1, 18))
         self.assertIn("Season 1", plan.target_path)
         self.assertIn("S01E18", plan.new_name)
+        assert plan.episode_mapping is not None
         self.assertEqual(
             plan.episode_mapping.reason,
             "publisher_cour_mapped_to_merged_tmdb_season",
@@ -975,7 +990,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             config_error="",
             session=None,
         )
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
         scraper.get_detail = Mock(return_value={
             "id": 278043,
             "name": "正相反的你与我",
@@ -1001,7 +1016,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             title="正相反的你与我", year="2026", media_type="tv",
             confidence=1.0, threshold=0.9, status="matched", need_confirm=False,
         )
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Show.S02E06.tmdb278043.mkv", False, 100, "etag", "source"
         )
@@ -1011,6 +1026,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         )
 
         self.assertEqual(plan.action, "skip")
+        assert plan.match is not None
         self.assertTrue(plan.match.need_confirm)
         self.assertIn("季号", plan.note)
 
@@ -1021,7 +1037,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             config_error="",
             session=None,
         )
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
         scraper.get_detail = Mock(return_value={})
         scraper.get_tv_season_detail = Mock(return_value={})
         match = MatchResult(
@@ -1036,7 +1052,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             status="matched",
             need_confirm=False,
         )
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Show.S02E06.tmdb278043.mkv", False, 100, "etag", "source"
         )
@@ -1046,6 +1062,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         )
 
         self.assertEqual(plan.action, "skip")
+        assert plan.match is not None
         self.assertTrue(plan.match.need_confirm)
         self.assertIn("999/278043", plan.note)
         scraper.get_detail.assert_not_called()
@@ -1071,7 +1088,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
                     config_error="",
                     session=None,
                 )
-                scraper = TMDBScraper(client=client)
+                scraper = TMDBScraper(client=cast(TMDBClient, client))
                 scraper.get_detail = Mock(return_value=detail)
                 scraper.get_tv_season_detail = Mock(return_value={
                     "season_number": 1,
@@ -1089,7 +1106,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
                     status="matched",
                     need_confirm=False,
                 )
-                organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+                organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
                 file = GuangYaFile(
                     "f", filename, False, 100, "etag", "source"
                 )
@@ -1109,7 +1126,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
     def test_verified_episode_proof_fails_closed_when_final_position_differs(self):
         match = self._verified_episode_match(target_episode=4)
         scraper = self._proof_scraper(match)
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Example.Show.S01E03.1080p.mkv", False, 100, "etag", "source"
         )
@@ -1120,12 +1137,13 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(plan.action, "skip")
         self.assertIn("最终季集位置不一致", plan.note)
+        assert plan.match is not None
         self.assertTrue(plan.match.need_confirm)
 
     def test_verified_episode_proof_is_not_directory_cacheable(self):
         match = self._verified_episode_match()
 
-        self.assertIsNotNone(verified_automatic_identity_proof(match))
+        assert (verified_automatic_identity_proof(match)) is not None
         self.assertFalse(Organizer._cacheable_directory_match(match))
 
     def test_verified_episode_proof_rejects_threshold_binding_mismatch(self):
@@ -1141,7 +1159,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             "recognition_threshold"
         ] = 0.6
 
-        self.assertIsNotNone(verified_automatic_identity_proof(match))
+        assert (verified_automatic_identity_proof(match)) is not None
 
     def test_verified_episode_proof_rejects_nonfinite_numeric_fields(self):
         for field, value in (
@@ -1164,13 +1182,13 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             with self.subTest(detail_id=detail_id):
                 match = self._verified_episode_match()
                 scraper = self._proof_scraper(match)
-                detail = dict(scraper.get_detail.return_value)
+                detail = dict(cast(Mock, scraper.get_detail).return_value)
                 if detail_id is None:
                     detail.pop("id", None)
                 else:
                     detail["id"] = detail_id
-                scraper.get_detail.return_value = detail
-                organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+                cast(Mock, scraper.get_detail).return_value = detail
+                organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
                 file = GuangYaFile(
                     "f", "Example.Show.S01E03.1080p.mkv", False, 100, "etag", "source"
                 )
@@ -1180,6 +1198,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
                 )
 
                 self.assertEqual(plan.action, "skip")
+                assert plan.match is not None
                 self.assertTrue(plan.match.need_confirm)
                 self.assertIn("最终季集位置不一致", plan.note)
 
@@ -1187,8 +1206,8 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         match = self._verified_episode_match()
         match.tmdb_id = "9002"
         scraper = self._proof_scraper(match)
-        scraper.get_detail.return_value["id"] = 9002
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        cast(Mock, scraper.get_detail).return_value["id"] = 9002
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Example.Show.S01E03.1080p.mkv", False, 100, "etag", "source"
         )
@@ -1198,6 +1217,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         )
 
         self.assertEqual(plan.action, "skip")
+        assert plan.match is not None
         self.assertTrue(plan.match.need_confirm)
 
     def test_verified_target_season_year_proof_rechecks_current_detail(self):
@@ -1229,12 +1249,12 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             "episode_mapping": dict(mapping),
         }
         scraper = self._proof_scraper(match)
-        scraper.get_detail.return_value["seasons"] = [{
+        cast(Mock, scraper.get_detail).return_value["seasons"] = [{
             "season_number": 1,
             "episode_count": 12,
             "air_date": "2024-01-05",
         }]
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         file = GuangYaFile(
             "f", "Example.Show.2025.S01E03.1080p.mkv", False, 100, "etag", "source"
         )
@@ -1244,6 +1264,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         )
 
         self.assertEqual(plan.action, "skip")
+        assert plan.match is not None
         self.assertTrue(plan.match.need_confirm)
         self.assertIn("最终季集位置不一致", plan.note)
 
@@ -1278,6 +1299,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         self.assertNotEqual(normal.action, "skip")
         self.assertEqual(normal.season, 1)
         self.assertEqual(unresolved.action, "skip")
+        assert unresolved.match is not None
         self.assertTrue(unresolved.match.need_confirm)
         self.assertIn("无法安全确定 TMDB 季号", unresolved.note)
 
@@ -1286,7 +1308,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             api_key="key", base_url="https://tmdb.example", config_error="", session=None,
             search=Mock(side_effect=ProviderTimeout("timeout")),
         )
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
 
         for index in range(3):
             self.assertEqual(scraper.search(f"Title {index}", "2026", "movie"), [])
@@ -1338,7 +1360,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         ):
             profile = probe_media_profile(file, client, enabled=True, timeout=5, budget=budget)
 
-        self.assertIsNotNone(profile)
+        assert (profile) is not None
         self.assertEqual(profile.render(), "1080p.SDR.H.265.24fps.AAC.2.0")
         self.assertEqual(client.get_download_url.call_count, 2)
         self.assertEqual(run.call_count, 2)
@@ -1383,35 +1405,40 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
     def test_completed_isolated_staging_is_deleted_only_after_empty_recheck(self):
         organizer, request_id, root, _info = self._completed_staging_fixture()
         report = OrganizeTaskManager._cleanup_download_staging(
-            organizer, [request_id], [{"id": root, "name": "MF-7"}],
+            cast(GuangYaClient, organizer.client), [request_id], [{"id": root, "name": "MF-7"}],
             rules=OrganizeRules(clean_empty=True),
         )
         self.assertEqual(report["cleaned"], 1)
         organizer.client.delete_empty_directory.assert_called_once_with(
             root, expected_etag="dir-etag", expected_updated_at=123,
         )
-        self.assertEqual(db.get_download_request(request_id)["gy_staging_cleanup_status"], "completed")
+        get_download_request_result_2 = db.get_download_request(request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["gy_staging_cleanup_status"], "completed")
 
     def test_completed_isolated_staging_is_retained_without_atomic_delete_capability(self):
         organizer, request_id, root, _info = self._completed_staging_fixture()
         organizer.client.supports_guarded_empty_directory_delete = False
         report = OrganizeTaskManager._cleanup_download_staging(
-            organizer, [request_id], [{"id": root, "name": "MF-7"}],
+            cast(GuangYaClient, organizer.client), [request_id], [{"id": root, "name": "MF-7"}],
             rules=OrganizeRules(clean_empty=True),
         )
         self.assertEqual(report["unsupported"], 1)
         organizer.client.delete_empty_directory.assert_not_called()
-        self.assertEqual(db.get_download_request(request_id)["gy_staging_cleanup_status"], "retained")
+        get_download_request_result_3 = db.get_download_request(request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["gy_staging_cleanup_status"], "retained")
 
     def test_completed_isolated_staging_cleanup_failure_is_persisted(self):
         organizer, request_id, root, _info = self._completed_staging_fixture()
         organizer.client.delete_empty_directory.side_effect = RuntimeError("version changed")
         report = OrganizeTaskManager._cleanup_download_staging(
-            organizer, [request_id], [{"id": root, "name": "MF-7"}],
+            cast(GuangYaClient, organizer.client), [request_id], [{"id": root, "name": "MF-7"}],
             rules=OrganizeRules(clean_empty=True),
         )
         self.assertEqual(report["delete_failures"], 1)
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["gy_staging_cleanup_status"], "failed")
         self.assertIn("结果未确认", row["gy_staging_cleanup_error"])
 
@@ -1419,12 +1446,13 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         organizer, request_id, root, info = self._completed_staging_fixture()
         info.name = "other"
         report = OrganizeTaskManager._cleanup_download_staging(
-            organizer, [request_id], [{"id": root, "name": "MF-7"}],
+            cast(GuangYaClient, organizer.client), [request_id], [{"id": root, "name": "MF-7"}],
             rules=OrganizeRules(clean_empty=True),
         )
         self.assertGreater(report["unavailable"], 0)
         organizer.client.delete_empty_directory.assert_not_called()
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["gy_staging_cleanup_status"], "retained")
         self.assertIn("身份", row["gy_staging_cleanup_error"])
 
@@ -1505,6 +1533,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             )
 
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["organize_status"], "stopped")
         self.assertEqual(row["organize_started"], -1)
         self.assertEqual(row["strm_status"], "skipped")
@@ -1528,7 +1557,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(plan.action, "move")
         self.assertEqual(plan.conflict_decision, "new")
-        self.assertIsInstance(find.call_args.args[2], dict)
+        assert isinstance(find.call_args.args[2], dict)
 
     def test_credits_detail_failures_share_circuit_and_success_resets_it(self):
         client = SimpleNamespace(
@@ -1539,7 +1568,7 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
                 {"id": 7, "credits": {}},
             ]),
         )
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
         for tmdb_id in ("1", "2", "3"):
             self.assertEqual(scraper.get_detail_with_credits(tmdb_id, "movie"), {})
         self.assertEqual(scraper.get_detail_with_credits("4", "movie"), {})
@@ -1562,9 +1591,9 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
         self.assertEqual(client.get_download_url.call_count, 1)
 
     def test_ai_different_inputs_do_not_share_global_network_lock(self):
-        scraper = TMDBScraper(client=SimpleNamespace(
+        scraper = TMDBScraper(client=cast(TMDBClient, SimpleNamespace(
             api_key="key", base_url="https://tmdb.example", session=None,
-        ))
+        )))
         client_key = ("https://ai.example/v1/chat/completions", "model", "", 5, "")
         first_started = threading.Event()
         second_started = threading.Event()
@@ -1622,7 +1651,9 @@ class AutoOrganizeHardeningTests(IsolatedDatabaseTestCase):
             )
 
         self.assertEqual(db.get_organize_confirmation_queue_position(new_id), 1)
-        self.assertEqual(db.get_organize_confirmation("old")["status"], "queued")
+        get_organize_confirmation_result = db.get_organize_confirmation("old")
+        assert get_organize_confirmation_result is not None
+        self.assertEqual(get_organize_confirmation_result["status"], "queued")
 
 
 if __name__ == "__main__":

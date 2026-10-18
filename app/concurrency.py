@@ -59,9 +59,9 @@ class KeyedSingleFlight:
     """
 
     def __init__(self, *, max_entries: int = 256) -> None:
-        if isinstance(max_entries, bool) or int(max_entries) < 1:
+        if isinstance(max_entries, bool) or max_entries < 1:
             raise ValueError("max_entries 必须是正整数")
-        self._max_entries = int(max_entries)
+        self._max_entries = max_entries
         self._lock = threading.RLock()
         self._inflight: dict[Hashable, tuple[int, threading.Event]] = {}
         self._generation = 0

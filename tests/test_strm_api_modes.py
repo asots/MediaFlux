@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from unittest.mock import Mock, patch
+from fastapi.routing import APIRoute
 
 from app.routes import strm_api
 
@@ -20,7 +21,7 @@ def test_only_explicit_fast_and_full_run_routes_are_registered():
     paths = {
         route.path
         for route in strm_api.router.routes
-        if "POST" in getattr(route, "methods", set())
+        if isinstance(route, APIRoute) and route.methods is not None and "POST" in route.methods
     }
     assert "/api/strm/run" not in paths
     assert "/api/strm/run/fast" in paths

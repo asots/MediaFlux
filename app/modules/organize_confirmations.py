@@ -5,8 +5,8 @@
 """
 from __future__ import annotations
 
-import hashlib
 import copy
+import hashlib
 import json
 import re
 import secrets
@@ -14,6 +14,7 @@ import threading
 import time
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+from sqlite3 import Row
 
 from app import database as db
 from app.clients.guangya import GuangYaClient, close_guangya_client
@@ -90,7 +91,7 @@ def _confirmation_strm_debounce_seconds(payload: dict) -> int:
         minimum=0,
     )
     default_seconds = 30 if actionable_groups > 1 else 8
-    configured = str(
+    configured = (
         get("GY_ORGANIZE_CONFIRM_STRM_DEBOUNCE_SECONDS", "") or ""
     ).strip()
     if not configured:
@@ -337,7 +338,7 @@ class _AgentEpisodeWriteBoundary:
         }
 
     def bind_target_context(self, plan, target_id: str, *, companions, target_names) -> None:
-        if not str(target_id or ""):
+        if not (target_id or ""):
             raise DirectoryScrapeConflictError("研究计划缺少有效目标目录")
         final_names = [str(name).casefold() for name in target_names]
         if len(set(final_names)) != len(final_names):
@@ -351,7 +352,7 @@ class _AgentEpisodeWriteBoundary:
             _validate_snapshot(self.client, frozen, role="研究伴随文件")
             companion_ids.append(str(item.file_id))
             names.add(str(item.name).casefold())
-        self.contexts[str(plan.file_id)] = {"target_id": str(target_id), "companions": companion_ids, "names": names}
+        self.contexts[str(plan.file_id)] = {"target_id": target_id, "companions": companion_ids, "names": names}
 
     def _assert_authorized(self, plan) -> None:
         from app.modules.episode_research_service import episode_research_enabled
@@ -401,12 +402,12 @@ class _AgentEpisodeWriteBoundary:
     def before_companion_write(self, plan, item, target_id: str, target_name: str) -> None:
         self._assert_authorized(plan)
         context = self.contexts.get(str(plan.file_id))
-        if context is None or str(target_id) != context["target_id"] or str(item.file_id) not in context["companions"]:
+        if context is None or target_id != context["target_id"] or str(item.file_id) not in context["companions"]:
             raise DirectoryScrapeConflictError("伴随文件目标超出冻结研究范围")
         _validate_snapshot(self.client, self.frozen[str(item.file_id)], role="研究伴随文件")
-        names = {str(item.name).casefold(), str(target_name).casefold()}
+        names = {str(item.name).casefold(), target_name.casefold()}
         if any(str(other.file_id) != str(item.file_id) and str(other.name).casefold() in names
-               for other in self.client.list_dir(str(target_id))):
+               for other in self.client.list_dir(target_id)):
             raise DirectoryScrapeConflictError("伴随文件写前发现同名目标，未授权覆盖")
 
 
@@ -427,7 +428,7 @@ def _persist_confirmation_actions(
     allow_skip_terminal = bool(persisted_payload.get("allow_skip_terminal"))
     if not files or (not candidates and not allow_skip_terminal):
         return ()
-    resolved_chat = str(chat_id or get("TG_CHAT_ID", "") or "").strip()
+    resolved_chat = (chat_id or get("TG_CHAT_ID", "") or "").strip()
     token = secrets.token_urlsafe(12)
     db.create_organize_confirmation(
         token=token,
@@ -469,8 +470,8 @@ def _persist_confirmation_retry(
         raise ValueError("候选参数无效")
     candidate = dict(candidates[selected_index])
     retry_payload = dict(payload)
-    retry_payload[_RETRY_SELECTED_INDEX_KEY] = int(selected_index)
-    resolved_chat = str(chat_id or get("TG_CHAT_ID", "") or "").strip()
+    retry_payload[_RETRY_SELECTED_INDEX_KEY] = selected_index
+    resolved_chat = (chat_id or get("TG_CHAT_ID", "") or "").strip()
     retry_token = secrets.token_urlsafe(12)
     db.create_organize_confirmation(
         token=retry_token,
@@ -494,7 +495,7 @@ def _persist_confirmation_retry(
 def confirmation_token_from_event(event: NotificationEvent) -> str:
     """从任一人工确认按钮提取持久化 token。"""
     for action in event.actions:
-        parts = str(action.callback_data or "").split(":", 2)
+        parts = (action.callback_data or "").split(":", 2)
         if len(parts) == 3 and parts[0] == "orgc" and parts[1]:
             return parts[1]
     return ""
@@ -516,7 +517,7 @@ def publish_confirmation_event(
         NotificationTopic,
     )
 
-    resolved_token = str(token or confirmation_token_from_event(event)).strip()
+    resolved_token = (token or confirmation_token_from_event(event)).strip()
     if not resolved_token:
         return False
     importance = (
@@ -531,7 +532,7 @@ def publish_confirmation_event(
             topic=NotificationTopic.CONFIRMATION,
             importance=importance,
             chat_id=chat_id,
-            preferred_message_id=int(message_id or 0),
+            preferred_message_id=(message_id or 0),
         )
     finally:
         if not terminal:
@@ -578,7 +579,7 @@ def update_confirmation_lifecycle_downstream(
     from app.modules.telegram_notification_center import get_notification_thread_event
     from app.modules.telegram_notification_policy import NotificationTopic
 
-    thread_key = f"confirmation:{str(token or '').strip()}"
+    thread_key = f"confirmation:{(token or '').strip()}"
     previous = get_notification_thread_event(
         thread_key, topic=NotificationTopic.CONFIRMATION, chat_id=chat_id,
     )
@@ -601,7 +602,7 @@ def update_confirmation_lifecycle_downstream(
         if not replaced:
             fields.append((label, value))
     row = db.get_organize_confirmation(token)
-    keep_actions = bool(row is not None and str(row["status"] or "") == "pending")
+    keep_actions = (row is not None and str(row["status"] or "") == "pending")
     title = "⚠️ 人工确认整理链路部分完成" if partial or error else previous.title
     footer = str(error or previous.footer)[:300]
     event = NotificationEvent(
@@ -767,7 +768,7 @@ def create_local_media_confirmation_actions(
     payload = {
         "version": 1,
         "kind": "local_media",
-        "owner": str(owner or "admin"),
+        "owner": (owner or "admin"),
         "local_task_id": int(task.id),
         "local_task_version": int(task.version),
         "local_source_id": int(task.source_id),
@@ -851,7 +852,7 @@ def schedule_local_media_recognition_review(
 def _decode_row(row) -> dict:
     try:
         payload = json.loads(str(row["payload_json"] or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError("确认任务数据损坏，请重新执行整理") from exc
     if not isinstance(payload, dict):
         raise ValueError("确认任务数据损坏，请重新执行整理")
@@ -891,14 +892,14 @@ def _finalize_guangya_manual_logs(
 def _decode_json_object(value: object) -> dict:
     try:
         decoded = json.loads(str(value or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return {}
     return decoded if isinstance(decoded, dict) else {}
 
 
 def _latest_confirmation_rows(rows: list) -> list:
     """同一父任务重复投递时只统计每个文件快照的最新候选卡。"""
-    latest: dict[str, object] = {}
+    latest: dict[str, Row] = {}
     for row in rows:
         fingerprint = str(row["fingerprint"] or "").strip()
         key = fingerprint or "token:" + str(row["token"] or "")
@@ -989,12 +990,12 @@ def _maybe_update_parent_organize_rollup(
     organize_task_id: str, *, chat_id: str = "",
 ) -> bool:
     """幂等收口一条原始 /organize 汇总；未全部结束时保持不动。"""
-    parent_id = str(organize_task_id or "").strip()
+    parent_id = (organize_task_id or "").strip()
     if not parent_id:
         return False
     with _rollup_guard:
         rows = db.list_organize_confirmations_for_task(
-            parent_id, chat_id=str(chat_id or ""),
+            parent_id, chat_id=(chat_id or ""),
         )
         if not rows or not any(not bool(row["rollup_applied"]) for row in rows):
             return False
@@ -1008,13 +1009,13 @@ def _maybe_update_parent_organize_rollup(
 
         accepted = bool(update_organize_lifecycle_confirmations(
             parent_id,
-            chat_id=str(chat_id or ""),
+            chat_id=(chat_id or ""),
             baseline=baseline,
             outcomes=outcomes,
         ))
         if accepted:
             db.mark_organize_confirmation_rollup_applied(
-                parent_id, chat_id=str(chat_id or ""),
+                parent_id, chat_id=(chat_id or ""),
             )
         return accepted
 
@@ -1129,7 +1130,7 @@ def cancel_confirmation(
     if current is None:
         raise ValueError("确认操作不存在或已失效")
     expected_chat = str(current["chat_id"] or "")
-    if expected_chat and expected_chat != str(chat_id or ""):
+    if expected_chat and expected_chat != (chat_id or ""):
         raise ValueError("确认操作不存在或已失效")
     _raise_if_confirmation_expired(current)
     payload = _decode_row(current)
@@ -1164,12 +1165,12 @@ def cancel_confirmation(
     )
     try:
         _maybe_update_parent_organize_rollup(
-            str(current["organize_task_id"] or ""), chat_id=str(chat_id or ""),
+            str(current["organize_task_id"] or ""), chat_id=(chat_id or ""),
         )
     except Exception as exc:  # noqa: BLE001 - 终态已落库，汇总投影只做补偿。
         logger.warning(
             "人工确认暂不处理后父汇总更新失败 token=%s type=%s",
-            str(token)[:6], type(exc).__name__,
+            token[:6], type(exc).__name__,
         )
     return {"cancelled": True, "directory": directory}
 
@@ -1182,7 +1183,7 @@ def skip_confirmation(
     if current is None:
         raise ValueError("确认操作不存在或已失效")
     expected_chat = str(current["chat_id"] or "")
-    if expected_chat and expected_chat != str(chat_id or ""):
+    if expected_chat and expected_chat != (chat_id or ""):
         raise ValueError("确认操作不存在或已失效")
     _raise_if_confirmation_expired(current)
     payload = _decode_row(current)
@@ -1222,12 +1223,12 @@ def skip_confirmation(
         _dispatch_due_confirmation_delivery(token)
     try:
         _maybe_update_parent_organize_rollup(
-            str(current["organize_task_id"] or ""), chat_id=str(chat_id or ""),
+            str(current["organize_task_id"] or ""), chat_id=(chat_id or ""),
         )
     except Exception as exc:  # noqa: BLE001 - 终态已落库，汇总投影只做补偿。
         logger.warning(
             "人工确认跳过后父汇总更新失败 token=%s type=%s",
-            str(token)[:6], type(exc).__name__,
+            token[:6], type(exc).__name__,
         )
     return {"skipped": True, "directory": directory}
 
@@ -1296,7 +1297,7 @@ def _dispatch_confirmation_token(token: str) -> dict:
             _dispatch_due_confirmation_delivery(token)
         logger.warning(
             "Telegram 排队整理数据损坏 token=%s type=%s",
-            str(token)[:6],
+            token[:6],
             type(exc).__name__,
         )
         try:
@@ -1306,7 +1307,7 @@ def _dispatch_confirmation_token(token: str) -> dict:
         except Exception as rollup_exc:  # noqa: BLE001 - 不覆盖已持久化失败终态。
             logger.warning(
                 "损坏确认任务父汇总更新失败 token=%s type=%s",
-                str(token)[:6], type(rollup_exc).__name__,
+                token[:6], type(rollup_exc).__name__,
             )
         return {"ok": False, "claimed": True, "terminal": True, "error": message}
 
@@ -1332,7 +1333,7 @@ def _dispatch_confirmation_token(token: str) -> dict:
         db.requeue_organize_confirmation(token, str(exc or "整理任务提交失败"))
         logger.warning(
             "Telegram 排队整理提交异常 token=%s type=%s",
-            str(token)[:6],
+            token[:6],
             type(exc).__name__,
         )
         return {"ok": False, "claimed": True, "busy": True, "error": str(exc)}
@@ -1360,7 +1361,7 @@ def _dispatch_next_queued_confirmation() -> dict:
 
 
 def _delivery_timestamp(delay_seconds: int = 0) -> str:
-    return _timestamp(datetime.now() + timedelta(seconds=int(delay_seconds)))
+    return _timestamp(datetime.now() + timedelta(seconds=delay_seconds))
 
 
 def _dispatch_due_confirmation_delivery(token: str = "") -> bool:
@@ -1393,7 +1394,7 @@ def _dispatch_due_confirmation_delivery(token: str = "") -> bool:
             token=token,
             message_id=item["message_id"],
             terminal=True,
-            error=event.title.startswith(("❌", "⚠️")),
+            error=str(event.title).startswith(("❌", "⚠️")),
         )
     except Exception as exc:
         accepted = False
@@ -1522,10 +1523,11 @@ def _process_recognition_review_row(row) -> str:
             "Agent 识别复核审计落库时已失去所有权 token=%s", token[:6]
         )
         return "ownership_lost"
+    assert decision.candidate_index is not None
     try:
         start_confirmation(
             token,
-            int(decision.candidate_index),
+            decision.candidate_index,
             chat_id=str(row["chat_id"] or ""),
             actor="agent",
         )
@@ -1575,7 +1577,7 @@ def _recognition_review_loop(
         )
 
     while not stop_event.is_set():
-        token = ""
+        token: str = ""
         try:
             row = db.claim_next_organize_confirmation_review()
             if row is None:
@@ -1717,7 +1719,7 @@ def stop_confirmation_dispatcher(timeout: float = 2.0) -> bool:
         if _dispatch_thread is thread and stopped:
             _dispatch_thread = None
     review_stopped = stop_recognition_review_dispatcher(timeout=timeout)
-    return bool(stopped and review_stopped)
+    return (stopped and review_stopped)
 
 
 def start_confirmation(
@@ -1728,14 +1730,14 @@ def start_confirmation(
     actor: str = "human",
 ) -> dict:
     """持久化确认选择；人工与 Agent 竞争同一个一次性 pending 所有权。"""
-    normalized_actor = str(actor or "human").strip().lower()
+    normalized_actor = (actor or "human").strip().lower()
     if normalized_actor not in {"human", "agent"}:
         raise ValueError("确认执行者无效")
     preview = db.get_organize_confirmation(token)
     if preview is None:
         raise ValueError("确认操作不存在或已失效")
     expected_chat = str(preview["chat_id"] or "")
-    if expected_chat and expected_chat != str(chat_id or ""):
+    if expected_chat and expected_chat != (chat_id or ""):
         raise ValueError("确认操作不存在或已失效")
     _raise_if_confirmation_expired(preview)
 
@@ -1758,7 +1760,9 @@ def start_confirmation(
     if normalized_actor == "agent" and status == "pending":
         receipt = _episode_research_receipt_from_row(preview)
         if receipt is not None:
-            from app.modules.episode_research_service import revalidate_episode_research_receipt
+            from app.modules.episode_research_service import (
+                revalidate_episode_research_receipt,
+            )
             revalidate_episode_research_receipt(payload, receipt, expected_candidate_index=selected_index)
 
     if status in {"queued", "running", "completed"}:
@@ -1815,13 +1819,14 @@ def start_confirmation(
             except Exception as exc:  # noqa: BLE001 - 数据库终态优先，通知异步补偿。
                 logger.warning(
                     "人工确认点击过期收口失败 token=%s type=%s",
-                    str(token)[:6], type(exc).__name__,
+                    token[:6], type(exc).__name__,
                 )
             raise ValueError("确认操作已过期，请重新执行整理")
         raise
     queue_id = f"queue-{int(row['id']):06d}"
     db.update_organize_confirmation(token, task_id=queue_id, error="")
     row = db.get_organize_confirmation(token)
+    assert row is not None
 
     # 只调度队首，避免后来点击的消息绕过已经排队的确认任务。
     _dispatch_next_queued_confirmation()
@@ -1850,15 +1855,15 @@ def _validate_snapshot(client: GuangYaClient, item: dict, *, role: str) -> None:
     if current is None or current.is_dir:
         raise DirectoryScrapeConflictError(f"{role}已不存在，请重新执行整理")
     mismatches = []
-    if str(current.name or "") != str(item.get("name") or ""):
+    if (current.name or "") != str(item.get("name") or ""):
         mismatches.append("文件名")
     expected_parent = str(item.get("parent_id") or "")
-    if expected_parent and str(current.parent_id or "") != expected_parent:
+    if expected_parent and (current.parent_id or "") != expected_parent:
         mismatches.append("所在目录")
-    if int(current.size or 0) != int(item.get("size") or 0):
+    if (current.size or 0) != int(item.get("size") or 0):
         mismatches.append("文件大小")
     expected_etag = str(item.get("etag") or "")
-    if expected_etag and str(current.etag or "") != expected_etag:
+    if expected_etag and (current.etag or "") != expected_etag:
         mismatches.append("ETag")
     if mismatches:
         raise DirectoryScrapeConflictError(
@@ -1889,7 +1894,7 @@ def _validate_metatube_confirmation_identity(
 
 def _resolve_guangya_confirmation_candidate(
     payload: dict, candidate: dict, rules: OrganizeRules,
-) -> tuple[TMDBScraper, object, dict, str]:
+) -> tuple[TMDBScraper, MatchResult, dict, str]:
     provider = _candidate_provider(candidate)
     external_id = _candidate_external_id(candidate)
     media_type = str(candidate.get("media_type") or "").strip().lower()
@@ -1915,7 +1920,7 @@ def _resolve_guangya_confirmation_candidate(
                 raise ValueError("MetaTube 候选媒体参数无效")
             if not rules.nsfw_exclusive:
                 raise ValueError("当前来源不是成人专用来源，已拒绝 MetaTube 候选")
-            if not str(rules.nsfw_metatube_endpoint or "").strip():
+            if not (rules.nsfw_metatube_endpoint or "").strip():
                 raise ValueError("MetaTube 服务地址未配置")
             recognizer = None
             try:
@@ -1948,11 +1953,11 @@ def _resolve_guangya_confirmation_candidate(
             fallback = build_clean_title_candidate(seed, rules.nsfw_strip_domains)
             if fallback is None:
                 raise ValueError("待确认文件未提取到有效番号，不能清洗标题入库")
-            resolved_id = str(fallback.get("external_id") or "").strip()
+            resolved_id = (fallback.get("external_id") or "").strip()
             if normalize_code(external_id) != normalize_code(resolved_id):
                 raise ValueError("清洗标题候选番号与待确认文件不一致")
             # 标题由服务端根据原始文件重新生成，不能信任回传候选中的可修改文本。
-            title = str(fallback.get("title") or resolved_id).strip()
+            title = (fallback.get("title") or resolved_id).strip()
             detail = {
                 **dict(fallback.get("metadata") or {}),
                 "number": resolved_id,
@@ -2195,7 +2200,7 @@ def _execute_local_media_confirmation(
             task_id,
             owner=owner,
             expected_version=expected_version,
-            expected_snapshot_digest=str(task.snapshot_digest or ""),
+            expected_snapshot_digest=(task.snapshot_digest or ""),
             confirmed_snapshot_digest=expected_digest,
             tmdb_id=tmdb_id,
             media_type=media_type,
@@ -2339,14 +2344,14 @@ def _execute_confirmation(
             except Exception as exc:  # noqa: BLE001 - 不让投影失败反转整理结果。
                 logger.warning(
                     "人工确认执行后父汇总更新失败 token=%s type=%s",
-                    str(token)[:6], type(exc).__name__,
+                    token[:6], type(exc).__name__,
                 )
 
 
 def _natural_sort_key(value: str) -> tuple[object, ...]:
     return tuple(
         int(part) if part.isdigit() else part.casefold()
-        for part in re.split(r"(\d+)", str(value or ""))
+        for part in re.split(r"(\d+)", (value or ""))
     )
 
 
@@ -2372,7 +2377,7 @@ def _confirmation_notification_threads(
         "topic": "confirmation",
         "thread_key": f"confirmation:{token}",
         "token": token,
-        "chat_id": str(chat_id or ""),
+        "chat_id": (chat_id or ""),
         "topic_enabled": True,
     }]
     organize_task_id = str(payload.get("organize_task_id") or "").strip()
@@ -2381,7 +2386,7 @@ def _confirmation_notification_threads(
             "topic": "organize",
             "thread_key": f"organize:{organize_task_id}",
             "task_id": organize_task_id,
-            "chat_id": str(chat_id or ""),
+            "chat_id": (chat_id or ""),
             "topic_enabled": True,
         })
     return threads
@@ -2390,7 +2395,6 @@ def _confirmation_notification_threads(
 def _finalize_confirmed_downloads(payload: dict, client, stats: dict, rules: OrganizeRules,
                                   *, confirmation_token: str = '') -> list[int]:
     """完成确认后收口原下载业务；通知rollup不是删除权限或业务身份。"""
-    from types import SimpleNamespace
 
     from app.modules.organize_tasks import OrganizeTaskManager
     from app.repositories.download_staging import (
@@ -2431,7 +2435,7 @@ def _finalize_confirmed_downloads(payload: dict, client, stats: dict, rules: Org
                 return request_ids
             # 绝不能传 organizer.client：候选 Scoped 视图看不到未选择的文件。
             report = OrganizeTaskManager._cleanup_download_staging(
-                SimpleNamespace(client=client), cleanup_ids,
+                client, cleanup_ids,
                 [{"id": str(row["gy_target_dir"]), "name": str(row["gy_staging_name"])}
                  for row in rows if int(row["id"]) in cleanup_ids],
                 rules=rules,
@@ -2559,20 +2563,20 @@ def _execute_guangya_confirmation(
             payload, candidate, current_rules,
         )
 
-        position_overrides = {
+        position_overrides: dict[str | tuple[str, str], tuple[int | None, int | None]] = {
             str(item.get("name") or ""): (item.get("season"), item.get("episode"))
             for item in files
         }
         episode_proposal = _episode_research_for_execution(token, payload, selected_index, actor)
         if episode_proposal is not None:
-            if provider != "tmdb" or str(match.tmdb_id) != episode_proposal["tmdb_id"]:
+            if provider != "tmdb" or match.tmdb_id != episode_proposal["tmdb_id"]:
                 raise DirectoryScrapeConflictError("当前候选身份与季集研究不一致")
             # 联网重验耗时期间可能发生同ID内容变化；再次验证整包后才创建计划。
             for item in files:
                 _validate_snapshot(client, item, role="研究视频")
             for item in companions:
                 _validate_snapshot(client, item, role="研究伴随文件")
-            position_overrides = {
+            position_overrides: dict[str | tuple[str, str], tuple[int | None, int | None]] = {
                 str(files[row["file_index"]]["name"]): (row["target_season"], row["target_episode"])
                 for row in episode_proposal["mappings"]
             }
@@ -2588,7 +2592,7 @@ def _execute_guangya_confirmation(
         execution_rules = replace(current_rules, clean_empty=False) if episode_boundary else current_rules
         organizer = Organizer(
             client=client,
-            **({"before_plan_write": write_boundary} if write_boundary is not None else {}),
+            before_plan_write=write_boundary,
             scraper=FixedMatchScraper(
                 scraper,
                 match,
@@ -2754,7 +2758,9 @@ def _execute_guangya_confirmation(
             )
         if download_request_ids:
             try:
-                from app.modules.telegram_download_lifecycle import publish_download_lifecycle
+                from app.modules.telegram_download_lifecycle import (
+                    publish_download_lifecycle,
+                )
                 for request_id in download_request_ids:
                     publish_download_lifecycle(request_id, stats=stats)
             except Exception as exc:

@@ -4,11 +4,13 @@
 MockTransport。领域 plan 过期而确认卡仍有效，旧确认必须先 READ 才能给新卡。
 """
 from __future__ import annotations
+from typing import cast
 
 import asyncio
 import json
 import socket
 import threading
+from app.modules.process_lock import CrossProcessLock
 import time
 from unittest.mock import Mock
 
@@ -135,7 +137,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
         domain_actions = DomainActions(repository)
         # 复用 queue 测试的独立 manager/进程内锁；入队、签名校验、worker、回执均真实。
         manager = organize_tasks.OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         monkeypatch.setattr(organize_tasks, "get_organize_manager", lambda: manager)
         monkeypatch.setattr(manager, "_wake_download_tracker", lambda: None)
         # durable 路由省略 client_factory，默认值已绑定；仅换 Provider 工厂，不换执行器。
@@ -243,7 +245,9 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
                 view.apply(event)
             assert view.build().to_dict()["effect_result"] == failed[0].payload["result"]
             assert "reobservation_source" not in json.dumps(script.requests)
-            assert provider.file_info("move").name == "External.mp4"
+            file_info_result = provider.file_info("move")
+            assert file_info_result is not None
+            assert file_info_result.name == "External.mp4"
             for write in writes.values():
                 write.assert_not_called()
             with db.get_conn() as conn:
@@ -260,7 +264,9 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             for method, write in writes.items():
                 if method != "rename":
                     write.assert_not_called()
-            assert provider.file_info("move").name == "Final.mp4"
+            file_info_result_2 = provider.file_info("move")
+            assert file_info_result_2 is not None
+            assert file_info_result_2.name == "Final.mp4"
             finished_plan = plans._read(new_flow.plan_id)
             assert finished_plan["status"] == "completed"
             job = get_organize_operation_job(finished_plan["job_id"])

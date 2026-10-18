@@ -51,8 +51,8 @@ def get_guangya_connection_status(_arguments: dict[str, Any]) -> ToolResult:
     client = None
     try:
         client = GuangYaClient()
-        configured = bool(client.logged_in)
-        reachable = bool(client.probe_connection()) if configured else False
+        configured = (client.logged_in)
+        reachable = (client.probe_connection()) if configured else False
     except Exception as exc:
         logger.warning("Agent 光鸭连接状态读取失败 type=%s", type(exc).__name__)
         return ToolResult(
@@ -353,7 +353,7 @@ def set_guangya_organize_schedule_policy_confirmed(
     arguments: dict[str, Any], expected_context: str
 ) -> ToolResult:
     state = _capture(arguments)
-    if not secrets.compare_digest(_fingerprint(state), str(expected_context or "")):
+    if not secrets.compare_digest(_fingerprint(state), (expected_context or "")):
         raise AgentToolError(
             "光鸭定时整理策略配置已变化，请重新预检",
             code="confirmation_stale",

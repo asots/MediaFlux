@@ -30,7 +30,7 @@ def client(request):
     instance.close()
 
 
-def payload(count=137, size=8, start=0):
+def payload(count=137, size=8, start=0) -> dict:
     return {
         "Items": [{"Id": f"item-{i}", "Name": f"Unrelated title {i}", "Type": "Movie"} for i in range(start, start + size)],
         "TotalRecordCount": count,
@@ -248,7 +248,7 @@ def test_paging_filter_and_count_mode_all_partition_cache(monkeypatch):
         library_search._search_cache.clear()
     search = MagicMock(return_value=[])
     monkeypatch.setattr(library_search, "search_media_servers", search)
-    options = [{}, {"offset": 8}, {"search_by": "actor"}, {"media_type": "movie"}, {"count_only": True}]
+    options: list[dict] = [{}, {"offset": 8}, {"search_by": "actor"}, {"media_type": "movie"}, {"count_only": True}]
     try:
         for option in options:
             library_search._search_sources("Sample", 8, **option)

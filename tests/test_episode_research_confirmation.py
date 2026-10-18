@@ -5,20 +5,29 @@ import copy
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
-from app import config, database as db
-from app.modules import organize_confirmations as confirmations
+from app import config
+from app import database as db
+from app.clients.tmdb import TMDBClient
 from app.modules import episode_research_service as service
-from app.modules.agent_recognition_review import RecognitionReviewDecision, review_confirmation_payload
-from app.modules.episode_research import EpisodeEvidenceReader, EpisodeResearchError
+from app.modules import organize_confirmations as confirmations
+from app.modules.agent_recognition_review import (
+    RecognitionReviewDecision,
+    review_confirmation_payload,
+)
 from app.modules.directory_scrape_errors import DirectoryScrapeConflictError
-from app.modules.organize import OrganizeRules
-from app.modules.organize import organize_rules_snapshot
+from app.modules.episode_research import EpisodeEvidenceReader, EpisodeResearchError
+from app.modules.organize import OrganizeRules, organize_rules_snapshot
 from app.modules.scraper import TMDBScraper
 from tests.support import IsolatedDatabaseTestCase
-from tests.test_episode_research_validation import EvidenceClient, GROUP_ID, case_payload
-from tests.test_guangya_directory_scrape import _MutableTreeClient, _dir, _file
+from tests.test_episode_research_validation import (
+    GROUP_ID,
+    EvidenceClient,
+    case_payload,
+)
+from tests.test_guangya_directory_scrape import _dir, _file, _MutableTreeClient
 
 
 class EpisodeResearchConfirmationTests(IsolatedDatabaseTestCase):
@@ -80,7 +89,7 @@ class EpisodeResearchConfirmationTests(IsolatedDatabaseTestCase):
                                        payload=self.payload, expires_at=(datetime.now(timezone.utc).astimezone()+timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
                                        review_requested=True, review_ready=True)
         row = db.claim_next_organize_confirmation_review()
-        self.assertIsNotNone(row)
+        assert (row) is not None
         with patch("app.modules.agent_recognition_review.review_confirmation_payload", return_value=decision):
             return confirmations._process_recognition_review_row(row)
 
@@ -93,20 +102,22 @@ class EpisodeResearchConfirmationTests(IsolatedDatabaseTestCase):
             def tv_season_detail(self, identity, season): return self.get(f"/tv/{identity}/season/{season}")
         client = Client()
         client.data["/tv/100"].update(original_name="Fixture Show", genres=[{"id": 16, "name": "Animation"}], origin_country=["CN"], credits={"cast": [], "crew": []})
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
         self.addCleanup(scraper.close)
         return scraper
 
     def execute(self):
         row = db.claim_queued_organize_confirmation("episode-case")
-        self.assertIsNotNone(row)
+        assert (row) is not None
         with patch.object(confirmations, "TMDBScraper", return_value=self.scraper()):
             return confirmations._execute_guangya_confirmation("episode-case", self.payload, self.payload["candidates"][0],
                                                                selected_index=0, chat_id="owner-chat", actor="agent")
 
     def test_verified_research_runs_existing_frozen_executor_not_old_numbering_rule(self):
         self.assertEqual(self.create(self.decision()), "approved")
-        self.assertEqual(db.get_organize_confirmation("episode-case")["status"], "queued")
+        get_organize_confirmation_result = db.get_organize_confirmation("episode-case")
+        assert get_organize_confirmation_result is not None
+        self.assertEqual(get_organize_confirmation_result["status"], "queued")
         result = self.execute()
         self.assertEqual(result["stats"]["moved"], 4)
         for number, item in enumerate(self.payload["files"], 1):
@@ -115,6 +126,7 @@ class EpisodeResearchConfirmationTests(IsolatedDatabaseTestCase):
             self.assertEqual(self.cloud.infos[current.parent_id].name, "Specials")
         self.assertEqual(self.cloud.deleted, [])
         row = db.get_organize_confirmation("episode-case")
+        assert row is not None
         self.assertEqual((row["status"], row["confirmation_actor"]), ("completed", "agent"))
         self.assertIn("episode_research_receipt", json.loads(row["review_result_json"]))
 
@@ -122,7 +134,9 @@ class EpisodeResearchConfirmationTests(IsolatedDatabaseTestCase):
         decision = self.decision()
         self.values["AGENT_EPISODE_RESEARCH_ENABLED"] = "0"
         self.assertNotEqual(self.create(decision), "approved")
-        self.assertEqual(db.get_organize_confirmation("episode-case")["status"], "pending")
+        get_organize_confirmation_result_2 = db.get_organize_confirmation("episode-case")
+        assert get_organize_confirmation_result_2 is not None
+        self.assertEqual(get_organize_confirmation_result_2["status"], "pending")
         self.assertEqual(self.cloud.deleted, [])
         self.assertTrue(all(self.cloud.infos[item["file_id"]].parent_id == "source" for item in self.payload["files"]))
 

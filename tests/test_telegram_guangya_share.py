@@ -3,14 +3,15 @@ from __future__ import annotations
 import re
 import unittest
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
 from app import database as db
+from app.clients.guangya import GuangYaClient
 from app.config import web_credentials
 from tests.support import IsolatedDatabaseTestCase
-
 
 SHARE_URL = "https://www.guangyapan.com/s/demo123?code=2468"
 HASH_ROUTE_SHARE_URL = (
@@ -186,7 +187,7 @@ class ShareTransferPreviewStoreTests(unittest.TestCase):
                 HASH_ROUTE_SHARE_URL,
                 "chat",
                 "user",
-                client=client,
+                client=cast(GuangYaClient, client),
                 store=store,
             )
 
@@ -286,7 +287,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
                 "chat-100",
                 user_id="user-200",
                 target_name="电视剧",
-                client=self.client,
+                client=cast(GuangYaClient, self.client),
                 store=self.store,
                 tracker_chat_id="chat-100",
             )
@@ -297,7 +298,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
                 "chat-100",
                 user_id="user-200",
                 target_name="电视剧",
-                client=self.client,
+                client=cast(GuangYaClient, self.client),
                 store=self.store,
                 tracker_chat_id="chat-100",
             )
@@ -319,7 +320,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         tracker.reload.assert_called_once_with()
 
         row = db.get_download_request(first["request_id"])
-        self.assertIsNotNone(row)
+        assert (row) is not None
         self.assertRegex(str(row["request_key"]), r"^[0-9a-f]{64}$")
         self.assertEqual(row["kind"], "guangya_share")
         self.assertEqual(row["source_value"], "")
@@ -355,7 +356,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         ):
             result = create_share_request(
                 self.preview_id, ["file-1"], "dir-target", "chat-100",
-                user_id="user-200", target_name="电视剧", client=self.client,
+                user_id="user-200", target_name="电视剧", client=cast(GuangYaClient, self.client),
                 store=self.store, tracker_chat_id="chat-100",
             )
 
@@ -365,6 +366,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
             (SECRET_TOKEN, ["file-1"], "staging-recovered"),
         ])
         row = db.get_download_request(result["request_id"])
+        assert row is not None
         self.assertEqual(row["gy_target_dir"], "staging-recovered")
         self.assertEqual(row["gy_staging_name"], "MediaFlux-share-recovered")
 
@@ -398,7 +400,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         ):
             result = create_share_request(
                 self.preview_id, ["file-1"], "dir-target", "chat-100",
-                user_id="user-200", target_name="电视剧", client=self.client,
+                user_id="user-200", target_name="电视剧", client=cast(GuangYaClient, self.client),
                 store=self.store, tracker_chat_id="chat-100",
             )
 
@@ -423,7 +425,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         ):
             result = create_share_request(
                 self.preview_id, ["file-1"], "dir-target", "chat-100",
-                user_id="user-200", target_name="电视剧", client=self.client,
+                user_id="user-200", target_name="电视剧", client=cast(GuangYaClient, self.client),
                 store=self.store, tracker_chat_id="chat-100",
             )
 
@@ -431,6 +433,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         self.assertIn("多个同名", result["error"])
         self.assertEqual(self.client.restore_calls, [])
         row = db.get_download_request(result["request_id"])
+        assert row is not None
         self.assertEqual(row["status"], "failed")
 
     def test_foreign_selected_id_fails_before_cloud_write_or_persistence(self):
@@ -443,7 +446,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
                 "dir-target",
                 "chat-100",
                 user_id="user-200",
-                client=self.client,
+                client=cast(GuangYaClient, self.client),
                 store=self.store,
             )
         self.assertEqual(self.client.restore_calls, [])
@@ -463,7 +466,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
 
         result = create_share_request(
             self.preview_id, ["file-1"], "dir-target", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
 
         self.assertFalse(result["success"])
@@ -481,12 +484,13 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         })
         result = create_share_request(
             self.preview_id, ["file-3"], "dir-failure", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
 
         self.assertFalse(result["success"])
         self.assertNotIn(SIGNED_URL, repr(result))
         row = db.get_download_request(result["request_id"])
+        assert row is not None
         persisted = repr(dict(row)) + repr([
             dict(item) for item in db.list_download_logs(source="guangya_share")
         ])
@@ -501,15 +505,15 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         ])
         first = create_share_request(
             self.preview_id, ["file-1"], "dir-retry", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
         second = create_share_request(
             self.preview_id, ["file-1"], "dir-retry", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
         third = create_share_request(
             self.preview_id, ["file-1"], "dir-retry", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
 
         self.assertFalse(first["success"])
@@ -528,11 +532,11 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         ])
         first = create_share_request(
             self.preview_id, ["file-1"], "dir-uncertain", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
         second = create_share_request(
             self.preview_id, ["file-1"], "dir-uncertain", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
 
         self.assertFalse(first["success"])
@@ -552,15 +556,15 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
         ])
         first = create_share_request(
             self.preview_id, ["file-2"], "dir-retry-limit", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
         second = create_share_request(
             self.preview_id, ["file-2"], "dir-retry-limit", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
         third = create_share_request(
             self.preview_id, ["file-2"], "dir-retry-limit", "chat-100",
-            user_id="user-200", client=self.client, store=self.store,
+            user_id="user-200", client=cast(GuangYaClient, self.client), store=self.store,
         )
 
         self.assertFalse(first["success"])
@@ -582,7 +586,7 @@ class ShareTransferRequestTests(IsolatedDatabaseTestCase):
                 "dir-target",
                 "chat-100",
                 user_id="user-200",
-                client=self.client,
+                client=cast(GuangYaClient, self.client),
                 store=self.store,
             )
         self.assertTrue(result["success"])

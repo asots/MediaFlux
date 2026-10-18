@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import uuid
+from typing import Any
 
 from app import database as db
 from app.logger import get_logger, log_throttled
@@ -33,7 +34,7 @@ class RSSScheduler:
 
     @staticmethod
     def _alert_key(sub_id: int) -> str:
-        return f"{_ALERT_KEY_PREFIX}{int(sub_id)}"
+        return f"{_ALERT_KEY_PREFIX}{sub_id}"
 
     def _persisted_alert(self, sub_id: int) -> dict | None:
         raw = db.kv_get(self._alert_key(sub_id), "")
@@ -49,7 +50,7 @@ class RSSScheduler:
             or not isinstance(value.get("signature"), list)
             or not isinstance(value.get("accepted"), bool)
             or not isinstance(value.get("event_key"), str)
-            or not value["event_key"].startswith(f"rss-alert:{int(sub_id)}:")
+            or not value["event_key"].startswith(f"rss-alert:{sub_id}:")
         ):
             raise ValueError("RSS 告警持久状态无效，已停止重放")
         return value
@@ -66,7 +67,7 @@ class RSSScheduler:
             if self._alert_signatures.get(sub_id) == signature:
                 return
         try:
-            alert = self._persisted_alert(sub_id)
+            alert: dict[str, Any] | None = self._persisted_alert(sub_id)
             same_issue = alert is not None and tuple(alert["signature"]) == signature
             if same_issue and alert["accepted"]:
                 with self._lock:
@@ -77,9 +78,10 @@ class RSSScheduler:
                 # 恢复或问题变化后生成新身份，避免旧一次性事件永久吞掉复发。
                 alert = {
                     "version": 1, "signature": list(signature), "accepted": False,
-                    "event_key": f"rss-alert:{int(sub_id)}:{uuid.uuid4().hex}",
+                    "event_key": f"rss-alert:{sub_id}:{uuid.uuid4().hex}",
                 }
                 self._save_alert(sub_id, alert)
+            assert alert is not None
             subscription = db.get_rss_subscription(sub_id)
         except Exception as exc:
             logger.warning(
@@ -90,9 +92,12 @@ class RSSScheduler:
             return
         name = str(subscription["name"] or f"订阅 #{sub_id}") if subscription else f"订阅 #{sub_id}"
         try:
-            from app.modules.telegram_notification_center import publish_notification_event
+            from app.modules.telegram_notification_center import (
+                publish_notification_event,
+            )
             from app.modules.telegram_notification_policy import (
-                NotificationImportance, NotificationTopic,
+                NotificationImportance,
+                NotificationTopic,
             )
 
             accepted = bool(publish_notification_event(
@@ -307,8 +312,8 @@ class RSSScheduler:
                 )
             else:
                 unresolved = db.get_rss_manual_review_summary(sub_id)
-                outcome_unknown = int(unresolved.get("outcome_unknown_count") or 0)
-                failed = int(unresolved.get("failed_count") or 0)
+                outcome_unknown = (unresolved.get("outcome_unknown_count") or 0)
+                failed = (unresolved.get("failed_count") or 0)
                 if outcome_unknown:
                     self._notify_issue(
                         sub_id,

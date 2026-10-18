@@ -1,6 +1,11 @@
 """RSS 的真实 DB 失败恢复 / 跨源消费闭环；仅替换外部下载后端。"""
 from __future__ import annotations
 
+from tests.support import assert_present
+
+from typing import cast
+from starlette.requests import Request
+
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -45,15 +50,19 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
         rid = int(dispatcher.create_request(item, "", "", origin=f"rss:{sid}")["id"])
         prefix = "qb" if backend == "qb" else "gy"
         db.update_download_request(rid, status="submitted", targets=backend, **{f"{prefix}_status": "submitted"})
-        self.assertEqual((db.get_rss_entry(eid)["status"], db.get_rss_entry(eid)["processed"]), ("downloaded", 1))
+        get_rss_entry_result = db.get_rss_entry(eid)
+        assert get_rss_entry_result is not None
+        get_rss_entry_result_2 = db.get_rss_entry(eid)
+        assert get_rss_entry_result_2 is not None
+        self.assertEqual((get_rss_entry_result["status"], get_rss_entry_result_2["processed"]), ("downloaded", 1))
         return rid, eid, item
 
-    def fail(self, rid, backend="qb"):
+    def fail_request(self, rid, backend="qb"):
         prefix = "qb" if backend == "qb" else "gy"
-        self.assertIsNotNone(apply_download_tracker_update(
-            db.get_download_request(rid), status="failed", error="下载失败 passkey=super-secret",
+        assert (apply_download_tracker_update(
+            assert_present(db.get_download_request(rid)), status="failed", error="下载失败 passkey=super-secret",
             **{f"{prefix}_status": "failed"},
-        ))
+        )) is not None
 
     @staticmethod
     def success(_row, **_kwargs):
@@ -63,9 +72,9 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
         for backend in ("qb", "guangya"):
             with self.subTest(backend=backend):
                 rid, eid, _ = self.accepted(backend)
-                self.fail(rid, backend)
-                response = rss_api.list_entries(None, subscription_id=None, status="failed", q="")
-                row = next(row for row in json.loads(response.body) if row["id"] == eid)
+                self.fail_request(rid, backend)
+                response = rss_api.list_entries(cast(Request, None), subscription_id=None, status="failed", q="")
+                row = next(row for row in json.loads(bytes(response.body)) if row["id"] == eid)
                 self.assertEqual((row["status"], row["processed"]), ("downloaded", True))
                 self.assertEqual(row["delivery"]["request_id"], rid)
                 self.assertTrue(row["delivery"]["failed"])
@@ -77,23 +86,27 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
         failed_request, failed, _ = self.accepted()
         unknown_request, unknown, _ = self.accepted()
         _healthy_request, healthy, _ = self.accepted()
-        self.fail(failed_request)
+        self.fail_request(failed_request)
         db.update_download_request(unknown_request, status="manual_review", qb_status="outcome_unknown")
         with db.get_conn() as conn:
             conn.execute("UPDATE rss_entries SET processed_at=datetime('now','-8 days')")
         self.assertEqual(db.purge_processed_rss_entries(), 1)
         self.assertIsNone(db.get_rss_entry(healthy))
-        self.assertIsNotNone(db.get_rss_entry(failed))
-        self.assertIsNotNone(db.get_rss_entry(unknown))
+        assert (db.get_rss_entry(failed)) is not None
+        assert (db.get_rss_entry(unknown)) is not None
 
     def test_explicit_retry_uses_original_identity_and_backend_then_updates_same_entry(self):
         for backend in ("qb", "guangya"):
             with self.subTest(backend=backend):
                 rid, eid, item = self.accepted(backend)
-                self.fail(rid, backend)
-                before_key = db.get_rss_entry(eid)["download_request_key"]
+                self.fail_request(rid, backend)
+                get_rss_entry_result_3 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_3 is not None
+                before_key = get_rss_entry_result_3["download_request_key"]
                 # feed URL / 订阅目标变化不得改变已受理请求的恢复身份。
-                db.update_rss_subscription(db.get_rss_entry(eid)["rss_item_id"], {"download_method": "guangya" if backend == "qb" else "qb"})
+                get_rss_entry_result_4 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_4 is not None
+                db.update_rss_subscription(get_rss_entry_result_4["rss_item_id"], {"download_method": "guangya" if backend == "qb" else "qb"})
                 with db.get_conn() as conn:
                     conn.execute("UPDATE rss_entries SET payload=? WHERE id=?", ('{"torrent_url":"https://changed.invalid/new.torrent"}', eid))
                 with patch.object(dispatcher, "_submit_qb", side_effect=self.success) as qb, patch.object(dispatcher, "_submit_guangya", side_effect=self.success) as gy:
@@ -106,8 +119,10 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
                 self.assertEqual(gy.call_count, int(backend == "guangya"))
                 self.assertTrue(repeated["existing"])
                 successor = db.get_download_request(result["request_id"])
+                assert successor is not None
                 self.assertEqual(successor["source_value"], item.source_value)
                 current = db.get_rss_entry(eid)
+                assert current is not None
                 self.assertEqual(current["download_request_key"], before_key)
                 self.assertEqual((current["status"], current["processed"]), ("downloaded", 1))
                 self.assertEqual(current["delivery_request_id"], result["request_id"])
@@ -116,12 +131,18 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
     def test_mark_reopens_definite_backend_failure_without_clearing_identity(self):
         for backend in ("qb", "guangya"):
             rid, eid, _ = self.accepted(backend)
-            self.fail(rid, backend)
-            key = db.get_rss_entry(eid)["download_request_key"]
-            response = rss_api.mark_entries(None, {"entry_ids": [eid], "processed": False})
-            self.assertEqual(json.loads(response.body)["updated"], 1)
-            self.assertEqual(db.get_rss_entry(eid)["status"], "pending")
-            self.assertEqual(db.get_rss_entry(eid)["download_request_key"], key)
+            self.fail_request(rid, backend)
+            get_rss_entry_result_5 = db.get_rss_entry(eid)
+            assert get_rss_entry_result_5 is not None
+            key = get_rss_entry_result_5["download_request_key"]
+            response = rss_api.mark_entries(cast(Request, None), {"entry_ids": [eid], "processed": False})
+            self.assertEqual(json.loads(bytes(response.body))["updated"], 1)
+            get_rss_entry_result_6 = db.get_rss_entry(eid)
+            assert get_rss_entry_result_6 is not None
+            self.assertEqual(get_rss_entry_result_6["status"], "pending")
+            get_rss_entry_result_7 = db.get_rss_entry(eid)
+            assert get_rss_entry_result_7 is not None
+            self.assertEqual(get_rss_entry_result_7["download_request_key"], key)
             with patch.object(dispatcher, "_submit_qb", side_effect=self.success), patch.object(dispatcher, "_submit_guangya", side_effect=self.success):
                 self.assertTrue(RSSEngine().download(eid)["ok"])
 
@@ -146,7 +167,7 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
             self.addCleanup(engine.close)
             first = engine.download(eid)
             self.assertTrue(first["ok"], first)
-            self.fail(first["request_id"])
+            self.fail_request(first["request_id"])
             retry = engine.download(eid)
             self.assertTrue(retry["ok"], retry)
             self.assertNotEqual(first["request_id"], retry["request_id"])
@@ -175,7 +196,7 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
             self.addCleanup(engine.close)
             first = engine._download_entry(db.get_rss_entry(eid), qb_runtime_config=runtime)
             assert first["ok"], first
-            self.fail(first["request_id"])
+            self.fail_request(first["request_id"])
             retry = engine._download_entry(db.get_rss_entry(eid), qb_runtime_config=runtime)
             assert retry["ok"], retry
         assert factory.call_count == 2
@@ -224,14 +245,18 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
                     self.addCleanup(engine.close)
                     bound = engine._download_entry(db.get_rss_entry(eid), qb_runtime_config=runtime)
                     assert bound["ok"] and bound["request_id"] == manual["request_id"], bound
-                    assert db.get_download_request(bound["request_id"])["kind"] == "torrent"
+                    get_download_request_result = db.get_download_request(bound["request_id"])
+                    assert get_download_request_result is not None
+                    assert get_download_request_result["kind"] == "torrent"
                     assert qb.add_torrent_detailed.call_count == 1
-                    self.fail(bound["request_id"])
+                    self.fail_request(bound["request_id"])
                     with db.get_conn() as conn:
                         conn.execute("UPDATE download_requests SET completed_at=datetime('now','localtime','-31 days') WHERE id=?",
                                      (bound["request_id"],))
                     assert db.purge_expired_download_request_torrent_data(30) == 1
-                    assert db.get_download_request(bound["request_id"])["torrent_data"] is None
+                    get_download_request_result_2 = db.get_download_request(bound["request_id"])
+                    assert get_download_request_result_2 is not None
+                    assert get_download_request_result_2["torrent_data"] is None
                     retry = engine._download_entry(db.get_rss_entry(eid), qb_runtime_config=runtime)
                     assert retry["ok"], retry
                 qb.export_torrent.assert_called_once_with(dispatcher.parse_torrent_metadata(payload)[1])
@@ -278,7 +303,9 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
             _, eid, _ = self.pending()
             db.record_rss_entry_failure(eid, code, False)
             self.assertEqual(db.update_rss_entries_processed([eid], False), 0)
-            self.assertEqual(db.get_rss_entry(eid)["status"], "failed")
+            get_rss_entry_result_8 = db.get_rss_entry(eid)
+            assert get_rss_entry_result_8 is not None
+            self.assertEqual(get_rss_entry_result_8["status"], "failed")
             self.assertEqual(db.update_rss_entries_processed([eid], True), 1)
             self.assertEqual(db.update_rss_entries_processed([eid], False), 0)
 
@@ -290,23 +317,27 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
                          "failure_code='qb_outcome_unknown',failure_retryable=0 WHERE id=?", (eid,))
         db.update_download_request(rid, status="manual_review", qb_status="outcome_unknown")
         self.assertEqual(db.update_rss_entries_processed([eid], False), 0)
-        self.fail(rid)
+        self.fail_request(rid)
         delivery = rss_entry_delivery(db.get_rss_entry(eid))
         self.assertTrue(delivery["retryable"])
         self.assertFalse(delivery["review_required"])
         _, alternate, _ = self.pending(media_key=key)
-        self.assertEqual(db.get_rss_entry(alternate)["status"], "pending")
+        get_rss_entry_result_9 = db.get_rss_entry(alternate)
+        assert get_rss_entry_result_9 is not None
+        self.assertEqual(get_rss_entry_result_9["status"], "pending")
         with patch.object(dispatcher, "_submit_qb", side_effect=self.success) as backend:
             result = RSSEngine().download(eid)
         self.assertTrue(result["ok"], result)
         backend.assert_called_once()
-        self.assertEqual(db.get_rss_entry(eid)["failure_code"], "")
+        get_rss_entry_result_10 = db.get_rss_entry(eid)
+        assert get_rss_entry_result_10 is not None
+        self.assertEqual(get_rss_entry_result_10["failure_code"], "")
 
     def test_rss_retry_fence_rechecks_unknown_change_after_entry_reopens(self):
         for backend in ("qb", "guangya"):
             with self.subTest(backend=backend):
                 rid, eid, _ = self.accepted(backend)
-                self.fail(rid, backend)
+                self.fail_request(rid, backend)
                 real_resubmit = dispatcher.resubmit_download_request
                 field = "qb_status" if backend == "qb" else "gy_status"
                 def race(source_id, target, field=field, real_resubmit=real_resubmit, **kwargs):
@@ -320,7 +351,9 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
                 self.assertFalse(result["ok"], result)
                 self.assertTrue(result["review_required"], result)
                 qb.assert_not_called(); gy.assert_not_called()
-                self.assertEqual(db.get_download_request(rid)["status"], "manual_review")
+                get_download_request_result_3 = db.get_download_request(rid)
+                assert get_download_request_result_3 is not None
+                self.assertEqual(get_download_request_result_3["status"], "manual_review")
                 with db.get_conn() as conn:
                     self.assertEqual(conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0], before)
                 self.assertTrue(rss_entry_delivery(db.get_rss_entry(eid))["review_required"])
@@ -334,7 +367,9 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
                     db.update_download_request(rid, status=root, **values)
                     with db.get_conn() as conn:
                         conn.execute("UPDATE rss_entries SET download_backend=? WHERE id=?", (target, eid))
-                    self.assertEqual(rss_retry_source_is_safe(db.get_download_request(rid), target), bool(db.get_rss_entry(eid)["delivery_retryable"]))
+                    get_rss_entry_result_11 = db.get_rss_entry(eid)
+                    assert get_rss_entry_result_11 is not None
+                    self.assertEqual(rss_retry_source_is_safe(db.get_download_request(rid), target), bool(get_rss_entry_result_11["delivery_retryable"]))
 
     def test_pending_from_paused_or_subscribe_only_source_does_not_block_auto_download(self):
         for enabled, action in ((0, "download"), (0, "subscribe"), (1, "subscribe"), (1, "download")):
@@ -342,12 +377,16 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
                 media_key = f"tmdb:{self.sequence+1}:tv:S01E001"
                 _, first, _ = self.pending(media_key=media_key, enabled=enabled, action=action)
                 sid, second, _ = self.pending(media_key=media_key)
-                self.assertEqual(db.get_rss_entry(second)["status"], "pending")
+                get_rss_entry_result_12 = db.get_rss_entry(second)
+                assert get_rss_entry_result_12 is not None
+                self.assertEqual(get_rss_entry_result_12["status"], "pending")
                 with patch.object(RSSEngine, "refresh", return_value={"total": 0, "new": 0, "skipped": 0}), patch.object(dispatcher, "_submit_qb", side_effect=self.success) as backend:
                     result = RSSEngine().auto_download(sid)
                 self.assertEqual(result["downloaded"], 1, result)
                 backend.assert_called_once()
-                self.assertEqual(db.get_rss_entry(first)["status"], "pending")
+                get_rss_entry_result_13 = db.get_rss_entry(first)
+                assert get_rss_entry_result_13 is not None
+                self.assertEqual(get_rss_entry_result_13["status"], "pending")
 
     def test_two_pending_resources_share_one_atomic_consumption_right(self):
         _, first, _ = self.pending(media_key="tmdb:42:tv:S01E001")
@@ -363,7 +402,9 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
                 self.assertTrue(entered.wait(5))
                 result = RSSEngine().download(second)
                 self.assertTrue(result["existing"], result)
-                self.assertEqual(db.get_rss_entry(second)["status"], "skipped")
+                get_rss_entry_result_14 = db.get_rss_entry(second)
+                assert get_rss_entry_result_14 is not None
+                self.assertEqual(get_rss_entry_result_14["status"], "skipped")
             finally:
                 release.set()
             self.assertTrue(task.result(timeout=5)["ok"])
@@ -383,15 +424,21 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
         key = "tmdb:42:tv:S01E001"
         rid, _first, _ = self.accepted(media_key=key)
         sid, second, item = self.pending(media_key=key)
-        self.assertEqual(db.get_rss_entry(second)["status"], "skipped")
-        self.fail(rid)
+        get_rss_entry_result_15 = db.get_rss_entry(second)
+        assert get_rss_entry_result_15 is not None
+        self.assertEqual(get_rss_entry_result_15["status"], "skipped")
+        self.fail_request(rid)
         def refresh():
             return db.add_rss_entry_with_media(sid, "Episode", f"guid-{self.sequence}", media_key=key, payload=json.dumps({"torrent_url": item.source_value}))
         self.assertIsNone(refresh()["id"])
-        self.assertEqual(db.get_rss_entry(second)["status"], "pending")
+        get_rss_entry_result_16 = db.get_rss_entry(second)
+        assert get_rss_entry_result_16 is not None
+        self.assertEqual(get_rss_entry_result_16["status"], "pending")
         self.assertEqual(db.update_rss_entries_processed([second], True), 1)
         refresh()
-        self.assertEqual(db.get_rss_entry(second)["status"], "skipped")
+        get_rss_entry_result_17 = db.get_rss_entry(second)
+        assert get_rss_entry_result_17 is not None
+        self.assertEqual(get_rss_entry_result_17["status"], "skipped")
         self.assertEqual(db.list_rss_entries(sub_id=sid)[0]["skip_reason"], "")
 
     def test_current_unknown_receipt_blocks_other_resources(self):
@@ -400,4 +447,6 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
             rid, _, _ = self.accepted(media_key=key)
             db.update_download_request(rid, status="manual_review", qb_status=status)
             _, other, _ = self.pending(media_key=key)
-            self.assertEqual(db.get_rss_entry(other)["status"], "skipped")
+            get_rss_entry_result_18 = db.get_rss_entry(other)
+            assert get_rss_entry_result_18 is not None
+            self.assertEqual(get_rss_entry_result_18["status"], "skipped")

@@ -119,10 +119,13 @@ class ActivityFollowTests(IsolatedDatabaseTestCase):
                         disable=phase == "terminal",
                     ))
                 current = rules.get_rule(owner, args["rule_id"])
+                assert before is not None
+                assert current is not None
                 self.assertEqual(current["settings"], before["settings"])
                 self.assertEqual(current["revision"], before["revision"])
                 self.assertTrue(stop_confirmed(args, token, self.context).ok)
                 after = rules.get_rule(owner, args["rule_id"])
+                assert after is not None
                 self.assertFalse(after["enabled"])
                 self.assertEqual(after["lease_token"], "")
                 self.assertEqual(after["lease_until"], "")
@@ -136,14 +139,18 @@ class ActivityFollowTests(IsolatedDatabaseTestCase):
         args = {"rule_id": saved.data["rule_id"]}
         _, token = prepare_stop(args, self.context)
         row = rules.get_rule(agent_job_owner_digest(self.context.owner), args["rule_id"])
+        assert row is not None
         settings = {**row["settings"], "title": "Changed by another confirmation"}
         updated = rules.save_rule(row["owner_digest"], kind=row["kind"], settings=settings,
                                   enabled=True, next_run_at=row["next_run_at"],
                                   rule_id=row["id"], expected_revision=row["revision"])
-        self.assertIsNotNone(updated)
+        assert (updated) is not None
         with self.assertRaises(AgentToolError):
             stop_confirmed(args, token, self.context)
-        self.assertTrue(rules.get_rule(row["owner_digest"], row["id"])["enabled"])
+        assert row is not None
+        get_rule_result = rules.get_rule(row["owner_digest"], row["id"])
+        assert get_rule_result is not None
+        self.assertTrue(get_rule_result["enabled"])
 
     def test_read_running_sends_nothing_then_terminal_notifies_once(self):
         saved = self.save()

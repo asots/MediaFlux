@@ -79,7 +79,7 @@ class _DeleteCase:
             "expected_etag": item.etag, "expected_updated_at": item.updated_at,
         })
         assert response.status_code == 202
-        assert json.loads(response.body)["task_id"] == "delete-task"
+        assert json.loads(bytes(response.body))["task_id"] == "delete-task"
         call = self.manager.start_operation.call_args
         assert call.args[:2] == ("删除光鸭目录项", item.name)
         assert call.kwargs == {
@@ -347,7 +347,9 @@ def test_confirmation_queued_during_parent_lookup_invalidates_initial_active_set
     def lookup(file_id):
         # 候选 deep 的快照已读取；走到 B 内部的 nested 时，guard 已取得仅含 A 的集合。
         if file_id == "nested":
-            assert db.get_organize_confirmation(token_b)["status"] == "pending"
+            get_organize_confirmation_result = db.get_organize_confirmation(token_b)
+            assert get_organize_confirmation_result is not None
+            assert get_organize_confirmation_result["status"] == "pending"
             db.update_organize_confirmation(token_b, status="queued")
         return delete_case.nodes.get(file_id)
 
@@ -361,6 +363,8 @@ def test_confirmation_queued_during_parent_lookup_invalidates_initial_active_set
     assert read.call_count == 2
     assert all(call.kwargs == {"active_only": True} for call in read.call_args_list)
     assert sum(call.args == ("nested",) for call in delete_case.provider.file_info.call_args_list) == 1
-    assert db.get_organize_confirmation(token_b)["status"] == "queued"
+    get_organize_confirmation_result_2 = db.get_organize_confirmation(token_b)
+    assert get_organize_confirmation_result_2 is not None
+    assert get_organize_confirmation_result_2["status"] == "queued"
     assert {row["id"] for row in cleanup.list_staging_cleanup_requests(active_only=True)} == {active_a, completed_b}
     assert "重新确认" in delete_case.audit()["reason"]

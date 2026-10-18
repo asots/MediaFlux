@@ -4,6 +4,8 @@ capture_session_contract is also used by the offline, fixed-base differential
 probe. No test constructs a second runner or requires Git/history at runtime.
 """
 from __future__ import annotations
+from app.agent.kernel.state_ports import SessionStateStore
+from typing import cast
 
 import asyncio
 import json
@@ -62,12 +64,12 @@ def _normalize(value: Any) -> Any:
 
 
 async def capture_session_contract(case):
-    timeline = []
+    timeline: list[list[object]] = []
     executions = []
 
     class RecordingStore(InMemorySessionStateStore):
-        async def commit(self, lease, *, conversation=None, updates=()):
-            result = await super().commit(lease, conversation=conversation, updates=updates)
+        async def commit(self, lease, *, conversation=None, updates=(), task_patch=None):
+            result = await super().commit(lease, conversation=conversation, updates=updates, task_patch=task_patch)
             timeline.append(["commit", asdict(result)])
             return result
 
@@ -121,9 +123,9 @@ async def capture_session_contract(case):
         [ModelEvent(ModelEventType.TEXT_DELTA, text="已核对。"),
          ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
     ])
-    pipeline = ToolPipeline(catalog=catalog, state_store=store)
+    pipeline = ToolPipeline(catalog=catalog, state_store=cast(SessionStateStore, store))
     session = AgentSession(
-        model=model, catalog=catalog, pipeline=pipeline, state_store=store,
+        model=model, catalog=catalog, pipeline=pipeline, state_store=cast(SessionStateStore, store),
         journal=Journal(), retriever=CapabilityRetriever(), system_prompt="R0 compatibility fixture",
         limits=SessionLimits(max_model_rounds=2, max_tool_calls=1 if case == "over_budget" else 4),
     )

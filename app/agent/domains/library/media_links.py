@@ -45,9 +45,9 @@ def _origin(parsed) -> tuple[str, str, int] | None:
 
 
 def _path_contains_base(item_path: str, base_path: str) -> bool:
-    normalized_base = "/" + str(base_path or "").strip("/") if base_path else ""
+    normalized_base = "/" + (base_path or "").strip("/") if base_path else ""
     normalized_base = "" if normalized_base == "/" else normalized_base.rstrip("/")
-    normalized_item = "/" + str(item_path or "").lstrip("/")
+    normalized_item = "/" + (item_path or "").lstrip("/")
     if not normalized_base:
         return True
     return normalized_item == normalized_base or normalized_item.startswith(
@@ -112,7 +112,7 @@ def _normalized_server_base(value: object) -> tuple[str, str, int, str] | None:
         or parsed.fragment
     ):
         return None
-    path = "/" + str(parsed.path or "").strip("/") if parsed.path else ""
+    path = "/" + (parsed.path or "").strip("/") if parsed.path else ""
     path = "" if path == "/" else path.rstrip("/")
     origin = _origin(parsed)
     if origin is None:
@@ -140,7 +140,7 @@ def _public_mediaflux_host(listen_host: object) -> str | None:
     explicit_host = _reachable_host(listen_host)
     if explicit_host:
         return explicit_host
-    raw = str(config.get("GY_STRM_BASE_URL", "") or "").strip()
+    raw = (config.get("GY_STRM_BASE_URL", "") or "").strip()
     try:
         parsed = urlsplit(raw)
     except (TypeError, ValueError):
@@ -177,7 +177,7 @@ def _proxy_base_url(row: Mapping[str, Any], runtime: Mapping[str, Any]) -> str:
 def _matching_proxy_base(*, server_type: str, server_url: str) -> str:
     """查找同一媒体上游的运行中反代；异常只降级为服务器直连。"""
 
-    server_type_expected = str(server_type or "").strip().casefold()
+    server_type_expected = (server_type or "").strip().casefold()
     expected_base = _normalized_server_base(server_url)
     if expected_base is None:
         return ""
@@ -185,7 +185,7 @@ def _matching_proxy_base(*, server_type: str, server_url: str) -> str:
         from app.modules.media_proxy import get_media_proxy_manager
         from app.repositories.media_proxy import list_media_proxy_instances
 
-        runtime_by_id = get_media_proxy_manager().status()
+        runtime_by_id: dict[int | str, dict[str, Any]] = {key: value for key, value in get_media_proxy_manager().status().items()}
         rows = list_media_proxy_instances()
     except Exception as exc:  # noqa: BLE001 - 可选运行能力不可阻断媒体查询
         logger.debug("Agent 媒体链接读取反代状态失败 type=%s", type(exc).__name__)
@@ -193,7 +193,8 @@ def _matching_proxy_base(*, server_type: str, server_url: str) -> str:
     if not isinstance(runtime_by_id, Mapping):
         return ""
 
-    for row in rows:
+    for raw_row in rows:
+        row = dict(raw_row)
         try:
             if not bool(int(_row_value(row, "enabled", 0) or 0)):
                 continue

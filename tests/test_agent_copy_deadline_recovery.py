@@ -1,11 +1,14 @@
 """已受理 copy 的原期限与恢复后取消契约；仅使用隔离 SQLite 和假 Provider。"""
 
 from __future__ import annotations
+from app.clients.guangya import GuangYaClient
+from typing import cast
 
 import asyncio
 import json
 import socket
 import threading
+from app.modules.process_lock import CrossProcessLock
 import time
 from functools import partial
 from types import SimpleNamespace
@@ -53,7 +56,7 @@ def copy_queue(monkeypatch, tmp_path):
     monkeypatch.setattr(
         guangya_fs_change_actions,
         "execute_fs_change_plan",
-        partial(guangya_fs_change.execute_fs_change_plan, client_factory=lambda: client),
+        partial(guangya_fs_change.execute_fs_change_plan, client_factory=lambda: cast(GuangYaClient, client)),
     )
     monkeypatch.setattr(OrganizeTaskManager, "_wake_download_tracker", lambda _self: None)
     with isolated_test_database():
@@ -103,9 +106,10 @@ def _enqueue_plan(client, operation="copy"):
 def _run_claimed(row):
     # 沿用现有队列测试的同步 worker 夹具，不启动 dispatcher 或后台线程。
     manager = OrganizeTaskManager()
-    manager._lock = threading.Lock()
+    worker_lock = threading.Lock()
+    manager._lock = cast(CrossProcessLock, worker_lock)
     manager._lock.acquire()
-    manager._worker = object()
+    manager._worker = cast(threading.Thread, object())
     manager._task = {
         "id": row["job_id"], "status": "running", "durable": True,
         "owner_digest": row["owner_digest"], "stats": {},
@@ -113,7 +117,7 @@ def _run_claimed(row):
     # 不替换 _execute_durable_operation：真实签名验证、取消 guard 和 dispatch 都执行。
     manager._run_durable_operation(dict(row))
     assert manager._worker is None
-    assert not manager._lock.locked()
+    assert not worker_lock.locked()
     return manager
 
 
@@ -123,6 +127,7 @@ def _accepted_copy_pending(client):
     assert claimed is not None
     _run_claimed(claimed)
     pending = jobs.get_organize_operation_job(queued["job_id"])
+    assert pending is not None
     assert pending["status"] == "pending"
     assert pending["error_code"] == jobs.CLOUD_COPY_PENDING_CODE
     assert pending["expires_at"] == queued["expires_at"]
@@ -155,6 +160,7 @@ def _terminal_receipt(manager, job_id):
 def test_copy_readback_crossing_original_deadline_blocks_remaining_move(copy_queue):
     client, clock = copy_queue
     _plan, pending, checkpoint = _accepted_copy_pending(client)
+    assert pending is not None
     deadline = pending["expires_at"]
     clock[0] = deadline - 1
     claimed = jobs.claim_organize_operation_job(pending["job_id"])
@@ -174,6 +180,7 @@ def test_copy_readback_crossing_original_deadline_blocks_remaining_move(copy_que
     receipt = _terminal_receipt(manager, pending["job_id"])
     client.copy.assert_called_once_with(["trash"], "target")
     assert client.task_status.call_count == 2
+    assert finished is not None
     assert finished["expires_at"] == deadline
     assert client.move.call_count == 0, (
         "copy 回读跨过原 expires_at 后仍执行了剩余 move："
@@ -195,6 +202,7 @@ def test_accepted_copy_stays_uncancellable_after_running_orphan_recovery(copy_qu
     client, clock = copy_queue
     plan, pending, checkpoint = _accepted_copy_pending(client)
     clock[0] += jobs.CLOUD_COPY_POLL_SECONDS + 1
+    assert pending is not None
     running = jobs.claim_organize_operation_job(pending["job_id"])
     assert running is not None
     assert running["status"] == "running"
@@ -210,6 +218,7 @@ def test_accepted_copy_stays_uncancellable_after_running_orphan_recovery(copy_qu
     # worker 已失去执行者；真实恢复读取并认证上述计划/checkpoint，不替换恢复检查器。
     assert jobs.recover_orphaned_organize_operation_jobs() == 1
     recovered = jobs.get_organize_operation_job(running["job_id"])
+    assert recovered is not None
     assert recovered["status"] == "pending"
     assert recovered["lease_generation"] > running["lease_generation"]
     assert recovered["expires_at"] == pending["expires_at"]
@@ -221,6 +230,7 @@ def test_accepted_copy_stays_uncancellable_after_running_orphan_recovery(copy_qu
         "已受理 copy 的恢复改变了取消契约："
         f"before={before}, after={outcome}, recovery_code={recovered['error_code']}"
     )
+    assert cancelled is not None
     assert cancelled["status"] == "pending"
     assert cancelled["cancel_requested"] == 0
     assert cancelled["payload_json"] == pending["payload_json"]
@@ -244,8 +254,10 @@ def test_accepted_copy_handle_is_uncancellable_before_first_defer(copy_queue):
 
     def persisted_snapshot():
         signed = guangya_fs_change._read(plan["plan_id"])
+        get_organize_operation_job_result = jobs.get_organize_operation_job(queued["job_id"])
+        assert get_organize_operation_job_result is not None
         return {
-            "row": dict(jobs.get_organize_operation_job(queued["job_id"])),
+            "row": dict(get_organize_operation_job_result),
             "plan": guangya_fs_change._plan_path(plan["plan_id"]).read_bytes(),
             "journal": guangya_fs_change._journal_path(plan["plan_id"]).read_bytes(),
             "checkpoint": guangya_fs_change._read_fs_checkpoints(signed),
@@ -273,6 +285,7 @@ def test_accepted_copy_handle_is_uncancellable_before_first_defer(copy_queue):
     assert before["checkpoint"]["operation_items"][1]["status"] == "not_started"
     assert jobs.verify_organize_operation_payload(before["row"])
     client.copy.assert_called_once_with(["trash"], "target")
+    assert finished is not None
     assert outcome == "uncancellable", (
         "已有签名 copy handle、首轮 defer 前仍接受了取消："
         f"outcome={outcome}, queue_after_worker={finished['status']}"
@@ -283,6 +296,7 @@ def test_accepted_copy_handle_is_uncancellable_before_first_defer(copy_queue):
         assert after["row"][field] == before["row"][field]
     for field in ("plan", "journal", "checkpoint"):
         assert after[field] == before[field]
+    assert finished is not None
     assert finished["status"] == "pending"
     assert finished["error_code"] == jobs.CLOUD_COPY_PENDING_CODE
     assert finished["cancel_requested"] == 0
@@ -308,10 +322,12 @@ def test_unstarted_copy_and_plain_rename_remain_cancellable(copy_queue, operatio
         row["job_id"], owner=_OWNER, expected_lease_generation=row["lease_generation"],
     )
     assert outcome == ("requested" if claim_first else "cancelled")
+    assert cancelled is not None
     assert cancelled["cancel_requested"] == 1
     if claim_first:
         _run_claimed(cancelled)
     terminal = jobs.get_organize_operation_job(row["job_id"])
+    assert terminal is not None
     assert terminal["status"] == "cancelled"
     assert terminal["payload_json"] == "{}"
     assert terminal["payload_auth"] == ""
@@ -328,21 +344,25 @@ def test_copy_expiry_after_crash_before_first_defer_does_not_claim_remote_cancel
     client, clock = copy_queue
     plan, queued = _enqueue_plan(client)
     claimed = jobs.claim_organize_operation_job(queued['job_id'])
+    assert claimed is not None
     client.task_status.side_effect = SystemExit(73)
     # 保留真实签名 copy handle，进程在首轮 defer/队列 marker 前消失。
     with pytest.raises(SystemExit):
         OrganizeTaskManager._execute_durable_operation(dict(claimed))
     crashed = jobs.get_organize_operation_job(queued['job_id'])
+    assert crashed is not None
     assert crashed['status'] == 'running'
     assert crashed['error_code'] != jobs.CLOUD_COPY_PENDING_CODE
     journal = guangya_fs_change._read_fs_checkpoints(guangya_fs_change._read(plan['plan_id']))
     assert journal['copy_tasks']['1']
     assert jobs.recover_orphaned_organize_operation_jobs() == 1
     restored = jobs.get_organize_operation_job(queued['job_id'])
+    assert restored is not None
     assert restored['status'] == 'pending'
     clock[0] = restored['expires_at'] + 1
     assert jobs.claim_organize_operation_job(queued['job_id']) is None
     expired = jobs.get_organize_operation_job(queued['job_id'])
+    assert expired is not None
     assert expired['status'] == 'manual_review', dict(expired)
     assert expired['error_code'] == 'ProviderCopyOutcomeUnknown'
     assert '视为已取消' in expired['error']

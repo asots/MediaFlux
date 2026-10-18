@@ -90,7 +90,7 @@ def inspect_nsfw_clean_candidate(payload: dict, candidate: dict) -> dict[str, An
         if _codes(name, strip_domains) != {code}:
             return reject("identity_mismatch", "原文件番号缺失、混合或与候选不同")
         clean = build_clean_title_candidate(name, strip_domains)
-        if not clean or normalize_code(str(clean["external_id"])) != code:
+        if not clean or normalize_code(clean["external_id"]) != code:
             return reject("identity_mismatch", "清洗结果未保留原始番号")
         part = extract_nsfw_multipart(name, strip_domains)
         if part is not None and (part.ambiguous or part.part_index is None):
@@ -99,7 +99,7 @@ def inspect_nsfw_clean_candidate(payload: dict, candidate: dict) -> dict[str, An
         rows.append(
             {
                 "original_name": name,
-                "clean_title": str(clean["title"]),
+                "clean_title": clean["title"],
                 "part_index": parts[-1],
             }
         )

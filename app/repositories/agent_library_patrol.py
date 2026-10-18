@@ -9,7 +9,7 @@ import sqlite3
 def ensure_agent_library_patrol(*, next_run_at: str | None = None) -> sqlite3.Row:
     """幂等创建全库缺集巡检单例。"""
     timestamp = db.now()
-    due_at = str(next_run_at or timestamp)
+    due_at = (next_run_at or timestamp)
     with db.get_conn() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO agent_library_patrol("
@@ -28,7 +28,7 @@ def ensure_agent_library_patrol(*, next_run_at: str | None = None) -> sqlite3.Ro
 def reschedule_agent_library_patrol(*, next_run_at: str | None = None) -> bool:
     """将非运行中的全库巡检重新排到指定时间，用于配置热加载。"""
     timestamp = db.now()
-    due_at = str(next_run_at or timestamp)
+    due_at = (next_run_at or timestamp)
     ensure_agent_library_patrol(next_run_at=due_at)
     with db.get_conn() as conn:
         cur = conn.execute(
@@ -53,7 +53,7 @@ def cancel_agent_library_patrol_lease(
 ) -> bool:
     """禁用巡检时释放运行租约，并递增 generation 使旧 worker 写入失效。"""
     timestamp = db.now()
-    due_at = str(next_run_at or timestamp)
+    due_at = (next_run_at or timestamp)
     sql = (
         "UPDATE agent_library_patrol SET status='pending',"
         "lease_generation=lease_generation+1,next_run_at=?,cycle_as_of='',"
@@ -64,7 +64,7 @@ def cancel_agent_library_patrol_lease(
     params: list[object] = [due_at, timestamp]
     if expected_lease_generation is not None:
         sql += " AND lease_generation=?"
-        params.append(max(0, int(expected_lease_generation)))
+        params.append(max(0, expected_lease_generation))
     with db.get_conn() as conn:
         cur = conn.execute(sql, tuple(params))
         return cur.rowcount == 1
@@ -76,7 +76,7 @@ def claim_due_agent_library_patrol(
     stale_before: str | None = None,
 ) -> sqlite3.Row | None:
     """原子领取到期的全库巡检，generation 用于隔离过期 worker。"""
-    timestamp = str(current_time or db.now())
+    timestamp = (current_time or db.now())
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
@@ -84,7 +84,7 @@ def claim_due_agent_library_patrol(
                 "UPDATE agent_library_patrol SET status='retry_wait',"
                 "next_run_at=?,updated_at=? "
                 "WHERE patrol_key='default' AND status='running' AND updated_at<=?",
-                (timestamp, timestamp, str(stale_before)),
+                (timestamp, timestamp, stale_before),
             )
         cur = conn.execute(
             "UPDATE agent_library_patrol SET status='running',"
@@ -111,20 +111,20 @@ def continue_agent_library_patrol(
     cycle_started_at: str | None = None,
 ) -> bool:
     """保存可续跑批次进度，并立即释放当前租约供下一批领取。"""
-    cursor = str(cycle_cursor_tmdb_id or "").strip()
+    cursor = (cycle_cursor_tmdb_id or "").strip()
     if cursor and (
         not cursor.isascii() or not cursor.isdigit() or not 1 <= len(cursor) <= 10
     ):
         raise ValueError("全库巡检游标无效")
-    stalls = max(0, min(int(cycle_stall_attempts), 3))
+    stalls = max(0, min(cycle_stall_attempts, 3))
     if not cursor and stalls == 0:
         raise ValueError("全库巡检游标无效")
-    raw = str(cycle_accumulator_json or "")
+    raw = (cycle_accumulator_json or "")
     if not raw or len(raw.encode("utf-8")) > 32_768:
         raise ValueError("全库巡检累计投影无效")
     try:
         parsed = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError("全库巡检累计投影无效") from exc
     expected_keys = {
         "as_of", "patrol_status", "findings_truncated",
@@ -135,13 +135,13 @@ def continue_agent_library_patrol(
     if not isinstance(parsed, dict) or set(parsed) != expected_keys:
         raise ValueError("全库巡检累计投影无效")
     timestamp = db.now()
-    started_at = str(cycle_started_at or timestamp)
+    started_at = (cycle_started_at or timestamp)
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
             "SELECT cycle_cursor_tmdb_id FROM agent_library_patrol "
             "WHERE patrol_key='default' AND status='running' AND lease_generation=?",
-            (max(0, int(expected_lease_generation)),),
+            (max(0, expected_lease_generation),),
         ).fetchone()
         if current is None:
             return False
@@ -159,15 +159,15 @@ def continue_agent_library_patrol(
             "cycle_updated_at=?,error_type='',updated_at=? "
             "WHERE patrol_key='default' AND status='running' AND lease_generation=?",
             (
-                str(next_run_at or timestamp),
-                str(cycle_as_of or "")[:10],
+                (next_run_at or timestamp),
+                (cycle_as_of or "")[:10],
                 str(int(cursor)) if cursor else "",
                 raw,
                 stalls,
                 started_at,
                 timestamp,
                 timestamp,
-                max(0, int(expected_lease_generation)),
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -184,7 +184,7 @@ def retry_agent_library_patrol_cycle(
     """批次异常时保留安全累计投影与游标，稍后从断点重试。"""
     if status not in {"pending", "retry_wait"}:
         raise ValueError("全库巡检重试状态无效")
-    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
+    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", (error_type or ""))[:80]
     timestamp = db.now()
     with db.get_conn() as conn:
         cur = conn.execute(
@@ -194,12 +194,12 @@ def retry_agent_library_patrol_cycle(
             "AND cycle_as_of<>''",
             (
                 status,
-                max(0, min(int(attempts), 100)),
-                str(next_run_at or timestamp),
+                max(0, min(attempts, 100)),
+                (next_run_at or timestamp),
                 safe_error_type,
                 timestamp,
                 timestamp,
-                max(0, int(expected_lease_generation)),
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -234,14 +234,14 @@ def update_agent_library_patrol(
         "not_configured", "unavailable", "failed",
     }:
         raise ValueError("全库巡检结果无效")
-    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
+    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", (error_type or ""))[:80]
     fingerprint = None
     if result_fingerprint is not None:
-        candidate = str(result_fingerprint or "").lower()
+        candidate = (result_fingerprint or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", candidate):
             raise ValueError("全库巡检结果指纹无效")
         fingerprint = candidate
-    payload = str(notification_payload_json or "")
+    payload = (notification_payload_json or "")
     if enqueue_notification:
         if fingerprint is None or outcome not in {"updates_available", "up_to_date"}:
             raise ValueError("全库巡检通知参数无效")
@@ -254,7 +254,7 @@ def update_agent_library_patrol(
         row = conn.execute(
             "SELECT result_revision,result_fingerprint FROM agent_library_patrol "
             "WHERE patrol_key='default' AND status='running' AND lease_generation=?",
-            (max(0, int(expected_lease_generation)),),
+            (max(0, expected_lease_generation),),
         ).fetchone()
         if row is None:
             return False
@@ -268,20 +268,20 @@ def update_agent_library_patrol(
             outcome,
             revision,
             stored_fingerprint,
-            max(0, min(int(attempts), 100)),
-            str(next_run_at or timestamp),
+            max(0, min(attempts, 100)),
+            (next_run_at or timestamp),
             last_finished_at,
-            str(as_of or "")[:10],
-            max(0, int(checked_series_count)),
-            max(0, int(updates_available_count)),
-            max(0, int(missing_episode_count)),
-            max(0, int(inconclusive_count)),
-            max(0, int(unmapped_series_count)),
-            str(projection_json or "{}"),
+            (as_of or "")[:10],
+            max(0, checked_series_count),
+            max(0, updates_available_count),
+            max(0, missing_episode_count),
+            max(0, inconclusive_count),
+            max(0, unmapped_series_count),
+            (projection_json or "{}"),
             1 if findings_truncated else 0,
             safe_error_type,
             timestamp,
-            max(0, int(expected_lease_generation)),
+            max(0, expected_lease_generation),
         )
         cur = conn.execute(
             "UPDATE agent_library_patrol SET status=?,outcome=?,result_revision=?,"
@@ -302,7 +302,7 @@ def update_agent_library_patrol(
             and (previous_fingerprint or outcome == "updates_available")
         )
         if should_enqueue:
-            notification_time = str(last_finished_at or timestamp)
+            notification_time = (last_finished_at or timestamp)
             conn.execute(
                 "INSERT INTO agent_library_patrol_notification_outbox("
                 "patrol_key,result_revision,fingerprint,outcome,payload_json,status,"
@@ -330,7 +330,7 @@ def claim_due_agent_library_patrol_notification(
     stale_before: str | None = None,
 ) -> sqlite3.Row | None:
     """原子领取一条到期通知；generation 隔离过期发送者。"""
-    timestamp = str(current_time or db.now())
+    timestamp = (current_time or db.now())
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
@@ -339,7 +339,7 @@ def claim_due_agent_library_patrol_notification(
                 "SET status='discarded',lease_generation=lease_generation+1,"
                 "payload_json='',last_error_type='DeliveryOutcomeUnknown',updated_at=? "
                 "WHERE status='sending' AND updated_at<=?",
-                (timestamp, str(stale_before)),
+                (timestamp, stale_before),
             )
         row = conn.execute(
             "SELECT id FROM agent_library_patrol_notification_outbox "
@@ -367,13 +367,13 @@ def claim_due_agent_library_patrol_notification(
 def complete_agent_library_patrol_notification(
     notification_id: int, *, expected_lease_generation: int, sent_at: str | None = None,
 ) -> bool:
-    timestamp = str(sent_at or db.now())
+    timestamp = (sent_at or db.now())
     with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_library_patrol_notification_outbox "
             "SET status='sent',payload_json='',sent_at=?,last_error_type='',updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
-            (timestamp, timestamp, int(notification_id), max(0, int(expected_lease_generation))),
+            (timestamp, timestamp, notification_id, max(0, expected_lease_generation)),
         )
         return cur.rowcount == 1
 
@@ -390,8 +390,8 @@ def release_agent_library_patrol_notification(
             "SET status='retry_wait',next_attempt_at=?,last_error_type='',updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                str(next_attempt_at or timestamp), timestamp, int(notification_id),
-                max(0, int(expected_lease_generation)),
+                (next_attempt_at or timestamp), timestamp, notification_id,
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -401,7 +401,7 @@ def retry_agent_library_patrol_notification(
     notification_id: int, *, expected_lease_generation: int,
     next_attempt_at: str, error_type: str = "",
 ) -> bool:
-    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
+    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", (error_type or ""))[:80]
     timestamp = db.now()
     with db.get_conn() as conn:
         cur = conn.execute(
@@ -410,8 +410,8 @@ def retry_agent_library_patrol_notification(
             "next_attempt_at=?,last_error_type=?,updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                str(next_attempt_at or timestamp), safe_error_type, timestamp,
-                int(notification_id), max(0, int(expected_lease_generation)),
+                (next_attempt_at or timestamp), safe_error_type, timestamp,
+                notification_id, max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -420,7 +420,7 @@ def retry_agent_library_patrol_notification(
 def discard_agent_library_patrol_notification(
     notification_id: int, *, expected_lease_generation: int, error_type: str = "",
 ) -> bool:
-    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
+    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", (error_type or ""))[:80]
     timestamp = db.now()
     with db.get_conn() as conn:
         cur = conn.execute(
@@ -428,8 +428,8 @@ def discard_agent_library_patrol_notification(
             "SET status='discarded',payload_json='',last_error_type=?,updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                safe_error_type, timestamp, int(notification_id),
-                max(0, int(expected_lease_generation)),
+                safe_error_type, timestamp, notification_id,
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -446,7 +446,7 @@ def discard_agent_library_patrol_notifications() -> int:
             "WHERE status IN ('pending','retry_wait','sending')",
             (timestamp,),
         )
-        return max(0, int(cur.rowcount))
+        return max(0, cur.rowcount)
 
 
 def _recover_after_restart(conn, timestamp: str) -> None:

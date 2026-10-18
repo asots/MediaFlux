@@ -111,6 +111,7 @@ class NavigationDiscoveryUiContractTests(unittest.TestCase):
             </html>
         """
 
+        assert sync_playwright is not None
         playwright = sync_playwright().start()
         browser = None
         try:
@@ -183,6 +184,7 @@ class OrganizeRulesFirstPaintTests(unittest.TestCase):
     def setUpClass(cls):
         from jinja2 import Environment, FileSystemLoader
 
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         bundled = Path(cls.playwright.chromium.executable_path)
         executable = str(bundled) if bundled.is_file() else next(
@@ -299,7 +301,7 @@ class OrganizeRulesFirstPaintTests(unittest.TestCase):
     def _assert_initial(self, page, target):
         page.wait_for_function("window.__rulesFrames.length > 0")
         checkpoint = page.evaluate("window.__parserCheckpoint")
-        self.assertIsNotNone(checkpoint)
+        assert (checkpoint) is not None
         self.assertEqual(checkpoint["panels"], [target])
         # 解析期目标 tab 已高亮，与 DOM 接管完成后的颜色一致。
         before = page.evaluate("window.__beforeBusiness")

@@ -153,6 +153,7 @@ class MissingMediaWorkflowTests(IsolatedDatabaseTestCase):
         captured = recent.get(owner="session-a")
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].request_id, request_id)
+        assert captured[0].verification is not None
         self.assertEqual(captured[0].verification.episode, 3)
 
     def test_kernel_runtime_releases_cancelled_confirmation_for_reselection(self):
@@ -176,14 +177,12 @@ class MissingMediaWorkflowTests(IsolatedDatabaseTestCase):
 
         row = self.repository.list_for_owner(owner="session-a")[0]
         self.assertEqual(row["item_state"], "selection_required")
-        self.assertIsNotNone(
-            self.repository.select_candidate(
+        assert (self.repository.select_candidate(
                 owner="session-a",
                 verification=_VERIFICATION,
                 candidate_title="The.Show.S02E03.2160p",
                 target="guangya",
-            )
-        )
+            )) is not None
 
     def test_search_projection_is_owner_scoped_and_persists_no_resource_secret(self):
         workflow_id = self.repository.capture_search(
@@ -230,7 +229,7 @@ class MissingMediaWorkflowTests(IsolatedDatabaseTestCase):
             candidate_title="The.Show.S02E03.1080p",
             target="qb",
         )
-        self.assertIsNotNone(ref)
+        assert (ref) is not None
         self.assertIsNone(self.repository.select_candidate(
             owner="session-a",
             verification=_VERIFICATION,
@@ -239,7 +238,7 @@ class MissingMediaWorkflowTests(IsolatedDatabaseTestCase):
         ))
         context = workflow_followup_context({**_VERIFICATION, "library_name": "动漫库"}, ref)
         parsed = parse_recent_download_verification_context(context)
-        self.assertIsNotNone(parsed)
+        assert (parsed) is not None
         self.assertEqual((parsed.season, parsed.episode), (2, 3))
         self.assertEqual(parsed.library_name, "动漫库")
         self.assertEqual(workflow_ref_from_context(context), {
@@ -299,7 +298,7 @@ class MissingMediaWorkflowTests(IsolatedDatabaseTestCase):
             candidate_title="The.Show.S02E03.1080p",
             target="qb",
         )
-        self.assertIsNotNone(first)
+        assert (first) is not None
         assert first is not None
         ref = {
             "workflow_id": first.workflow_id,
@@ -315,7 +314,7 @@ class MissingMediaWorkflowTests(IsolatedDatabaseTestCase):
             candidate_title="The.Show.S02E03.2160p",
             target="guangya",
         )
-        self.assertIsNotNone(second)
+        assert (second) is not None
         assert second is not None
         active = ({
             "workflow_id": second.workflow_id,
@@ -334,7 +333,7 @@ class MissingMediaWorkflowTests(IsolatedDatabaseTestCase):
             candidate_title="The.Show.S02E03.REPACK",
             target="both",
         )
-        self.assertIsNotNone(third)
+        assert (third) is not None
 
     def test_new_search_stales_previous_active_workflow_and_public_view_is_safe(self):
         first_id = self.repository.capture_search(
@@ -350,6 +349,7 @@ class MissingMediaWorkflowTests(IsolatedDatabaseTestCase):
         self.assertNotEqual(first_id, second_id)
         rows = self.repository.list_for_owner(owner="session-a")
         states = {str(row["workflow_id"]): str(row["state"]) for row in rows}
+        assert first_id is not None and second_id is not None
         self.assertEqual(states[first_id], "stale")
         self.assertEqual(states[second_id], "search_ready")
 

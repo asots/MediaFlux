@@ -9,7 +9,7 @@ import re
 import secrets
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app import config
 from app import database as db
@@ -24,8 +24,8 @@ _THREAD_RE = re.compile(r"^[1-9][0-9]{0,18}$")
 
 
 def _key(owner: str, session_id: str) -> str:
-    owner_value = str(owner or "").strip()
-    session_value = str(session_id or "").strip()
+    owner_value = (owner or "").strip()
+    session_value = (session_id or "").strip()
     if not owner_value or not session_value:
         raise ValueError("Telegram model preference scope is invalid")
     digest = hashlib.sha256(
@@ -41,9 +41,9 @@ def _channel_fingerprint(values: Mapping[str, str] | None = None) -> str:
     """摘要化同一 Provider 快照；保持历史 KV 摘要格式，不保存 API key。"""
     if values is None:
         values = config.get_many(("AGENT_LLM_API_URL", "AGENT_LLM_PROTOCOL", "AGENT_LLM_API_KEY"))
-    base_url = str(values.get("AGENT_LLM_API_URL", "") or "").strip().rstrip("/")
-    protocol = str(values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip().casefold()
-    api_key = str(values.get("AGENT_LLM_API_KEY", "") or "")
+    base_url = (values.get("AGENT_LLM_API_URL", "") or "").strip().rstrip("/")
+    protocol = (values.get("AGENT_LLM_PROTOCOL", "auto") or "auto").strip().casefold()
+    api_key = (values.get("AGENT_LLM_API_KEY", "") or "")
     credential_digest = hashlib.sha256(api_key.encode("utf-8")).digest()
     material = b"\0".join((
         b"mediaflux-telegram-model-channel:v1",
@@ -55,11 +55,11 @@ def _channel_fingerprint(values: Mapping[str, str] | None = None) -> str:
 
 
 def _callback_key(owner: str, token: str) -> str:
-    owner_digest = hashlib.sha256(str(owner).encode("utf-8")).hexdigest()
+    owner_digest = hashlib.sha256(owner.encode("utf-8")).hexdigest()
     return f"telegram_model_callback:v1:{owner_digest}:{token}"
 
 
-def _expiry_is_live(value: object) -> bool:
+def _expiry_is_live(value: Any) -> bool:
     try:
         expires_at = float(value or 0)
     except (TypeError, ValueError, OverflowError):
@@ -69,14 +69,14 @@ def _expiry_is_live(value: object) -> bool:
 
 def create_model_callback(
     owner: str, session_id: str, thread_id: object, *,
-    action: str, model_id: str = "", page: int = 0,
+    action: str, model_id: str = "", page: int | str | float = 0,
 ) -> str:
     """Create a short-lived owner/session/thread-bound model-menu callback."""
     from app.modules.telegram_topic_routing import _maybe_prune_expired_routes
 
     _maybe_prune_expired_routes()
-    normalized_owner = str(owner or "").strip()
-    normalized_session = str(session_id or "").strip()
+    normalized_owner = (owner or "").strip()
+    normalized_session = (session_id or "").strip()
     if not normalized_owner or not normalized_session:
         raise ValueError("Telegram model callback scope is invalid")
     normalized_thread = str(thread_id or "").strip()
@@ -114,8 +114,8 @@ def create_model_callback(
 
 def resolve_model_callback(
     owner: str, token: str, thread_id: object
-) -> dict[str, object] | None:
-    normalized_token = str(token or "")
+) -> dict[str, Any] | None:
+    normalized_token = (token or "")
     if not _MODEL_CALLBACK_TOKEN_RE.fullmatch(normalized_token):
         return None
     try:

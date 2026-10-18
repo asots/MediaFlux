@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from app.modules.process_lock import CrossProcessLock
+from typing import cast
+
 import json
 import sqlite3
 import tempfile
@@ -89,7 +92,7 @@ class OrganizerCleanupSafetyTests(unittest.TestCase):
             )],
             subtitle_plans_by_video={},
         )
-        stats = {"failed": 0, "scan_errors": []}
+        stats: dict = {"failed": 0, "scan_errors": []}
 
         with patch(
             "app.modules.organize.execute_organize_plans", return_value=None,
@@ -115,7 +118,7 @@ class ManualSourceRootCleanupTests(unittest.TestCase):
         organizer._clean_empty_dirs_report.return_value = {
             "cleaned": 1, "delete_failures": 0
         }
-        stats = {"moved": 1, "failed": 0, "scan_errors": []}
+        stats: dict = {"moved": 1, "failed": 0, "scan_errors": []}
         rules = OrganizeRules(target_dir_id="archive", clean_empty=True)
 
         with patch("app.modules.organize_tasks.config.get", return_value="[]"):
@@ -133,7 +136,7 @@ class ManualSourceRootCleanupTests(unittest.TestCase):
 
     def test_manual_task_preserves_configured_permanent_source_root(self):
         organizer = MagicMock()
-        stats = {"moved": 1, "failed": 0, "scan_errors": []}
+        stats: dict = {"moved": 1, "failed": 0, "scan_errors": []}
         rules = OrganizeRules(target_dir_id="archive", clean_empty=True)
         configured = json.dumps([{"id": "source", "name": "永久来源"}])
 
@@ -149,7 +152,7 @@ class ManualSourceRootCleanupTests(unittest.TestCase):
 
     def test_manual_task_fails_closed_when_source_config_is_invalid(self):
         organizer = MagicMock()
-        stats = {"moved": 1, "failed": 0, "scan_errors": []}
+        stats: dict = {"moved": 1, "failed": 0, "scan_errors": []}
         rules = OrganizeRules(target_dir_id="archive", clean_empty=True)
 
         with patch("app.modules.organize_tasks.config.get", return_value="not-json"):
@@ -651,7 +654,7 @@ class OrganizeTaskFailureTests(unittest.TestCase):
 
     def test_manual_operations_queue_fifo_and_keep_terminal_history(self):
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         first_started = threading.Event()
         release_first = threading.Event()
         second_finished = threading.Event()
@@ -719,7 +722,7 @@ class OrganizeTaskFailureTests(unittest.TestCase):
 
     def test_manual_operation_queued_behind_full_organize_starts_after_release(self):
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         organize_started = threading.Event()
         release_organize = threading.Event()
         operation_finished = threading.Event()
@@ -756,16 +759,24 @@ class OrganizeTaskFailureTests(unittest.TestCase):
             release_organize.set()
             self.assertTrue(operation_finished.wait(timeout=4))
             deadline = monotonic() + 3
-            while manager.task_result(queued["task_id"])["status"] != "completed" and monotonic() < deadline:
+            while monotonic() < deadline:
+                queued_result = manager.task_result(queued["task_id"])
+                assert queued_result is not None
+                if queued_result["status"] == "completed":
+                    break
                 sleep(0.01)
 
-        self.assertEqual(manager.task_result(full["task_id"])["status"], "completed")
-        self.assertEqual(manager.task_result(queued["task_id"])["status"], "completed")
+        task_result_result = manager.task_result(full["task_id"])
+        assert task_result_result is not None
+        self.assertEqual(task_result_result["status"], "completed")
+        task_result_result_2 = manager.task_result(queued["task_id"])
+        assert task_result_result_2 is not None
+        self.assertEqual(task_result_result_2["status"], "completed")
         manager.begin_shutdown()
 
     def test_manual_operation_queue_rolls_back_when_dispatcher_start_fails(self):
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
         dispatcher = MagicMock()
         dispatcher.is_alive.return_value = False
@@ -793,7 +804,7 @@ class OrganizeTaskFailureTests(unittest.TestCase):
 
     def test_shutdown_records_queued_manual_operation_as_stopped(self):
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
         queued = manager.start_operation(
             "目录刮削",
@@ -808,7 +819,7 @@ class OrganizeTaskFailureTests(unittest.TestCase):
         manager._lock.release()
 
         terminal = manager.task_result(queued["task_id"])
-        self.assertIsNotNone(terminal)
+        assert (terminal) is not None
         self.assertEqual(terminal["status"], "stopped")
         self.assertIn("服务关闭", terminal["error"])
         history = manager.task_status()["operation_history"]

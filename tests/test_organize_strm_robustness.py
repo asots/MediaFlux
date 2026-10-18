@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from threading import Thread
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from starlette.requests import Request
+from app.modules.scraper import TMDBScraper
+
 import hashlib
 import json
 import os
@@ -7,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,7 +54,7 @@ class _MetadataClient(_TreeClient):
                 item
                 for values in self.tree.values()
                 for item in values
-                if str(item.file_id) == str(file_id)
+                if item.file_id == file_id
             ),
             None,
         )
@@ -81,7 +89,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             (),
             {"file_info": lambda _self, file_id: {"source": source, "child": child}.get(file_id)},
         )()
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, object()))
 
         with self.assertRaisesRegex(DirectoryScrapeStateError, "归档目标位于来源目录内"):
             organizer._validate_target_outside_source("source", "child")
@@ -147,7 +155,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             "subtitle_reasons": [],
             "skip_reasons": [],
         }
-        organizer = Organizer(client=Client(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, Client()), scraper=cast(TMDBScraper, object()))
 
         with patch.object(organizer, "_ensure_dir_chain", return_value="target-id"), patch(
             "app.modules.organize.add_organize_log", return_value=1
@@ -204,7 +212,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             "subtitle_skipped": 0, "subtitle_reasons": [], "skip_reasons": [],
             "scan_errors": [], "strm_changes": [], "strm_force_full": False,
         }
-        organizer = Organizer(client=Client(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, Client()), scraper=cast(TMDBScraper, object()))
         probe_worker = unittest.mock.Mock()
         from app.modules.organize_probe_notifications import build_notification_context
 
@@ -278,6 +286,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             emby_refresh_override=True, download_request_ids=[7],
             organize_changes=stats["strm_changes"], force_full=False,
         )
+        assert isinstance(stats['strm'], dict)
         self.assertTrue(stats["strm"]["ok"])
 
     def test_pending_confirmations_debounce_strm_link(self) -> None:
@@ -312,6 +321,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             Organizer.trigger_post_actions(stats, rules)
 
         post_link.assert_not_called()
+        assert isinstance(stats['strm'], dict)
         self.assertTrue(stats["strm"]["skipped"])
 
     def test_audit_failure_does_not_trigger_strm_link(self) -> None:
@@ -323,6 +333,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             Organizer.trigger_post_actions(stats, rules)
 
         post_link.assert_not_called()
+        assert isinstance(stats['strm'], dict)
         self.assertTrue(stats["strm"]["skipped"])
 
     def test_stale_remote_snapshot_fails_before_creating_target_or_moving(self) -> None:
@@ -359,7 +370,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
             "conflict": 0, "failed": 0, "subtitle_moved": 0,
             "subtitle_skipped": 0, "subtitle_reasons": [], "skip_reasons": [],
         }
-        organizer = Organizer(client=Client(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, Client()), scraper=cast(TMDBScraper, object()))
 
         with patch.object(organizer, "_ensure_dir_chain") as ensure_target:
             execute_organize_plans(organizer,
@@ -394,7 +405,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
 
         item = GuangYaFile("video", "Movie.mkv", False, 100, "etag", "source")
         with self.assertRaisesRegex(GuangYaCompensationError, "人工核验"):
-            Organizer(client=Client(), scraper=object())._restore_remote_file(
+            Organizer(client=cast(GuangYaClient, Client()), scraper=cast(TMDBScraper, object()))._restore_remote_file(
                 item, "source", "Movie.mkv"
             )
         self.assertEqual(operations, [])
@@ -449,7 +460,7 @@ class StrmRobustnessTests(IsolatedDatabaseTestCase):
                         source_id,
                         "http://media.invalid",
                         root,
-                        client=_TreeClient({source_id: [file]}),
+                        client=cast(GuangYaClient, _TreeClient({source_id: [file]})),
                         clean_invalid=False,
                     )
                 self.assertEqual(list(Path(outside).iterdir()), [])
@@ -477,7 +488,7 @@ class StrmRobustnessTests(IsolatedDatabaseTestCase):
                     source_id,
                     "http://media.invalid",
                     root,
-                    client=_TreeClient({source_id: [file]}),
+                    client=cast(GuangYaClient, _TreeClient({source_id: [file]})),
                     clean_invalid=False,
                 )
 
@@ -514,14 +525,14 @@ class StrmRobustnessTests(IsolatedDatabaseTestCase):
                     source_id,
                     "http://media.invalid",
                     root,
-                    client=client,
+                    client=cast(GuangYaClient, client),
                     metadata_exts={"nfo"},
                     clean_invalid=False,
                 )
                 from app.modules.strm_metadata_worker import STRMMetadataWorker
 
                 worker = STRMMetadataWorker()
-                worker._client = client
+                worker._client = cast(GuangYaClient, client)
                 with patch(
                     "app.modules.strm_metadata_worker.get_bool", return_value=True
                 ), patch(
@@ -587,7 +598,7 @@ class StrmRobustnessTests(IsolatedDatabaseTestCase):
                         source_id,
                         "http://media.invalid",
                         root,
-                        client=_MetadataClient({source_id: [first, second]}),
+                        client=cast(GuangYaClient, _MetadataClient({source_id: [first, second]})),
                         metadata_exts={"nfo"},
                         clean_invalid=False,
                     )
@@ -689,15 +700,15 @@ class PlayGyRouteRobustnessTests(unittest.TestCase):
         ):
             first = play_gy(
                 "scoped", "etag", "1", "Movie.mkv",
-                request=first_request, **self._signed_args("scoped"),
+                request=cast(Request, first_request), **self._signed_args("scoped"),
             )
             second = play_gy(
                 "scoped", "etag", "1", "Movie.mkv",
-                request=first_request, **self._signed_args("scoped"),
+                request=cast(Request, first_request), **self._signed_args("scoped"),
             )
             third = play_gy(
                 "scoped", "etag", "1", "Movie.mkv",
-                request=second_request, **self._signed_args("scoped"),
+                request=cast(Request, second_request), **self._signed_args("scoped"),
             )
 
         self.assertEqual(first.headers["location"], "https://storage.invalid/token-a/scoped")
@@ -734,15 +745,15 @@ class PlayGyRouteRobustnessTests(unittest.TestCase):
         ):
             first = play_gy(
                 "ua-scoped", "etag", "1", "Movie.mkv",
-                request=request_a, **self._signed_args("ua-scoped"),
+                request=cast(Request, request_a), **self._signed_args("ua-scoped"),
             )
             second = play_gy(
                 "ua-scoped", "etag", "1", "Movie.mkv",
-                request=request_b, **self._signed_args("ua-scoped"),
+                request=cast(Request, request_b), **self._signed_args("ua-scoped"),
             )
             repeated = play_gy(
                 "ua-scoped", "etag", "1", "Movie.mkv",
-                request=request_b, **self._signed_args("ua-scoped"),
+                request=cast(Request, request_b), **self._signed_args("ua-scoped"),
             )
 
         self.assertEqual(first.headers["location"], "https://storage.invalid/1/ua-scoped")
@@ -761,8 +772,8 @@ class PlayGyRouteRobustnessTests(unittest.TestCase):
             response = play_gy("slow", "etag", "1", "Movie.mkv", **self._signed_args("slow"))
 
         self.assertEqual(response.status_code, 504)
-        self.assertEqual(json.loads(response.body), {"error": "光鸭播放地址获取超时"})
-        self.assertNotIn("secret", response.body.decode("utf-8"))
+        self.assertEqual(json.loads(bytes(response.body)), {"error": "光鸭播放地址获取超时"})
+        self.assertNotIn("secret", bytes(response.body).decode("utf-8"))
 
     def test_missing_direct_url_does_not_fall_back_to_local_filename_search(self) -> None:
         client = type(
@@ -785,10 +796,10 @@ class PlayGyRouteRobustnessTests(unittest.TestCase):
         with patch("app.routes.proxy.GuangYaClient", return_value=Client()):
             response = play_gy("file", "etag", "1", "Movie.mkv", **self._signed_args())
 
-        payload = json.loads(response.body)
+        payload = json.loads(bytes(response.body))
         self.assertEqual(response.status_code, 500)
         self.assertEqual(payload, {"error": "光鸭播放地址获取失败"})
-        self.assertNotIn("storage.invalid", response.body.decode("utf-8"))
+        self.assertNotIn("storage.invalid", bytes(response.body).decode("utf-8"))
 
     def test_invalid_signature_is_rejected_before_provider_call(self) -> None:
         with patch("app.routes.proxy.GuangYaClient") as client:
@@ -1097,7 +1108,7 @@ class StrmSchedulerRobustnessTests(IsolatedDatabaseTestCase):
 
         scheduler = STRMScheduler()
         scheduler._stop_event.set()
-        scheduler._pending_thread = SimpleNamespace(is_alive=lambda: True)
+        scheduler._pending_thread = cast(Thread, SimpleNamespace(is_alive=lambda: True))
 
         scheduler.start()
 
@@ -1109,7 +1120,7 @@ class StrmSchedulerRobustnessTests(IsolatedDatabaseTestCase):
 
         scheduler = STRMScheduler()
         scheduler._stop_event.set()
-        scheduler._worker = SimpleNamespace(is_alive=lambda: True)
+        scheduler._worker = cast(Thread, SimpleNamespace(is_alive=lambda: True))
 
         scheduler.start()
 
@@ -1560,7 +1571,9 @@ class StrmSchedulerRobustnessTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["partial"])
         self.assertEqual(result["source_runtime"][0]["status"], "partial")
-        self.assertEqual(db.get_last_task_run("strm_sync")["status"], "partial")
+        get_last_task_run_result = db.get_last_task_run("strm_sync")
+        assert get_last_task_run_result is not None
+        self.assertEqual(get_last_task_run_result["status"], "partial")
 
 
 class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
@@ -1570,8 +1583,8 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
             self.calls = []
 
         def list_dir(self, file_id: str):
-            self.calls.append(str(file_id))
-            return self.tree.get(str(file_id), [])
+            self.calls.append(file_id)
+            return self.tree.get(file_id, [])
 
     @staticmethod
     def _dir(file_id: str, name: str, parent_id: str) -> GuangYaFile:
@@ -1591,7 +1604,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
             "nested-a": [a_video],
             "group-b": [b_video],
         })
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
         stats = organizer._initial_stats()
 
         result = organizer._scan_source(
@@ -1611,7 +1624,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
     def test_negative_max_files_keeps_legacy_fail_closed_semantics(self) -> None:
         video = GuangYaFile("video", "Episode.01.mkv", False, 1024, parent_id="root")
         client = self.RecordingTreeClient({"root": [video]})
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
 
         with patch("app.modules.organize.execute_organize_plans") as execute:
             plans, stats = organizer.organize(
@@ -1641,7 +1654,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
                 confidence=1.0, status="matched", matched_by="test",
             )
         })()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=scraper)
 
         with patch.object(
             organizer, "_build_plans",
@@ -1671,7 +1684,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
                 confidence=1.0, status="matched", matched_by="test",
             )
         })()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=scraper)
 
         with patch("app.modules.organize.execute_organize_plans") as execute, self.assertRaisesRegex(
             RuntimeError, "文件数量上限"
@@ -1687,7 +1700,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
         cancel_event.set()
         video = GuangYaFile("video", "Episode.01.mkv", False, 1024, parent_id="root")
         client = self.RecordingTreeClient({"root": [video]})
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
 
         plans, stats = organizer.organize(
             "root", OrganizeRules(), dry_run=True, cancel_event=cancel_event,
@@ -1704,7 +1717,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
         second = self._dir("d2", "二层", "d1")
         client = self.RecordingTreeClient({"root": [root], "d1": [second], "d2": []})
         organizer = Organizer(
-            client=client, scraper=object(), traversal_limits=(1, 10, 100)
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()), traversal_limits=(1, 10, 100)
         )
 
         plans, stats = organizer.organize("root", OrganizeRules(), dry_run=True)
@@ -1726,7 +1739,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
             "dup": [cycle],
         })
         organizer = Organizer(
-            client=client, scraper=object(), traversal_limits=(8, 10, 100)
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()), traversal_limits=(8, 10, 100)
         )
 
         _plans, stats = organizer.organize("root", OrganizeRules(), dry_run=True)
@@ -1744,7 +1757,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
         ]
         client = self.RecordingTreeClient({"root": files})
         organizer = Organizer(
-            client=client, scraper=object(), traversal_limits=(8, 10, 2)
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()), traversal_limits=(8, 10, 2)
         )
 
         with patch("app.modules.organize.execute_organize_plans") as execute, self.assertRaisesRegex(
@@ -1765,7 +1778,7 @@ class OrganizeTraversalBudgetTests(IsolatedDatabaseTestCase):
             "grandchild": [],
         })
         organizer = Organizer(
-            client=client, scraper=object(), traversal_limits=(1, 10, 100)
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()), traversal_limits=(1, 10, 100)
         )
 
         with patch(

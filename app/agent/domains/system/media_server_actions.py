@@ -88,7 +88,7 @@ def _compatibility(slot: str, product: str, major: int | None) -> tuple[str, str
 
 
 def _node_payload(slot: str, result: ToolResult) -> dict[str, Any]:
-    connection_status = str(result.status or "unavailable")
+    connection_status = (result.status or "unavailable")
     enabled = connection_status != "disabled"
     configured = connection_status not in {"disabled", "not_configured"}
     node: dict[str, Any] = {

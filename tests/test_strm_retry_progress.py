@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import hashlib
 import subprocess
 import tempfile
@@ -154,12 +157,12 @@ class StrmFailureLedgerTests(IsolatedDatabaseTestCase):
                 source_id,
                 "http://mediaflux.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
                 metadata_exts={"nfo"},
                 source_name="主媒体",
             )
             worker = STRMMetadataWorker()
-            worker._client = client
+            worker._client = cast(GuangYaClient, client)
             with patch(
                 "app.modules.strm_metadata_worker.get_bool", return_value=True
             ), patch(
@@ -199,7 +202,7 @@ class StrmFailureLedgerTests(IsolatedDatabaseTestCase):
                     source_id,
                     "http://mediaflux.invalid",
                     root,
-                    client=client,
+                    client=cast(GuangYaClient, client),
                     source_name="待重试源",
                 )
             failures = db.list_strm_failures(status="open", limit=20)
@@ -222,7 +225,7 @@ class StrmFailureLedgerTests(IsolatedDatabaseTestCase):
                 side_effect=lambda key, default=0: int(values.get(key, default) or 0),
             ):
                 retried = strm_module.retry_strm_failures(
-                    [selected_id], "manual", client=client
+                    [selected_id], "manual", client=cast(GuangYaClient, client)
                 )
 
             self.assertEqual(retried["resolved"], 1)
@@ -270,7 +273,7 @@ class StrmFailureLedgerTests(IsolatedDatabaseTestCase):
                 side_effect=lambda key, default=0: int(values.get(key, default) or 0),
             ):
                 result = strm_module.retry_strm_failures(
-                    [failure_id], "manual", client=client
+                    [failure_id], "manual", client=cast(GuangYaClient, client)
                 )
 
             self.assertEqual(result["resolved"], 1)
@@ -290,14 +293,14 @@ class StrmFailureLedgerTests(IsolatedDatabaseTestCase):
 
         with tempfile.TemporaryDirectory() as root:
             first = strm_module.sync_strm(
-                source_id, "http://old-mediaflux.invalid", root, client=client
+                source_id, "http://old-mediaflux.invalid", root, client=cast(GuangYaClient, client)
             )
             target = next(Path(root).rglob("*.strm"))
             self.assertEqual(first["generated"], 1)
             self.assertTrue(target.read_text("utf-8").startswith("http://old-mediaflux.invalid/"))
 
             changed = strm_module.sync_strm(
-                source_id, "http://new-mediaflux.invalid", root, client=client
+                source_id, "http://new-mediaflux.invalid", root, client=cast(GuangYaClient, client)
             )
             self.assertEqual(changed["generated"], 1)
             self.assertEqual(changed["skipped"], 0)
@@ -305,7 +308,7 @@ class StrmFailureLedgerTests(IsolatedDatabaseTestCase):
 
             target.write_text("corrupted", encoding="utf-8")
             repaired = strm_module.sync_strm(
-                source_id, "http://new-mediaflux.invalid", root, client=client
+                source_id, "http://new-mediaflux.invalid", root, client=cast(GuangYaClient, client)
             )
             self.assertEqual(repaired["generated"], 1)
             self.assertEqual(repaired["updated"], 1)
@@ -322,14 +325,14 @@ class StrmFailureLedgerTests(IsolatedDatabaseTestCase):
                 source_id,
                 "http://mediaflux.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
                 source_name="稳定源",
             )
             second = strm_module.sync_strm(
                 source_id,
                 "http://mediaflux.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
                 source_name="稳定源",
             )
 
@@ -362,7 +365,7 @@ class StrmProgressTests(IsolatedDatabaseTestCase):
                 source_id,
                 "http://mediaflux.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
                 source_name="进度源",
                 clean_invalid=False,
                 on_progress=lambda stage, completed, total, detail: events.append(
@@ -416,7 +419,7 @@ class StrmProgressTests(IsolatedDatabaseTestCase):
                 result = strm_module.retry_strm_failures(
                     ids,
                     "manual",
-                    client=client,
+                    client=cast(GuangYaClient, client),
                     on_progress=lambda *event: events.append(event),
                 )
 
@@ -859,7 +862,7 @@ class StrmRetrySourcePlanningAndConfigTests(IsolatedDatabaseTestCase):
         )
 
         with tempfile.TemporaryDirectory() as root, self._config(root, sources):
-            result = strm_module.retry_strm_failures(ids, "manual", client=client)
+            result = strm_module.retry_strm_failures(ids, "manual", client=cast(GuangYaClient, client))
             first_target = Path(root) / strm_module.STRM_SUBDIR / "电影一" / "Movie.strm"
             second_target = Path(root) / strm_module.STRM_SUBDIR / "电影二" / "Movie.strm"
             self.assertTrue(first_target.is_file())
@@ -886,7 +889,7 @@ class StrmRetrySourcePlanningAndConfigTests(IsolatedDatabaseTestCase):
         )
 
         with tempfile.TemporaryDirectory() as root, self._config(root, sources):
-            result = strm_module.retry_strm_failures(ids, "manual", client=client)
+            result = strm_module.retry_strm_failures(ids, "manual", client=cast(GuangYaClient, client))
             self.assertTrue(
                 (Path(root) / strm_module.STRM_SUBDIR / "同名 (abc111)" / "A.strm").is_file()
             )
@@ -912,9 +915,9 @@ class StrmRetrySourcePlanningAndConfigTests(IsolatedDatabaseTestCase):
                     runtime = {"sources": list(reversed(sources)) if reverse else sources,
                                "strm_root": root, "base_url": "http://mediaflux.invalid"}
                     if retry_all:
-                        result = strm_module.retry_all_strm_failures("", "generate", "manual", client=client, runtime_config=runtime)
+                        result = strm_module.retry_all_strm_failures("", "generate", "manual", client=cast(GuangYaClient, client), runtime_config=runtime)
                     else:
-                        result = strm_module.retry_strm_failures(ids, "manual", client=client, runtime_config=runtime)
+                        result = strm_module.retry_strm_failures(ids, "manual", client=cast(GuangYaClient, client), runtime_config=runtime)
                     self.assertEqual(result["resolved"], 2)
                     for source in sources:
                         rows = db.list_strm_index(source["source_key"])
@@ -934,7 +937,7 @@ class StrmRetrySourcePlanningAndConfigTests(IsolatedDatabaseTestCase):
         client = _TreeClient({"peer": [video], "original": RuntimeError("scan failed")})
         with tempfile.TemporaryDirectory() as root:
             runtime = {"sources": sources, "strm_root": root, "base_url": "http://mediaflux.invalid"}
-            result = strm_module.retry_strm_failures([failure_id], "manual", client=client, runtime_config=runtime)
+            result = strm_module.retry_strm_failures([failure_id], "manual", client=cast(GuangYaClient, client), runtime_config=runtime)
             self.assertEqual(result["resolved"], 0)
             self.assertEqual(result["deferred"], 1)
             self.assertTrue(result["scan_incomplete"])
@@ -950,7 +953,7 @@ class StrmRetrySourcePlanningAndConfigTests(IsolatedDatabaseTestCase):
         client = _TreeClient({"new": [video], "old": []})
         with tempfile.TemporaryDirectory() as root:
             runtime = {"sources": sources, "strm_root": root, "base_url": "http://mediaflux.invalid"}
-            result = strm_module.retry_strm_failures([failure_id], "manual", client=client, runtime_config=runtime)
+            result = strm_module.retry_strm_failures([failure_id], "manual", client=cast(GuangYaClient, client), runtime_config=runtime)
             self.assertEqual(result["resolved"], 1)
             self.assertIn("old", client.list_calls)
             self.assertTrue((Path(root) / strm_module.STRM_SUBDIR / "New" / "Episode.strm").is_file())
@@ -966,7 +969,7 @@ class StrmRetrySourcePlanningAndConfigTests(IsolatedDatabaseTestCase):
         )
 
         with tempfile.TemporaryDirectory() as root, self._config(root, sources):
-            result = strm_module.retry_strm_failures([failure_id], "manual", client=client)
+            result = strm_module.retry_strm_failures([failure_id], "manual", client=cast(GuangYaClient, client))
             target = Path(root) / strm_module.STRM_SUBDIR / "新来源" / "Moved.strm"
             rows = db.list_strm_index(f"guangya:{new_source}")
             target_exists = target.is_file()
@@ -994,7 +997,7 @@ class StrmRetrySourcePlanningAndConfigTests(IsolatedDatabaseTestCase):
                         })
                         with self._config(root, sources, base_url):
                             result = strm_module.retry_strm_failures(
-                                [failure_id], "manual", client=client
+                                [failure_id], "manual", client=cast(GuangYaClient, client)
                             )
                         self.assertFalse(result["ok"])
                         self.assertEqual(client.list_calls, [])
@@ -1015,7 +1018,7 @@ class StrmRetrySourcePlanningAndConfigTests(IsolatedDatabaseTestCase):
                 self._config(root, sources), patch(
                     "app.modules.strm._strm_target", return_value=Path(outside) / "escape.strm"
                 ), patch("app.modules.strm.generate_strm") as generate:
-            result = strm_module.retry_strm_failures([failure_id], "manual", client=client)
+            result = strm_module.retry_strm_failures([failure_id], "manual", client=cast(GuangYaClient, client))
 
         self.assertEqual(result["resolved"], 0)
         self.assertEqual(result["failed"], 1)
@@ -1102,7 +1105,7 @@ class StrmRetryConcurrencyStateTests(IsolatedDatabaseTestCase):
                     side_effect=lambda key, default="": values.get(key, default),
                 ):
                     retry = strm_module.retry_strm_failures(
-                        [failure_id], "manual", client=client
+                        [failure_id], "manual", client=cast(GuangYaClient, client)
                     )
                 sync = scheduler.run_blocking("manual")
             finally:
@@ -1132,7 +1135,7 @@ class StrmRetryConcurrencyStateTests(IsolatedDatabaseTestCase):
                 side_effect=lambda key, default="": values.get(key, default),
             ), patch("app.modules.strm.generate_strm", side_effect=RuntimeError("retry failed")):
                 result = strm_module.retry_strm_failures(
-                    [failure_id], "manual", client=client
+                    [failure_id], "manual", client=cast(GuangYaClient, client)
                 )
 
         self.assertEqual(result["failed"], 1)
@@ -1193,7 +1196,7 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
                 "app.modules.strm.db.upsert_strm_index", side_effect=fail_fresh
             ):
                 result = strm_module.retry_strm_failures(
-                    [failure_id], "manual", client=client
+                    [failure_id], "manual", client=cast(GuangYaClient, client)
                 )
 
             row = db.list_strm_index(source_key)[0]
@@ -1223,7 +1226,7 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
                 "app.modules.strm.requests.get", return_value=_Response(b"new-data")
             ):
                 result = strm_module.retry_strm_failures(
-                    [failure_id], "manual", client=client
+                    [failure_id], "manual", client=cast(GuangYaClient, client)
                 )
             new_path = Path(root) / strm_module.STRM_SUBDIR / "new.jpg"
             row = db.list_strm_index(source_key)[0]
@@ -1253,7 +1256,7 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
                 "app.modules.strm.requests.get", return_value=_Response(b"fresh-data")
             ):
                 result = strm_module.retry_strm_failures(
-                    [failure_id], "manual", client=client
+                    [failure_id], "manual", client=cast(GuangYaClient, client)
                 )
             rows = db.list_strm_index(source_key)
             self.assertEqual([row["file_id"] for row in rows], ["fresh"])
@@ -1268,7 +1271,7 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
         events = []
         with tempfile.TemporaryDirectory() as root, self._config(root, source):
             result = strm_module.retry_strm_failures(
-                ids, "manual", client=client, on_progress=lambda *event: events.append(event)
+                ids, "manual", client=cast(GuangYaClient, client), on_progress=lambda *event: events.append(event)
             )
 
         self.assertEqual(result["missing"], 3)
@@ -1291,7 +1294,7 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
         events = []
         with tempfile.TemporaryDirectory() as root, self._config(root, source):
             result = strm_module.retry_strm_failures(
-                [found_id, missing_id], "manual", client=client,
+                [found_id, missing_id], "manual", client=cast(GuangYaClient, client),
                 on_progress=lambda *event: events.append(event),
             )
 
@@ -1313,7 +1316,7 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
             "app.modules.strm._scan_limits", return_value=(1, 100, 100, 60)
         ):
             result = strm_module.retry_strm_failures(
-                [failure_id], "manual", client=client
+                [failure_id], "manual", client=cast(GuangYaClient, client)
             )
 
         self.assertTrue(result["scan_incomplete"])
@@ -1339,7 +1342,7 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
         client = _TreeClient({source: RuntimeError("temporary remote failure")})
         with tempfile.TemporaryDirectory() as root, self._config(root, source):
             result = strm_module.retry_strm_failures(
-                [failure_id], "manual", client=client
+                [failure_id], "manual", client=cast(GuangYaClient, client)
             )
 
         self.assertTrue(result["scan_incomplete"])
@@ -1361,7 +1364,7 @@ class StrmMetadataRetryTransactionAndMissingTests(IsolatedDatabaseTestCase):
             result = strm_module.retry_strm_failures(
                 [failure_id],
                 "manual",
-                client=client,
+                client=cast(GuangYaClient, client),
                 should_stop=lambda: bool(client.list_calls),
             )
 
@@ -1436,7 +1439,7 @@ class StrmRetryBatchAndSchedulerSafetyTests(IsolatedDatabaseTestCase):
         ), patch("app.modules.strm._update_video_index_snapshot", return_value=None):
             result = strm_module.retry_all_strm_failures(
                 "source-batch", "generate", "web",
-                client=client, runtime_config=self._bulk_runtime(root),
+                client=cast(GuangYaClient, client), runtime_config=self._bulk_runtime(root),
                 on_progress=lambda *event: progress_events.append(event),
             )
 
@@ -1468,7 +1471,7 @@ class StrmRetryBatchAndSchedulerSafetyTests(IsolatedDatabaseTestCase):
         ), patch("app.modules.strm._update_video_index_snapshot", return_value=None):
             result = strm_module.retry_all_strm_failures(
                 "source-batch", "generate", "web",
-                client=client, runtime_config=self._bulk_runtime(root),
+                client=cast(GuangYaClient, client), runtime_config=self._bulk_runtime(root),
             )
 
         self.assertTrue(result["ok"])
@@ -1616,8 +1619,9 @@ globalThis.__MEDIAFLUX_STRM_TEST_HOOK__=true;
     def _template_script() -> str:
         return Path("app/static/js/guangya-strm.js").read_text(encoding="utf-8")
 
-    def _run_node(self, assertions: str) -> None:
-        program = self._DOM_STUB + "\n" + self._template_script() + "\n" + assertions
+    @classmethod
+    def _run_node(cls, assertions: str) -> None:
+        program = cls._DOM_STUB + "\n" + cls._template_script() + "\n" + assertions
         with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
             handle.write(program)
             name = handle.name
@@ -1627,7 +1631,7 @@ globalThis.__MEDIAFLUX_STRM_TEST_HOOK__=true;
             )
         finally:
             Path(name).unlink(missing_ok=True)
-        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        assert result.returncode == 0, result.stderr or result.stdout
 
     def test_retry_failure_reenables_real_rendered_checkbox(self):
         self._run_node(textwrap.dedent(r"""

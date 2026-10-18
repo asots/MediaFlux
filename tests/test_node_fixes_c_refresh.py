@@ -1,4 +1,7 @@
 """C01/C02：真实临时 STRM、来源范围与 durable outbox 回归。"""
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,14 +40,14 @@ class RefreshFixesTests(unittest.TestCase):
         for incremental in (False, True):
             with self.subTest(incremental=incremental), isolated_test_database(), tempfile.TemporaryDirectory() as root:
                 first = strm.sync_strm("source", "http://play.invalid", root,
-                                       client=Cloud(), clean_empty_dirs=False)
+                                       client=cast(GuangYaClient, Cloud()), clean_empty_dirs=False)
                 old = Path(first["changed_strm_paths"][0])
                 if incremental:
                     stats = strm.sync_strm_incremental("source", [change()], "http://play.invalid", root,
-                                                       client=Cloud("NewSeries"))
+                                                       client=cast(GuangYaClient, Cloud("NewSeries")))
                 else:
                     stats = strm.sync_strm("source", "http://play.invalid", root,
-                                           client=Cloud("NewSeries"), clean_empty_dirs=False)
+                                           client=cast(GuangYaClient, Cloud("NewSeries")), clean_empty_dirs=False)
                 strm.finalize_changed_paths(stats)
                 new = Path(db.list_strm_index("guangya:source")[0]["strm_path"])
                 self.assertFalse(old.exists())
@@ -60,11 +63,11 @@ class RefreshFixesTests(unittest.TestCase):
     def test_C01_failed_move_does_not_report_deleted_old_directory(self):
         with isolated_test_database(), tempfile.TemporaryDirectory() as root:
             initial = strm.sync_strm("source", "http://play.invalid", root,
-                                     client=Cloud(), clean_empty_dirs=False)
+                                     client=cast(GuangYaClient, Cloud()), clean_empty_dirs=False)
             old = Path(initial["changed_strm_paths"][0])
             with patch.object(strm, "_delete_owned_file", side_effect=OSError("injected")):
                 stats = strm.sync_strm_incremental("source", [change()], "http://play.invalid", root,
-                                                   client=Cloud("NewSeries"))
+                                                   client=cast(GuangYaClient, Cloud("NewSeries")))
             self.assertTrue(old.is_file())
             self.assertEqual(stats["failed"], 1)
             self.assertEqual(stats["changed_strm_paths"], [])
@@ -106,10 +109,10 @@ class RefreshFixesTests(unittest.TestCase):
     def test_C01_remove_only_has_no_stale_upsert_path(self):
         with isolated_test_database(), tempfile.TemporaryDirectory() as root:
             initial = strm.sync_strm("source", "http://play.invalid", root,
-                                     client=Cloud(), clean_empty_dirs=False)
+                                     client=cast(GuangYaClient, Cloud()), clean_empty_dirs=False)
             old = Path(initial["changed_strm_paths"][0])
             stats = strm.sync_strm_incremental("source", [{"source_id": "source", "kind": "video",
-                "action": "remove", "file_id": "0"}], "http://play.invalid", root, client=Cloud())
+                "action": "remove", "file_id": "0"}], "http://play.invalid", root, client=cast(GuangYaClient, Cloud()))
             self.assertFalse(stats["fallback_required"])
             self.assertEqual(stats["changed_strm_paths"], [str(old)])
             self.assertFalse(old.exists())

@@ -186,9 +186,10 @@ class DockerWorkflowTests(unittest.TestCase):
 
     def test_type_check_gate_uses_ci_python_and_blocks_before_tests(self) -> None:
         test_job = self.text.split("  test:", 1)[1].split("  smoke:", 1)[0]
-        self.assertIn('python -m pip install "pyrefly==1.2.0"', test_job)
-        self.assertIn('version("pyrefly") == "1.2.0"', test_job)
-        gate = 'pyrefly check --python-interpreter-path "$(command -v python)"'
+        self.assertIn('python -m pip install "pyrefly==1.4.0"', test_job)
+        self.assertIn('"types-PyYAML==6.0.12.20260906" "types-croniter==6.2.4.20261006"', test_job)
+        self.assertIn('version("pyrefly") == "1.4.0"', test_job)
+        gate = 'pyrefly check --min-severity=warn --python-interpreter-path "$(command -v python)"'
         self.assertIn(gate, test_job)
         self.assertLess(test_job.index(gate), test_job.index("python -m pytest tests"))
         steps = yaml.safe_load(self.text)["jobs"]["test"]["steps"]

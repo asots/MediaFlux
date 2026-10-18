@@ -66,8 +66,8 @@ class InspectionStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LocalMediaServiceError, "不存在或已过期"):
             store.get("admin", second)
-        self.assertIsNotNone(store.get("admin", first))
-        self.assertIsNotNone(store.get("admin", third))
+        assert (store.get("admin", first)) is not None
+        assert (store.get("admin", third)) is not None
         self.assertLessEqual(len(store._records), 3)
         self.assertLessEqual(store._snapshot_entries, 4)
 
@@ -93,7 +93,7 @@ class InspectionStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LocalMediaServiceError, "不存在或已过期"):
             store.get("admin", expired)
-        self.assertIsNotNone(store.get("admin", current))
+        assert (store.get("admin", current)) is not None
         self.assertEqual(len(store._scope_ids), 1)
 
 

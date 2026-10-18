@@ -104,20 +104,20 @@ class MediaServerProviderTransport:
         item: MediaItem,
     ) -> dict[str, Any]:
         result = {
-            "__object_id": str(item.id or ""),
+            "__object_id": (item.id or ""),
             "__object_kind": "media_item",
-            "name": str(item.name or ""),
-            "type": str(item.type or ""),
-            "year": str(item.year or ""),
-            "runtime_minutes": int(item.runtime or 0),
-            "series_name": str(item.series_name or ""),
+            "name": (item.name or ""),
+            "type": (item.type or ""),
+            "year": (item.year or ""),
+            "runtime_minutes": (item.runtime or 0),
+            "series_name": (item.series_name or ""),
             "season_number": item.season_number,
             "episode_number": item.episode_number,
-            "date_added": str(item.date_added or ""),
-            "overview": str(item.overview or ""),
-            "last_played": str(item.last_played or ""),
+            "date_added": (item.date_added or ""),
+            "overview": (item.overview or ""),
+            "last_played": (item.last_played or ""),
             "progress_percent": float(item.progress or 0),
-            "genres": [str(value) for value in item.genres[:12] if str(value).strip()],
+            "genres": [value for value in item.genres[:12] if value.strip()],
         }
         open_url = resolve_link(item.web_url or item.series_web_url)
         if open_url:
@@ -131,14 +131,14 @@ class MediaServerProviderTransport:
         genre_counts: Counter[str] = Counter()
         media_type_counts: Counter[str] = Counter()
         for item in items:
-            title = str(item.display_name or "").strip()
+            title = (item.display_name or "").strip()
             if title:
                 title_counts[title] += 1
-            media_type = str(item.type or "").strip().casefold()
+            media_type = (item.type or "").strip().casefold()
             if media_type:
                 media_type_counts[media_type] += 1
             for genre in item.genres:
-                normalized = str(genre or "").strip()
+                normalized = (genre or "").strip()
                 if normalized:
                     genre_counts[normalized] += 1
         return {
@@ -151,7 +151,7 @@ class MediaServerProviderTransport:
     def _playback_user(
         profile: MediaServerProfile, client: Any
     ) -> tuple[str, str]:
-        value = str(profile.user_id or "").strip()
+        value = (profile.user_id or "").strip()
         try:
             if value:
                 return normalize_explicit_media_user_id(value), "配置用户"
@@ -209,7 +209,7 @@ class MediaServerProviderTransport:
                 if operation == "media.items.counts":
                     raw_counts = client.get_media_counts()
                     counts = {
-                        key: max(0, int(raw_counts.get(key, 0) or 0))
+                        key: max(0, (raw_counts.get(key, 0) or 0))
                         for key in (
                             "total_items",
                             "movie_count",
@@ -247,7 +247,7 @@ class MediaServerProviderTransport:
                     media_type = str(arguments.get("media_type") or "all")
                     if media_type not in {"all", "movie", "tv", "episode"}:
                         raise ProviderGatewayError("媒体类型无效", code="invalid_arguments")
-                    query = {"limit": limit}
+                    query: dict[str, Any] = {"limit": limit}
                     if library_id:
                         query["parent_id"] = library_id
                     if media_type != "all":
@@ -255,7 +255,7 @@ class MediaServerProviderTransport:
                     items = client.recent_media(**query)
                     granularity = "episode" if media_type == "episode" else "work"
                     unit = "个单集" if granularity == "episode" else "部作品"
-                    scope = {"kind": "all", "media_type": media_type}
+                    scope: dict[str, Any] = {"kind": "all", "media_type": media_type}
                     if selected_library:
                         scope.update(kind="library", library={
                             "__object_id": library_id, "__object_kind": "media_library",
@@ -319,8 +319,8 @@ class MediaServerProviderTransport:
                         {
                             "server_label": profile.label,
                             "user_selection": user_selection,
-                            "inventory_total": int(inventory.total or 0),
-                            "inventory_truncated": bool(inventory.truncated),
+                            "inventory_total": (inventory.total or 0),
+                            "inventory_truncated": (inventory.truncated),
                             "criteria": {
                                 "media_type": str(
                                     arguments.get("media_type") or "any"
@@ -393,7 +393,7 @@ class MediaServerProviderTransport:
                         str(arguments["library_ref"])
                     )
                     counts = {
-                        key: max(0, int(raw_counts.get(key, 0) or 0))
+                        key: max(0, (raw_counts.get(key, 0) or 0))
                         for key in (
                             "total_items",
                             "movie_count",
@@ -450,8 +450,8 @@ class MediaServerProviderTransport:
                         data={
                             "series": candidates,
                             "count": len(candidates),
-                            "total": int(result.total or 0),
-                            "truncated": bool(result.truncated),
+                            "total": (result.total or 0),
+                            "truncated": (result.truncated),
                         },
                         source=f"{profile.server_type}_api",
                     )
@@ -470,10 +470,10 @@ class MediaServerProviderTransport:
                         data={
                             "episodes": episodes,
                             "count": len(episodes),
-                            "total": int(inventory.total or 0),
-                            "truncated": bool(inventory.truncated),
-                            "ignored_specials": int(inventory.ignored_specials or 0),
-                            "ignored_unknown": int(inventory.ignored_unknown or 0),
+                            "total": (inventory.total or 0),
+                            "truncated": (inventory.truncated),
+                            "ignored_specials": (inventory.ignored_specials or 0),
+                            "ignored_unknown": (inventory.ignored_unknown or 0),
                         },
                         source=f"{profile.server_type}_api",
                     )
@@ -589,7 +589,7 @@ class MediaServerProviderTransport:
                 # refresh_library 的客户端契约会把部分网络异常折叠为 False；
                 # 进入调用后只能保守认为请求可能已被上游接收。
                 external_write_possible = True
-                accepted = bool(client.refresh_library(target_id))
+                accepted = (client.refresh_library(target_id))
         except ProviderGatewayError:
             raise
         except TimeoutError as exc:

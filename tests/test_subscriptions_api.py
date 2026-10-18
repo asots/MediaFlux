@@ -1,6 +1,9 @@
 """统一订阅中心 API 与页面契约测试。"""
 from __future__ import annotations
 
+from typing import cast
+from starlette.requests import Request
+
 import asyncio
 import json
 import re
@@ -393,7 +396,7 @@ class SubscriptionMappingAsyncContractTests(unittest.IsolatedAsyncioTestCase):
         ):
             task = asyncio.create_task(
                 subscriptions_api.create_from_watchlist(
-                    SimpleNamespace(), self._payload()
+                    cast(Request, SimpleNamespace()), self._payload()
                 )
             )
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
@@ -404,7 +407,7 @@ class SubscriptionMappingAsyncContractTests(unittest.IsolatedAsyncioTestCase):
             response = await task
 
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(json.loads(response.body)["code"], "mapping_required")
+        self.assertEqual(json.loads(bytes(response.body))["code"], "mapping_required")
         discovery.map_to_tmdb_async.assert_awaited_once_with(
             "bangumi", "12345", "tv", "测试动画", "2026",
             confirmed_tmdb_id="",
@@ -450,7 +453,7 @@ class SubscriptionMappingAsyncContractTests(unittest.IsolatedAsyncioTestCase):
         ):
             task = asyncio.create_task(
                 subscriptions_api.create_from_watchlist(
-                    SimpleNamespace(), self._payload()
+                    cast(Request, SimpleNamespace()), self._payload()
                 )
             )
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))

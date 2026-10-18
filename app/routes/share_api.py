@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import secrets
+from typing import Any
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
@@ -16,7 +17,6 @@ from app.modules.share_transfer import (
 )
 from app.web import require_api_login
 
-
 router = APIRouter(prefix="/api/share")
 logger = get_logger(__name__)
 
@@ -29,7 +29,7 @@ def _web_owner(request: Request) -> str:
     return f"web:{owner_id}"
 
 
-def _remember_share_request(request: Request, request_id: object) -> None:
+def _remember_share_request(request: Request, request_id: Any) -> None:
     try:
         normalized = int(request_id)
     except (TypeError, ValueError):
@@ -147,9 +147,9 @@ def share_request_status(request_id: int, request: Request):
         int(item) for item in list(request.session.get("share_transfer_requests") or [])
         if str(item).isdigit()
     }
-    if int(request_id) not in remembered:
+    if request_id not in remembered:
         return JSONResponse({"error": "转存请求不存在"}, status_code=404)
-    row = db.get_download_request(int(request_id))
+    row = db.get_download_request(request_id)
     if row is None or str(row["kind"] or "") != "guangya_share" or str(row["origin"] or "") != "web":
         return JSONResponse({"error": "转存请求不存在"}, status_code=404)
     status = str(row["status"] or "pending")

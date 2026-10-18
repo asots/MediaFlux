@@ -6,7 +6,7 @@ import asyncio
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import AsyncIterable, AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterable, Generator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -61,7 +61,7 @@ class KernelMetrics:
 
     def __init__(self, *, history_size: int = 500) -> None:
         self._lock = threading.Lock()
-        self._history: deque[TurnMeasurement] = deque(maxlen=max(20, int(history_size)))
+        self._history: deque[TurnMeasurement] = deque(maxlen=max(20, history_size))
         self._status_counts: Counter[str] = Counter()
         self._task_status_counts: Counter[str] = Counter()
 
@@ -70,14 +70,14 @@ class KernelMetrics:
         events: AsyncIterable[AgentEvent],
         *,
         channel: str,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         with self.measure(channel=channel) as measurement:
             async for event in events:
                 measurement.observe(event)
                 yield event
 
     @contextmanager
-    def measure(self, *, channel: str, request_id: str = "") -> Iterator[_TurnObservation]:
+    def measure(self, *, channel: str, request_id: str = "") -> Generator[_TurnObservation, None, None]:
         """由执行器持有直到真正结束；页面断流不代表执行取消。"""
         observation = _TurnObservation(request_id=request_id)
         status = "interrupted"
@@ -100,7 +100,7 @@ class KernelMetrics:
             ended = time.monotonic()
             measurement = TurnMeasurement(
                 request_id=observation.request_id,
-                channel=str(channel or "api")[:20],
+                channel=(channel or "api")[:20],
                 status=status,
                 ttfe_ms=max(0, int(((observation.first_event_at or ended) - observation.started) * 1000)),
                 ttft_ms=(
@@ -162,7 +162,7 @@ def _percentile(values: list[int], ratio: float) -> int | None:
         return None
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * ratio)))
-    return int(ordered[index])
+    return (ordered[index])
 
 
 def _average(values: list[int]) -> float:

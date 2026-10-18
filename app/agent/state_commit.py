@@ -1,13 +1,13 @@
 """Agent 查询续接状态的两阶段提交。"""
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+import logging
+import threading
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from typing import Any
-import logging
-import threading
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class AgentStateCommitBuffer:
         self._lock = threading.RLock()
         self._actions: list[Callable[[], Any]] = []
         self._closed = False
-        self._owner = str(owner or "").strip()
+        self._owner = (owner or "").strip()
         self._resource_candidate_snapshot: dict[str, Any] | None = None
         self._request_states: dict[str, Any] = {}
         self._action_keys: set[str] = set()
@@ -41,8 +41,8 @@ class AgentStateCommitBuffer:
         factory: Callable[[], Any],
     ) -> Any | None:
         """返回当前请求私有状态；它不会在提交前泄漏到跨轮上下文。"""
-        owner_key = str(owner or "").strip()
-        state_key = str(key or "").strip()
+        owner_key = (owner or "").strip()
+        state_key = (key or "").strip()
         if not callable(factory):
             raise TypeError("request state factory must be callable")
         if not owner_key or owner_key != self._owner or not state_key:
@@ -56,7 +56,7 @@ class AgentStateCommitBuffer:
 
     def add_once(self, *, key: str, action: Callable[[], Any]) -> bool:
         """同一请求内按键至多登记一次提交动作。"""
-        action_key = str(key or "").strip()
+        action_key = (key or "").strip()
         if not action_key:
             return False
         if not callable(action):
@@ -73,7 +73,7 @@ class AgentStateCommitBuffer:
     def stage_resource_candidates(
         self, *, owner: str, snapshot: dict[str, Any]
     ) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key or owner_key != self._owner or not isinstance(snapshot, dict):
             return False
         with self._lock:
@@ -83,7 +83,7 @@ class AgentStateCommitBuffer:
             return True
 
     def resource_candidates(self, *, owner: str) -> dict[str, Any] | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         with self._lock:
             if (
                 self._closed
@@ -139,7 +139,7 @@ _ACTIVE_RESOURCE_CANDIDATES: ContextVar[dict[str, dict[str, Any]] | None] = Cont
 
 
 @contextmanager
-def defer_agent_state_commits(buffer: AgentStateCommitBuffer) -> Iterator[None]:
+def defer_agent_state_commits(buffer: AgentStateCommitBuffer) -> Generator[None, None, None]:
     """让当前查询及其 ``asyncio.to_thread`` 子调用共享同一提交缓冲区。"""
     if not isinstance(buffer, AgentStateCommitBuffer):
         raise TypeError("buffer must be AgentStateCommitBuffer")
@@ -156,7 +156,7 @@ def active_agent_state_commit_buffer() -> AgentStateCommitBuffer | None:
 
 
 @contextmanager
-def isolate_agent_resource_results() -> Iterator[None]:
+def isolate_agent_resource_results() -> Generator[None, None, None]:
     """让一次原生工具循环内的新资源句柄立即可见，但不提前持久化候选上下文。"""
     current = _ACTIVE_RESOURCE_CANDIDATES.get()
     if current is not None:
@@ -169,7 +169,7 @@ def isolate_agent_resource_results() -> Iterator[None]:
         _ACTIVE_RESOURCE_CANDIDATES.reset(token)
 
 
-def commit_or_defer_agent_state(action: Callable[[], None]) -> bool:
+def commit_or_defer_agent_state(action: Callable[[], object]) -> bool:
     """无协调器时保持即时写入；有缓冲区时延迟到终态发布窗口。"""
     buffer = _ACTIVE_STATE_COMMIT_BUFFER.get()
     if buffer is None:
@@ -185,7 +185,7 @@ def stage_agent_resource_candidates(*, owner: str, snapshot: dict[str, Any]) -> 
     if buffer is not None:
         staged = buffer.stage_resource_candidates(owner=owner, snapshot=snapshot) or staged
     active = _ACTIVE_RESOURCE_CANDIDATES.get()
-    owner_key = str(owner or "").strip()
+    owner_key = (owner or "").strip()
     if active is not None and owner_key:
         active[owner_key] = deepcopy(snapshot)
         staged = True
@@ -193,7 +193,7 @@ def stage_agent_resource_candidates(*, owner: str, snapshot: dict[str, Any]) -> 
 
 
 def active_agent_resource_candidates(*, owner: str) -> dict[str, Any] | None:
-    owner_key = str(owner or "").strip()
+    owner_key = (owner or "").strip()
     buffer = _ACTIVE_STATE_COMMIT_BUFFER.get()
     if buffer is not None:
         snapshot = buffer.resource_candidates(owner=owner_key)

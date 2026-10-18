@@ -254,13 +254,13 @@ def search_recognition_titles(
     normalized_title = _normalize_title(title)
     if not normalized_title:
         return RecognitionWebHintResult(status="unsafe_input")
-    normalized_type = str(media_type or "").strip().lower()
+    normalized_type = (media_type or "").strip().lower()
     if normalized_type not in {"movie", "tv"}:
         normalized_type = ""
-    normalized_year = str(year or "").strip()
+    normalized_year = (year or "").strip()
     if normalized_year and not re.fullmatch(r"(?:18|19|20|21)\d{2}", normalized_year):
         normalized_year = ""
-    api_key = str(get("TAVILY_API_KEY", "") or "").strip()
+    api_key = (get("TAVILY_API_KEY", "") or "").strip()
     if not api_key:
         return RecognitionWebHintResult(status="misconfigured")
 

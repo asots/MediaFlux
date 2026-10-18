@@ -66,7 +66,7 @@ class CancelledDownloadAdmissionTests(unittest.TestCase):
 
     def bound_pending(self):
         admission = self.claim()
-        self.assertIsNotNone(admission)
+        assert (admission) is not None
         self.assertTrue(db.begin_media_download_dispatch(
             admission, subscription_id=self.subscription, subscription_revision=1
         ))
@@ -89,7 +89,7 @@ class CancelledDownloadAdmissionTests(unittest.TestCase):
         self.assertTrue(row["error"])
         self.assertEqual(db.list_active_media_download_admissions(self.subscription), [])
         retry = self.claim()
-        self.assertIsNotNone(retry, "相同 media_key 应允许重新认领")
+        assert (retry) is not None, "相同 media_key 应允许重新认领"
         self.assertNotEqual(retry, admission)
 
     @contextmanager
@@ -142,6 +142,7 @@ class CancelledDownloadAdmissionTests(unittest.TestCase):
         request_row = db.get_download_request(request)
         admission_row = self.admission(admission)
         self.assertEqual(admission_row["error"], "用户取消了未提交请求")
+        assert request_row is not None
         self.assertEqual(admission_row["completed_at"], request_row["completed_at"])
         self.assertEqual(admission_row["updated_at"], request_row["updated_at"])
         self.assert_cancelled(request, admission)
@@ -151,7 +152,9 @@ class CancelledDownloadAdmissionTests(unittest.TestCase):
         with patch.object(repository, "_sync_media_download_admissions_conn", side_effect=RuntimeError("projection unavailable")):
             with self.assertRaisesRegex(RuntimeError, "projection unavailable"):
                 db.cancel_pending_download_request(request)
-        self.assertEqual(db.get_download_request(request)["status"], "pending")
+        get_download_request_result = db.get_download_request(request)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["status"], "pending")
         self.assertEqual(self.admission(admission)["status"], "dispatching")
         self.assertIsNone(self.claim())
 
@@ -232,8 +235,11 @@ db.reconcile_startup_media_download_admissions()
                 self.download()
             backend.assert_not_called()
         self.assertEqual((raised.exception.status_code, raised.exception.code), (409, "cancelled"))
-        self.assertEqual(db.get_download_request(request)["status"], "cancelled")
+        get_download_request_result_2 = db.get_download_request(request)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["status"], "cancelled")
         candidate = db.get_media_subscription_candidate(self.candidate)
+        assert candidate is not None
         self.assertEqual(candidate["status"], "available")
         self.assertIsNone(candidate["request_id"])
         db.sync_media_download_admission_for_request(request)
@@ -260,6 +266,7 @@ db.reconcile_startup_media_download_admissions()
             backend.assert_not_called()
         self.assertEqual((raised.exception.status_code, raised.exception.code), (409, "cancelled"))
         candidate = db.get_media_subscription_candidate(self.candidate)
+        assert candidate is not None
         self.assertEqual(candidate["status"], "available")
         self.assertIsNone(candidate["request_id"])
         # 取消发生时尚未绑定，必须由 service 读取真实 cancelled 后补齐同步。
@@ -273,8 +280,12 @@ db.reconcile_startup_media_download_admissions()
             backend.assert_called_once()
         self.assertTrue(result["ok"])
         self.assertNotEqual(result["request_id"], previous)
-        self.assertEqual(db.get_download_request(previous)["status"], "cancelled")
-        self.assertEqual(db.get_download_request(result["request_id"])["status"], "submitted")
+        get_download_request_result_3 = db.get_download_request(previous)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["status"], "cancelled")
+        get_download_request_result_4 = db.get_download_request(result["request_id"])
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["status"], "submitted")
         row = self.admission(result["admission_id"])
         self.assertEqual(row["request_id"], result["request_id"])
         self.assertEqual(row["status"], "submitted")
@@ -292,8 +303,12 @@ db.reconcile_startup_media_download_admissions()
             result = self.download()
             backend.assert_called_once()
         self.assertTrue(result["duplicate"])
-        self.assertEqual(db.get_download_request(request)["status"], "submitted")
-        self.assertEqual(db.get_media_subscription_candidate(self.candidate)["status"], "submitted")
+        get_download_request_result_5 = db.get_download_request(request)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5["status"], "submitted")
+        get_media_subscription_candidate_result = db.get_media_subscription_candidate(self.candidate)
+        assert get_media_subscription_candidate_result is not None
+        self.assertEqual(get_media_subscription_candidate_result["status"], "submitted")
         db.reconcile_startup_media_download_admissions()
         self.assertEqual(self.admission(result["admission_id"])["status"], "submitted")
         self.assert_active_owner(result["admission_id"])
@@ -307,9 +322,15 @@ db.reconcile_startup_media_download_admissions()
         request = result["request_id"]
         self.assertEqual(result["status"], "manual_review")
         self.assertFalse(db.cancel_pending_download_request(request))
-        self.assertEqual(db.get_download_request(request)["gy_status"], "outcome_unknown")
-        self.assertNotEqual(db.get_download_request(request)["status"], "cancelled")
-        self.assertEqual(db.get_media_subscription_candidate(self.candidate)["status"], "submitted")
+        get_download_request_result_6 = db.get_download_request(request)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6["gy_status"], "outcome_unknown")
+        get_download_request_result_7 = db.get_download_request(request)
+        assert get_download_request_result_7 is not None
+        self.assertNotEqual(get_download_request_result_7["status"], "cancelled")
+        get_media_subscription_candidate_result_2 = db.get_media_subscription_candidate(self.candidate)
+        assert get_media_subscription_candidate_result_2 is not None
+        self.assertEqual(get_media_subscription_candidate_result_2["status"], "submitted")
         db.sync_media_download_admission_for_request(request)
         db.init_db()
         db.reconcile_startup_media_download_admissions()
@@ -328,12 +349,16 @@ db.reconcile_startup_media_download_admissions()
             with self.subTest(status=status):
                 db.update_download_request(request, status=status, gy_status=backend_status, error="不能清除")
                 db.sync_media_download_admission_for_request(request)
-                before = dict(db.get_download_request(request))
+                get_download_request_result_8 = db.get_download_request(request)
+                assert get_download_request_result_8 is not None
+                before = dict(get_download_request_result_8)
                 before_admission = self.admission(admission)
                 with patch.object(repository, "_sync_media_download_admissions_conn", wraps=repository._sync_media_download_admissions_conn) as sync:
                     self.assertFalse(db.cancel_pending_download_request(request))
                     sync.assert_not_called()
-                self.assertEqual(dict(db.get_download_request(request)), before)
+                get_download_request_result_9 = db.get_download_request(request)
+                assert get_download_request_result_9 is not None
+                self.assertEqual(dict(get_download_request_result_9), before)
                 self.assertEqual(self.admission(admission), before_admission)
                 self.assertIsNone(self.claim())
 
@@ -370,7 +395,7 @@ db.reconcile_startup_media_download_admissions()
         current = self.admission(result["admission_id"])
         self.assertEqual(current["status"], "failed")
         self.assertIn("归档失败，需要处理", current["error"])
-        self.assertIsNotNone(current["completed_at"])
+        assert (current["completed_at"]) is not None
         self.assertEqual(db.list_active_media_download_admissions(self.subscription), [])
         self.assertEqual(db.sync_media_download_admission_for_request(request), 0)
 

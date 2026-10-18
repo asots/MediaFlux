@@ -176,6 +176,7 @@ def test_normal_web_and_telegram_share_search_facts_without_downloading(
         candidates = await search(session, telegram=telegram)
         state = await store.load(owner=OWNER, session_id=SESSION)
         restored = await current_candidate_view(state=state, store=store)
+        assert restored is not None
         assert restored["ref"] == candidates["ref"]
         assert len(restored["items"]) == 2
         events = await store.list_events(owner=OWNER, session_id=SESSION)
@@ -234,6 +235,7 @@ def test_batch_cross_module_web_selection_telegram_confirmation_has_per_target_r
         )
         state = await store.load(owner=OWNER, session_id=SESSION)
         restored = await current_candidate_view(state=state, store=store)
+        assert restored is not None
         assert restored["last_result"]["handled_positions"] == [1, 2]
         assert restored["last_result"]["target"] == "both"
         assert all(

@@ -1,4 +1,8 @@
 """Explicit turn-local retention through the real capability handler and native wire."""
+
+from typing import cast
+from collections.abc import Callable
+from app.clients.http import FixedHostHttpClient
 import asyncio
 import json
 from contextlib import asynccontextmanager
@@ -71,7 +75,7 @@ async def native_retention():
             yield Response({'choices': [{'delta': delta, 'finish_reason': 'tool_calls' if calls else 'stop'}]})
         async def aclose(self): pass
 
-    session.model = OpenAICompatibleModelAdapter(ProviderSettings(api_url='https://offline.invalid/v1', model='fixture', protocol='chat_completions'), client_factory=lambda **_: Client())
+    session.model = OpenAICompatibleModelAdapter(ProviderSettings(api_url='https://offline.invalid/v1', model='fixture', protocol='chat_completions'), client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: Client()))
     await collect(session.run(replace(request(), message='先读取初始对象快照，保留初始读取能力，再分阶段检查十种能力；最后再次读取初始对象核对变化。')))
     names = [[t['function']['name'] for t in r.get('tools', [])] for r in seen]
     results = [json.loads(m['content']) for m in seen[-1]['messages'] if m['role'] == 'tool']

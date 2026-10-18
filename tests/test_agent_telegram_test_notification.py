@@ -106,6 +106,7 @@ class TelegramTestNotificationTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "outcome_unknown")
         self.assertIn("确认", result.summary)
+        assert result.error is not None
         self.assertIn("先检查 Telegram", result.error)
         serialized = self._serialized(result.to_dict())
         self.assertNotIn("raw timeout", serialized)

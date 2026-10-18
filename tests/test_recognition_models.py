@@ -52,7 +52,7 @@ class RecognitionModelTests(unittest.TestCase):
         )
         json.dumps([token.to_dict(), evidence.to_dict()], ensure_ascii=False)
         with self.assertRaises(FrozenInstanceError):
-            token.value = "13"
+            setattr(token, "value", "13")
 
     def test_models_import_first_does_not_load_scraper_or_create_a_cycle(self):
         script = textwrap.dedent(

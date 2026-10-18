@@ -133,7 +133,7 @@ def effective_preferences(
 
 
 def owner_media_preferences(owner: str) -> dict[str, Any]:
-    owner = str(owner or "").strip()
+    owner = (owner or "").strip()
     if not owner:
         return default_media_preferences()
     return effective_preferences(get_media_preferences(action_history_owner_digest(owner)))

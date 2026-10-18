@@ -1,9 +1,13 @@
 """Agent 持久化全库缺集巡检的状态机与安全投影测试。"""
 
 from __future__ import annotations
+from starlette.responses import JSONResponse
+from starlette.requests import Request
+from typing import cast
 
 import json
 import unittest
+import unittest.mock
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -87,7 +91,7 @@ class AgentLibraryPatrolConfigTests(unittest.TestCase):
                 return_value=scheduler,
             ),
         ):
-            response = save_config(self._request(), payload)
+            response = save_config(cast(Request, self._request()), payload)
         self.assertEqual(response, {"success": True})
         persist.assert_called_once_with(payload)
         scheduler.reload.assert_called_once_with(immediate=False)
@@ -102,7 +106,8 @@ class AgentLibraryPatrolConfigTests(unittest.TestCase):
                 patch("app.routes.api.config.get", return_value=""),
                 patch("app.routes.api.config.set_and_save") as persist,
             ):
-                response = save_config(self._request(), {key: "enabled"})
+                response = save_config(cast(Request, self._request()), {key: "enabled"})
+            assert isinstance(response, JSONResponse)
             self.assertEqual(response.status_code, 400)
             persist.assert_not_called()
 
@@ -118,7 +123,8 @@ class AgentLibraryPatrolConfigTests(unittest.TestCase):
                 patch("app.routes.api.config.get", return_value=""),
                 patch("app.routes.api.config.set_and_save") as persist,
             ):
-                response = save_config(self._request(), payload)
+                response = save_config(cast(Request, self._request()), payload)
+            assert isinstance(response, JSONResponse)
             self.assertEqual(response.status_code, 400)
             persist.assert_not_called()
 
@@ -136,6 +142,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
         self.assertEqual(first["patrol_key"], "default")
         self.assertEqual(second["next_run_at"], "2026-08-03 12:00:00")
         claimed = db.claim_due_agent_library_patrol(current_time="2026-08-03 12:00:00")
+        assert claimed is not None
         self.assertEqual(claimed["status"], "running")
         self.assertEqual(claimed["lease_generation"], 1)
         self.assertIsNone(
@@ -173,7 +180,9 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
         new_job = db.claim_due_agent_library_patrol(
             current_time="2026-08-03 12:31:00", stale_before="2026-08-03 12:01:00"
         )
+        assert old_job is not None
         self.assertEqual(old_job["lease_generation"], 1)
+        assert new_job is not None
         self.assertEqual(new_job["lease_generation"], 2)
         self.assertFalse(
             db.update_agent_library_patrol(
@@ -199,19 +208,24 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
         self.assertTrue(
             db.reschedule_agent_library_patrol(next_run_at="2026-08-03 12:00:00")
         )
+        get_agent_library_patrol_result = db.get_agent_library_patrol()
+        assert get_agent_library_patrol_result is not None
         self.assertEqual(
-            db.get_agent_library_patrol()["next_run_at"], "2026-08-03 12:00:00"
+            get_agent_library_patrol_result["next_run_at"], "2026-08-03 12:00:00"
         )
         running = db.claim_due_agent_library_patrol(current_time="2026-08-03 12:00:00")
-        self.assertIsNotNone(running)
+        assert (running) is not None
         self.assertFalse(
             db.reschedule_agent_library_patrol(next_run_at="2026-08-03 11:00:00")
         )
-        self.assertEqual(db.get_agent_library_patrol()["status"], "running")
+        get_agent_library_patrol_result_2 = db.get_agent_library_patrol()
+        assert get_agent_library_patrol_result_2 is not None
+        self.assertEqual(get_agent_library_patrol_result_2["status"], "running")
 
     def test_cancel_running_lease_invalidates_old_worker(self):
         db.ensure_agent_library_patrol(next_run_at="2026-08-03 12:00:00")
         job = db.claim_due_agent_library_patrol(current_time="2026-08-03 12:00:00")
+        assert job is not None
         self.assertTrue(
             db.cancel_agent_library_patrol_lease(
                 next_run_at="2026-08-03 12:00:01",
@@ -219,6 +233,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
             )
         )
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["lease_generation"], job["lease_generation"] + 1)
         self.assertFalse(
@@ -245,6 +260,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
         first = db.claim_due_agent_library_patrol_notification(
             current_time="2026-08-03 12:00:00"
         )
+        assert first is not None
         self.assertEqual(first["status"], "sending")
         self.assertEqual(first["lease_generation"], 1)
         self.assertIsNone(
@@ -263,6 +279,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
         second = db.claim_due_agent_library_patrol_notification(
             current_time="2026-08-03 12:01:00"
         )
+        assert second is not None
         self.assertEqual(second["lease_generation"], 2)
         self.assertFalse(
             db.complete_agent_library_patrol_notification(
@@ -335,7 +352,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
                 8: "retry_wait",
             },
         )
-        self.assertIsNotNone(db.get_agent_library_patrol())
+        assert (db.get_agent_library_patrol()) is not None
         recovered = db.claim_due_agent_library_patrol_notification(
             current_time="2026-08-03 12:00:00", stale_before="2026-08-03 11:58:00"
         )
@@ -370,9 +387,11 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
     def test_init_recovers_interrupted_running_patrol(self):
         db.ensure_agent_library_patrol(next_run_at="2026-08-03 12:00:00")
         claimed = db.claim_due_agent_library_patrol(current_time="2026-08-03 12:00:00")
+        assert claimed is not None
         self.assertEqual(claimed["lease_generation"], 1)
         db.init_db()
         recovered = db.get_agent_library_patrol()
+        assert recovered is not None
         self.assertEqual(recovered["status"], "retry_wait")
         self.assertEqual(recovered["lease_generation"], 2)
 
@@ -390,6 +409,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
             "unmapped_series_count": 0,
             "options": [],
         }
+        assert claimed is not None
         self.assertTrue(
             db.continue_agent_library_patrol(
                 expected_lease_generation=claimed["lease_generation"],
@@ -402,6 +422,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
         )
         db.init_db()
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["cycle_cursor_tmdb_id"], "12345")
         self.assertEqual(
@@ -422,6 +443,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
             "unmapped_series_count": 0,
             "options": [],
         }
+        assert claimed is not None
         self.assertTrue(
             db.continue_agent_library_patrol(
                 expected_lease_generation=claimed["lease_generation"],
@@ -432,6 +454,7 @@ class AgentLibraryPatrolDatabaseTests(IsolatedDatabaseTestCase):
             )
         )
         claimed = db.claim_due_agent_library_patrol(current_time="2026-08-03 12:00:01")
+        assert claimed is not None
         self.assertFalse(
             db.continue_agent_library_patrol(
                 expected_lease_generation=claimed["lease_generation"],
@@ -497,8 +520,10 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         db.ensure_agent_library_patrol(next_run_at="2026-08-10 12:00:00")
         with self._config(enabled=True):
             scheduler.reload()
+            get_agent_library_patrol_result_3 = db.get_agent_library_patrol()
+            assert get_agent_library_patrol_result_3 is not None
             self.assertEqual(
-                db.get_agent_library_patrol()["next_run_at"], "2026-08-03 12:00:00"
+                get_agent_library_patrol_result_3["next_run_at"], "2026-08-03 12:00:00"
             )
             self.assertEqual(scheduler.run_once(), 1)
         executor.assert_called_once()
@@ -512,6 +537,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 1)
         executor.assert_called_once_with({"as_of": "2026-08-03", "max_series": 50})
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["outcome"], "updates_available")
         self.assertEqual(row["attempts"], 0)
@@ -552,6 +578,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         with self._config():
             self.assertEqual(scheduler.run_once(), 1)
             interim = db.get_agent_library_patrol()
+            assert interim is not None
             self.assertEqual(interim["status"], "pending")
             self.assertEqual(interim["cycle_cursor_tmdb_id"], "12345")
             self.assertEqual(interim["last_finished_at"], None)
@@ -568,6 +595,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             ]
         )
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["outcome"], "updates_available")
         self.assertEqual(row["checked_series_count"], 5)
@@ -613,15 +641,19 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         with self._config():
             self.assertEqual(scheduler.run_once(), 1)
             first = db.get_agent_library_patrol()
+            assert first is not None
             self.assertEqual(first["cycle_cursor_tmdb_id"], "")
             self.assertEqual(first["cycle_stall_attempts"], 1)
             status = get_library_patrol_status({})
             self.assertTrue(status.data["continuation_pending"])
             self.assertEqual(status.data["cycle_checked_series_count"], 0)
             self.assertEqual(scheduler.run_once(), 1)
-            self.assertEqual(db.get_agent_library_patrol()["cycle_stall_attempts"], 2)
+            get_agent_library_patrol_result_4 = db.get_agent_library_patrol()
+            assert get_agent_library_patrol_result_4 is not None
+            self.assertEqual(get_agent_library_patrol_result_4["cycle_stall_attempts"], 2)
             self.assertEqual(scheduler.run_once(), 1)
             skipped = db.get_agent_library_patrol()
+            assert skipped is not None
             self.assertEqual(skipped["cycle_cursor_tmdb_id"], "12345")
             self.assertEqual(skipped["cycle_stall_attempts"], 0)
             skipped_projection = json.loads(skipped["cycle_accumulator_json"])
@@ -639,6 +671,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             ]
         )
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "retry_wait")
         self.assertEqual(row["outcome"], "inconclusive")
         self.assertEqual(row["checked_series_count"], 2)
@@ -660,6 +693,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 1)
             scheduler.reload()
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["cycle_cursor_tmdb_id"], "12345")
         self.assertEqual(
@@ -677,6 +711,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 1)
         row = db.get_agent_library_patrol()
         notifications = db.list_agent_library_patrol_notifications()
+        assert row is not None
         self.assertEqual(row["result_revision"], 1)
         self.assertEqual(len(notifications), 1)
         self.assertEqual(notifications[0]["status"], "pending")
@@ -697,7 +732,9 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         )
         with self._config(notify=True):
             self.assertEqual(scheduler.run_once(), 1)
-        self.assertEqual(db.get_agent_library_patrol()["result_revision"], 1)
+        get_agent_library_patrol_result_5 = db.get_agent_library_patrol()
+        assert get_agent_library_patrol_result_5 is not None
+        self.assertEqual(get_agent_library_patrol_result_5["result_revision"], 1)
         self.assertEqual(db.list_agent_library_patrol_notifications(), [])
 
     def test_a_b_a_transitions_each_enqueue_a_new_revision(self):
@@ -719,7 +756,9 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
                 self.assertEqual(scheduler.run_once(), 1)
         notifications = db.list_agent_library_patrol_notifications()
         self.assertEqual([row["result_revision"] for row in notifications], [1, 2, 3])
-        self.assertEqual(db.get_agent_library_patrol()["result_revision"], 3)
+        get_agent_library_patrol_result_6 = db.get_agent_library_patrol()
+        assert get_agent_library_patrol_result_6 is not None
+        self.assertEqual(get_agent_library_patrol_result_6["result_revision"], 3)
 
     def test_delivery_success_marks_outbox_sent(self):
         sender = Mock(return_value=True)
@@ -748,6 +787,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.dispatch_notification_once(), 1)
         patrol = db.get_agent_library_patrol()
         notification = db.list_agent_library_patrol_notifications()[0]
+        assert patrol is not None
         self.assertEqual(patrol["outcome"], "updates_available")
         self.assertEqual(notification["status"], "retry_wait")
         self.assertEqual(notification["attempts"], 1)
@@ -833,6 +873,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         with self._config():
             self.assertEqual(scheduler.run_once(), 1)
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "retry_wait")
         self.assertEqual(row["outcome"], "inconclusive")
         self.assertEqual(row["attempts"], 1)
@@ -852,6 +893,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 1)
         row = db.get_agent_library_patrol()
         self.assertEqual(executor.call_count, 3)
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["attempts"], 0)
         self.assertEqual(row["next_run_at"], "2026-08-04 13:15:00")
@@ -865,6 +907,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 0)
         executor.assert_not_called()
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["lease_generation"], 2)
         self.assertEqual(row["outcome"], "")
@@ -876,7 +919,9 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         with patch.object(scheduler, "_enabled", return_value=False):
             scheduler.reload()
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "pending")
+        assert job is not None
         self.assertEqual(row["lease_generation"], job["lease_generation"] + 1)
         self.assertEqual(row["next_run_at"], "2026-08-03 12:00:00")
 
@@ -897,6 +942,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 1)
             self.assertEqual(scheduler.run_once(), 1)
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["status"], "retry_wait")
         self.assertEqual(row["attempts"], 1)
         self.assertEqual(row["cycle_cursor_tmdb_id"], "12345")
@@ -914,6 +960,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         with self._config():
             self.assertEqual(scheduler.run_once(), 1)
         row = db.get_agent_library_patrol()
+        assert row is not None
         self.assertEqual(row["outcome"], "failed")
         self.assertEqual(row["error_type"], "RuntimeError")
         serialized = repr(dict(row))
@@ -948,6 +995,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         with self._config():
             scheduler.run_once()
         row = db.get_agent_library_patrol()
+        assert row is not None
         projection = json.loads(row["projection_json"])
         self.assertEqual(row["outcome"], "failed")
         self.assertEqual(projection["patrol_status"], "inconclusive")

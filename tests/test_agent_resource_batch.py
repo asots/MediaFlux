@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -42,7 +43,7 @@ from tests.test_agent_ux_backend import (
 
 @pytest.fixture
 def store(tmp_path):
-    yield from ux.store.__wrapped__(tmp_path)
+    yield from inspect.unwrap(ux.store)(tmp_path)
 
 
 def _prepare_batch(args):
@@ -223,7 +224,7 @@ def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeyp
     click("i2")
     click("tboth")
     assert draft["positions"] == [1, 2] and draft["target"] == "both"
-    assert session.model.requests == [] and bot.sent == [] and len(bot.edits) == 4
+    assert model.requests == [] and bot.sent == [] and len(bot.edits) == 4
     edit_count = len(bot.edits)
     click("r")  # 旧消息中遗留的推荐按钮不能清掉用户的手动选择。
     assert len(bot.edits) == edit_count and draft["positions"] == [1, 2]
@@ -239,7 +240,7 @@ def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeyp
     with patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch), \
          patch("app.agent.domains.resources.candidate_actions.submit_resource_batch_confirmed", side_effect=lambda *a: _batch_result()) as execute:
         click("p")
-        assert draft["phase"] == "approval" and session.model.requests == []
+        assert draft["phase"] == "approval" and model.requests == []
         execute.assert_not_called()
         plan = draft["plan_id"]
         agent_adapter.handle_agent_callback(bot, Call(f"agk:{terminal_action}:{plan}", message), TELEBOT)
@@ -254,7 +255,7 @@ def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeyp
         assert ended["phase"] == "result" and ended["positions"] == [] and ended["plan_id"] == ""
         assert agent_candidates.render(TELEBOT, view, ended)[1] is None
         assert bot.sent == []
-        assert len(session.model.requests) == (1 if terminal_action == "c" else 0)
+        assert len(model.requests) == (1 if terminal_action == "c" else 0)
         count = len(bot.edits)
         agent_adapter.handle_agent_callback(bot, Call(f"agk:c:{plan}", message), TELEBOT)
         assert len(bot.edits) == count

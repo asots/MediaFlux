@@ -268,7 +268,7 @@ class DatabaseIsolationTests(unittest.TestCase):
                     row = conn.execute(
                         "SELECT name FROM sqlite_master WHERE type='table' AND name='strm_index'"
                     ).fetchone()
-                self.assertIsNotNone(row)
+                assert (row) is not None
             self.assertEqual(db.resolve_db_path(), previous)
 
 

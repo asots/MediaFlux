@@ -80,7 +80,8 @@ class SubscriptionWorkflowTerminalAdmissionTests(IsolatedDatabaseTestCase):
                 "VALUES('218642','tv','师兄啊师兄',1,'satisfied',0,?,?)",
                 (stamp, stamp),
             )
-            self.subscription_id = int(cur.lastrowid)
+            assert cur.lastrowid is not None
+            self.subscription_id = cur.lastrowid
 
     def _admission(self, admission_status: str, request_status: str) -> None:
         stamp = db.now()
@@ -90,7 +91,8 @@ class SubscriptionWorkflowTerminalAdmissionTests(IsolatedDatabaseTestCase):
                 "VALUES(?,'magnet','师兄啊师兄 S01E154',?,?,?,?)",
                 (f"key-{admission_status}-{stamp}", request_status, request_status, stamp, stamp),
             )
-            request_id = int(cur.lastrowid)
+            assert cur.lastrowid is not None
+            request_id = cur.lastrowid
             conn.execute(
                 "INSERT INTO media_download_admissions(media_key,tmdb_id,media_type,"
                 "season,episode,subscription_id,request_id,status,created_at,updated_at) "
@@ -98,7 +100,7 @@ class SubscriptionWorkflowTerminalAdmissionTests(IsolatedDatabaseTestCase):
                 (self.subscription_id, request_id, admission_status, stamp, stamp),
             )
 
-    def _workflow(self) -> dict:
+    def _workflow(self):
         return list_media_subscription_workflows([self.subscription_id])[self.subscription_id]
 
     def test_completed_admission_with_stale_request_reports_no_active_work(self):

@@ -1,6 +1,9 @@
 """发布格式教学的字段、回放、确认和统一解析链契约。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.tmdb import TMDBClient
+
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -69,7 +72,7 @@ class ReleaseFormatTests(IsolatedDatabaseTestCase):
 
     def test_confirmed_save_is_reused_by_context_and_release_projection(self):
         save_teaching()
-        parser = TMDBScraper("offline-fixture")
+        parser = TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(parser.close)
         context = _parse_release_core(filename(15), PARENT).context
         parsed = parser.parse_media(filename(15), PARENT)
@@ -220,7 +223,7 @@ class ReleaseFormatTests(IsolatedDatabaseTestCase):
             with self.subTest(template=template), self.assertRaises(ValueError):
                 formats.compile_template(template)
         regex = formats.compile_template("[A+B](.{title}.)-{episode}.mkv").regex
-        self.assertIsNotNone(regex.fullmatch("[A+B](.Hello.)-12.mkv"))
+        assert (regex.fullmatch("[A+B](.Hello.)-12.mkv")) is not None
         self.assertIsNone(regex.fullmatch("AAAB-Hello-12.mkv"))
 
     def test_invalid_counts_boolean_positions_and_season_labels_are_rejected(self):
@@ -295,7 +298,7 @@ class ReleaseFormatTests(IsolatedDatabaseTestCase):
         save_teaching()
         create_rule({"name": "作品内旧偏移", "matcher_type": "text", "pattern": "[Example-Team]",
                      "scope": "filename", "action": "episode_offset", "numeric_value": -12})
-        parser = TMDBScraper("offline-fixture")
+        parser = TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(parser.close)
         parsed = parser.parse_media(filename(13), PARENT)
         self.assertEqual((parsed.source_episode, parsed.effective_episode), (13, 1))
@@ -318,7 +321,7 @@ class ReleaseFormatTests(IsolatedDatabaseTestCase):
                          ("external-import", "冲突格式", TEMPLATE.replace("track{episode}r{version}", "track0{version}r{episode}"),
                           "directory", PARENT, json.dumps(item["examples"]), db.now(), db.now()))
         formats.invalidate_cache()
-        parser = TMDBScraper("offline-fixture")
+        parser = TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(parser.close)
         with patch.object(parser, "match_from_tmdb", side_effect=AssertionError("格式冲突不得进入匹配放行")):
             result = parser.match(filename(15), PARENT)
@@ -402,4 +405,4 @@ class ReleaseFormatApiTests(IsolatedDatabaseTestCase):
         value["draft"]["template"] = "{title}-{invalid}-{episode}.mkv"
         response = client.post("/api/tools/release-formats/preview", json=value, headers=headers)
         self.assertEqual(response.status_code, 400)
-        self.assertIsInstance(response.json()["error"], str)
+        assert isinstance(response.json()["error"], str)

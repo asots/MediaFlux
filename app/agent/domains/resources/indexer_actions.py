@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any
@@ -56,7 +57,9 @@ _SORT_MODES = frozenset(
 _SPLIT_SITE_HOSTS = frozenset(
     host
     for base in (AIPAN_URL, DYGANG_URL, YS5266_URL)
-    for host in (urlsplit(base).hostname, urlsplit(base).hostname.removeprefix("www."))
+    for hostname in (urlsplit(base).hostname,)
+    if hostname is not None
+    for host in (hostname, hostname.removeprefix("www."))
 )
 
 
@@ -393,7 +396,7 @@ def search_resources(
         data={
             "query": _safe_text(result.query, 120),
             "effective_query": dict(arguments),
-            "page": int(result.page),
+            "page": (result.page),
             "sort_mode": request.sort_mode,
             "items": items,
             "technical_filter": technical_filter,
@@ -404,9 +407,9 @@ def search_resources(
                 _safe_text(value, 32) for value in result.sites_succeeded[:16]
             ],
             "errors": errors,
-            "partial": bool(result.partial),
-            "cached": bool(result.cached),
-            "has_more": bool(result.has_more),
+            "partial": (result.partial),
+            "cached": (result.cached),
+            "has_more": (result.has_more),
             "truncated": truncated,
             "site_collected_counts": dict(result.site_collected_counts),
             "site_truncated_counts": dict(result.site_truncated_counts),
@@ -437,12 +440,12 @@ def search_resources(
 def download_target_readiness(target: str) -> dict[str, bool]:
     readiness: dict[str, bool] = {}
     if target in {"qb", "both"}:
-        readiness["qb"] = bool(str(config.get("QB_URL", "") or "").strip())
+        readiness["qb"] = bool((config.get("QB_URL", "") or "").strip())
     if target in {"guangya", "both"}:
         client = None
         try:
             client = GuangYaClient()
-            readiness["guangya"] = bool(client.logged_in)
+            readiness["guangya"] = (client.logged_in)
         except Exception:  # noqa: BLE001 - 后端就绪探测必须安全降级
             readiness["guangya"] = False
         finally:
@@ -471,7 +474,7 @@ def _stored_resource(arguments: dict[str, str], *, service: Any | None = None):
 
 
 def _resource_confirmation_payload(
-    arguments: dict[str, str], item: Any, readiness: dict[str, bool], destination: dict[str, str]
+    arguments: dict[str, str], item: Any, readiness: dict[str, bool], destination: Mapping[str, object]
 ) -> dict[str, Any]:
     return {
         "result_id": arguments["result_id"],
@@ -641,7 +644,7 @@ def _submit_resource(
             False, "unavailable", "下载处理失败", error="下载处理失败，请稍后重试。"
         )
 
-    public = {
+    public: dict[str, Any] = {
         key: result.get(key)
         for key in (
             "result_id",
@@ -679,7 +682,7 @@ def submit_resource_confirmed(
 ) -> ToolResult:
     state = _capture_submit_resource(arguments)
     if not secrets.compare_digest(
-        str(state["fingerprint"]), str(expected_context or "")
+        str(state["fingerprint"]), (expected_context or "")
     ):
         raise AgentToolError(
             "资源或下载配置已变化，请重新预检", code="confirmation_stale"
@@ -827,7 +830,7 @@ def _converge_batch_duplicates(items: list[dict[str, Any]]) -> int:
         "manual_review": "提交结果待核对，勿直接重复提交",
         "failed": "提交失败",
     }
-    completed: dict[tuple[int, str], list[dict[str, Any]]] = {}
+    completed: dict[tuple[int | None, str | None], list[dict[str, Any]]] = {}
     for item in items:
         request_id = item.get("request_id")
         if (
@@ -979,7 +982,7 @@ def submit_resource_batch_confirmed(
 ) -> ToolResult:
     state = _capture_submit_resource_batch(arguments)
     if not secrets.compare_digest(
-        str(state["fingerprint"]), str(expected_context or "")
+        str(state["fingerprint"]), (expected_context or "")
     ):
         raise AgentToolError(
             "资源集合或下载配置已变化，请重新预检", code="confirmation_stale"

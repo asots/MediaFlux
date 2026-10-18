@@ -31,7 +31,7 @@ def media_credits_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     media_type = arguments.get("media_type")
     if not isinstance(media_type, str) or media_type not in {"movie", "tv"}:
         raise AgentToolError("media_type 仅支持 movie 或 tv")
-    clean = {"tmdb_id": tmdb_id, "media_type": media_type}
+    clean: dict[str, Any] = {"tmdb_id": tmdb_id, "media_type": media_type}
     for field, default in (("cast_limit", 20), ("crew_limit", 15)):
         value = arguments.get(field, default)
         if (

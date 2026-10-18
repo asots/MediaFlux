@@ -65,7 +65,7 @@ def execute_recycle_bin_delete(client, *, trigger: str, reason: str,
             delete_operation()
     except Exception as exc:
         safe_error = (
-            str(safe_failure_message or "").strip()
+            (safe_failure_message or "").strip()
             or redact_sensitive_text(exc)[:500]
         )[:500]
         provider_not_called = bool(

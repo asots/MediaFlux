@@ -6,9 +6,15 @@ from __future__ import annotations
 
 import os
 import unittest
+from typing import cast
 from unittest.mock import Mock, patch
 
+from telebot import TeleBot
+from telebot.types import InlineKeyboardMarkup
+
 from app import notifier
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
 from tests.support import release_parse_result
 
 
@@ -50,7 +56,7 @@ class NotificationSendingTests(unittest.TestCase):
 
     @staticmethod
     def _install_bot(bot: FakeBot, chat_id: str = "100") -> None:
-        notifier._bot = bot
+        notifier._bot = cast(TeleBot, bot)
         notifier._chat_id = chat_id
         notifier._initialized = True
 
@@ -207,9 +213,9 @@ class NotificationSendingTests(unittest.TestCase):
 
         self.assertTrue(notifier.edit_event_result(event, chat_id="-100", message_id="77").ok)
         self.assertEqual(bot.edits[0][1:3], ("-100", 77))
-        self.assertEqual(
-            bot.edits[0][3].keyboard[0][0].callback_data, "orgc:token:0"
-        )
+        markup = bot.edits[0][3]
+        assert isinstance(markup, InlineKeyboardMarkup)
+        self.assertEqual(markup.keyboard[0][0].callback_data, "orgc:token:0")
 
     def test_edit_event_treats_unchanged_message_as_idempotent_success(self):
         bot = FakeBot(message_error=RuntimeError(
@@ -250,9 +256,9 @@ class NotificationSendingTests(unittest.TestCase):
     def test_send_event_uses_photo_and_escapes_all_dynamic_content(self):
         """若事件渲染漏掉转义或没有走 sendPhoto，本测试必须失败。"""
         event_type = getattr(notifier, "NotificationEvent", None)
-        self.assertIsNotNone(event_type, "NotificationEvent 尚未实现")
+        assert (event_type) is not None, "NotificationEvent 尚未实现"
         send_event_result = getattr(notifier, "send_event_result", None)
-        self.assertIsNotNone(send_event_result, "send_event_result 尚未实现")
+        assert (send_event_result) is not None, "send_event_result 尚未实现"
         bot = FakeBot()
         self._install_bot(bot)
 
@@ -286,9 +292,9 @@ class NotificationSendingTests(unittest.TestCase):
             }
 
         event_type = getattr(notifier, "NotificationEvent", None)
-        self.assertIsNotNone(event_type, "NotificationEvent 尚未实现")
+        assert (event_type) is not None, "NotificationEvent 尚未实现"
         send_event_result = getattr(notifier, "send_event_result", None)
-        self.assertIsNotNone(send_event_result, "send_event_result 尚未实现")
+        assert (send_event_result) is not None, "send_event_result 尚未实现"
         bot = FakeBot(photo_error=TelegramPhotoRejected("photo unavailable"))
         self._install_bot(bot, "200")
         event = event_type(
@@ -332,7 +338,7 @@ class NotificationSendingTests(unittest.TestCase):
                 self.message_attempts += 1
                 if self.message_attempts == 2:
                     error = RuntimeError("rate limited after first chunk")
-                    error.result_json = {"error_code": 429, "description": "retry later"}
+                    setattr(error, "result_json", {"error_code": 429, "description": "retry later"})
                     raise error
                 self.messages.append((chat_id, text))
 
@@ -402,9 +408,9 @@ class NotificationSendingTests(unittest.TestCase):
     def test_long_escaped_event_never_splits_inside_html_entity_or_bold_tag(self):
         """若分段切断 HTML entity 或粗体标签，本测试必须失败。"""
         event_type = getattr(notifier, "NotificationEvent", None)
-        self.assertIsNotNone(event_type, "NotificationEvent 尚未实现")
+        assert (event_type) is not None, "NotificationEvent 尚未实现"
         send_event_result = getattr(notifier, "send_event_result", None)
-        self.assertIsNotNone(send_event_result, "send_event_result 尚未实现")
+        assert (send_event_result) is not None, "send_event_result 尚未实现"
         bot = FakeBot()
         self._install_bot(bot, "400")
         event = event_type(title="长通知", lines=(("<&>" * 1400),))
@@ -454,7 +460,7 @@ class MediaCardTests(unittest.TestCase):
     def test_movie_card_contains_required_media_fields_and_tmdb_image(self):
         """若电影卡片遗漏规格字段、画质摘要或 TMDB 图片，本测试必须失败。"""
         build_media_events = getattr(notifier, "build_media_events", None)
-        self.assertIsNotNone(build_media_events, "build_media_events 尚未实现")
+        assert (build_media_events) is not None, "build_media_events 尚未实现"
 
         events = build_media_events([{
             "title": "流浪地球<2>",
@@ -484,7 +490,7 @@ class MediaCardTests(unittest.TestCase):
     def test_tv_card_groups_episode_range_by_tmdb_type_and_season(self):
         """若剧集未按季聚合或集数范围压缩错误，本测试必须失败。"""
         build_media_events = getattr(notifier, "build_media_events", None)
-        self.assertIsNotNone(build_media_events, "build_media_events 尚未实现")
+        assert (build_media_events) is not None, "build_media_events 尚未实现"
         common = {
             "title": "庆余年",
             "year": "2024",
@@ -612,7 +618,7 @@ class MediaCardTests(unittest.TestCase):
     def test_media_card_without_identification_data_falls_back_to_stats(self):
         """若业务数据不足时卡片为空或报错，而非结构化统计，本测试必须失败。"""
         build_stats_event = getattr(notifier, "build_stats_event", None)
-        self.assertIsNotNone(build_stats_event, "build_stats_event 尚未实现")
+        assert (build_stats_event) is not None, "build_stats_event 尚未实现"
 
         event = build_stats_event(
             "光鸭整理完成 <A>",
@@ -633,12 +639,20 @@ class MediaCardTests(unittest.TestCase):
         self.assertNotIn("空值", rendered)
         self.assertIn("目录：来源&amp;一", rendered)
 
+    def test_stats_footer_preserves_false_values(self):
+        for footer, expected in ((0, "0"), (False, "False"), (None, "")):
+            with self.subTest(footer=footer):
+                event = notifier.build_stats_event("统计", {}, footer=footer)
+                self.assertEqual(event.footer, expected)
+                rendered = notifier.render_event(event)
+                self.assertEqual(rendered.splitlines()[1:], [expected] if expected else [])
+
 
 class BusinessNotificationIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         notifier.reset()
         self.bot = FakeBot()
-        notifier._bot = self.bot
+        notifier._bot = cast(TeleBot, self.bot)
         notifier._chat_id = "test-only"
         notifier._initialized = True
 
@@ -839,6 +853,7 @@ class BusinessNotificationIntegrationTests(unittest.TestCase):
     def test_plan_one_tolerates_invalid_tmdb_and_parsed_season_numbers(self):
         """异常季号或集数不得从 _plan_one 冒泡并中断整个整理扫描。"""
         from unittest.mock import Mock
+
         from app.clients.guangya import GuangYaFile
         from app.modules.organize import Organizer, OrganizeRules
         from app.modules.scraper import MatchResult
@@ -882,7 +897,7 @@ class BusinessNotificationIntegrationTests(unittest.TestCase):
                     "genres": [],
                     "seasons": seasons,
                 }
-                organizer = Organizer(client=object(), scraper=scraper)
+                organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
                 file = GuangYaFile(
                     f"file-{label}", "Show.S02E01.mkv", False,
                     1024, "etag", "source",
@@ -900,13 +915,14 @@ class BusinessNotificationIntegrationTests(unittest.TestCase):
     def test_successful_move_exposes_media_data_for_rich_card(self):
         """若整理成功后未产生可供富媒体通知聚合的数据，本测试必须失败。"""
         from unittest.mock import Mock, patch
-        from app.modules.organize import Organizer, OrganizePlan, OrganizeRules
+
+        from app.modules.organize import OrganizePlan, Organizer, OrganizeRules
         from app.modules.organize_execution import execute_organize_plans
         from app.modules.scraper import MatchResult
 
         client = Mock()
         client.list_dir.return_value = []
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, object()))
         organizer._ensure_dir_chain = Mock(return_value="target")
         organizer._find_file = Mock(return_value=None)
         plan = OrganizePlan(
@@ -936,7 +952,8 @@ class BusinessNotificationIntegrationTests(unittest.TestCase):
         ):
             execute_organize_plans(organizer, [plan], OrganizeRules(rename_enabled=False), stats, {})
 
-        self.assertEqual(len(stats.get("media_items") or []), 1)
+        assert isinstance(stats['media_items'], list)
+        self.assertEqual(len(stats["media_items"]), 1)
         item = stats["media_items"][0]
         self.assertEqual(item["title"], "庆余年")
         self.assertEqual(item["season"], 2)

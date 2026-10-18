@@ -364,7 +364,7 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
             expected_revision=0,
             updates={"preferred_server": "emby"},
         )
-        self.assertIsNotNone(changed)
+        assert (changed) is not None
         with self.assertRaises(AgentToolError) as captured:
             service.confirm(prepared["action_plan"]["plan_id"], owner="owner-a")
         self.assertEqual(captured.exception.code, "confirmation_stale")
@@ -413,7 +413,9 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
 
     def test_today_summary_prioritizes_bounded_safe_content_events(self) -> None:
         stamp = db.now()
-        revision = int(db.get_media_subscription(self.sid)["revision"])
+        get_media_subscription_result = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result is not None
+        revision = int(get_media_subscription_result["revision"])
         with db.get_conn() as conn:
             conn.execute(
                 "INSERT INTO media_subscription_runs(subscription_id,trigger_type,subscription_revision,status,summary,payload_json,error,started_at,finished_at) VALUES(?, 'manual', ?, 'missing', '', '{}', '', ?, ?)",

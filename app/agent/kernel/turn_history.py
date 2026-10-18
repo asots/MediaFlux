@@ -69,7 +69,8 @@ async def persist_conversation(turn: AgentTurn,
     staged_completed: set[str] | None = None,
     wait_action: _ContinuationAction | None = None,
 ) -> None:
-
+    lease = turn.lease
+    assert lease is not None
     async with turn.publication_lock:
         checkpoint_messages = list(turn.messages if staged_messages is None else staged_messages)
         completed = turn.completed_call_ids if staged_completed is None else staged_completed
@@ -108,7 +109,7 @@ async def persist_conversation(turn: AgentTurn,
             # 失败确认后的诊断仍属于同一执行组，不能在续接前撤掉已有的有界容量。
             # 下一用户回合仍按正常规则释放；保留此阶段并不会提高容量上限。
             turn.state = await turn.session.state_store.commit(
-                turn.lease,
+                lease,
                 updates=(_ExecutionCapacity(
                     "", turn.state.execution_capacity if preserve_capacity or turn.diagnosing_effect else close_pending and any(
                         call.call_id not in completed for call in turn.active_calls
@@ -135,8 +136,9 @@ async def remember_result(turn: AgentTurn,
 ) -> bool:
     """先持久化真实执行结果，再沿原始任务继续，不能靠模型改写事实。"""
 
+    lease = turn.tool_context.lease
     receipt_plan_id = receipt_plan_id or turn.plan_id
-    safe_content = str(content or "").strip()
+    safe_content = (content or "").strip()
     if not safe_content:
         return False
     conversation = [dict(item) for item in turn.state.conversation]
@@ -156,7 +158,7 @@ async def remember_result(turn: AgentTurn,
         effect_plan_id=receipt_plan_id or "",
         completion_receipt_id=receipt_plan_id or "",
     ).to_dict()
-    safe_public_content = str(public_content or "").strip()
+    safe_public_content = (public_content or "").strip()
     if safe_public_content:
         item["public_content"] = safe_public_content
     updates: tuple[StateUpdate, ...] = ()
@@ -172,15 +174,15 @@ async def remember_result(turn: AgentTurn,
             remember_effect_receipt,
         )
 
-        await remember_effect_receipt(turn.session.state_store, owner=turn.lease.owner,
-            session_id=turn.lease.session_id, plan_id=receipt_plan_id, message=item)
+        await remember_effect_receipt(turn.session.state_store, owner=lease.owner,
+            session_id=lease.session_id, plan_id=receipt_plan_id, message=item)
         turn.state = await turn.session.state_store.commit(
-            turn.lease,
+            lease,
             conversation=conversation,
             updates=updates,
         )
-        await acknowledge_effect_receipt(turn.session.state_store, owner=turn.lease.owner,
-            session_id=turn.lease.session_id, plan_id=receipt_plan_id)
+        await acknowledge_effect_receipt(turn.session.state_store, owner=lease.owner,
+            session_id=lease.session_id, plan_id=receipt_plan_id)
         turn.messages = restore_messages(turn.state)
         return True
     except StalePublicationError:

@@ -9,11 +9,9 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from tests.support import InitializedWebTestCase
-
 from app.config import web_credentials
 from app.main import create_app
-
+from tests.support import InitializedWebTestCase
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "app" / "templates" / "discovery.html"
@@ -337,7 +335,7 @@ class DiscoveryPageTests(InitializedWebTestCase):
             enabled.text,
             re.S,
         )
-        self.assertIsNotNone(indexer_box)
+        assert (indexer_box) is not None
         self.assertNotIn(" hidden", indexer_box.group(0))
         self.assertIn('aria-hidden="false"', indexer_box.group(0))
 
@@ -497,7 +495,7 @@ class DiscoveryPageTests(InitializedWebTestCase):
             re.compile(r"\.discovery-search-input\s*\{[^}]*border-radius:\s*10px", re.S),
         )
         shelf_rule = re.search(r"\.discovery-shelf\s*\{(?P<body>[^}]*)\}", source, re.S)
-        self.assertIsNotNone(shelf_rule)
+        assert (shelf_rule) is not None
         shelf_styles = shelf_rule.group("body")
         self.assertNotIn("padding:", shelf_styles)
         self.assertNotIn("border:", shelf_styles)

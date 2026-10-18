@@ -45,11 +45,11 @@ class AgentInput:
     initial_read_tool: str = ""  # 服务端固定接力；整个回合仅允许 READ，不是 quota 恢复。
 
     def __post_init__(self) -> None:
-        message = str(self.message or "").strip()
-        owner = str(self.owner or "").strip()
-        session_id = str(self.session_id or "").strip()
-        request_id = str(self.request_id or "").strip() or secrets.token_urlsafe(12)
-        channel = str(self.channel or "api").strip().lower() or "api"
+        message = (self.message or "").strip()
+        owner = (self.owner or "").strip()
+        session_id = (self.session_id or "").strip()
+        request_id = (self.request_id or "").strip() or secrets.token_urlsafe(12)
+        channel = (self.channel or "api").strip().lower() or "api"
         if not message:
             raise ValueError("message cannot be empty")
         if not owner:
@@ -140,7 +140,7 @@ class CancellationToken:
         return self._reason or "cancelled"
 
     def cancel(self, reason: str = "cancelled", task: asyncio.Task[Any] | None = None) -> None:
-        self._reason = str(reason or "cancelled")[:200]
+        self._reason = (reason or "cancelled")[:200]
         self._event.set()
         if self.interruptible and task is not None and not task.done() and not self._task_cancel_requested:
             self._task_cancel_requested = True  # 重复取消不能打断状态/回执收尾。

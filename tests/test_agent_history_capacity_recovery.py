@@ -1,4 +1,5 @@
 """历史容量不足不得锁死后续查询，当前调用仍保留完整配对与未知状态。"""
+from typing import Any
 import asyncio
 import json
 
@@ -20,7 +21,7 @@ from tests.test_cancelled_read_inline import sqlite_store
 
 
 def large_history():
-    rows = [{"role": "user", "content": "查询媒体"}]
+    rows: list[dict[str, Any]] = [{"role": "user", "content": "查询媒体"}]
     for i in range(5):
         rows.extend([
             {"role": "assistant", "tool_calls": [{"call_id": str(i), "name": "library.search", "arguments": {"query": "媒体"}}]},

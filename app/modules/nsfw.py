@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import quote, urlsplit
 
 import requests
@@ -106,7 +106,7 @@ class MetaTubeMetadata:
     @property
     def display_title(self) -> str:
         number = normalize_code(self.number)
-        title = re.sub(r"\s+", " ", str(self.title or "")).strip()
+        title = re.sub(r"\s+", " ", (self.title or "")).strip()
         title_key = _code_comparison_key(title)
         if number and title and any(
             alias and alias in title_key for alias in _code_alias_keys(number)
@@ -192,7 +192,7 @@ def _collapse_equivalent_metatube_results(
     )
 
 
-def normalize_code(value: str) -> str:
+def normalize_code(value: str | int) -> str:
     text = re.sub(r"[^A-Za-z0-9]+", "-", str(value or "").upper()).strip("-")
     text = re.sub(r"-+", "-", text)
     compact = text.replace("-", "")
@@ -223,11 +223,11 @@ def _code_alias_keys(number: str) -> tuple[str, ...]:
 
 
 def clean_nsfw_release_text(value: str, strip_domains: str = "") -> str:
-    text = str(value or "")
+    text = (value or "")
     text = _DOMAIN_TOKEN_RE.sub(" ", text)
     configured = {
         item.strip().lower().lstrip(".")
-        for item in re.split(r"[,，\s]+", str(strip_domains or ""))
+        for item in re.split(r"[,，\s]+", (strip_domains or ""))
         if item.strip()
     }
     for domain in sorted(configured, key=len, reverse=True):
@@ -287,7 +287,7 @@ _LEADING_RELEASE_YEAR_RE = re.compile(r"^(?:19|20)\d{2}(?=$|[\s._\-])")
 
 def _identifier_span(value: str, identifier: NsfwIdentifier) -> tuple[str, int, int] | None:
     """在清洗后的字符串中定位番号，兼容连字符、点、空格和紧凑写法。"""
-    cleaned = str(value or "")
+    cleaned = (value or "")
     code = normalize_code(identifier.code)
     parts = [part for part in code.split("-") if part]
     if not parts:
@@ -342,7 +342,7 @@ def extract_nsfw_part_index(value: str) -> int | None:
     """从已归档名称读取 ``CDn`` 分段，用于目标目录冲突判定。"""
     matches = list(re.finditer(
         r"(?i)(?:^|[._ \-])CD(\d{1,2})(?=$|[._ \-])",
-        str(value or ""),
+        (value or ""),
     ))
     if not matches:
         return None
@@ -380,7 +380,25 @@ def clean_nsfw_archive_title(value: str, strip_domains: str = "") -> str:
     return f"{code} {tail}".strip() if tail else code
 
 
-def build_clean_title_candidate(value: str, strip_domains: str = "") -> dict[str, object] | None:
+class CleanTitleMetadata(TypedDict):
+    number: str
+    title: str
+    fallback: bool
+
+
+class CleanTitleCandidate(TypedDict):
+    provider: str
+    external_id: str
+    tmdb_id: str
+    media_type: str
+    title: str
+    year: str
+    score: float
+    support: int
+    metadata: CleanTitleMetadata
+
+
+def build_clean_title_candidate(value: str, strip_domains: str = "") -> CleanTitleCandidate | None:
     """为 MetaTube 无结果的明确番号生成“清洗标题后入库”候选。"""
     identifier = extract_nsfw_identifier(value, strip_domains)
     if identifier is None:
@@ -402,7 +420,7 @@ def build_clean_title_candidate(value: str, strip_domains: str = "") -> dict[str
     }
 
 def validate_category_name(value: str) -> str:
-    category = str(value or "成人内容").strip()
+    category = (value or "成人内容").strip()
     if not _SAFE_CATEGORY_RE.fullmatch(category) or category in {".", ".."}:
         raise ValueError("成人内容分类名不能包含路径分隔符或非法字符")
     return category
@@ -421,12 +439,12 @@ class MetaTubeClient:
         timeout: float = 8.0,
         session: requests.Session | None = None,
     ) -> None:
-        endpoint = str(endpoint or "").strip().rstrip("/")
+        endpoint = (endpoint or "").strip().rstrip("/")
         parsed = urlsplit(endpoint)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("MetaTube 服务地址必须是有效的 HTTP/HTTPS URL")
         self.endpoint = endpoint
-        self.token = str(token or "").strip()
+        self.token = (token or "").strip()
         self.timeout = max(2.0, min(float(timeout or 8.0), 30.0))
         self._owns_session = session is None
         self.session = session or requests.Session()
@@ -553,8 +571,8 @@ class MetaTubeClient:
         return sorted(exact, key=lambda item: (item.provider.casefold(), item.external_id))
 
     def get_movie(self, provider: str, external_id: str) -> MetaTubeMetadata:
-        safe_provider = quote(str(provider or "").strip(), safe="")
-        safe_id = quote(str(external_id or "").strip(), safe="")
+        safe_provider = quote((provider or "").strip(), safe="")
+        safe_id = quote((external_id or "").strip(), safe="")
         if not safe_provider or not safe_id:
             raise MetaTubeError("MetaTube 媒体身份不完整")
         data = self._get(f"/v1/movies/{safe_provider}/{safe_id}", params={"lazy": "true"})
@@ -580,7 +598,7 @@ def clear_nsfw_cache() -> None:
 
 
 def _cache_key(endpoint: str, token: str, code: str) -> str:
-    scope = hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()[:12]
+    scope = hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:12]
     return f"{endpoint.rstrip('/')}|{scope}|{normalize_code(code)}"
 
 
@@ -616,7 +634,7 @@ class NsfwRecognizer:
         session: requests.Session | None = None,
     ) -> None:
         self.client = MetaTubeClient(endpoint, token, timeout=timeout, session=session)
-        self.strip_domains = str(strip_domains or "")
+        self.strip_domains = (strip_domains or "")
         self._close_lock = threading.Lock()
         self._closed = False
 
@@ -672,6 +690,7 @@ class NsfwRecognizer:
                     if finished is not None:
                         finished.set()
             else:
+                assert cached is not None
                 rows, error = cached
                 if error or rows is None:
                     return []
@@ -732,7 +751,7 @@ class NsfwRecognizer:
         )
 
     def resolve(self, external_id: str) -> tuple[MatchResult, dict[str, Any]]:
-        provider, separator, item_id = str(external_id or "").partition(":")
+        provider, separator, item_id = (external_id or "").partition(":")
         if not separator or not provider or not item_id:
             raise MetaTubeError("MetaTube 媒体身份无效")
         item = self.client.get_movie(provider, item_id)

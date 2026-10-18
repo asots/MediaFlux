@@ -1,6 +1,9 @@
 """Web/Agent 本地整理重试共用状态机，保留中断核验与版本边界。"""
 from __future__ import annotations
 
+from typing import cast
+from app.agent.models import ToolContext
+
 from unittest.mock import patch
 
 from app import database as db
@@ -35,15 +38,19 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
         )
         if interrupted:
             db.init_db()
-        return db.get_local_media_task(task_id, owner="admin")
+        task = db.get_local_media_task(task_id, owner="admin")
+        assert task is not None
+        return task
 
     def test_cas_retry_clears_previous_confirmation_and_keeps_selection(self):
         task = self._task()
+        assert task is not None
         self.assertTrue(db.reset_local_media_task_if_current(
             task.id, owner="admin", expected_version=task.version,
             expected_status=task.status,
         ))
         retried = db.get_local_media_task(task.id, owner="admin")
+        assert retried is not None
         self.assertEqual(retried.confirmation_actor, "")
         self.assertEqual(retried.status, "waiting_stable")
         self.assertEqual(retried.version, task.version + 1)
@@ -53,6 +60,7 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
 
     def test_cas_retry_does_not_discard_interrupted_write_without_confirmation(self):
         task = self._task(interrupted=True)
+        assert task is not None
         self.assertTrue(db.is_interrupted_local_media_write_error(task.error))
         self.assertFalse(db.reset_local_media_task_if_current(
             task.id, owner="admin", expected_version=task.version,
@@ -63,6 +71,7 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
 
     def test_cas_retry_explicit_interruption_confirmation_is_replay_safe(self):
         task = self._task(interrupted=True)
+        assert task is not None
         args = dict(owner="admin", expected_version=task.version,
                     expected_status=task.status, confirm_interrupted_write=True)
         self.assertTrue(db.reset_local_media_task_if_current(task.id, **args))
@@ -74,6 +83,7 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
         task = self._task()
         for owner, version in (("other", task.version), ("admin", task.version - 1)):
             with self.subTest(owner=owner, version=version):
+                assert task is not None
                 self.assertFalse(db.reset_local_media_task_if_current(
                     task.id, owner=owner, expected_version=version,
                     expected_status=task.status,
@@ -86,8 +96,8 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
         for version, status in ((None, task.status), (task.version, None)):
             with self.subTest(version=version, status=status):
                 self.assertFalse(db.reset_local_media_task_if_current(
-                    task.id, owner="admin", expected_version=version,
-                    expected_status=status,
+                    task.id, owner="admin", expected_version=cast(int, version),
+                    expected_status=cast(str, status),
                 ))
                 self.assertEqual(db.get_local_media_task(task.id, owner="admin"), task)
                 self.assertEqual(len(db.list_local_media_task_items(task.id, owner="admin")), 1)
@@ -97,7 +107,7 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
         with patch.object(actions, "_require_owner", return_value="owner-a"), patch.object(
             self._domain_actions.local_media, "_current_task", return_value=(None, task)
         ):
-            result, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, None)
+            result, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, cast(ToolContext, None))
         self.assertTrue(fingerprint)
         self.assertTrue(result.data["interrupted_write"])
         self.assertIn("核验", " ".join(result.data["effects"]))
@@ -108,9 +118,10 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
         with patch.object(actions, "_require_owner", return_value="owner-a"), patch.object(
             self._domain_actions.local_media, "_current_task", return_value=(None, task)
         ), patch.object(actions, "get_local_media_scheduler") as scheduler:
-            _, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, None)
-            result = self._domain_actions.local_media.retry_local_media_task_confirmed({"task_number": 1}, fingerprint, None)
+            _, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, cast(ToolContext, None))
+            result = self._domain_actions.local_media.retry_local_media_task_confirmed({"task_number": 1}, fingerprint, cast(ToolContext, None))
         self.assertTrue(result.ok)
+        assert task is not None
         self.assertEqual(
             result.effect_metadata["completion"],
             {
@@ -120,5 +131,7 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
                 "operation": "retry",
             },
         )
-        self.assertEqual(db.get_local_media_task(task.id, owner="admin").confirmation_actor, "")
+        get_local_media_task_result = db.get_local_media_task(task.id, owner="admin")
+        assert get_local_media_task_result is not None
+        self.assertEqual(get_local_media_task_result.confirmation_actor, "")
         scheduler.return_value.reload.assert_called_once()

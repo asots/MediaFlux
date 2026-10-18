@@ -1,5 +1,9 @@
 """B2：后台规格补全沿用前台的分片身份与统一命名。"""
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
@@ -57,7 +61,7 @@ class ProbePreservesMultipart(IsolatedDatabaseTestCase):
                     match=match,
                     action="move",
                 )
-                organizer = Organizer(client=object(), scraper=object())
+                organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
                 organizer._apply_media_profile_to_move_plan(
                     initial,
                     original,
@@ -148,13 +152,15 @@ class ProbePreservesMultipart(IsolatedDatabaseTestCase):
                         "UPDATE organize_probe_queue SET next_attempt_at='2000-01-01 00:00:00'"
                     )
                 worker = OrganizeProbeWorker()
-                worker._client = client
+                worker._client = cast(GuangYaClient, client)
                 profile = MediaProfile(resolution="1080p", video_codec="H264")
                 with patch(
                     "app.modules.media_probe.probe_media_profile", return_value=profile
                 ):
                     self.assertTrue(worker._process_one())
-                after = client.file_info(current.file_id).name
+                file_info_result = client.file_info(current.file_id)
+                assert file_info_result is not None
+                after = file_info_result.name
                 job = None
                 with db.get_conn() as conn:
                     job = dict(
@@ -183,12 +189,16 @@ class ProbePreservesMultipart(IsolatedDatabaseTestCase):
                 )
                 self.assertEqual(after, expected.new_name)
                 self.assertEqual(expected.multipart_index, part)
+                file_info_result_2 = client.file_info(subtitle.file_id)
+                assert file_info_result_2 is not None
                 self.assertEqual(
-                    client.file_info(subtitle.file_id).name,
+                    file_info_result_2.name,
                     after.rsplit(".", 1)[0] + ".en.srt",
                 )
                 self.assertEqual(job["status"], "completed")
-                self.assertEqual(db.get_organize_log(log_id)["current_name"], after)
+                get_organize_log_result = db.get_organize_log(log_id)
+                assert get_organize_log_result is not None
+                self.assertEqual(get_organize_log_result["current_name"], after)
 
 
 if __name__ == "__main__":

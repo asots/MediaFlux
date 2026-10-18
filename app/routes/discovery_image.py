@@ -100,13 +100,13 @@ def _serializer() -> URLSafeSerializer:
 
 
 def _canonical_poster_key(provider: str, poster_key: str) -> tuple[str, str]:
-    provider = str(provider or "").strip().lower()
+    provider = (provider or "").strip().lower()
     if provider.startswith("calendar-"):
         key = canonical_platform_poster_key(provider.removeprefix("calendar-"), poster_key)
         if not key:
             raise HTTPException(status_code=400, detail="invalid platform poster key")
         return provider, key
-    raw = str(poster_key or "").strip().lstrip("/")
+    raw = (poster_key or "").strip().lstrip("/")
     decoded = unquote(raw)
     if (
         not raw or len(raw) > 1024 or raw != decoded or "%" in raw or "://" in raw
@@ -149,7 +149,7 @@ def decode_poster_token(provider: str, token: str) -> str:
     if not isinstance(payload, dict) or payload.get("v") != 1:
         raise HTTPException(status_code=400, detail="invalid poster token")
     signed_provider = str(payload.get("provider") or "")
-    if signed_provider != str(provider or "").strip().lower():
+    if signed_provider != (provider or "").strip().lower():
         raise HTTPException(status_code=400, detail="poster provider mismatch")
     _, key = _canonical_poster_key(signed_provider, str(payload.get("key") or ""))
     return key
@@ -202,7 +202,7 @@ def poster(request: Request, provider: str, token: str):
         raise HTTPException(status_code=401, detail="unauthorized")
     poster_key = decode_poster_token(provider, token)
     url = _upstream_url(provider, poster_key)
-    is_douban = str(provider or "").strip().lower() == "douban"
+    is_douban = (provider or "").strip().lower() == "douban"
     headers = _douban_headers() if is_douban else _default_headers()
 
     # 豆瓣 CDN 有时尝试不同的图片主机可以绕过单节点限流

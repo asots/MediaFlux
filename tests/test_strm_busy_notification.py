@@ -202,7 +202,11 @@ def test_cleanup_summary_describes_round_guard_and_only_observed_queue(queued):
         stats["organize_followup_queued"] = True
     event = handlers._strm_summary_event({"partial": True}, stats, 0)
     assert event.lines == cleanup_notice_lines(stats)
-    text = "\n".join(event.lines)
+    lines: list[str] = []
+    for line in event.lines:
+        assert isinstance(line, str)
+        lines.append(line)
+    text = "\n".join(lines)
     assert "暂停本轮删除型清理" in text
     assert "来源退役" in text
     assert "空目录" in text

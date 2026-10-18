@@ -1,6 +1,8 @@
 """Media Agent Bangumi 放送日历测试。"""
 
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
 import unittest
 from unittest.mock import Mock, patch
@@ -78,7 +80,7 @@ class AgentBangumiCalendarTests(unittest.TestCase):
         )
         for arguments in invalid:
             with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
-                calendar_arguments(arguments)
+                calendar_arguments(cast(dict[str, Any], arguments))
 
     def test_disabled_feature_does_not_create_service(self):
         service = Mock()

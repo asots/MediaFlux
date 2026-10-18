@@ -63,29 +63,30 @@ def safe_media_name(value: Any, *, path_value: bool = False,
             or "://" in decoded
         )
     )
-    path_style_uri = bool(
+    path_style_uri = (
         has_uri_scheme
         and parsed is not None
-        and str(parsed.path or "").startswith("/")
+        and (parsed.path or "").startswith("/")
     )
-    opaque_uri = bool(
+    opaque_uri = (
         has_uri_scheme
         and not explicit_uri
         and parsed is not None
         and (
-            str(parsed.scheme or "").lower() in _DANGEROUS_OPAQUE_URI_SCHEMES
-            or "@" in str(parsed.path or "")
+            (parsed.scheme or "").lower() in _DANGEROUS_OPAQUE_URI_SCHEMES
+            or "@" in (parsed.path or "")
             or has_sensitive_query
-            or bool(_SENSITIVE_ASSIGNMENT_RE.search(str(parsed.path or "")))
+            or bool(_SENSITIVE_ASSIGNMENT_RE.search(parsed.path or ""))
         )
     )
     if (
         opaque_uri
+        and parsed is not None
         and not parsed.netloc
-        and not str(parsed.path or "").startswith("/")
+        and not (parsed.path or "").startswith("/")
     ):
         return ""
-    is_uri = bool(
+    is_uri = (
         explicit_uri or path_style_uri or (path_value and has_uri_scheme)
     )
     is_path = bool(
@@ -113,4 +114,4 @@ def safe_media_name(value: Any, *, path_value: bool = False,
         selected = raw
 
     selected = _CONTROL_RE.sub(" ", selected).strip()
-    return selected[:max(1, int(limit))]
+    return selected[:max(1, limit)]

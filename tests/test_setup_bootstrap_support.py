@@ -30,12 +30,16 @@ def initialize_web_paths(paths, username, password, inspect_page=None):
         assert not paths.env_file.exists()
         assert not paths.database_path.exists()
         assert not (paths.config_dir / '.web-secret-key').exists()
-        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+        search_result = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+        assert search_result is not None
+        token = search_result.group(1)
         assert token in client.get('/setup').text
         if inspect_page:
             inspect_page(page, client)
         page = client.get('/setup')
-        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+        search_result_2 = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+        assert search_result_2 is not None
+        token = search_result_2.group(1)
         response = client.post('/setup', data={
             'username': username, 'password': password,
             'password_confirm': password, 'csrf_token': token,
@@ -45,7 +49,9 @@ def initialize_web_paths(paths, username, password, inspect_page=None):
         assert not client.cookies.get('session')
         page = client.get('/login')
         assert page.status_code == 200
-        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+        search_result_3 = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+        assert search_result_3 is not None
+        token = search_result_3.group(1)
         response = client.post('/login', data={
             'username': username, 'password': password, 'csrf_token': token,
         }, follow_redirects=False)

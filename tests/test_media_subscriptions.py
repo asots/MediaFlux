@@ -27,6 +27,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
 
     def test_search_failures_are_correlated_without_changing_inventory_missing_results(self):
         import json
+
         from app.indexers.models import AggregatedIndexerResult, IndexerProviderError
 
         service = MediaSubscriptionService()
@@ -60,7 +61,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
                 self.assertEqual(checked["result"]["candidate_count"], 0)
                 events = [record for record in logs.records if hasattr(record, "media_subscription_search")]
                 self.assertEqual(len(events), 1)
-                event = events[0].media_subscription_search
+                event = getattr(events[0], "media_subscription_search")
                 self.assertEqual((event["outcome"], event["subscription_id"], event["media_type"], event["season"], event["episode"]),
                                  (outcome, subscription_id, "tv", 1, 1))
                 self.assertEqual(event["run_id"], db.list_media_subscription_runs(subscription_id=subscription_id)[0]["id"])
@@ -75,7 +76,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
     def test_search_cancellation_keeps_preview_and_live_exception_contracts(self):
         service = MediaSubscriptionService()
         subscription_id = self._seed_subscription(tmdb_id="7", media_type="movie")
-        self.assertIsNotNone(db.claim_media_subscription_check_run(subscription_id, "manual"))
+        assert (db.claim_media_subscription_check_run(subscription_id, "manual")) is not None
         row = db.get_media_subscription(subscription_id)
         async def run(awaitable):
             return await awaitable
@@ -98,7 +99,11 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
                             self.assertIs(caught.exception, failure)
                         else:
                             result = asyncio.run(coroutine)
-                            self.assertEqual(result["status"] if preview else result, "unavailable" if preview else (0, 0))
+                            if preview:
+                                assert isinstance(result, dict)
+                                self.assertEqual(result["status"], "unavailable")
+                            else:
+                                self.assertEqual(result, (0, 0))
                     event = next(record.media_subscription_search for record in logs.records if hasattr(record, "media_subscription_search"))
                     expected = ("cancelled" if isinstance(failure, asyncio.CancelledError) or (not preview and getattr(failure, "code", "") == "cancelled")
                                 else "rejected" if propagated else "unavailable")
@@ -108,7 +113,10 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
                     self.assertNotIn("sensitive-value", " ".join(logs.output))
 
     def test_four_search_paths_keep_the_same_normalized_requests(self):
-        from app.indexers.models import AggregatedIndexerResult, IndexerMediaSearchRequest
+        from app.indexers.models import (
+            AggregatedIndexerResult,
+            IndexerMediaSearchRequest,
+        )
 
         service = MediaSubscriptionService()
         detail = {"original_name": "TV original", "original_title": "Movie original"}
@@ -117,7 +125,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             return await awaitable
         for media_type in ("tv", "movie"):
             subscription_id = self._seed_subscription(tmdb_id="7", media_type=media_type)
-            self.assertIsNotNone(db.claim_media_subscription_check_run(subscription_id, "manual"))
+            assert (db.claim_media_subscription_check_run(subscription_id, "manual")) is not None
             row = db.get_media_subscription(subscription_id)
             target = _ExpectedMedia("tmdb:7:tv:S01E002", season=1, episode=2)
             for preview in (True, False):
@@ -134,9 +142,11 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
                                      if preview else service._search_movie(row, detail, "tmdb:7:movie"))
                     asyncio.run(coroutine)
                 request, sites = indexer.search_media.call_args.args
+                assert row is not None
                 original = detail["original_name" if media_type == "tv" else "original_title"]
-                options = ({"aliases": [row["title"], original], "sort_mode": "published_desc", "season": 1, "episode": 2}
+                options: dict = ({"aliases": [row["title"], original], "sort_mode": "published_desc", "season": 1, "episode": 2}
                            if media_type == "tv" else {})
+                assert row is not None
                 expected = IndexerMediaSearchRequest.create(title=row["title"], original_title=original, year=row["year"], media_type=media_type, **options)
                 self.assertEqual(request, expected)
                 self.assertEqual(sites, ["site"])
@@ -208,7 +218,9 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         self.assertEqual({row["id"] for row in rows}, set(current[:2]))
         submitted = next(row for row in rows if row["status"] == "submitted")
         self.assertEqual(submitted["delivery"]["request_status"], "downloading")
-        self.assertEqual(db.get_media_subscription_candidate(historical[0])["status"], "expired")
+        get_media_subscription_candidate_result = db.get_media_subscription_candidate(historical[0])
+        assert get_media_subscription_candidate_result is not None
+        self.assertEqual(get_media_subscription_candidate_result["status"], "expired")
         self.assertEqual(service.get_subscription(subscription_id)["candidate_count"], len(rows))
         self.assertEqual([row["id"] for row in db.list_media_subscription_candidates(subscription_id)], current[:1])
         history = db.list_media_subscription_candidates(subscription_id, statuses=(), limit=500)
@@ -218,7 +230,9 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(limited), 1)
         db.update_media_subscription_candidate(current[0], expires_at="2000-01-01 00:00:00")
         self.assertEqual([row["id"] for row in service.list_candidates(subscription_id)], current[1:2])
-        self.assertEqual(db.get_media_subscription_candidate(current[0])["status"], "expired")
+        get_media_subscription_candidate_result_2 = db.get_media_subscription_candidate(current[0])
+        assert get_media_subscription_candidate_result_2 is not None
+        self.assertEqual(get_media_subscription_candidate_result_2["status"], "expired")
 
     def test_create_normalizes_identity_and_atomically_upserts_same_tmdb_media(self) -> None:
         service = MediaSubscriptionService()
@@ -387,8 +401,10 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             subscription_id, media_key=media_key, result_ids=("result-a",)
         )[0]
         run_id = db.claim_media_subscription_check_run(subscription_id, "manual")
-        self.assertIsNotNone(run_id)
-        revision = int(db.get_media_subscription(subscription_id)["revision"])
+        assert (run_id) is not None
+        get_media_subscription_result = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result is not None
+        revision = int(get_media_subscription_result["revision"])
         admission_id = db.claim_media_download_admission(
             media_key=media_key,
             tmdb_id="86034",
@@ -400,13 +416,15 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             subscription_revision=revision,
             require_active_check=True,
         )
-        self.assertIsInstance(admission_id, int)
-        self.assertGreater(int(admission_id or 0), 0)
+        assert isinstance(admission_id, int)
+        self.assertGreater(admission_id or 0, 0)
 
         updated = service.update_subscription(subscription_id, {"action": "notify"})
         self.assertEqual(updated["status"], "new")
         self.assertEqual(int(updated["revision"]), revision + 1)
-        self.assertEqual(db.get_media_subscription_candidate(candidate_id)["status"], "expired")
+        get_media_subscription_candidate_result_3 = db.get_media_subscription_candidate(candidate_id)
+        assert get_media_subscription_candidate_result_3 is not None
+        self.assertEqual(get_media_subscription_candidate_result_3["status"], "expired")
         with db.get_conn() as conn:
             admission = conn.execute(
                 "SELECT status FROM media_download_admissions WHERE id=?", (admission_id,)
@@ -418,7 +436,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         self.assertEqual(run["status"], "cancelled")
         committed = db.finalize_media_subscription_check(
             subscription_id,
-            int(run_id),
+            run_id,
             status="satisfied",
             run_status="satisfied",
             summary="旧检查结果",
@@ -432,7 +450,9 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             subscription_revision=revision,
         )
         self.assertFalse(committed)
-        self.assertEqual(db.get_media_subscription(subscription_id)["status"], "new")
+        get_media_subscription_result_2 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_2 is not None
+        self.assertEqual(get_media_subscription_result_2["status"], "new")
 
     def test_stale_run_cannot_overwrite_or_dispatch_after_reclaim(self) -> None:
         subscription_id = self._seed_subscription()
@@ -441,8 +461,10 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             subscription_id, media_key=media_key, result_ids=("stale-run",)
         )[0]
         stale_run_id = db.claim_media_subscription_check_run(subscription_id, "scheduler")
-        self.assertIsNotNone(stale_run_id)
-        revision = int(db.get_media_subscription(subscription_id)["revision"])
+        assert (stale_run_id) is not None
+        get_media_subscription_result_3 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_3 is not None
+        revision = int(get_media_subscription_result_3["revision"])
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE media_subscriptions SET updated_at=datetime('now','localtime','-31 minutes') "
@@ -452,13 +474,13 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(db.recover_stale_media_subscription_checks(stale_minutes=30), 1)
         current_run_id = db.claim_media_subscription_check_run(subscription_id, "retry")
-        self.assertIsNotNone(current_run_id)
+        assert (current_run_id) is not None
         self.assertNotEqual(stale_run_id, current_run_id)
         self.assertFalse(db.media_subscription_check_is_active(
-            subscription_id, revision, run_id=int(stale_run_id)
+            subscription_id, revision, run_id=stale_run_id
         ))
         self.assertTrue(db.media_subscription_check_is_active(
-            subscription_id, revision, run_id=int(current_run_id)
+            subscription_id, revision, run_id=current_run_id
         ))
 
         stale_admission = db.claim_media_download_admission(
@@ -471,13 +493,13 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             episode=1,
             subscription_revision=revision,
             require_active_check=True,
-            check_run_id=int(stale_run_id),
+            check_run_id=stale_run_id,
         )
         self.assertEqual(stale_admission, 0)
 
         stale_committed = db.finalize_media_subscription_check(
             subscription_id,
-            int(stale_run_id),
+            stale_run_id,
             status="satisfied",
             run_status="satisfied",
             summary="迟到的旧检查结果",
@@ -491,11 +513,13 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             subscription_revision=revision,
         )
         self.assertFalse(stale_committed)
-        self.assertEqual(db.get_media_subscription(subscription_id)["status"], "checking")
+        get_media_subscription_result_4 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_4 is not None
+        self.assertEqual(get_media_subscription_result_4["status"], "checking")
 
         current_committed = db.finalize_media_subscription_check(
             subscription_id,
-            int(current_run_id),
+            current_run_id,
             status="missing",
             run_status="missing",
             summary="当前检查结果",
@@ -510,6 +534,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(current_committed)
         current = db.get_media_subscription(subscription_id)
+        assert current is not None
         self.assertEqual(current["status"], "missing")
         self.assertIn('"run":"current"', current["result_json"])
 
@@ -521,7 +546,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         self.assertTrue(db.delete_media_subscription(subscription_id))
         self.assertIsNone(db.get_media_subscription(subscription_id))
         deleted = db.get_media_subscription(subscription_id, include_deleted=True)
-        self.assertIsNotNone(deleted)
+        assert (deleted) is not None
         self.assertEqual(int(deleted["enabled"]), 0)
         self.assertTrue(deleted["deleted_at"])
         runs = db.list_media_subscription_runs(subscription_id=subscription_id)
@@ -674,6 +699,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             result_ids=("stale",),
         )[0]
         row = db.get_media_subscription(subscription_id)
+        assert row is not None
         old_revision = int(row["revision"])
         admission_id = db.claim_media_download_admission(
             media_key="tmdb:86034:tv:S01E001",
@@ -685,11 +711,11 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             episode=1,
             subscription_revision=old_revision,
         )
-        self.assertIsInstance(admission_id, int)
+        assert isinstance(admission_id, int)
 
         service.update_subscription(subscription_id, {"action": "notify"})
         allowed = db.begin_media_download_dispatch(
-            int(admission_id),
+            admission_id,
             subscription_id=subscription_id,
             subscription_revision=old_revision,
         )
@@ -697,7 +723,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             admission = conn.execute(
                 "SELECT status,error FROM media_download_admissions WHERE id=?",
-                (int(admission_id),),
+                (admission_id,),
             ).fetchone()
         self.assertEqual(admission["status"], "cancelled")
         self.assertIn("配置已变更", admission["error"])
@@ -711,6 +737,8 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             media_key="tmdb:127532:tv:S01E001",
             result_ids=("other",),
         )[0]
+        get_media_subscription_result_5 = db.get_media_subscription(first_id)
+        assert get_media_subscription_result_5 is not None
         claimed = db.claim_media_download_admission(
             media_key="tmdb:127532:tv:S01E001",
             tmdb_id="127532",
@@ -719,7 +747,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             candidate_id=candidate_id,
             season=1,
             episode=1,
-            subscription_revision=int(db.get_media_subscription(first_id)["revision"]),
+            subscription_revision=int(get_media_subscription_result_5["revision"]),
         )
         self.assertEqual(claimed, 0)
 
@@ -772,6 +800,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         runs = db.list_media_subscription_runs(subscription_id=subscription_id)
         self.assertEqual(runs[0]["status"], "cancelled")
         subscription = db.get_media_subscription(subscription_id)
+        assert subscription is not None
         self.assertEqual(subscription["status"], "new")
         self.assertEqual(subscription["last_error"], "")
         self.assertIn(
@@ -779,7 +808,7 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             [int(row["id"]) for row in db.list_due_media_subscriptions()],
         )
         reclaimed = db.claim_media_subscription_check_run(subscription_id, "retry")
-        self.assertIsNotNone(reclaimed)
+        assert (reclaimed) is not None
 
     def test_cancel_event_releases_checking_lease_immediately(self) -> None:
         service = MediaSubscriptionService()
@@ -797,7 +826,9 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         self.assertEqual(ctx.exception.code, "cancelled")
         runs = db.list_media_subscription_runs(subscription_id=subscription_id)
         self.assertEqual(runs[0]["status"], "cancelled")
-        self.assertEqual(db.get_media_subscription(subscription_id)["status"], "new")
+        get_media_subscription_result_6 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_6 is not None
+        self.assertEqual(get_media_subscription_result_6["status"], "new")
         self.assertIn(
             subscription_id,
             [int(row["id"]) for row in db.list_due_media_subscriptions()],
@@ -811,7 +842,9 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
             action="auto",
             download_target="guangya",
         )
-        before = dict(db.get_media_subscription(subscription_id))
+        get_media_subscription_result_11 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_11 is not None
+        before = dict(get_media_subscription_result_11)
         expected = _ExpectedMedia(
             media_key="tmdb:86034:tv:S01E003",
             season=1,
@@ -874,7 +907,9 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         ):
             result = asyncio.run(service.preview_subscription_updates(subscription_id))
 
-        after = dict(db.get_media_subscription(subscription_id))
+        get_media_subscription_result_12 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_12 is not None
+        after = dict(get_media_subscription_result_12)
         self.assertEqual(result["status"], "missing")
         self.assertEqual(result["missing"][0]["label"], "S01E03")
         self.assertEqual(result["resource_search"]["candidate_count"], 1)
@@ -889,20 +924,23 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
     def test_stale_cancel_cannot_release_new_configuration(self) -> None:
         subscription_id = self._seed_subscription()
         run_id = db.claim_media_subscription_check_run(subscription_id, "manual")
-        self.assertIsNotNone(run_id)
-        old_revision = int(db.get_media_subscription(subscription_id)["revision"])
+        assert (run_id) is not None
+        get_media_subscription_result_7 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_7 is not None
+        old_revision = int(get_media_subscription_result_7["revision"])
         service = MediaSubscriptionService()
         service.update_subscription(subscription_id, {"action": "notify"})
 
         self.assertFalse(
             db.cancel_media_subscription_run(
-                int(run_id),
+                run_id,
                 subscription_id=subscription_id,
                 subscription_revision=old_revision,
                 reason="旧检查已取消",
             )
         )
         current = db.get_media_subscription(subscription_id)
+        assert current is not None
         self.assertEqual(current["action"], "notify")
         self.assertEqual(current["status"], "new")
 
@@ -910,24 +948,27 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         service = MediaSubscriptionService()
         subscription_id = self._seed_subscription()
         run_id = db.claim_media_subscription_check_run(subscription_id, "manual")
-        self.assertIsNotNone(run_id)
-        old_revision = int(db.get_media_subscription(subscription_id)["revision"])
+        assert (run_id) is not None
+        get_media_subscription_result_8 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_8 is not None
+        old_revision = int(get_media_subscription_result_8["revision"])
         service.update_subscription(subscription_id, {"action": "notify"})
 
         committed = db.fail_media_subscription_check(
             subscription_id,
-            int(run_id),
+            run_id,
             interval_minutes=60,
             error="旧检查失败",
             subscription_revision=old_revision,
         )
         self.assertFalse(committed)
         current = db.get_media_subscription(subscription_id)
+        assert current is not None
         self.assertEqual(current["action"], "notify")
         self.assertEqual(current["status"], "new")
         with db.get_conn() as conn:
             run = conn.execute(
-                "SELECT status FROM media_subscription_runs WHERE id=?", (int(run_id),)
+                "SELECT status FROM media_subscription_runs WHERE id=?", (run_id,)
             ).fetchone()
         self.assertEqual(run["status"], "cancelled")
 
@@ -947,7 +988,9 @@ class MediaSubscriptionHotspotTests(IsolatedDatabaseTestCase):
             media_key="tmdb:86034:tv:S01E001",
             result_ids=("hotspot",),
         )[0]
-        revision = int(db.get_media_subscription(subscription_id)["revision"])
+        get_media_subscription_result_9 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_9 is not None
+        revision = int(get_media_subscription_result_9["revision"])
         admission_id = db.claim_media_download_admission(
             media_key="tmdb:86034:tv:S01E001",
             tmdb_id="86034",
@@ -958,7 +1001,8 @@ class MediaSubscriptionHotspotTests(IsolatedDatabaseTestCase):
             episode=1,
             subscription_revision=revision,
         )
-        return subscription_id, int(admission_id)
+        assert admission_id is not None
+        return subscription_id, admission_id
 
     def test_reconcile_admissions_uses_one_repository_boundary(self) -> None:
         subscription_id, admission_id = self._seed()
@@ -1112,8 +1156,10 @@ class MediaSubscriptionAutoCandidateSelectionTests(IsolatedDatabaseTestCase):
             require_active_check=True,
             cancel_event=None,
         )
+        get_media_subscription_candidate_result_4 = db.get_media_subscription_candidate(submitted_id)
+        assert get_media_subscription_candidate_result_4 is not None
         self.assertEqual(
-            db.get_media_subscription_candidate(submitted_id)["status"],
+            get_media_subscription_candidate_result_4["status"],
             "submitted",
         )
 
@@ -1208,7 +1254,9 @@ class MediaSubscriptionCancellationBoundaryTests(IsolatedDatabaseTestCase):
             media_key="tmdb:86034:tv:S01E001",
             result_ids=("race",),
         )[0]
-        revision = int(db.get_media_subscription(subscription_id)["revision"])
+        get_media_subscription_result_10 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_10 is not None
+        revision = int(get_media_subscription_result_10["revision"])
         admission_id = db.claim_media_download_admission(
             media_key="tmdb:86034:tv:S01E001",
             tmdb_id="86034",
@@ -1231,9 +1279,10 @@ class MediaSubscriptionCancellationBoundaryTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(updated, 0)
         with db.get_conn() as conn:
+            assert admission_id is not None
             status = conn.execute(
                 "SELECT status FROM media_download_admissions WHERE id=?",
-                (int(admission_id),),
+                (admission_id,),
             ).fetchone()["status"]
         self.assertEqual(status, "cancelled")
 

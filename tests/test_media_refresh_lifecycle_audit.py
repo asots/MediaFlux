@@ -89,6 +89,7 @@ class MediaRefreshLifecycleAuditTests(TestCase):
             self.assertEqual(stopped, [True])
             self.assertTrue(start_returned.is_set())
             self.assertEqual(factory.call_count, 1)
+            assert coordinator._thread is not None
             self.assertTrue(coordinator._thread.is_alive())
         finally:
             coordinator.stop()
@@ -101,13 +102,15 @@ class MediaRefreshLifecycleAuditTests(TestCase):
         ) as factory:
             coordinator.start()
             first = coordinator._thread
-            first.finish_on_join = False
+            assert first is not None
+            setattr(first, "finish_on_join", False)
             self.assertFalse(coordinator.stop(timeout=0.1))
             self.assertIs(coordinator._thread, first)
             coordinator.start()
             self.assertEqual(factory.call_count, 1)
             self.assertTrue(coordinator._stop_event.is_set())
-            first.alive = False
+            assert first is not None
+            setattr(first, "alive", False)
             coordinator.start()
             self.assertEqual(factory.call_count, 2)
             self.assertIsNot(coordinator._thread, first)
@@ -128,6 +131,7 @@ class MediaRefreshLifecycleAuditTests(TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "thread start failure"):
                     coordinator.start()
+            assert coordinator._thread is not None
             self.assertFalse(coordinator._thread.is_alive())
             coordinator.start()
             for _ in range(10):

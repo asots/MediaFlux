@@ -17,7 +17,6 @@ from typing import Literal, Sequence
 from app.defaults import DEFAULT_WEB_PORT
 from app.runtime_paths import RuntimePaths
 
-
 DiagnosticStatus = Literal["ok", "warning", "error"]
 DEFAULT_SERVICE_HOST = "0.0.0.0"
 DEFAULT_SERVICE_PORT = DEFAULT_WEB_PORT
@@ -149,8 +148,8 @@ def _windows_elevation_state() -> bool | None:
     try:
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        advapi32 = getattr(ctypes, "WinDLL")("advapi32", use_last_error=True)
 
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
         advapi32.OpenProcessToken.argtypes = [
@@ -468,7 +467,7 @@ def _port_check(host: str, port: int) -> DiagnosticCheck:
 
 
 def _ffprobe_check() -> DiagnosticCheck:
-    configured = str(
+    configured = (
         os.environ.get("MEDIAFLUX_FFPROBE")
         or ""
     ).strip()

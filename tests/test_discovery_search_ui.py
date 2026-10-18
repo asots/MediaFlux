@@ -49,7 +49,7 @@ class DiscoverySearchUIContractTests(unittest.TestCase):
 
     def test_toolbar_contains_compact_search_and_icon_only_actions(self):
         toolbar = re.search(r'<div class="discovery-toolbar">(?P<body>.*?)</div>\s*</section>', self.template, re.S)
-        self.assertIsNotNone(toolbar)
+        assert (toolbar) is not None
         body = toolbar.group("body")
         self.assertRegex(body, re.compile(r'<form[^>]+id="discovery-search-form".*?<div[^>]+id="discovery-filter-region"', re.S))
         self.assertRegex(
@@ -925,6 +925,7 @@ class DiscoveryResourceSiteFilterContractTests(unittest.TestCase):
 class DiscoveryResourceSiteFilterBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = next(
             (
@@ -1178,7 +1179,9 @@ class DiscoveryResourceSiteFilterBrowserTests(unittest.TestCase):
     def open_gallery_cache_fixture(self, width=1100, delayed_section=False):
         from jinja2 import Environment, FileSystemLoader
         env = Environment(loader=FileSystemLoader(ROOT / "app/templates"))
-        content = re.search(r"{% block content %}(.*?){% endblock %}", TEMPLATE.read_text(), re.S).group(1)
+        search_result = re.search(r"{% block content %}(.*?){% endblock %}", TEMPLATE.read_text(), re.S)
+        assert search_result is not None
+        content = search_result.group(1)
         body = env.from_string(content).render(resource_results_enabled=True, url_for=lambda *args, **kwargs: "#")
         context = self.browser.new_context(viewport={"width": width, "height": 800})
         self.addCleanup(context.close)
@@ -1470,8 +1473,12 @@ class DiscoveryResourceSiteFilterBrowserTests(unittest.TestCase):
         btbtla = page.locator("[data-resource-site-filter='btbtla']")
         nyaa = page.locator("[data-resource-site-filter='nyaa']")
         self.assertEqual(btbtla.locator("span").first.inner_text(), "BTBtla 失败")
-        self.assertIn("BTBtla 独立错误", btbtla.get_attribute("aria-label"))
-        self.assertIn("Nyaa 独立错误", nyaa.get_attribute("title"))
+        text_content = btbtla.get_attribute("aria-label")
+        assert text_content is not None
+        self.assertIn("BTBtla 独立错误", text_content)
+        text_content = nyaa.get_attribute("title")
+        assert text_content is not None
+        self.assertIn("Nyaa 独立错误", text_content)
         btbtla.focus()
         details = page.locator(".discovery-resource-site-details.is-visible")
         self.assertIn("BTBtla 独立错误", details.inner_text())
@@ -1513,12 +1520,16 @@ class DiscoveryResourceSiteFilterBrowserTests(unittest.TestCase):
         )
         btbtla = page.locator("[data-resource-site-filter='btbtla']")
         self.assertEqual(btbtla.locator("span").first.inner_text(), "BTBtla 0")
-        self.assertIn("BTBtla：暂无结果", btbtla.get_attribute("aria-label"))
+        text_content = btbtla.get_attribute("aria-label")
+        assert text_content is not None
+        self.assertIn("BTBtla：暂无结果", text_content)
         btbtla.focus()
         self.assertIn("BTBtla：没有匹配项", page.locator(".discovery-resource-site-details.is-visible").inner_text())
         disabled = page.locator(".discovery-resource-site-status.is-disabled")
         self.assertEqual(disabled.count(), 1)
-        self.assertIn("Nyaa：未启用", disabled.get_attribute("aria-label"))
+        text_content = disabled.get_attribute("aria-label")
+        assert text_content is not None
+        self.assertIn("Nyaa：未启用", text_content)
 
     def test_filter_select_focus_stays_inside_complete_wrapper_without_geometry_shift(self):
         page = self.open_filter_controls()
@@ -1703,6 +1714,7 @@ class DiscoveryResourceSiteFilterBrowserTests(unittest.TestCase):
                 page.evaluate("window.scrollTo(0, 1000)")
                 button.wait_for(state="visible")
                 bounds = button.bounding_box()
+                assert bounds is not None
                 self.assertGreaterEqual(bounds["width"], 44)
                 self.assertGreaterEqual(bounds["height"], 44)
                 self.assertLessEqual(bounds["x"] + bounds["width"], width)

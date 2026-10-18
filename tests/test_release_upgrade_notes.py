@@ -22,7 +22,7 @@ class ReleaseUpgradeNotesTests(unittest.TestCase):
 
     def upgrade_span(self):
         span = re.search(r"\bschema\s*(\d+)\s*→\s*(\d+)", self.section)
-        self.assertIsNotNone(span, "升级说明必须声明完整 schema 跨度")
+        assert (span) is not None, "升级说明必须声明完整 schema 跨度"
         return int(span.group(1)), int(span.group(2))
 
     def assert_supported_upgrade(self, previous, target):

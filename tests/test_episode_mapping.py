@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import unittest
 from datetime import date, timedelta
 from unittest.mock import Mock
@@ -120,7 +124,9 @@ class EpisodeMappingTests(unittest.TestCase):
             directory_member_count=2,
         )
 
+        assert first is not None
         self.assertEqual((first.target_season, first.target_episode), (0, 7))
+        assert second is not None
         self.assertEqual((second.target_season, second.target_episode), (0, 8))
         self.assertEqual(first.mode, "tmdb_special")
         self.assertEqual(first.confidence, 1.0)
@@ -145,6 +151,7 @@ class EpisodeMappingTests(unittest.TestCase):
             directory_member_count=26,
         )
 
+        assert mapping is not None
         self.assertEqual((mapping.target_season, mapping.target_episode), (0, 8))
 
     def test_overflow_special_mapping_rejects_partial_or_mixed_directory(self):
@@ -807,7 +814,7 @@ class EpisodeMappingTests(unittest.TestCase):
         self.assertEqual(last.mode, "absolute")
 
     def test_bare_episode_evidence_fails_closed_without_complete_single_mode_sequence(self):
-        cases = {
+        cases: dict[str, list[tuple[str, str, int | None, int | None]]] = {
             "missing_first": [
                 ("show", "Show", None, episode) for episode in range(2, 6)
             ],
@@ -1010,7 +1017,7 @@ class DirectoryScrapeEpisodeMappingTests(unittest.TestCase):
                 )
 
         scraper = FixedMatchScraper(
-            Delegate(),
+            cast(TMDBScraper, Delegate()),
             MatchResult(tmdb_id="100", title="Example Show", year="2026", media_type="tv"),
             season_override=1,
             position_overrides=overrides,
@@ -1060,7 +1067,7 @@ class DirectoryScrapeEpisodeMappingTests(unittest.TestCase):
                 return "invalid"
 
         scraper = FixedMatchScraper(
-            Delegate(),
+            cast(TMDBScraper, Delegate()),
             MatchResult(
                 tmdb_id="100", provider="tmdb", title="Example Show",
                 year="2026", media_type="tv",
@@ -1086,7 +1093,7 @@ class DirectoryScrapeEpisodeMappingTests(unittest.TestCase):
 
         delegate = Delegate()
         scraper = FixedMatchScraper(
-            delegate,
+            cast(TMDBScraper, delegate),
             MatchResult(
                 tmdb_id="100", provider="tmdb", title="Example Show",
                 year="2026", media_type="tv",
@@ -1126,10 +1133,10 @@ class DirectoryScrapeEpisodeMappingTests(unittest.TestCase):
                     return {"id": 100, "seasons": [{"season_number": 1, "episode_count": 12}]}
                 delegate = SimpleNamespace(get_detail=detail)
                 scraper = FixedMatchScraper(
-                    delegate, MatchResult(tmdb_id="100", media_type="tv"),
+                    cast(TMDBScraper, delegate), MatchResult(tmdb_id="100", media_type="tv"),
                     {"id": 100, "seasons": [{"season_number": 1, "episode_count": 12}]},
                 ) if wrapped else delegate
-                organizer = Organizer(client=object(), scraper=scraper)
+                organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, scraper))
                 organizer._detail("100", "tv")
                 calls.clear()
                 with self.assertRaisesRegex(TypeError, "metadata decoder failed"):

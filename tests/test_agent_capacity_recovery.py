@@ -938,6 +938,7 @@ def test_unfinished_confirmation_preserves_capacity_and_receipt_without_replay(
             )
         ]
         current = await reopened()
+        assert isinstance(active.state_store, SQLiteKernelStore)
         size = len(
             json.dumps(
                 active.state_store._state_payload(current),

@@ -1,6 +1,9 @@
 """STRM 提交、恢复与刷新交接反例；临时 SQLite / 假云盘，禁止外网。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import json
 import sqlite3
 import subprocess
@@ -58,8 +61,8 @@ def _run(root, *, mode="full", enabled=True, allow_emby=True, tree=None,
             stack.enter_context(patch.object(scheduler, name, return_value=value))
         for name in ("_notify_success", "_notify_details", "_notify_failure", "_schedule_persisted_change_queue"):
             stack.enter_context(patch.object(scheduler, name))
-        stack.enter_context(patch.object(scheduler_module, "sync_strm", side_effect=lambda **kw: strm.sync_strm(client=client, **kw)))
-        stack.enter_context(patch.object(scheduler_module, "sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=client, **kw)))
+        stack.enter_context(patch.object(scheduler_module, "sync_strm", side_effect=lambda **kw: strm.sync_strm(client=cast(GuangYaClient, client), **kw)))
+        stack.enter_context(patch.object(scheduler_module, "sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=cast(GuangYaClient, client), **kw)))
         execute = scheduler._execute_locked
 
         def execute_with_policy(trigger):
@@ -304,7 +307,7 @@ def test_skipped_provider_is_not_a_durable_handoff(tmp_path):
 def test_real_scheduler_entry_retires_last_source_without_config_short_circuit(tmp_path, entry):
     with isolated_test_database(), ExitStack() as stack:
         # 真正的索引/文件事实；随后仅配置变为空，没有伪造来源解析或校验。
-        strm.sync_strm("s", "http://play.invalid", str(tmp_path), client=_TreeClient(_tree(flat=True)))
+        strm.sync_strm("s", "http://play.invalid", str(tmp_path), client=cast(GuangYaClient, _TreeClient(_tree(flat=True))))
         db.enqueue_strm_retired_source("s", "S", str(tmp_path))
         stack.enter_context(patch.object(config, "_cache", {
             "GY_STRM_SOURCE_DIRS": "[]", "STRM_ROOT": str(tmp_path),
@@ -332,6 +335,7 @@ def test_real_scheduler_entry_retires_last_source_without_config_short_circuit(t
                 assert scheduler.trigger("config-retirement")["ok"]
             assert scheduler._run_released_event.wait(5), "真实 scheduler 入口未完成退役"
             run = db.get_last_task_run("strm_sync")
+            assert run is not None
             assert run["trigger_type"] == ("cron" if entry == "start-cron" else "config-retirement")
             result = json.loads(run["result"])
             assert result["stats"]["cleaned"] == result["stats"]["retired_sources"] == 1
@@ -385,6 +389,7 @@ def test_pending_refresh_event_is_partial_without_generation_failures(refresh_re
     )
     assert event.title == "⚠️ STRM 同步部分完成"
     text = dict(event.fields)["媒体库刷新"]
+    assert isinstance(text, str)
     assert "待重试（等待配置恢复）" in text
     assert "pending" not in text and "❌" not in text
 

@@ -1,6 +1,7 @@
 """真实任务判据的离线对照；伪造轨迹只用于测验收器，不计真实成功率。"""
 
 from __future__ import annotations
+from typing import Any
 
 import copy
 import json
@@ -15,7 +16,7 @@ def cases():
     return {row["id"]: row for row in eval_agent.load_live_cases()}
 
 
-def trace(case):
+def trace(case) -> dict[str, Any]:
     return {
         "case_id": case["id"],
         "case_version": case["version"],
@@ -39,7 +40,7 @@ def trace(case):
     }
 
 
-def receipt(name, arguments, data, **extra):
+def receipt(name, arguments, data, **extra) -> dict[str, Any]:
     return {
         "tool": name,
         "arguments": arguments,

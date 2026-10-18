@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from typing import cast
 
 from app.indexers.config import plan_media_site_route, tmdb_detail_is_animation
 from app.indexers.service import IndexerService
@@ -94,7 +95,7 @@ class ServiceMediaSiteRouteTests(unittest.TestCase):
 
         stub = SimpleNamespace(site_ids_for_scope=allowed_sites)
         routed = IndexerService.media_site_route(
-            stub, is_animation=False, original_language="zh",
+            cast(IndexerService, stub), is_animation=False, original_language="zh",
         )
 
         self.assertEqual(requested_scopes, ["manual"])

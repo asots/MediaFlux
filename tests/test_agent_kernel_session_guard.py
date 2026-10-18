@@ -1,7 +1,9 @@
 """A4：跨 worker 会话写保护、反向竞争和旧 publication 的隔离业务回归。"""
 from __future__ import annotations
+from tests.test_agent_ux_backend import SelectionModel
 
 import asyncio
+import inspect
 import threading
 from unittest.mock import patch
 
@@ -31,7 +33,7 @@ from tests.test_agent_ux_backend import (
 
 @pytest.fixture
 def isolated_chain():
-    yield from chain.isolated_chain.__wrapped__()
+    yield from inspect.unwrap(chain.isolated_chain)()
 
 
 async def prepare(session, pipeline, store, *, owner=OWNER, session_id=SESSION):
@@ -107,6 +109,7 @@ def test_confirmed_write_blocks_cross_worker_mutation_until_receipt_persisted(is
                         owner=OWNER, session_id=SESSION, message="另一 worker 的新问题",
                     ).to_agent_input()))
                     assert any(e.payload.get("code") == "effect_in_progress" for e in events)
+                    assert isinstance(other.model, SelectionModel)
                     assert other.model.requests == []
                 else:
                     with pytest.raises(SessionBusyError):
@@ -121,7 +124,9 @@ def test_confirmed_write_blocks_cross_worker_mutation_until_receipt_persisted(is
         state = await other_store.load(owner=OWNER, session_id=SESSION)
         request_id = result["data"]["items"][0]["request_id"]
         assert any(f"下载请求 #{request_id}" in item.get("public_content", "") for item in state.conversation)
-        assert db.get_download_request(request_id)["status"] == "submitted"
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        assert get_download_request_result["status"] == "submitted"
         assert isolated_chain[0].call_count == 1
     asyncio.run(exercise())
 
@@ -486,7 +491,7 @@ def _cancelled_work_process(mode, pipe):
         await heartbeat.wait()
         pipe.send({"cancel_propagated": True, "guard_released": True, "heartbeat": True})
 
-    fixture = isolated_chain.__wrapped__()
+    fixture = inspect.unwrap(isolated_chain)()
     try:
         asyncio.run(exercise(next(fixture)))
     finally:
@@ -572,13 +577,18 @@ def test_cancellation_during_confirmed_finalization_keeps_receipt_and_terminal_f
         while not queue.empty():
             events.append(queue.get_nowait())
         result = assert_completed(events)
+        assert events[-1] is not None
         assert events[-1].type is AgentEventType.TURN_COMPLETED
-        assert not any(e.type is AgentEventType.TURN_CANCELLED for e in events)
+        for event in events:
+            assert event is not None
+            assert event.type is not AgentEventType.TURN_CANCELLED
         request_id = result["data"]["items"][0]["request_id"]
         state = await other_store.load(owner=OWNER, session_id=SESSION)
         assert not state.pending_effect_plan_id
         assert any(f"下载请求 #{request_id}" in item.get("public_content", "") for item in state.conversation)
-        assert db.get_download_request(request_id)["status"] == "submitted"
+        get_download_request_result_2 = db.get_download_request(request_id)
+        assert get_download_request_result_2 is not None
+        assert get_download_request_result_2["status"] == "submitted"
         assert not await other_store.is_current(old)
         replay = await confirmation(other, plan)
         assert any(e.payload.get("code") == "confirmation_invalid" for e in replay)

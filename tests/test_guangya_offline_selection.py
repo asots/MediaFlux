@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from dataclasses import replace
 import re
 import tempfile
@@ -122,7 +124,7 @@ class GuangYaOfflineSelectionDomainTests(unittest.TestCase):
 
     def test_offline_rules_from_mapping_remains_available_after_preview_store_addition(self):
         factory = getattr(offline.OfflineRules, "from_mapping", None)
-        self.assertIsNotNone(factory)
+        assert (factory) is not None
 
         rules = factory({"target_dir_id": "9001", "allowed_exts": "mkv,mp4"})
 
@@ -131,7 +133,7 @@ class GuangYaOfflineSelectionDomainTests(unittest.TestCase):
 
     def test_normalize_offline_files_accepts_field_variants_and_resolver_exclusions(self):
         normalize = getattr(GuangYaClient, "normalize_offline_files", None)
-        self.assertIsNotNone(normalize, "GuangYaClient 应提供离线资源文件归一化")
+        assert (normalize) is not None, "GuangYaClient 应提供离线资源文件归一化"
 
         first = normalize(RESOLVE_SUBFILES_FIXTURE)
         second = normalize(RESOLVE_FILE_LIST_FIXTURE)
@@ -267,7 +269,7 @@ class GuangYaOfflineSelectionDomainTests(unittest.TestCase):
 
     def test_default_selection_applies_extension_size_keyword_and_resolver_filters(self):
         build_choices = getattr(offline, "build_offline_file_choices", None)
-        self.assertIsNotNone(build_choices, "offline 模块应提供默认选集规则")
+        assert (build_choices) is not None, "offline 模块应提供默认选集规则"
         rules = offline.OfflineRules(
             magnet_enabled=True,
             ed2k_enabled=True,
@@ -308,7 +310,7 @@ class GuangYaOfflineSelectionDomainTests(unittest.TestCase):
         ]
         client = self._client_with_raw(raw)
         submit = getattr(client, "add_offline_selection", None)
-        self.assertIsNotNone(submit, "GuangYaClient 应提供选集创建接口")
+        assert (submit) is not None, "GuangYaClient 应提供选集创建接口"
 
         result = submit(
             "magnet:?xt=urn:btih:selection",
@@ -434,6 +436,14 @@ class GuangYaOfflineSelectionDomainTests(unittest.TestCase):
 
 
 class FakeSelectionClient:
+    close: Mock
+    create_dir: Mock
+    list_dir: Mock
+    delete: Mock
+    file_info: Mock
+    supports_guarded_empty_directory_delete: bool
+    delete_empty_directory: Mock
+
     def __init__(self, resolve_payload: dict):
         self.logged_in = True
         self.resolve_payload = resolve_payload
@@ -507,7 +517,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:auto-filter",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="7",
             )
@@ -529,7 +539,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
         rules = replace(self.rules, exclude_keywords=(), min_file_mb=50)
         with patch.object(offline.OfflineRules, "from_config", return_value=rules):
             result = offline.submit_offline(
-                "magnet:?xt=urn:btih:sample-only", client=client, isolate_task=True,
+                "magnet:?xt=urn:btih:sample-only", client=cast(GuangYaClient, client), isolate_task=True,
             )
         self.assertFalse(result["ok"])
         self.assertIn("样片", result["error"])
@@ -544,13 +554,13 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
         ]}})
         rules = replace(self.rules, exclude_keywords=(), min_file_mb=50)
         preview = offline.preview_offline_selection(
-            "magnet:?xt=urn:btih:sample-choice", client=client, rules=rules,
+            "magnet:?xt=urn:btih:sample-choice", client=cast(GuangYaClient, client), rules=rules,
         )
         self.assertEqual(preview["default_selected_indexes"], [0, 2])
         sample = next(item for item in preview["files"] if item["index"] == 1)
         self.assertFalse(sample["locked"])
         selected = offline.submit_offline_selection(
-            "magnet:?xt=urn:btih:sample-choice", [1], client=client, rules=rules,
+            "magnet:?xt=urn:btih:sample-choice", [1], client=cast(GuangYaClient, client), rules=rules,
         )
         self.assertTrue(selected["ok"])
         self.assertEqual(client.selection_calls[0]["file_indexes"], [1])
@@ -566,7 +576,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
         client.create_dir = Mock()
         with patch.object(offline.OfflineRules, "from_config", return_value=self.rules):
             result = offline.submit_offline(
-                "magnet:?xt=urn:btih:incomplete", client=client, isolate_task=True,
+                "magnet:?xt=urn:btih:incomplete", client=cast(GuangYaClient, client), isolate_task=True,
             )
         self.assertFalse(result["ok"])
         self.assertIn("资源解析响应无效", result["error"])
@@ -595,7 +605,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:persist-before-submit",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="persisted",
                 on_staging_created=persist,
@@ -615,7 +625,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:persist-rejected",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="rejected",
                 on_staging_created=lambda _snapshot: (_ for _ in ()).throw(
@@ -658,7 +668,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             side_effect=execute,
         ) as audited_delete:
             status, error = offline._remove_empty_staging(
-                client,
+                cast(GuangYaClient, client),
                 "staging-clean",
                 expected_parent_id="9001",
                 expected_name="MF-clean",
@@ -702,7 +712,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 magnet,
                 title="牧神记 97",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="torrent",
                 torrent_data=torrent_data,
@@ -727,7 +737,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
         with patch.object(offline.OfflineRules, "from_config", return_value=self.rules):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:" + "a" * 40,
-                client=client,
+                client=cast(GuangYaClient, client),
                 torrent_data=b"private-torrent-bytes",
             )
 
@@ -755,7 +765,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:unknown-outcome",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="unknown",
             )
@@ -779,7 +789,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:timeout-outcome",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="timeout",
             )
@@ -806,7 +816,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:no-whole-fallback",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="8",
             )
@@ -834,7 +844,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:excluded-then-valid",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="recovered",
             )
@@ -858,7 +868,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:excluded-only",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="excluded",
             )
@@ -884,7 +894,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:excluded-no-isolation",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=False,
             )
 
@@ -916,7 +926,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:user-filtered",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="filtered",
             )
@@ -963,7 +973,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
             result = offline.submit_offline(
                 "magnet:?xt=urn:btih:retry",
                 title="Demo Release",
-                client=client,
+                client=cast(GuangYaClient, client),
                 isolate_task=True,
                 task_key="9",
             )
@@ -974,7 +984,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_preview_resolves_resource_and_returns_default_file_selection(self):
         preview_selection = getattr(offline, "preview_offline_selection", None)
-        self.assertIsNotNone(preview_selection, "offline 模块应提供资源选集预览")
+        assert (preview_selection) is not None, "offline 模块应提供资源选集预览"
         client = FakeSelectionClient(RESOLVE_SUBFILES_FIXTURE)
 
         result = preview_selection(
@@ -992,7 +1002,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_preview_reports_magnet_without_file_tree_as_unverifiable(self):
         preview_selection = getattr(offline, "preview_offline_selection", None)
-        self.assertIsNotNone(preview_selection)
+        assert (preview_selection) is not None
         client = FakeSelectionClient({
             "code": 0,
             "msg": "success",
@@ -1010,7 +1020,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_submit_re_resolves_and_rejects_tampered_file_index(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection, "offline 模块应提供服务端复核后的选集提交")
+        assert (submit_selection) is not None, "offline 模块应提供服务端复核后的选集提交"
         client = FakeSelectionClient(RESOLVE_SUBFILES_FIXTURE)
 
         result = submit_selection(
@@ -1030,7 +1040,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_submit_rejects_resolver_locked_index_even_when_it_exists(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection)
+        assert (submit_selection) is not None
         client = FakeSelectionClient(RESOLVE_SUBFILES_FIXTURE)
 
         result = submit_selection(
@@ -1056,7 +1066,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
         with patch.object(offline.OfflineRules, "from_config", return_value=rules):
             result = offline.submit_offline(
-                "magnet:?xt=urn:btih:no-rule-match", client=client,
+                "magnet:?xt=urn:btih:no-rule-match", client=cast(GuangYaClient, client),
             )
 
         self.assertFalse(result["ok"])
@@ -1067,7 +1077,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_submit_uses_selected_create_task_after_server_validation(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection)
+        assert (submit_selection) is not None
         client = FakeSelectionClient(RESOLVE_SUBFILES_FIXTURE)
 
         result = submit_selection(
@@ -1091,7 +1101,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_submit_propagates_structured_partial_success_without_reporting_whole_success(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection)
+        assert (submit_selection) is not None
         client = FakeSelectionClient(RESOLVE_SUBFILES_FIXTURE)
         client.selection_result = {
             "ok": False,
@@ -1126,7 +1136,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_submit_rejection_and_ambiguous_write_results_do_not_opt_into_retry(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection)
+        assert (submit_selection) is not None
         cases = (
             {
                 "ok": False, "partial_success": False, "outcome_unknown": False,
@@ -1171,7 +1181,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_selection_write_exception_does_not_set_retryable(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection)
+        assert (submit_selection) is not None
         client = FakeSelectionClient(RESOLVE_SUBFILES_FIXTURE)
         client.add_offline_selection = Mock(side_effect=TimeoutError("quota exceeded"))
 
@@ -1188,7 +1198,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_submit_without_file_tree_falls_back_to_legacy_create_task(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection)
+        assert (submit_selection) is not None
         client = FakeSelectionClient({
             "code": 0,
             "msg": "success",
@@ -1222,7 +1232,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_legacy_create_connection_error_is_marked_outcome_unknown(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection)
+        assert (submit_selection) is not None
         client = FakeSelectionClient({
             "code": 0,
             "msg": "success",
@@ -1249,7 +1259,7 @@ class GuangYaOfflineSelectionWorkflowTests(unittest.TestCase):
 
     def test_submit_magnet_without_file_tree_does_not_fall_back_to_whole_task(self):
         submit_selection = getattr(offline, "submit_offline_selection", None)
-        self.assertIsNotNone(submit_selection)
+        assert (submit_selection) is not None
         client = FakeSelectionClient({
             "code": 0,
             "msg": "success",
@@ -1287,7 +1297,7 @@ class OfflinePreviewStoreTests(unittest.TestCase):
 
     def test_preview_snapshot_is_one_time_and_keeps_server_selection_context(self):
         store_class = getattr(offline, "OfflinePreviewStore", None)
-        self.assertIsNotNone(store_class, "offline 模块应提供一次性预览快照存储")
+        assert (store_class) is not None, "offline 模块应提供一次性预览快照存储"
         store = store_class(ttl_seconds=60, clock=lambda: 100.0, token_factory=lambda: "preview-one")
 
         preview_id = store.create(
@@ -1319,7 +1329,7 @@ class OfflinePreviewStoreTests(unittest.TestCase):
 
     def test_preview_snapshot_rule_or_url_change_invalidates_snapshot(self):
         store_class = getattr(offline, "OfflinePreviewStore", None)
-        self.assertIsNotNone(store_class)
+        assert (store_class) is not None
         store = store_class(ttl_seconds=60, clock=lambda: 100.0, token_factory=lambda: "preview-change")
         preview_id = store.create(
             url="magnet:?xt=urn:btih:snapshot",
@@ -1330,9 +1340,7 @@ class OfflinePreviewStoreTests(unittest.TestCase):
             file_indexes=[0],
             locked_indexes=[],
         )
-        changed_rules = offline.OfflineRules(
-            **{**self.rules.__dict__, "target_dir_id": "9002", "target_dir_name": "剧集"}
-        )
+        changed_rules = replace(self.rules, target_dir_id="9002", target_dir_name="剧集")
 
         with self.assertRaisesRegex(ValueError, "预览上下文已变化"):
             store.claim(
@@ -1373,7 +1381,7 @@ class OfflinePreviewStoreTests(unittest.TestCase):
 
     def test_preview_snapshot_expires(self):
         store_class = getattr(offline, "OfflinePreviewStore", None)
-        self.assertIsNotNone(store_class)
+        assert (store_class) is not None
         now = [100.0]
         store = store_class(ttl_seconds=10, clock=lambda: now[0], token_factory=lambda: "preview-expired")
         preview_id = store.create(
@@ -1397,7 +1405,7 @@ class OfflinePreviewStoreTests(unittest.TestCase):
 
     def test_preview_store_evicts_oldest_snapshot_when_capacity_is_exceeded(self):
         store_class = getattr(offline, "OfflinePreviewStore", None)
-        self.assertIsNotNone(store_class)
+        assert (store_class) is not None
         preview_ids = iter(("preview-oldest", "preview-middle", "preview-newest"))
         store = store_class(
             ttl_seconds=60,

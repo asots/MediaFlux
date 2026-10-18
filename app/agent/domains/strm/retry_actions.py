@@ -89,13 +89,13 @@ def _capture(arguments: dict[str, Any]) -> dict[str, Any]:
         "failures": failures,
         "config_sha256": _stable_hash(config_payload),
         "runtime_sha256": _stable_hash(runtime_config),
-        "config_error": str(config_error or ""),
+        "config_error": (config_error or ""),
     }
     return {
         "scope": scope,
         "failures": failures,
         "runtime_config": runtime_config,
-        "config_error": str(config_error or ""),
+        "config_error": (config_error or ""),
         "fingerprint": _stable_hash(payload),
     }
 
@@ -282,7 +282,7 @@ def retry_strm_failure_records_confirmed(
 ) -> ToolResult:
     state = _capture(arguments)
     if not secrets.compare_digest(
-        str(state["fingerprint"]), str(expected_context or "")
+        str(state["fingerprint"]), (expected_context or "")
     ):
         raise AgentToolError(
             "STRM 失败项或运行配置已变化，请重新预检",

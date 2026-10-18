@@ -65,7 +65,7 @@ def _split_runtime_snapshot(
 ) -> tuple[int | None, str]:
     if not _production_owner_kind(context.owner):
         return None, fingerprint
-    prefix, separator, remainder = str(fingerprint or "").partition(":")
+    prefix, separator, remainder = (fingerprint or "").partition(":")
     generation_text, separator2, domain_fingerprint = remainder.partition(":")
     if prefix != "mfkr1" or not separator or not separator2:
         raise ToolPipelineError("确认计划缺少运行态快照", code="confirmation_invalid")
@@ -121,7 +121,7 @@ def _assert_success(result: ToolResult, *, code: str) -> ToolResult:
             result.error or result.summary,
             fallback="领域能力未能完成请求",
         )
-        domain_code = str(result.status or "").strip().casefold()
+        domain_code = (result.status or "").strip().casefold()
         # 领域服务已经把 conflict / busy / stale / outcome_unknown 等
         # 用户可处理状态标准化；Kernel 只校验其机器码形状，不应再次抹平。
         safe_code = domain_code if _ERROR_CODE_RE.fullmatch(domain_code) else code
@@ -132,7 +132,7 @@ def _assert_success(result: ToolResult, *, code: str) -> ToolResult:
 def _domain(spec: ToolSpec) -> str:
     prefix = spec.name.partition(".")[0].casefold()
     candidate = spec.domains[0] if spec.domains else DOMAIN_ALIASES.get(prefix, prefix)
-    candidate = re.sub(r"[^a-z0-9_.-]+", "_", str(candidate).casefold()).strip("_.-")
+    candidate = re.sub(r"[^a-z0-9_.-]+", "_", candidate.casefold()).strip("_.-")
     return candidate or "system"
 
 
@@ -153,14 +153,14 @@ def _retrieval_terms(spec: ToolSpec) -> tuple[str, ...]:
         *TOOL_RETRIEVAL_TERMS.get(spec.name, ()),
     )
     return tuple(
-        dict.fromkeys(str(item).strip() for item in values if str(item).strip())
+        dict.fromkeys(item.strip() for item in values if item.strip())
     )
 
 
 def _related_tools(spec: ToolSpec) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
-            str(item).strip() for item in spec.related_tools if str(item).strip()
+            item.strip() for item in spec.related_tools if item.strip()
         )
     )
 
@@ -184,7 +184,7 @@ def observe_configuration(value: Any, arguments: dict) -> dict[str, dict | None]
         candidates = [{**item, "component": item.get("name")} for item in data["components"] if isinstance(item, dict)]
     for item in candidates:
         component = item.get("component")
-        if (component in selected and item.get("status") in {"ready", "incomplete", "not_configured"}
+        if (isinstance(component, str) and component in selected and item.get("status") in {"ready", "incomplete", "not_configured"}
                 and type(item.get("enabled")) is bool):
             observations[component] = {"component": component, "status": item["status"], "enabled": item["enabled"],
                                        "probe_mode": "configuration_only", "network_accessed": False}
@@ -270,7 +270,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
         return PreparedEffect(
             preview=checked.to_dict(),
             snapshot_fingerprint=_bind_runtime_snapshot(
-                str(fingerprint or ""), context
+                (fingerprint or ""), context
             ),
             metadata={
                 **effect_metadata,

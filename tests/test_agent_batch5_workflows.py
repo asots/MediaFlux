@@ -1,6 +1,7 @@
 """Media Agent 第 5 批长尾业务安全闭环回归。"""
 
 from __future__ import annotations
+from typing import cast
 
 import hashlib
 import json
@@ -142,7 +143,9 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         self.assertTrue(preview.ok)
         marked = mark_rss_entries_confirmed(mark_args, fingerprint)
         self.assertEqual(marked.data["affected"], 2)
-        self.assertEqual(str(db.get_rss_entry(first)["status"]), "skipped")
+        get_rss_entry_result = db.get_rss_entry(first)
+        assert get_rss_entry_result is not None
+        self.assertEqual(str(get_rss_entry_result["status"]), "skipped")
         db.update_rss_entries_processed([first, second], False)
         runtime = {
             "url": "http://qb.internal",
@@ -243,6 +246,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             mark_rss_entries_confirmed(args, fingerprint)
         self.assertEqual(caught.exception.code, "confirmation_stale")
         row = db.get_rss_entry(first)
+        assert row is not None
         self.assertEqual(str(row["status"]), "failed")
         self.assertEqual(str(row["failure_code"]), "qb_unavailable")
         self.assertTrue(bool(row["failure_retryable"]))
@@ -401,8 +405,9 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             futures = [pool.submit(save, tmdb_id) for tmdb_id in ("101", "202")]
             barrier.wait(timeout=2)
             outcomes = [future.result(timeout=3) for future in futures]
-        self.assertEqual(sum(bool(value) for value in outcomes), 1)
+        self.assertEqual(sum(outcomes), 1)
         stored = db.get_media_external_id("douban", "race-source", "movie")
+        assert stored is not None
         self.assertIn(str(stored["tmdb_id"]), {"101", "202"})
         self.assertTrue(bool(stored["confirmed"]))
 
@@ -476,6 +481,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             "douban", "race-existing", "movie", "100", "旧候选", "2025", 0.8, False
         )
         before = db.get_media_external_id("douban", "race-existing", "movie")
+        assert before is not None
         expected = {
             "tmdb_id": str(before["tmdb_id"] or ""),
             "confirmed": bool(before["confirmed"]),
@@ -498,6 +504,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             )
         self.assertFalse(saved)
         stored = db.get_media_external_id("douban", "race-existing", "movie")
+        assert stored is not None
         self.assertEqual(str(stored["tmdb_id"]), "200")
         self.assertEqual(str(stored["title"]), "并发确认候选")
         self.assertTrue(bool(stored["confirmed"]))
@@ -1006,7 +1013,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         for invalid_domain in ("", "确认域", None):
             with self.subTest(invalid_domain=invalid_domain):
                 with self.assertRaises(ValueError):
-                    confirmation_context_fingerprint(value_a, domain=invalid_domain)
+                    confirmation_context_fingerprint(value_a, domain=cast(str, invalid_domain))
         _sid, first_entry, second_entry = self._rss()
         runtime = {
             "url": "http://qb.private.invalid",

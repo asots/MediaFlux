@@ -29,14 +29,14 @@ _NON_BUSINESS_FILESYSTEMS = frozenset({
 
 
 def _container_mode() -> bool:
-    return str(os.getenv("MEDIAFLUX_CONTAINER", "") or "").strip().lower() in {
+    return (os.getenv("MEDIAFLUX_CONTAINER", "") or "").strip().lower() in {
     "1", "true", "yes", "on",
     }
 
 
 def _decode_mountinfo_path(value: str) -> str:
     return _MOUNTINFO_ESCAPE_RE.sub(
-        lambda matched: chr(int(matched.group(1), 8)), str(value or "")
+        lambda matched: chr(int(matched.group(1), 8)), (value or "")
     )
 
 
@@ -98,7 +98,7 @@ def _platform_roots() -> list[Path]:
 
 
 def _configured_roots() -> list[Path]:
-    raw = str(get("LOCAL_MEDIA_BROWSE_ROOTS", "") or "").strip()
+    raw = (get("LOCAL_MEDIA_BROWSE_ROOTS", "") or "").strip()
     if raw:
         parts = [item.strip() for item in re.split(r"[\n,;]+", raw) if item.strip()]
         roots = [Path(item).expanduser() for item in parts]
@@ -162,7 +162,7 @@ def browse_local_directories(
     if not roots:
         raise PathMappingError("没有可浏览的本地目录，请检查 Docker 卷挂载和 LOCAL_MEDIA_BROWSE_ROOTS")
 
-    requested = str(path or "").strip()
+    requested = (path or "").strip()
     if not requested or requested == VIRTUAL_ROOT:
         if allowed_root is not None:
             current = roots[0]

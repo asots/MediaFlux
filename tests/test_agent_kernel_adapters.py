@@ -34,7 +34,7 @@ class AgentKernelAdapterTests(unittest.IsolatedAsyncioTestCase):
                 view = await consume_events(event_stream(events))
                 restored = last_turn_view([events[-1].to_dict()], None)
                 self.assertEqual(view.status, live_status)
-                self.assertIsNotNone(restored)
+                assert (restored) is not None
                 self.assertEqual(restored["status"], restored_status)
                 self.assertEqual(restored["request_id"], view.request_id)
                 self.assertEqual(restored["turn_id"], view.turn_id)
@@ -49,16 +49,20 @@ class AgentKernelAdapterTests(unittest.IsolatedAsyncioTestCase):
         restored = last_turn_view(tail, None)
         self.assertEqual(live.status, "partial")
         self.assertEqual(live.error_code, "stream_incomplete")
+        assert restored is not None
         self.assertEqual(restored["status"], "interrupted")
         activity = {"status": "running", "request_id": "r", "turn_id": "t", "generation": 1}
         active = active_turn_view(activity, tail)
+        assert active is not None
         self.assertEqual(active["detail"], "正在整理操作结果")
         self.assertIsNone(last_turn_view(tail, active))
         # 相同 turn_id 的其他请求不能覆盖正在恢复的回合。
         other = {**tail[-1], "request_id": "other", "type": "model.started"}
         self.assertEqual(active_turn_view(activity, [*tail, other]), active)
         activity["status"] = "cancelling"
-        self.assertEqual(active_turn_view(activity, tail)["detail"], "正在停止本轮任务")
+        active_turn_view_result = active_turn_view(activity, tail)
+        assert active_turn_view_result is not None
+        self.assertEqual(active_turn_view_result["detail"], "正在停止本轮任务")
 
     async def test_web_and_telegram_consume_the_same_event_truth(self) -> None:
         factory = EventFactory(session_id="s1", turn_id="t1", request_id="r1")
@@ -117,7 +121,7 @@ class AgentKernelAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         view = await consume_events(event_stream(events))
         self.assertEqual(view.status, "approval_required")
-        self.assertIsNotNone(view.approval)
+        assert (view.approval) is not None
         assert view.approval is not None
         self.assertEqual(view.approval.plan_id, "plan-1")
         self.assertEqual(view.approval.preview["summary"], "暂停 1 个下载任务")

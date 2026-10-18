@@ -1,6 +1,11 @@
 """Task 16 确定性 TMDB 识别管线的行为与诊断契约测试。"""
 from __future__ import annotations
 
+from app.modules.scraper import RecognitionResult
+
+from typing import cast
+from app.clients.tmdb import TMDBClient
+
 import inspect
 import json
 import threading
@@ -8,15 +13,15 @@ import unittest
 from datetime import date, timedelta
 from unittest.mock import Mock, patch
 
-from tests.support import release_parse_fields
+from tests.support import release_parse_fields, ReleaseParseFields
 
 
-def _parse_fields(parser, filename: str, parent_path: str = "") -> dict[str, object]:
+def _parse_fields(parser, filename: str, parent_path: str = "") -> ReleaseParseFields:
     return release_parse_fields(parser.parse_media(filename, parent_path))
 
 
 
-class RecognitionContractMixin:
+class RecognitionContractMixin(unittest.TestCase):
     def recognition_module(self):
         from app.modules import scraper
 
@@ -141,7 +146,7 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
 
         self.enterContext(isolated_test_database("parser-projection.db"))
         scraper = self.recognition_module()
-        parser = scraper.TMDBScraper("offline-fixture")
+        parser = scraper.TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(parser.close)
         fields = ('title', 'year', 'media_type', 'tmdb_id', 'source_season', 'source_episode', 'effective_season', 'effective_episode')
         context_fields = ('normalized_title', 'filename_year', 'folder_year', 'media_type', 'season', 'episode')
@@ -177,7 +182,7 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
 
         self.enterContext(isolated_test_database("ambiguous-release-title.db"))
         scraper = self.recognition_module()
-        parser = scraper.TMDBScraper("offline-fixture")
+        parser = scraper.TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(parser.close)
         names = (
             ("Title [19_91].mkv", "Title", "tv"),
@@ -209,6 +214,7 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
         ):
             with self.subTest(filename=filename):
                 core = scraper._parse_release_core(filename, include_release=True)
+                assert core.release_fields is not None
                 self.assertEqual(set(core.release_fields), {"title", "year", "type", "tmdb_id"})
                 self.assertEqual((core.context.season, core.context.episode), position)
 
@@ -446,7 +452,7 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
             match,
         )
 
-        self.assertIsInstance(result, scraper.ReleaseParseResult)
+        assert isinstance(result, scraper.ReleaseParseResult)
         self.assertEqual((result.source_season, result.source_episode), (2, 13))
         self.assertEqual((result.effective_season, result.effective_episode), (2, 1))
         self.assertEqual(result.effective_episode, 1)
@@ -2424,7 +2430,7 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
                 self.assertEqual(parser.clean_title(filename), "Final Fantasy VII")
                 self.assertTrue(
                     any(
-                        str(token).upper() == "FINAL"
+                        token.upper() == "FINAL"
                         for token in context.cleaned_components["noise_tokens"]
                     )
                 )
@@ -2592,7 +2598,7 @@ class RecognitionStageTests(RecognitionContractMixin, unittest.TestCase):
 
     def test_classified_bilingual_releases_use_chinese_identity_and_keep_source_positions(self):
         scraper = self.recognition_module()
-        parser = scraper.TMDBScraper("offline-fixture")
+        parser = scraper.TMDBScraper(cast(TMDBClient, "offline-fixture"))
         cases = (
             ("光阴之外", "Beyond Time's Gaze", "2025", (37, 38, 39), None, "GB][4K HEVC 10Bit"),
             ("仙逆", "Renegade Immortal", "2023", (157,), None, "AVC][GB][1080P"),
@@ -2821,7 +2827,7 @@ class CandidateScoringTests(RecognitionContractMixin, unittest.TestCase):
             "title_score", "original_title_score", "alias_score", "year_score",
             "year_penalty", "media_type_score", "constraint_penalty", "final_score",
         ):
-            self.assertIsInstance(getattr(breakdown, field), float, field)
+            assert isinstance(getattr(breakdown, field), float), field
         self.assertGreater(breakdown.original_title_score, 0.8)
         self.assertGreater(breakdown.alias_score, 0.8)
         self.assertEqual(breakdown.rejected_constraints, [])
@@ -2947,7 +2953,7 @@ class CandidateScoringTests(RecognitionContractMixin, unittest.TestCase):
 
         breakdown = scraper.score_candidate(context, candidate)
 
-        self.assertIsNotNone(evidence)
+        assert (evidence) is not None
         self.assertEqual(breakdown.year_score, 1.0)
         self.assertEqual(breakdown.year_penalty, 0.0)
         self.assertGreaterEqual(breakdown.final_score, 0.9)
@@ -3056,7 +3062,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 client = _DeterministicClient(
                     candidates, {str(item["id"]): item for item in candidates},
                 )
-                parser = scraper.TMDBScraper(client)
+                parser = scraper.TMDBScraper(cast(TMDBClient, client))
                 self.addCleanup(parser.close)
                 result = parser.deterministic_recognize(
                     "血玫瑰.1988.DVDRip.x264.2Audios.mkv",
@@ -3078,7 +3084,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                     "seasons": [{"season_number": 2, "episode_count": 40}]} for item in candidates}
         for available, expected in ((candidates, "2002"), (candidates[:1], "")):
             with self.subTest(expected=expected):
-                parser = scraper.TMDBScraper(_DeterministicClient(available, details))
+                parser = scraper.TMDBScraper(cast(TMDBClient, _DeterministicClient(available, details)))
                 self.addCleanup(parser.close)
                 result = parser.deterministic_recognize(filename, "source")
                 evidence = result.metadata["content_kind_evidence"]
@@ -3135,7 +3141,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 },
             },
         )
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         files = (
             (6, "B2088D0F"),
             (7, "4FD19EAF"),
@@ -3171,7 +3177,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "genre_ids": [10759, 18, 10765],
         }])
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             "[Dynamis One] Ever Night - 06 "
             "(B-Global Donghua 1920x832 HEVC AAC MKV) [B2088D0F].mkv",
             "1",
@@ -3201,7 +3207,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 }]},
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             "[Studio GreenTea] Virgin Punk Clockwork Girl "
@@ -3229,7 +3235,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "97617": {"seasons": [{"season_number": 1, "episode_count": 13}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         filename = (
             "[Nekomoe kissaten&LoliHouse] Maou Gakuin no Futekigousha "
             "- 13 [WebRip 1080P HEVC-10bit AAC ASSx2].mkv"
@@ -3243,6 +3249,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
 
         self.assertEqual(result.status, "matched")
         self.assertEqual(result.tmdb_id, "97617")
+        assert result.context is not None
         self.assertEqual((result.context.season, result.context.episode), (None, 13))
         self.assertEqual(result.context.normalized_title, "Maou Gakuin no Futekigousha")
         self.assertNotIn("distinctive_title_tokens_missing", result.rejected_constraints)
@@ -3258,7 +3265,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                     f"https://tmdb.invalid/search?api_key={secret}&query={title}"
                 )
 
-        tmdb = scraper_module.TMDBScraper(client=FailingClient([]))
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, FailingClient([])))
 
         result = tmdb.deterministic_recognize("Safe.Movie.2024.mkv")
 
@@ -3274,7 +3281,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "first_air_date": "2024-01-01",
             "media_type": "tv",
         }])
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize("[NC-Raws] Q - 01 [1080p].mkv")
 
@@ -3321,7 +3328,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 self.assertNotEqual(breakdown.matched_query, "1")
 
                 result = scraper_module.TMDBScraper(
-                    client=_DeterministicClient([wrong_candidate])
+                    client=cast(TMDBClient, _DeterministicClient([wrong_candidate]))
                 ).deterministic_recognize(filename, "1")
 
                 self.assertEqual(result.status, "low_confidence")
@@ -3375,12 +3382,13 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                     },
                 })
                 result = scraper_module.TMDBScraper(
-                    client=client
+                    client=cast(TMDBClient, client)
                 ).deterministic_recognize(filename, "1")
 
                 self.assertEqual(result.status, "matched")
                 self.assertFalse(result.need_confirm)
                 self.assertEqual(result.tmdb_id, tmdb_id)
+                assert result.context is not None
                 self.assertEqual(result.context.episode, episode)
                 self.assertNotIn("1", result.query_variants)
                 self.assertNotIn(
@@ -3400,7 +3408,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "9003": {"seasons": [{"season_number": 1, "episode_count": 12}]},
         })
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             "01.mkv", "/剧集/Example Show"
         )
 
@@ -3419,7 +3427,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "release_date": "2019-12-25",
             "media_type": "movie",
         }])
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize("1917.2019.1080p.BluRay.mkv")
 
@@ -3450,7 +3458,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         ], {
             "10": {"seasons": [{"season_number": 1, "episode_count": 10}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         with patch.object(tmdb, "_set_lock") as set_lock:
             result = tmdb.deterministic_recognize(
@@ -3458,7 +3466,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "/剧集/幕府将军 Shogun (2024)/Season 01",
             )
 
-        self.assertIsInstance(result, scraper_module.RecognitionResult)
+        assert isinstance(result, scraper_module.RecognitionResult)
         self.assertEqual(result.tmdb_id, "10")
         self.assertEqual(result.provider, "tmdb")
         self.assertEqual(result.external_id, "10")
@@ -3472,6 +3480,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertTrue(result.query_variants)
         self.assertTrue(result.threshold_decision["passed"])
         self.assertEqual(result.threshold_decision["score"], result.confidence)
+        assert result.candidates[0].score_breakdown is not None
         self.assertEqual(result.candidates[0].score_breakdown.final_score, result.candidates[0].score)
         self.assertNotIn("media_type_mismatch", result.rejected_constraints)
         self.assertTrue(all(item.media_type == "tv" for item in result.candidates))
@@ -3491,7 +3500,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "release_date": "2026-02-01", "media_type": "movie",
             },
         ])
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize("同名作品.2026.mkv")
 
@@ -3521,7 +3530,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 }
             },
         )
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             "Arifureta Shokugyou de Sekai Saikyou - 01.mkv",
@@ -3562,7 +3571,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "102": {"alternative_titles": {"results": [{"title": shared_alias}]}},
             },
         )
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             f"{shared_alias} - 01.mkv", f"/动漫/{shared_alias}/Season 01"
@@ -3608,7 +3617,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         )
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             "Yamishibai.S17E05.1080p.WEB-DL.mkv"
         )
 
@@ -3652,7 +3661,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "seasons": [{"season_number": 1, "episode_count": 13}],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(filename, "1")
         parsed = tmdb.parse_media(filename, "1", result)
@@ -3662,6 +3671,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(result.tmdb_id, "56559")
         self.assertEqual(result.matched_by, "implicit_season_fallback")
         self.assertEqual(result.season_override, 17)
+        assert result.context is not None
         self.assertEqual(
             (result.context.normalized_title, result.context.season, result.context.episode),
             ("Yami Shibai", 17, 6),
@@ -3689,12 +3699,13 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "1701": {"seasons": [{"season_number": 1, "episode_count": 10}]},
         })
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             filename
         )
 
         self.assertEqual(result.status, "matched")
         self.assertEqual(result.tmdb_id, "1701")
+        assert result.context is not None
         self.assertEqual(result.context.normalized_title, "Room 17")
         self.assertIsNone(result.context.season)
         self.assertIsNone(result.season_override)
@@ -3718,13 +3729,14 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         })
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             filename
         )
 
         self.assertEqual(result.status, "no_result")
         self.assertTrue(result.need_confirm)
         self.assertIsNone(result.season_override)
+        assert result.context is not None
         self.assertEqual(result.context.normalized_title, "Yami Shibai 17")
         self.assertNotIn("implicit_season_fallback", result.metadata)
 
@@ -3745,13 +3757,14 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "99": {"seasons": [{"season_number": 17, "episode_count": 12}]},
         })
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             filename
         )
 
         self.assertEqual(result.status, "no_result")
         self.assertTrue(result.need_confirm)
         self.assertIsNone(result.season_override)
+        assert result.context is not None
         self.assertEqual(result.context.normalized_title, "The Fantastic Four 17")
         self.assertIn(("The Fantastic Four", "", "tv"), client.search_calls)
         self.assertNotIn("implicit_season_fallback", result.metadata)
@@ -3773,7 +3786,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         })
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             filename
         )
 
@@ -3813,7 +3826,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
 
         client = _FailingExactClient({"Yami Shibai": candidates}, {})
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             filename, "1"
         )
 
@@ -3851,7 +3864,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         ]
         client = _QueryDeterministicClient({"Yami Shibai": candidates}, {})
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         self.assertEqual(tmdb.search("Yami Shibai 17", "", "tv"), [])
         client.candidates_by_query["Yami Shibai 17"] = [{
             "id": 777,
@@ -3901,7 +3914,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         ]
         client = _QueryDeterministicClient({"Yami Shibai": candidates}, {})
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         self.assertEqual(tmdb.search("Yami Shibai 17", "", "tv"), [])
         reached = threading.Event()
         release = threading.Event()
@@ -3972,7 +3985,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "136895": shared_detail,
         })
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             filename, "1"
         )
 
@@ -4013,7 +4026,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "seasons": [{"season_number": 1, "episode_count": 13}],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         with patch.object(tmdb, "_get_lock", return_value=None), patch(
             "app.modules.tmdb_regex_rules.find_tmdb_regex_match", return_value=None,
@@ -4027,6 +4040,8 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(result.matched_by, "implicit_season_fallback")
         self.assertEqual(result.season_override, 17)
         self.assertEqual((result.effective_season, result.effective_episode), (17, 6))
+        assert isinstance(result, RecognitionResult)
+        assert result.context is not None
         self.assertEqual((result.context.season, result.context.episode), (17, 6))
         self.assertEqual((parsed.source_season, parsed.source_episode), (None, 6))
         self.assertEqual((parsed.effective_season, parsed.effective_episode), (17, 6))
@@ -4077,7 +4092,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         )
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             "A Certain Magical Index.2008.S01E01.1080p.WEB-DL.mkv"
         )
 
@@ -4116,7 +4131,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }
 
         result = scraper_module.TMDBScraper(
-            client=_DeterministicClient(candidates, details)
+            client=cast(TMDBClient, _DeterministicClient(candidates, details))
         ).deterministic_recognize(
             "Shared Official Alias.2008.S01E01.1080p.WEB-DL.mkv"
         )
@@ -4176,7 +4191,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             ("One Piece - 1173 [1080p].mkv", None),
         ):
             with self.subTest(filename=filename):
-                result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+                result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
                     filename
                 )
 
@@ -4228,7 +4243,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 },
             },
         )
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         def season_detail(tmdb_id, season):
             if str(tmdb_id) == "102008":
@@ -4302,7 +4317,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         )
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             f"{shared_alias}.S02E05.1080p.mkv"
         )
 
@@ -4334,7 +4349,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         )
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             f"{shared_alias} - 1173 [1080p].mkv"
         )
 
@@ -4367,7 +4382,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         )
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             f"{shared_alias}.S01E12.1080p.mkv"
         )
 
@@ -4399,7 +4414,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             for candidate_id in (101, 102, 103, 104)
         }
         client = _DeterministicClient(raw_candidates, details)
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             f"{shared_alias} - 01.mkv", f"/动漫/{shared_alias}/Season 01"
@@ -4451,7 +4466,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 client = _DeterministicClient(raw_candidates, details)
 
                 result = scraper_module.TMDBScraper(
-                    client=client
+                    client=cast(TMDBClient, client)
                 ).deterministic_recognize(
                     f"{shared_alias} - 1173 [1080p].mkv"
                 )
@@ -4501,7 +4516,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }
         client = _DeterministicClient(raw_candidates, details)
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             f"{shared_alias} - 1173 [1080p].mkv"
         )
 
@@ -4544,7 +4559,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             },
         )
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             f"{shared_alias}.S01E01.1080p.mkv"
         )
 
@@ -4575,7 +4590,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 }
             },
         )
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         first = tmdb.deterministic_recognize(
             "Summer Time Rendering - 01.mkv", "/动漫/Summer Time Rendering"
@@ -4601,7 +4616,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "first_air_date": "2021-04-11",
             "seasons": [{"season_number": 2, "episode_count": 12}],
         }})
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         filename = (
             "[ANi] 不要欺负我，长瀞同学 2nd Attack（仅限港澳台地区） - 04 "
             "[1080P][Bilibili][WEB-DL][AAC AVC][CHT CHS][MP4].mp4"
@@ -4626,7 +4641,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "229619": {"seasons": [{"season_number": 2, "episode_count": 20}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             "Art Attack 2nd Attack - 04.mkv",
@@ -4645,7 +4660,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "first_air_date": "2000-06-15",
             "media_type": "tv",
         }])
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         filename = (
             "[ANi] 不要欺负我，长瀞同学 2nd Attack（仅限港澳台地区） - 04 "
             "[1080P][Bilibili][WEB-DL][AAC AVC][CHT CHS][MP4].mp4"
@@ -4682,7 +4697,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         ], {
             "287075": {"seasons": [{"season_number": 1, "episode_count": 12}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         filename = (
             "[ANi] 魔法少女奈葉 EXCEEDS Gun Blaze Vengeance - 04 "
             "[1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
@@ -4695,6 +4710,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(result.status, "matched")
         self.assertEqual(result.tmdb_id, "287075")
         old_candidate = next(item for item in result.candidates if item.tmdb_id == "19836")
+        assert old_candidate.score_breakdown is not None
         self.assertIn(
             "distinctive_title_tokens_missing",
             old_candidate.score_breakdown.rejected_constraints,
@@ -4702,7 +4718,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertLess(old_candidate.score, result.confidence)
 
         old_only = scraper_module.TMDBScraper(
-            client=_DeterministicClient(client.candidates[:1])
+            client=cast(TMDBClient, _DeterministicClient(client.candidates[:1]))
         ).deterministic_recognize(
             filename, "/动漫/魔法少女奈葉"
         )
@@ -4724,7 +4740,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "229676": {"seasons": [{"season_number": 1, "episode_count": 12}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             "[ANi] 魔域英雄传说 Ubel Blatt - 01 "
@@ -4746,7 +4762,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "223911": {"seasons": [{"season_number": 1, "episode_count": 200}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             "Xian.Ni.S01E145.2160p.WEB-DL.HEVC.AAC-BlackTV.mp4",
@@ -4768,7 +4784,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "first_air_date": "2025-01-11",
             "media_type": "tv",
         }])
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             "[ANi] 魔域英雄传说 Totally Different - 01 "
@@ -4789,7 +4805,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "325158": {"seasons": [{"season_number": 1, "episode_count": 12}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         filename = (
             "[ANi] 無用聖女的異世界美食之旅 憑藉隱藏技能召喚露營車 - 05 "
             "[1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
@@ -4807,16 +4823,16 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "id": 9001, "name": "Example Show", "first_air_date": "2024-01-01",
             "media_type": "tv",
         }
-        missing_season = scraper_module.TMDBScraper(client=_DeterministicClient(
+        missing_season = scraper_module.TMDBScraper(client=cast(TMDBClient, _DeterministicClient(
             [candidate], {"9001": {
                 "seasons": [{"season_number": 1, "episode_count": 12}],
             }},
-        )).deterministic_recognize("Example.Show.S02E03.1080p.mkv")
-        out_of_range = scraper_module.TMDBScraper(client=_DeterministicClient(
+        ))).deterministic_recognize("Example.Show.S02E03.1080p.mkv")
+        out_of_range = scraper_module.TMDBScraper(client=cast(TMDBClient, _DeterministicClient(
             [candidate], {"9001": {
                 "seasons": [{"season_number": 2, "episode_count": 2}],
             }},
-        )).deterministic_recognize("Example.Show.S02E03.1080p.mkv")
+        ))).deterministic_recognize("Example.Show.S02E03.1080p.mkv")
 
         self.assertEqual(missing_season.status, "low_confidence")
         self.assertIn("tmdb_position_season_not_found", missing_season.rejected_constraints)
@@ -4857,7 +4873,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 }],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
 
         result = tmdb.deterministic_recognize(
@@ -4869,7 +4885,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(result.tmdb_id, "9001")
         self.assertEqual(result.confidence, 1.0)
         evidence = result.metadata.get("target_season_year_evidence")
-        self.assertIsInstance(evidence, dict)
+        assert isinstance(evidence, dict)
         self.assertEqual(evidence["expected_year"], "2024")
         self.assertEqual((evidence["target_season"], evidence["target_episode"]), (3, 2))
 
@@ -4888,7 +4904,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "seasons": [{"season_number": 1, "episode_count": 85}],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
         tmdb.get_tv_season_detail = Mock(
             return_value=_merged_four_season_timeline()
@@ -4901,7 +4917,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual((result.status, result.need_confirm), ("matched", False))
         self.assertEqual(result.tmdb_id, "65942")
         evidence = result.metadata.get("target_season_year_evidence")
-        self.assertIsInstance(evidence, dict)
+        assert isinstance(evidence, dict)
         self.assertEqual(evidence["date_scope"], "segment")
         self.assertEqual(evidence["year_anchor_episode"], 26)
         self.assertEqual(
@@ -4966,7 +4982,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 }],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
 
         result = tmdb.deterministic_recognize(
@@ -4978,7 +4994,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(result.tmdb_id, "61415")
         self.assertEqual(result.confidence, 1.0)
         evidence = result.metadata.get("target_season_year_evidence")
-        self.assertIsInstance(evidence, dict)
+        assert isinstance(evidence, dict)
         self.assertEqual(evidence["expected_year"], "2015")
         self.assertEqual(
             (evidence["target_season"], evidence["target_episode"]), (2, 1)
@@ -5006,7 +5022,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 }],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
 
         result = tmdb.deterministic_recognize(
@@ -5017,7 +5033,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual((result.tmdb_id, result.media_type), ("94664", "tv"))
         self.assertEqual(result.confidence, 1.0)
         evidence = result.metadata.get("target_season_year_evidence")
-        self.assertIsInstance(evidence, dict)
+        assert isinstance(evidence, dict)
         self.assertEqual((evidence["target_season"], evidence["target_episode"]), (3, 1))
 
     def test_type_specific_tv_search_rejects_explicit_movie_result(self):
@@ -5028,7 +5044,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "release_date": "2024-01-01",
             "media_type": "movie",
         }])
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         result = tmdb.deterministic_recognize(
             "Example.Show.S01E01.1080p.mkv", media_type_hint="tv"
@@ -5057,7 +5073,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 }],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
 
         result = tmdb.deterministic_recognize(
@@ -5069,7 +5085,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(result.tmdb_id, "9001")
         self.assertEqual(result.confidence, 1.0)
         evidence = result.metadata.get("target_season_year_evidence")
-        self.assertIsInstance(evidence, dict)
+        assert isinstance(evidence, dict)
         self.assertEqual((evidence["target_season"], evidence["target_episode"]), (3, 2))
 
     def test_target_season_air_year_fails_closed_when_detail_year_differs(self):
@@ -5089,7 +5105,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 }],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
 
         result = tmdb.deterministic_recognize(
@@ -5128,7 +5144,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             for item in candidates
         }
         tmdb = scraper_module.TMDBScraper(
-            client=_DeterministicClient(candidates, details)
+            client=cast(TMDBClient, _DeterministicClient(candidates, details))
         )
         tmdb.match_mode = "strict"
 
@@ -5148,7 +5164,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "9001": {"seasons": [{"season_number": 1, "episode_count": 12}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
         breakdown = self._controlled_breakdown(
             scraper_module, 0.85, "Example Show"
@@ -5163,7 +5179,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         self.assertEqual(result.status, "low_confidence")
         self.assertTrue(result.need_confirm)
         self.assertEqual(result.threshold, 0.9)
-        self.assertIsNotNone(proof)
+        assert (proof) is not None
         self.assertEqual(proof["external_id"], "9001")
         self.assertEqual(proof["source_position"], {"season": 1, "episode": 3})
         self.assertEqual(proof["target_position"], {"season": 1, "episode": 3})
@@ -5178,7 +5194,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "9001": {"seasons": [{"season_number": 1, "episode_count": 12}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "loose"
         breakdown = self._controlled_breakdown(
             scraper_module, 0.85, "Example Show"
@@ -5192,7 +5208,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         proof = scraper_module.verified_automatic_identity_proof(result)
         self.assertEqual(result.status, "matched")
         self.assertEqual(result.threshold, 0.6)
-        self.assertIsNotNone(proof)
+        assert (proof) is not None
         self.assertEqual(proof["recognition_threshold"], 0.6)
         self.assertEqual(proof["source_position"], {"season": None, "episode": 3})
         self.assertEqual(proof["target_position"], {"season": 1, "episode": 3})
@@ -5206,7 +5222,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "9001": {"seasons": [{"season_number": 1, "episode_count": 2}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
         breakdown = self._controlled_breakdown(
             scraper_module, 0.85, "Example Show"
@@ -5237,7 +5253,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "9001": {"seasons": [{"season_number": 1, "episode_count": 12}]},
             "9002": {"seasons": [{"season_number": 1, "episode_count": 12}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
 
         def controlled_score(_context, raw):
@@ -5261,7 +5277,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "id": 530915, "title": "Example Movie",
             "release_date": "2024-01-01", "media_type": "movie",
         }])
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
         breakdown = self._controlled_breakdown(
             scraper_module, 0.85, "Example Movie"
@@ -5284,7 +5300,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
         }], {
             "9001": {"seasons": [{"season_number": 2, "episode_count": 12}]},
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         first = tmdb.deterministic_recognize("Example.Show.S02E03.1080p.mkv")
         second = tmdb.deterministic_recognize("Example.Show.S02E04.1080p.mkv")
@@ -5320,7 +5336,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "seasons": [{"season_number": 1, "episode_count": 25}],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
 
         with patch.object(
@@ -5361,7 +5377,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "seasons": [{"season_number": 1, "episode_count": 25}],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
         breakdown = self._controlled_breakdown(
             scraper_module, 0.89, "Merged Cour Show"
@@ -5386,7 +5402,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             (mapping["target_season"], mapping["target_episode"]), (1, 18)
         )
         proof = scraper_module.verified_automatic_identity_proof(result)
-        self.assertIsNotNone(proof)
+        assert (proof) is not None
         self.assertEqual(proof["target_position"], {"season": 1, "episode": 18})
         get_season_detail.assert_called_once_with("9001", 1)
 
@@ -5401,7 +5417,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "seasons": [{"season_number": 1, "episode_count": 25}],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "strict"
         breakdown = self._controlled_breakdown(
             scraper_module, 0.81, "Merged Cour Show"
@@ -5433,7 +5449,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "seasons": [{"season_number": 1, "episode_count": 25}],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
         tmdb.match_mode = "loose"
 
         with patch.object(
@@ -5460,7 +5476,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "media_type": "movie",
         }])
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(
             "1917.2019.1080p.BluRay.mkv"
         )
 
@@ -5487,7 +5503,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "seasons": [{"season_number": 3, "episode_count": 16}],
             },
         })
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         chinese = tmdb.deterministic_recognize(
             "平凡职业造就世界最强 第三季.EP16.1080p.CR.WEBRip.x264.AAC.CHS-LxyLab.mkv"
@@ -5499,7 +5515,9 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
 
         self.assertEqual((chinese.tmdb_id, romaji.tmdb_id), ("86034", "86034"))
         self.assertEqual((chinese.status, romaji.status), ("matched", "matched"))
+        assert chinese.context is not None
         self.assertEqual((chinese.context.season, chinese.context.episode), (3, 16))
+        assert romaji.context is not None
         self.assertEqual((romaji.context.season, romaji.context.episode), (3, 16))
 
     def test_real_world_noisy_ani_title_never_auto_matches_30_days(self):
@@ -5515,7 +5533,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             "- 01 [1080P][Bilibili][WEB-DL][AAC AVC][CHT CHS][MP4].mp4"
         )
 
-        result = scraper_module.TMDBScraper(client=client).deterministic_recognize(filename)
+        result = scraper_module.TMDBScraper(client=cast(TMDBClient, client)).deterministic_recognize(filename)
 
         self.assertEqual(result.status, "low_confidence")
         self.assertTrue(result.need_confirm)
@@ -5529,7 +5547,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
                 "media_type": "movie",
             },
         ])
-        tmdb = scraper_module.TMDBScraper(client=client)
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, client))
 
         with patch.object(tmdb, "_set_lock") as set_lock:
             result = tmdb.deterministic_recognize("目标电影.2024.mkv")
@@ -5545,7 +5563,7 @@ class DeterministicPipelineTests(RecognitionContractMixin, unittest.TestCase):
             tmdb_id="30", title="搜索结果", year="2024", media_type="movie",
             confidence=0.95, status="matched", matched_by="search",
         )
-        tmdb = scraper_module.TMDBScraper(client=_DeterministicClient([]))
+        tmdb = scraper_module.TMDBScraper(client=cast(TMDBClient, _DeterministicClient([])))
 
         with patch.object(tmdb, "_get_lock", return_value=None), patch(
             "app.modules.tmdb_regex_rules.find_tmdb_regex_match", return_value=None
@@ -5635,7 +5653,7 @@ class RecognitionPreviewContractTests(RecognitionContractMixin, unittest.TestCas
                 "parent_path": "/剧集/Show (2024)/Season 01",
             })
 
-        payload = json.loads(response.body)
+        payload = json.loads(bytes(response.body))
         self.assertEqual(preview.received[1], "/剧集/Show (2024)/Season 01")
         self.assertEqual(payload["parent_path"], preview.received[1])
         self.assertEqual(payload["recognition"]["folder_context"]["year"], "2024")

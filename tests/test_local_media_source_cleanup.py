@@ -1,6 +1,9 @@
 """本地媒体成功移动后的来源空目录收尾回归测试。"""
 from __future__ import annotations
 
+from typing import cast
+from app.modules.scraper import TMDBScraper
+
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -41,9 +44,9 @@ class LocalMediaSourceCleanupTests(IsolatedDatabaseTestCase):
             local_root=str(self.source), stable_seconds=0, owner="admin",
         )
         db.upsert_local_library_target(self.source_id, "tv", str(self.target), owner="admin")
-        self.service = LocalMediaService(scraper=FakeScraper(MatchResult(
+        self.service = LocalMediaService(scraper=cast(TMDBScraper, FakeScraper(MatchResult(
             tmdb_id="1", title="Show", year="2026", media_type="tv", confidence=1.0,
-        )))
+        ))))
         self.addCleanup(self.service.close)
         self.rules = OrganizeRules(
             region_split=False, year_split=False, small_file_mb=0,
@@ -231,7 +234,9 @@ class LocalMediaSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertTrue(self.selected.is_dir())
         self.assertEqual(list(self.target.rglob("*.mkv")), [])
         self.assertEqual(qb.calls, [("pause", "hash-1"), ("resume", "hash-1")])
-        self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "failed")
+        get_local_media_task_result = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result is not None
+        self.assertEqual(get_local_media_task_result.status, "failed")
 
     def test_incomplete_rollback_keeps_empty_sources_and_qb_paused(self):
         qb = FakeQB()
@@ -256,4 +261,6 @@ class LocalMediaSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertEqual(list(self.nested.iterdir()), [])
         self.assertEqual(len(list(self.target.rglob("*.mkv"))), 1)
         self.assertEqual(qb.calls, [("pause", "hash-1")])
-        self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "requires_manual")
+        get_local_media_task_result_2 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_2 is not None
+        self.assertEqual(get_local_media_task_result_2.status, "requires_manual")

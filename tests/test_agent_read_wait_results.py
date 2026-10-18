@@ -87,6 +87,7 @@ def test_resumed_read_result_branches(mode, tmp_path):
         async def read(args, context):
             calls.append(dict(args))
             if mode == 'observation':
+                assert tool.read is not None
                 return await asyncio.to_thread(tool.read, args, context)
             if mode == 'invalid_observation':
                 return {'ok': True, 'summary': 'not verified configuration evidence'}
@@ -154,6 +155,7 @@ def test_foreground_error_still_allows_model_repair(tool_name):
             if len(calls) == 1:
                 raise ToolPipelineError('repairable foreground error', code='tool_execution_failed')
             if tool.observe is not None:
+                assert tool.read is not None
                 return await asyncio.to_thread(tool.read, args, context)
             return {'ok': True, 'summary': 'foreground repaired'}
 

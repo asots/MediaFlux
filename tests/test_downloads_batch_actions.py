@@ -283,7 +283,9 @@ class DownloadBatchActionApiTests(InitializedWebTestCase):
             def delete(hashes, *, delete_files):
                 self.assertEqual(hashes, torrent_hash)
                 self.assertFalse(delete_files)
-                self.assertEqual(db.get_download_request(request_id)["qb_status"], "cancelled")
+                get_download_request_result = db.get_download_request(request_id)
+                assert get_download_request_result is not None
+                self.assertEqual(get_download_request_result["qb_status"], "cancelled")
                 return True
 
             client.delete_torrents.side_effect = delete

@@ -10,8 +10,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from app.modules.scraper import parse_release_position
 from app.modules.episode_mapping import extract_release_episode_range
+from app.modules.scraper import parse_release_position
 
 _SEASON = re.compile(
     r"(?ix)(?:"
@@ -70,7 +70,7 @@ def parse_indexer_release_position(value: str, *, media_title: str = "") -> dict
     marker found later in the title to Chinese episode markers found earlier in the title.
     """
 
-    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = unicodedata.normalize("NFKC", (value or ""))
     base = parse_release_position(text)
     season = _valid_season(base.get("season"))
     episode = _valid_episode(base.get("episode"))
@@ -123,7 +123,7 @@ def parse_indexer_release_position(value: str, *, media_title: str = "") -> dict
 
     # 站点可把集名放在裸集号后。只有已核对作品名恰好位于编号前，才采用此格式；
     # 不把作品名自身的数字、年份或清晰度猜成集号，也不补造季号。
-    known_title = unicodedata.normalize("NFKC", str(media_title or "")).strip()
+    known_title = unicodedata.normalize("NFKC", (media_title or "")).strip()
     if episode is None and known_title:
         captioned = re.search(
             rf"(?:^|[\s\]】]){re.escape(known_title)}\s+(0*[1-9]\d{{0,2}})(?!\d)\s+(?=[\u3400-\u9fff])",

@@ -17,7 +17,12 @@ from app.modules.download_tracker import DownloadTracker
 
 class CountedEntries(OrderedDict):
     visited = 0
-    def items(self):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 只在测试中为 items 迭代注入访问计数，保留惰性遍历。
+        setattr(self, "items", self._counted_items)
+
+    def _counted_items(self):
         for item in super().items():
             self.visited += 1
             yield item

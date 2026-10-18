@@ -206,6 +206,7 @@ def test_stale_cleanup_preserves_newer_authority(winner):
         if winner == 'new_wait':
             assert before.metadata['read_wait']['wait_id'] != stale['wait_id']
         binding = runtime.session.continuation_binding
+        assert binding is not None
         changed = replace(binding, effective_digest='different-snapshot')
         assert await runtime.store.claim_continuation(stale, changed) is None
         assert not await runtime.session.resume_wait(candidate=stale)

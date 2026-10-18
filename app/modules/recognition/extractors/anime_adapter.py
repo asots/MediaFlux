@@ -63,12 +63,12 @@ def _parse_anitomy_ng(value: str) -> tuple[tuple[str, str], ...]:
     """延迟加载可选依赖并缓存不可变的原始字段。"""
     import anitomy_ng
 
-    return tuple((_kind_name(item.kind), str(item.value)) for item in anitomy_ng.parse(value))
+    return tuple((_kind_name(item.kind), item.value) for item in anitomy_ng.parse(value))
 
 
 def parse_anime_evidence(value: str) -> tuple[ReleaseParseEvidence, ...]:
     """返回实验解析证据；任何不可用状态都安全退化为空元组。"""
-    raw = str(value or "").strip()
+    raw = (value or "").strip()
     if not raw:
         return ()
     try:

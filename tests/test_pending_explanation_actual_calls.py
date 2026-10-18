@@ -26,6 +26,7 @@ def test_any_actual_call_is_rejected_without_repair_or_dispatch(name, arguments)
         runtime.force_call = True
         runtime.call_name = name
         runtime.call_arguments = arguments
+        assert preview.approval is not None
         view = await consume_events(
             runtime.session.explain(
                 owner="owner",

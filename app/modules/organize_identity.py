@@ -58,8 +58,8 @@ def _usable_filename_identity_hint(filename: str) -> str:
     证据时才会调用本函数。沿用识别器的信息量规则，保留短中文作品名；
     极短、纯数字和通用占位标题仍失败关闭，回退到路径标题。
     """
-    context = extract_recognition_context(str(filename or ""), "")
-    title = str(context.filename_title or context.normalized_title or "").strip()
+    context = extract_recognition_context((filename or ""), "")
+    title = (context.filename_title or context.normalized_title or "").strip()
     identity = _normalize_media_identity(title)
     if (
         _low_information_query(identity)
@@ -80,7 +80,7 @@ def _special_filename_identity_hint(filename: str) -> str:
     """
     if not is_special_media_name(filename):
         return ""
-    stem = str(filename or "").rsplit("/", 1)[-1]
+    stem = (filename or "").rsplit("/", 1)[-1]
     if "." in stem:
         stem = stem.rsplit(".", 1)[0]
     cleaned = strip_special_media_markers(stem)
@@ -101,7 +101,7 @@ def _recognition_identity_year(filename: str, parent_context: str) -> str:
     """
     context = extract_recognition_context(filename, parent_context)
     for value in (context.filename_year, context.folder_year):
-        year = str(value or "").strip()
+        year = (value or "").strip()
         if re.fullmatch(r"(?:19|20)\d{2}", year):
             return year
     return ""
@@ -123,10 +123,10 @@ def _directory_episode_identity_hint(filename: str, parent_context: str) -> str:
     )
 
     context = extract_recognition_context(filename, parent_context)
-    raw_candidates = [str(context.folder_title or "").strip()]
+    raw_candidates = [(context.folder_title or "").strip()]
     raw_candidates.extend(
         match.group(1).strip()
-        for match in _DIRECTORY_TITLE_SEGMENT_RE.finditer(str(parent_context or ""))
+        for match in _DIRECTORY_TITLE_SEGMENT_RE.finditer(parent_context or "")
     )
 
     compatible: list[tuple[int, str]] = []
@@ -137,7 +137,7 @@ def _directory_episode_identity_hint(filename: str, parent_context: str) -> str:
         parsed = extract_recognition_context(
             f"{raw_candidate}.S01E01.mkv", ""
         )
-        candidate = str(
+        candidate = (
             parsed.filename_title or parsed.normalized_title or raw_candidate
         ).strip()
         candidate_identity = _normalize_media_identity(candidate)

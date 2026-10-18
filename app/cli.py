@@ -1,6 +1,11 @@
 """MediaFlux 生产运行入口。"""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.modules.runtime_diagnostics import DiagnosticCheck
+
 import argparse
 import json
 import os
@@ -8,7 +13,6 @@ import sys
 import webbrowser
 from pathlib import Path
 from typing import Sequence
-from urllib.error import URLError
 from urllib.request import urlopen
 
 import uvicorn
@@ -195,7 +199,7 @@ def _status(port: int | None = None) -> int:
     try:
         with urlopen(f"http://127.0.0.1:{effective_port}/healthz", timeout=1) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         print("MediaFlux health check failed")
         return 1
 
@@ -231,7 +235,7 @@ def _resolve_doctor_endpoint(
     paths: RuntimePaths,
     host: str | None,
     port: int | None,
-) -> tuple[str, int, object | None]:
+) -> tuple[str, int, DiagnosticCheck | None]:
     """只读解析 doctor 端点：CLI、环境、已有 user.env、默认值。"""
     from app.modules.runtime_diagnostics import DiagnosticCheck
 
@@ -411,7 +415,12 @@ def _support_bundle(output: Path | None, log_lines: int) -> int:
 
 def _backup_command(args: argparse.Namespace) -> int:
     """执行本地备份操作；恢复默认拒绝对运行中的服务写入。"""
-    from app.modules.backup import BackupError, create_backup, restore_backup, verify_backup
+    from app.modules.backup import (
+        BackupError,
+        create_backup,
+        restore_backup,
+        verify_backup,
+    )
     from app.runtime_paths import get_runtime_paths
 
     try:

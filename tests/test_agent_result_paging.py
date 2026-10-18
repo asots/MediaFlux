@@ -1,5 +1,6 @@
 """工具证据保真：实际Pipeline/加密SQLite引用/预算压缩，不访问外部Provider。"""
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 import json
@@ -304,7 +305,7 @@ class ResultPagingTests(IsolatedDatabaseTestCase):
                        dict(full, items=[], returned=0, next_offset=71)]
             last = (await read("/data/text", 9990, 10))["data"]
             invalid.append({key: value for key, value in last.items() if key != "next_offset"})
-            cases = [dict(page, data=value) for value in invalid]
+            cases: list[dict[str, Any]] = [dict(page, data=value) for value in invalid]
             cases.extend({key: value for key, value in page.items() if key != missing} for missing in ("result_handle", "read_tool"))
             coverage = {key: full[key] for key in ("path", "kind", "total", "offset", "returned", "next_offset", "has_more")}
             cases.extend(dict(page, truncated=True, truncation=[dict(coverage, **change)]) for change in (
@@ -468,7 +469,7 @@ class ResultPagingTests(IsolatedDatabaseTestCase):
                 content = compact_tool_content(content, maximum=maximum, trusted=maximum != 24000)
                 self.assertLessEqual(len(content), maximum)
                 for row in json.loads(content).get("truncation", []):
-                    node = source
+                    node: Any = source
                     for part in row["path"].split("/")[1:]:
                         key = part.replace("~1", "/").replace("~0", "~")
                         node = node[int(key)] if isinstance(node, list) else node[key]

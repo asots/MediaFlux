@@ -1,6 +1,7 @@
 """Media Agent 多站资源搜索与确认提交测试。"""
 
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 import unittest
@@ -30,6 +31,7 @@ from app.indexers.errors import (
 from app.indexers.models import (
     AggregatedIndexerResult,
     IndexerItem,
+    IndexerMediaSearchRequest,
     IndexerProviderError,
     ResolvedDownload,
 )
@@ -72,7 +74,7 @@ class FakeIndexerService:
         self.sites_attempted = sites_attempted
         self.sites_succeeded = sites_succeeded
         self.partial = partial
-        self.search_calls: list[tuple[object, object]] = []
+        self.search_calls: list[tuple[IndexerMediaSearchRequest, list[str] | None]] = []
 
     def site_ids_for_scope(self, scope="manual"):
         assert scope == "agent"
@@ -136,7 +138,7 @@ def _resource_item(**overrides) -> IndexerItem:
     return IndexerItem(**values)
 
 
-def _candidate_snapshot(*, count=2):
+def _candidate_snapshot(*, count=2) -> dict[str, Any]:
     candidates = []
     for position in range(1, count + 1):
         candidates.append(
@@ -510,7 +512,7 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             await asyncio.sleep(0.05)
             raise AssertionError("timeout should cancel the slow search")
 
-        service.search_media = slow_search
+        self.enterContext(patch.object(service, "search_media", slow_search))
         arguments = {
             "title": "Demo",
             "original_title": "",
@@ -621,6 +623,7 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
 
         self.assertFalse(expired.ok)
         self.assertEqual(expired.status, "result_expired")
+        assert expired.error is not None
         self.assertIn("旧资源确认已过期，请重新搜索", expired.error)
         readiness.assert_not_called()
 
@@ -821,6 +824,7 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         self.assertEqual(result.status, "review_required")
         self.assertEqual(result.data["review_required"], 2)
         self.assertEqual(result.data["failed"], 0)
+        assert result.error is not None
         self.assertIn("勿直接重复提交", result.error)
         self.assertEqual(dispatch.await_count, 2)
 
@@ -948,16 +952,18 @@ class IndexerReceivingSourceTests(unittest.TestCase):
                 patch("app.agent.domains.resources.indexer_actions._submit_resource_batch") as multiple,
             ):
                 arguments = {"result_ids": [_RESULT_ID], "target": "guangya"} if batch else {"result_id": _RESULT_ID, "target": "guangya"}
-                prepare = prepare_submit_resource_batch if batch else prepare_submit_resource
-                confirm = submit_resource_batch_confirmed if batch else submit_resource_confirmed
-                preview, token = prepare(arguments)
+                preview, token = (prepare_submit_resource_batch(arguments) if batch
+                                  else prepare_submit_resource({"result_id": _RESULT_ID, "target": "guangya"}))
                 self.assertTrue(preview.ok)
                 resources = preview.data["resources"] if batch else [preview.data["resource"]]
                 self.assertEqual(resources[0]["receiving_folder"], "FixtureSpecial")
                 self.assertNotIn("source-123", str(preview.to_dict()))
                 sources.return_value = [{"id": "different-source", "name": "FixtureSpecial"}]
                 with self.assertRaises(AgentToolError) as caught:
-                    confirm(arguments, token)
+                    if batch:
+                        submit_resource_batch_confirmed(arguments, token)
+                    else:
+                        submit_resource_confirmed({"result_id": _RESULT_ID, "target": "guangya"}, token)
                 self.assertEqual(caught.exception.code, "confirmation_stale")
                 single.assert_not_called()
                 multiple.assert_not_called()
@@ -997,6 +1003,7 @@ class IndexerReceivingSourceTests(unittest.TestCase):
             submitted = asyncio.run(download_indexer_result(service, _RESULT_ID, "guangya", origin_namespace="agent", scope="agent"))
             self.assertTrue(submitted["ok"], submitted)
             row = db.get_download_request(submitted["request_id"])
+            assert row is not None
             self.assertEqual((row["gy_requested_target_dir"], row["gy_requested_nsfw"]), ("special-source", 1))
             self.assertEqual((row["gy_staging_parent_dir"], row["gy_target_dir"]), ("special-source", "stage-7"))
             rules = OrganizeRules(nsfw_enabled=True, nsfw_source_ids='["special-source"]').for_source(row["gy_target_dir"])

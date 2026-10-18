@@ -13,7 +13,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from time import monotonic
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from app import config
 from app import database as db
@@ -80,9 +80,9 @@ class MediaSubscriptionError(ValueError):
         can_try_next_candidate: bool = False,
     ):
         super().__init__(message)
-        self.status_code = int(status_code)
-        self.code = str(code)
-        self.can_try_next_candidate = bool(can_try_next_candidate)
+        self.status_code = status_code
+        self.code = code
+        self.can_try_next_candidate = can_try_next_candidate
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,7 @@ class _ExpectedMedia:
 def _loads(value: Any, fallback: Any) -> Any:
     try:
         parsed = json.loads(str(value or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return fallback
     return parsed if isinstance(parsed, type(fallback)) else fallback
 
@@ -139,7 +139,7 @@ def _choice(value: Any, allowed: frozenset[str], default: str) -> str:
 
 def _strict_bool(value: Any, *, default: bool) -> bool:
     if value is None:
-        return bool(default)
+        return default
     if isinstance(value, bool):
         return value
     if isinstance(value, int) and value in {0, 1}:
@@ -219,12 +219,12 @@ def _search_rotation_from_row(row: Any, revision: int) -> dict[str, int] | None:
     if not isinstance(raw, dict):
         return None
     try:
-        cursor_revision = int(raw.get("revision"))
-        season = int(raw.get("season"))
-        episode = int(raw.get("episode"))
+        cursor_revision = int(raw.get("revision", ""))
+        season = int(raw.get("season", ""))
+        episode = int(raw.get("episode", ""))
     except (TypeError, ValueError, OverflowError):
         return None
-    if cursor_revision != int(revision) or season < 0 or episode <= 0:
+    if cursor_revision != revision or season < 0 or episode <= 0:
         return None
     return {"revision": cursor_revision, "season": season, "episode": episode}
 
@@ -242,29 +242,29 @@ def _rotated_missing_targets(
             item for item in missing
             if item.season is not None and item.episode is not None
         ),
-        key=lambda item: (int(item.season or 0), int(item.episode or 0), item.media_key),
+        key=lambda item: ((item.season or 0), int(item.episode or 0), item.media_key),
     )
-    if not ordered or int(limit) <= 0:
+    if not ordered or limit <= 0:
         return [], None
 
     start = 0
-    if cursor and int(cursor.get("revision", 0)) == int(revision):
-        position = (int(cursor.get("season", 0)), int(cursor.get("episode", 0)))
+    if cursor and cursor.get("revision", 0) == revision:
+        position = (cursor.get("season", 0), cursor.get("episode", 0))
         start = next(
             (
                 index for index, item in enumerate(ordered)
-                if (int(item.season or 0), int(item.episode or 0)) > position
+                if ((item.season or 0), (item.episode or 0)) > position
             ),
             0,
         )
 
-    count = min(len(ordered), max(0, int(limit)))
+    count = min(len(ordered), max(0, limit))
     selected = [ordered[(start + offset) % len(ordered)] for offset in range(count)]
     last = selected[-1]
     return selected, {
-        "revision": int(revision),
-        "season": int(last.season or 0),
-        "episode": int(last.episode or 0),
+        "revision": revision,
+        "season": (last.season or 0),
+        "episode": (last.episode or 0),
     }
 
 
@@ -286,7 +286,7 @@ def _metadata_from_detail(detail: dict[str, Any], media_type: str) -> dict[str, 
     return {"title": title, "original_title": original, "year": year, "poster_key": poster}
 
 
-def _subscription_workflow(row: Any, aggregate: dict[str, Any] | None = None) -> dict[str, Any]:
+def _subscription_workflow(row: Any, aggregate: Mapping[str, Any] | None = None) -> dict[str, Any]:
     values = aggregate or {}
     workflow = {
         "available_candidate_count": int(values.get("available_candidate_count") or 0),
@@ -339,7 +339,7 @@ def _subscription_workflow(row: Any, aggregate: dict[str, Any] | None = None) ->
 
 
 def _public_subscription(
-    row: Any, *, workflow: dict[str, Any] | None = None, candidates: int | None = None
+    row: Any, *, workflow: Mapping[str, Any] | None = None, candidates: int | None = None
 ) -> dict[str, Any]:
     payload = _row_dict(row)
     if not payload:
@@ -355,7 +355,7 @@ def _public_subscription(
     payload["workflow"] = _subscription_workflow(row, workflow)
     payload["candidate_count"] = int(payload["workflow"]["candidate_count"] or 0)
     if candidates is not None:
-        payload["candidate_count"] = max(payload["candidate_count"], int(candidates))
+        payload["candidate_count"] = max(payload["candidate_count"], candidates)
     return payload
 
 
@@ -477,11 +477,11 @@ class MediaSubscriptionService:
         return {"created": created, "subscription": self.get_subscription(subscription_id)}
 
     def get_subscription(self, subscription_id: int) -> dict[str, Any]:
-        row = db.get_media_subscription(int(subscription_id))
+        row = db.get_media_subscription(subscription_id)
         if row is None:
             raise MediaSubscriptionError("媒体订阅不存在", status_code=404, code="not_found")
-        workflows = db.list_media_subscription_workflows([int(subscription_id)])
-        return _public_subscription(row, workflow=workflows.get(int(subscription_id)))
+        workflows = db.list_media_subscription_workflows([subscription_id])
+        return _public_subscription(row, workflow=workflows.get(subscription_id))
 
     def list_subscriptions(self, *, status: str = "", enabled: bool | None = None) -> list[dict[str, Any]]:
         rows = db.list_media_subscriptions(status=status, enabled=enabled)
@@ -497,10 +497,10 @@ class MediaSubscriptionService:
         )]
 
     def list_candidates(self, subscription_id: int) -> list[dict[str, Any]]:
-        if db.get_media_subscription(int(subscription_id)) is None:
+        if db.get_media_subscription(subscription_id) is None:
             raise MediaSubscriptionError("媒体订阅不存在", status_code=404, code="not_found")
         rows = db.list_media_subscription_candidates(
-            int(subscription_id), statuses=("available", "submitted"), limit=500,
+            subscription_id, statuses=("available", "submitted"), limit=500,
         )
         return [_public_candidate(row) for row in rows]
 
@@ -512,14 +512,13 @@ class MediaSubscriptionService:
         limit_per_media: int = _PREVIEW_MAX_CANDIDATES_PER_MEDIA,
     ) -> dict[str, Any]:
         """实时核对单条订阅，但不持久化候选、不改调度、也不提交下载。"""
-        subscription_id = int(subscription_id)
         max_search_episodes = max(
             0,
-            min(int(max_search_episodes), _PREVIEW_MAX_SEARCH_EPISODES),
+            min(max_search_episodes, _PREVIEW_MAX_SEARCH_EPISODES),
         )
         limit_per_media = max(
             1,
-            min(int(limit_per_media), _PREVIEW_MAX_CANDIDATES_PER_MEDIA),
+            min(limit_per_media, _PREVIEW_MAX_CANDIDATES_PER_MEDIA),
         )
         row = db.get_media_subscription(subscription_id)
         if row is None:
@@ -570,7 +569,7 @@ class MediaSubscriptionService:
         return result
 
     def update_subscription(self, subscription_id: int, data: dict[str, Any]) -> dict[str, Any]:
-        current = db.get_media_subscription(int(subscription_id))
+        current = db.get_media_subscription(subscription_id)
         if current is None:
             raise MediaSubscriptionError("媒体订阅不存在", status_code=404, code="not_found")
         if not isinstance(data, dict):
@@ -612,15 +611,15 @@ class MediaSubscriptionService:
         fields["status"] = "new" if requested_enabled else "paused"
         fields["next_check_at"] = db.now()
         fields["last_error"] = ""
-        if not db.update_media_subscription_config(int(subscription_id), **fields):
+        if not db.update_media_subscription_config(subscription_id, **fields):
             raise MediaSubscriptionError("媒体订阅不存在", status_code=404, code="not_found")
-        return self.get_subscription(int(subscription_id))
+        return self.get_subscription(subscription_id)
 
     def delete_subscription(
         self, subscription_id: int, *, expected_snapshot: dict[str, Any] | None = None
     ) -> bool:
         return db.delete_media_subscription(
-            int(subscription_id), expected_snapshot=expected_snapshot
+            subscription_id, expected_snapshot=expected_snapshot
         )
 
     async def check_subscription(
@@ -630,7 +629,6 @@ class MediaSubscriptionService:
         trigger: str = "manual",
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
-        subscription_id = int(subscription_id)
         if db.get_media_subscription(subscription_id) is None:
             raise MediaSubscriptionError("媒体订阅不存在", status_code=404, code="not_found")
         run_id = db.claim_media_subscription_check_run(subscription_id, trigger)
@@ -640,7 +638,7 @@ class MediaSubscriptionService:
         assert row is not None
         interval = int(row["check_interval_minutes"] or 4320)
         revision = int(row["revision"] or 1)
-        run_token = _ACTIVE_CHECK_RUN_ID.set(int(run_id))
+        run_token = _ACTIVE_CHECK_RUN_ID.set(run_id)
         try:
             self._ensure_active_check(subscription_id, revision, cancel_event)
             if str(row["media_type"]) == "tv":
@@ -747,8 +745,8 @@ class MediaSubscriptionService:
                 "应用正在停止，订阅检查已取消", status_code=409, code="cancelled"
             )
         if not db.media_subscription_check_is_active(
-            int(subscription_id),
-            int(subscription_revision),
+            subscription_id,
+            subscription_revision,
             run_id=_ACTIVE_CHECK_RUN_ID.get(),
         ):
             raise MediaSubscriptionError(
@@ -868,11 +866,11 @@ class MediaSubscriptionService:
         if not isinstance(raw_seasons, list):
             raise MediaSubscriptionError("TMDB 季度数据无效", status_code=502, code="invalid_response")
         available = sorted({
-            int(item.get("season_number"))
+            int(item.get("season_number", ""))
             for item in raw_seasons
             if isinstance(item, dict)
             and str(item.get("season_number", "")).lstrip("-").isdigit()
-            and int(item.get("season_number")) >= 0
+            and int(item.get("season_number", "")) >= 0
         })
         include_specials = bool(row["include_specials"])
         if not include_specials:
@@ -928,7 +926,7 @@ class MediaSubscriptionService:
                     if not isinstance(item, dict):
                         continue
                     try:
-                        episode = int(item.get("episode_number"))
+                        episode = int(item.get("episode_number", ""))
                     except (TypeError, ValueError):
                         continue
                     if episode <= 0:
@@ -1045,7 +1043,7 @@ class MediaSubscriptionService:
             "status": status,
             "summary": summary,
             "expected_count": len(expected),
-            "local_count": int(local_count),
+            "local_count": local_count,
             "missing_count": len(missing),
             "missing": missing[:12],
             "missing_truncated": len(missing) > 12,
@@ -1099,7 +1097,7 @@ class MediaSubscriptionService:
         release = _parse_air_date(detail.get("release_date"))
         release_known = release is not None
         released = bool(release and release <= date.today())
-        missing_count = int(bool(inventory_complete and released and not present and not active))
+        missing_count = int(inventory_complete and released and not present and not active)
         search = self._empty_preview_search("not_run")
         if missing_count:
             search = await self._preview_search_movie(
@@ -1239,7 +1237,7 @@ class MediaSubscriptionService:
     @staticmethod
     def _empty_preview_search(status: str) -> dict[str, Any]:
         return {
-            "status": str(status or "not_run"),
+            "status": (status or "not_run"),
             "attempted_count": 0,
             "candidate_count": 0,
             "truncated": False,
@@ -1308,7 +1306,7 @@ class MediaSubscriptionService:
             "both": "qBittorrent + 光鸭",
         }.get(target, "光鸭")
 
-        search_partial = str(search_status or "").strip().lower() == "partial"
+        search_partial = (search_status or "").strip().lower() == "partial"
         if missing_count <= 0:
             state = "no_action"
             summary = "当前不需要提交下载"
@@ -1358,11 +1356,12 @@ class MediaSubscriptionService:
     ) -> AggregatedIndexerResult | None:
         """统一检索与诊断；库存状态和候选投影仍由调用方决定。"""
         original_key = "original_name" if target is not None else "original_title"
-        options = ({"sort_mode": "published_desc", "season": target.season, "episode": target.episode}
-                   if target is not None else {})
         request = IndexerMediaSearchRequest.create(
             title=str(row["title"]), original_title=str(detail.get(original_key) or row["original_title"] or ""),
-            year=row["year"], media_type="tv" if target is not None else "movie", **options,
+            year=row["year"], media_type="tv" if target is not None else "movie",
+            sort_mode="published_desc" if target is not None else "relevance_desc",
+            season=target.season if target is not None else None,
+            episode=target.episode if target is not None else None,
         )
         failure = None
         phase = "site_selection"
@@ -1395,6 +1394,7 @@ class MediaSubscriptionService:
             event.update(outcome=outcome, error_type=type(failure).__name__, failure_stage=phase)
         else:
             # 不记录查询正文、下载URL或服务端错误message；仅记录可关联的站点事实。
+            assert aggregated is not None
             errors = [{"site_id": item.site_id, "code": item.code} for item in aggregated.errors]
             outcome = ("unavailable" if errors and not aggregated.sites_succeeded and not aggregated.items
                        else "partial" if aggregated.partial or errors
@@ -1428,7 +1428,7 @@ class MediaSubscriptionService:
                 for item in missing
                 if item.season is not None and item.episode is not None
             ),
-            key=lambda item: (int(item.season or 0), int(item.episode or 0)),
+            key=lambda item: ((item.season or 0), int(item.episode or 0)),
         )[:max_search_episodes]
         items: list[dict[str, Any]] = []
         partial = False
@@ -1462,7 +1462,7 @@ class MediaSubscriptionService:
                 if len(candidates) >= limit_per_media:
                     break
             candidate_total += len(candidates)
-            partial = partial or bool(aggregated.partial)
+            partial = partial or aggregated.partial
             items.append({
                 "season": target.season,
                 "episode": target.episode,
@@ -1499,7 +1499,7 @@ class MediaSubscriptionService:
             self._preview_candidate(item.to_public_dict())
             for item in aggregated.items
             if item.download_state in {"ready", "resolvable"}
-            and int(item.relevance_score or 0) >= 60
+            and (item.relevance_score or 0) >= 60
         ][:limit_per_media]
         return {
             "status": "partial" if aggregated.partial else ("success" if candidates else "empty"),
@@ -1537,9 +1537,9 @@ class MediaSubscriptionService:
             if str(row["status"] or "") == "available"
         }
         return [
-            (int(candidate_id), candidate)
+            (candidate_id, candidate)
             for candidate_id, candidate in zip(candidate_ids, candidates)
-            if available.get(int(candidate_id)) == str(candidate.get("result_id") or "")
+            if available.get(candidate_id) == str(candidate.get("result_id") or "")
         ]
 
 
@@ -1645,7 +1645,7 @@ class MediaSubscriptionService:
         candidates = [
             item.to_public_dict() for item in aggregated.items
             if item.download_state in {"ready", "resolvable"}
-            and int(item.relevance_score or 0) >= 60
+            and (item.relevance_score or 0) >= 60
         ][:_MAX_CANDIDATES_PER_MEDIA]
         ids = db.replace_media_subscription_candidates(
             int(row["id"]), media_key, season=None, episode=None,
@@ -1749,7 +1749,7 @@ class MediaSubscriptionService:
         require_active_check: bool = False,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
-        candidate = db.get_media_subscription_candidate(int(candidate_id))
+        candidate = db.get_media_subscription_candidate(candidate_id)
         if candidate is None:
             raise MediaSubscriptionError("候选资源不存在", status_code=404, code="not_found")
         if str(candidate["status"]) != "available":
@@ -1886,7 +1886,7 @@ class MediaSubscriptionService:
             # 且仓储 CAS 确认未绑定请求并已释放准入，才允许自动选源继续。
             raise MediaSubscriptionError(
                 message, status_code=502, code="download_failed",
-                can_try_next_candidate=bool(
+                can_try_next_candidate=(
                     result.get("pre_submission_failure") is True and not request_id and released
                 ),
             )

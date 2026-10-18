@@ -20,16 +20,23 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                 )
                 page.locator("#agentRestoreNew").wait_for(state="visible")
                 notice = page.locator("#agentRestoreNotice").bounding_box()
+                assert notice is not None
                 composer = page.locator("#agentComposer").bounding_box()
+                assert composer is not None
                 self.assertLessEqual(notice["y"] + notice["height"] + 4, composer["y"])
                 page.locator("#agentRestoreNew").focus()
                 button = page.locator("#agentRestoreNew").bounding_box()
+                assert button is not None
                 self.assertLessEqual(button["y"] + button["height"], notice["y"] + notice["height"] + 0.5)
                 controls = page.locator(".agent-composer-header :is(a, button):visible")
                 self.assertEqual(controls.count(), 5)
                 self.assertTrue(page.locator("#agentSend").is_visible())
                 self.assertFalse(page.locator("#agentStopSession").is_visible())
-                boxes = [control.bounding_box() for control in controls.all()]
+                boxes = []
+                for control in controls.all():
+                    box = control.bounding_box()
+                    assert box is not None
+                    boxes.append(box)
                 for box in boxes:
                     self.assertGreaterEqual(box["width"], 44)
                     self.assertGreaterEqual(box["height"], 44)
@@ -69,7 +76,9 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                 page.wait_for_function("document.querySelector('#agentTaskSnapshot')?.dataset.taskStatus==='partial'")
                 page.evaluate("async()=>{await document.fonts.ready}")
                 before = page.locator("#agentComposer").bounding_box()
+                assert before is not None
                 bounds = panel.bounding_box()
+                assert bounds is not None
                 self.assertAlmostEqual(bounds["x"], before["x"], delta=0.5)
                 self.assertAlmostEqual(bounds["width"], before["width"], delta=0.5)
                 self.assertTrue(page.locator(".agent-composer-header").evaluate(
@@ -104,6 +113,7 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                     }"""))
                     self.assertEqual(panel.locator(".agent-task-details").evaluate("n=>n.scrollTop"), 50)
                     after = page.locator("#agentComposer").bounding_box()
+                    assert after is not None
                     self.assertEqual(page.locator(".agent-console").evaluate("n=>n.scrollLeft"), 0)
                     for key in ("x", "y", "width", "height"):
                         self.assertAlmostEqual(before[key], after[key], delta=0.5,
@@ -113,8 +123,12 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                 self.assertFalse(panel.evaluate("n=>n.open"))
                 self.assertTrue(summary.evaluate("n=>n===document.activeElement"))
                 self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
-                self.assertLessEqual(page.locator("#agentComposer").bounding_box()["y"] + before["height"], height)
-                self.assertGreater(page.locator("#agentTranscript").bounding_box()["height"], 30)
+                bounds = page.locator("#agentComposer").bounding_box()
+                assert bounds is not None
+                self.assertLessEqual(bounds["y"] + before["height"], height)
+                bounds = page.locator("#agentTranscript").bounding_box()
+                assert bounds is not None
+                self.assertGreater(bounds["height"], 30)
                 evidence = os.environ.get("CONSUMER_EVIDENCE")
                 if evidence:
                     page.screenshot(path=str(Path(evidence, f"task-summary-{width}-{height}.png")))
@@ -176,12 +190,14 @@ class TaskStatusLayoutBrowserTests(AgentShellBrowserCase):
                         self.assertNotEqual(ancestor["overflow"], "scroll", ancestor)
                         self.assertLessEqual(ancestor["scrollHeight"], ancestor["height"] + 1, ancestor)
                     before = page.locator("#agentComposer").bounding_box()
+                    assert before is not None
                     page.locator("#agentTranscript").evaluate("n=>n.scrollTop=0")
                     page.locator("#agentTranscript").hover()
                     page.mouse.wheel(0, 450)
                     page.wait_for_function("document.querySelector('#agentTranscript').scrollTop>0")
                     self.assertEqual(page.evaluate("window.scrollY"), 0)
                     after = page.locator("#agentComposer").bounding_box()
+                    assert after is not None
                     for key in ("x", "y", "width", "height"):
                         self.assertAlmostEqual(before[key], after[key], delta=0.5)
                     evidence = os.environ.get("CONSUMER_EVIDENCE")

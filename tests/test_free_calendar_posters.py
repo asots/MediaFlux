@@ -7,6 +7,7 @@ import socket
 import threading
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -86,9 +87,10 @@ class PlatformPosterKeyTests(unittest.TestCase):
     def test_bad_optional_image_does_not_drop_programme_facts(self):
         for key in (_KEY, "evil.invalid/image/x.webp", None, {"url": _KEY}):
             with self.subTest(key=key):
+                image_fields: dict[str, Any] = {"platform_poster_key": key}
                 entry = CalendarEntry("iqiyi", "123", "未匹配的动漫", "animation", "https://www.iqiyi.com/a_123.html",
                                       events=(CalendarEvent("2026-09-09", "10:00", "每周三更新"),),
-                                      evidence="官方日期排期", platform_poster_key=key)
+                                      evidence="官方日期排期", **image_fields)
                 self.assertEqual(entry.platform_poster_key, _KEY if key == _KEY else "")
                 self.assertEqual(entry.stable_id, "iqiyi:123")
                 self.assertEqual(len(entry.events), 1)

@@ -146,11 +146,13 @@ class AgentPendingDialogueBrowserTests(AgentShellBrowserCase):
                 page = self.dialogue_page(viewport)
                 card = page.locator(f'[data-plan-id="{PLAN_A}"]')
                 before = card.bounding_box()
+                assert before is not None
                 reads = page.evaluate("window.__dialogueReads")
                 self.send(page, read_events(), approval())
                 self.assert_original_card(page)
                 self.assertEqual(page.evaluate("window.__dialogueReads"), reads + 1)
                 after = card.bounding_box()
+                assert after is not None
                 for dimension in ("width", "height"):
                     self.assertAlmostEqual(before[dimension], after[dimension], delta=0.5)
                 self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), viewport["width"])

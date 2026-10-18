@@ -1,6 +1,9 @@
 """Scissor Seven 的 NF/Mys 发布名回归；仅运行离线清洗与季集解析。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.tmdb import TMDBClient
+
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,7 +30,7 @@ class ScissorSevenRecognitionTests(unittest.TestCase):
 
         cls.scraper = scraper
         cls.parser = scraper.TMDBScraper(
-            client=SimpleNamespace(api_key="", base_url="")
+            client=cast(TMDBClient, SimpleNamespace(api_key="", base_url=""))
         )
 
     def assert_release(self, episode: int, episode_title_number: int):

@@ -17,7 +17,7 @@ from app.agent.domains.system.jobs_actions import (
     start_episode_audit_confirmed,
 )
 from app.agent.errors import AgentToolError
-from app.agent.models import ToolContext
+from app.agent.models import ToolContext, ToolResult
 from tests.support import isolated_test_database
 
 OWNER = "r7-temporary-owner"
@@ -55,6 +55,7 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
             self.assertTrue(created)
             first_id = str(first["job_id"])
             running = db.claim_due_agent_job(job_type="library_episode_audit")
+            assert running is not None
             self.assertEqual(running["job_id"], first_id)
             context = ToolContext(owner=OWNER)
             preview, fingerprint = prepare_start_episode_audit(ARGUMENTS, context)
@@ -77,7 +78,7 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
             completion_uncommitted = threading.Event()
             allow_completion_commit = threading.Event()
             confirmation_checked = threading.Event()
-            outcomes = {}
+            outcomes: dict[str, bool | ToolResult] = {}
             failures = []
             real_get_conn = db.get_conn
             real_create = db.create_agent_job
@@ -100,6 +101,7 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
 
             def complete_existing():
                 try:
+                    assert running is not None
                     outcomes["completed"] = db.complete_agent_job(
                         first_id,
                         expected_lease_generation=int(running["lease_generation"]),
@@ -146,11 +148,13 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
             self.assertFalse(completer.is_alive() or confirmer.is_alive())
             self.assertTrue(outcomes["completed"])
             self.assertEqual(len(failures), 1)
-            self.assertIsInstance(failures[0], AgentToolError)
+            assert isinstance(failures[0], AgentToolError)
             self.assertEqual(failures[0].code, "confirmation_stale")
             self.assertNotIn("confirmed", outcomes)
+            get_agent_job_result = db.get_agent_job(owner=OWNER, job_id=first_id)
+            assert get_agent_job_result is not None
             self.assertEqual(
-                db.get_agent_job(owner=OWNER, job_id=first_id)["status"], "succeeded"
+                get_agent_job_result["status"], "succeeded"
             )
             self.assertEqual(len(db.list_agent_jobs(owner=OWNER)), 1)
             self.assertEqual(store.list_active_tickets(owner=OWNER), [])

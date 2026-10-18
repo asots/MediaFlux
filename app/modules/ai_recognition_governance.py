@@ -90,7 +90,7 @@ def provider_fingerprint(
     """生成不含明文凭据的 Provider 身份。"""
     digest = hashlib.sha256()
     for value in (base_url, model, api_key, protocol):
-        digest.update(str(value or "").encode("utf-8", "ignore"))
+        digest.update((value or "").encode("utf-8", "ignore"))
         digest.update(b"\0")
     return digest.hexdigest()
 

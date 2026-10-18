@@ -5,10 +5,10 @@ import json
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timedelta
-from dataclasses import asdict, dataclass
 from collections.abc import Iterable
-from typing import Any
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
+from typing import Any, Literal, overload
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class StrmRefreshPolicy:
 
     media_root: str = ""
     allow_emby: bool = True
-    request_owners: object = None
+    request_owners: Iterable[dict[str, Any]] | None = None
     enabled: bool = True
 
     def __call__(self, targets: list[str]) -> None:
@@ -31,14 +31,17 @@ class StrmRefreshPolicy:
             planned.targets, allow_emby=self.allow_emby, request_owners=self.request_owners,
         )
 
-    def record(self, conn: sqlite3.Connection, paths: object) -> None:
+    def record(self, conn: sqlite3.Connection, paths: Iterable[object] | None) -> None:
         if not self.enabled:
             return
         from app.modules.media_refresh import plan_refresh_targets
 
         # 历史任务未保存媒体根，保留其明确目标；新任务按冻结的根规划目录。
-        planning = {"changed_paths": paths} if self.media_root else {"changed_dirs": paths}
-        targets = plan_refresh_targets(**planning, media_roots=[self.media_root]).targets
+        planned = (
+            plan_refresh_targets(changed_paths=paths, media_roots=[self.media_root])
+            if self.media_root else plan_refresh_targets(changed_dirs=paths, media_roots=[self.media_root])
+        )
+        targets = planned.targets
         if targets:
             _enqueue_strm_refresh_paths(
                 conn, targets, stamp=db.now(), allow_emby=self.allow_emby,
@@ -97,9 +100,9 @@ def upsert_strm_index(
     conflicts = [
         item
         for item in dict.fromkeys(
-            str(value) for value in conflicting_file_ids if str(value)
+            value for value in conflicting_file_ids if value
         )
-        if item != str(file_id)
+        if item != file_id
     ]
     with database.get_conn() as conn:
         previous = conn.execute(
@@ -118,7 +121,7 @@ def upsert_strm_index(
                 size,
                 filename,
                 strm_path,
-                str(content_fingerprint or ""),
+                (content_fingerprint or ""),
                 database.now(),
             ),
         )
@@ -210,7 +213,7 @@ def list_strm_installation_rows(
         return conn.execute(
             "SELECT * FROM strm_index WHERE source=? AND file_id=? "
             "UNION SELECT * FROM strm_index WHERE strm_path=? AND source=?",
-            (str(source), str(file_id), str(strm_path), str(source)),
+            (source, file_id, strm_path, source),
         ).fetchall()
 
 
@@ -219,7 +222,7 @@ def list_strm_file_owners(file_id: str) -> list[sqlite3.Row]:
     with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM strm_index WHERE file_id=? AND source LIKE 'guangya:%'",
-            (str(file_id),),
+            (file_id,),
         ).fetchall()
 
 
@@ -227,7 +230,7 @@ def list_strm_path_owners(strm_path: str) -> list[sqlite3.Row]:
     """跨来源查询目标路径所有者，防止清理复用路径或其他来源的文件。"""
     with db.get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM strm_index WHERE strm_path=?", (str(strm_path),)
+            "SELECT * FROM strm_index WHERE strm_path=?", (strm_path,)
         ).fetchall()
 
 
@@ -239,7 +242,7 @@ def enqueue_strm_path_cleanup(items: list[dict[str, str]]) -> int:
     stamp = database.now()
     records = []
     for item in items:
-        values = tuple(str(item.get(key) or "") for key in (
+        values = tuple((item.get(key) or "") for key in (
             "source", "file_id", "strm_path", "content_fingerprint",
         ))
         if not all(values):
@@ -261,7 +264,7 @@ def list_strm_path_cleanup(
 ) -> list[sqlite3.Row]:
     """按不可变 ID 分页；保留被所有权校验阻止的凭据而不阻塞后面的任务。"""
     where = "source=?"
-    params: list[Any] = [str(source)]
+    params: list[Any] = [source]
     if only_file_ids is not None:
         # 先由 (source,file_id) 覆盖索引定位，再按主键分页，避免 SQLite
         # 为满足 ORDER BY id 而选择 (source,id) 后遍历所有无关凭据。
@@ -270,7 +273,7 @@ def list_strm_path_cleanup(
             "AND file_id IN (SELECT value FROM json_each(?)))"
         )
         params.append(json.dumps(sorted(only_file_ids)))
-    params.extend((int(after_id), max(1, min(int(limit), 1000))))
+    params.extend((after_id, max(1, min(limit, 1000))))
     with db.get_conn() as conn:
         return conn.execute(
             f"SELECT * FROM strm_path_cleanup WHERE {where} AND id>? ORDER BY id LIMIT ?",
@@ -279,7 +282,7 @@ def list_strm_path_cleanup(
 
 
 def delete_strm_path_cleanup(ids: list[int]) -> None:
-    values = list(dict.fromkeys(int(value) for value in ids))
+    values = list(dict.fromkeys(value for value in ids))
     if not values:
         return
     with db.get_conn() as conn:
@@ -294,7 +297,7 @@ def list_strm_indexes_by_file_id(file_id: str) -> list[sqlite3.Row]:
     """查询所有来源中引用同一远端文件的 STRM 索引。"""
     with db.get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM strm_index WHERE file_id=? ORDER BY id", (str(file_id),)
+            "SELECT * FROM strm_index WHERE file_id=? ORDER BY id", (file_id,)
         ).fetchall()
 
 
@@ -309,9 +312,9 @@ def list_strm_index_by_prefix(prefix: str) -> list[sqlite3.Row]:
 def delete_strm_index_ids(
     source: str, file_ids: list[str], *,
     refresh_policy: StrmRefreshPolicy | None = None,
-    refresh_paths: object = (),
+    refresh_paths: Iterable[object] | None = (),
 ) -> int:
-    ids = list(dict.fromkeys(str(item) for item in file_ids if str(item)))
+    ids = list(dict.fromkeys(item for item in file_ids if item))
     if not ids:
         return 0
     placeholders = ",".join("?" for _ in ids)
@@ -355,7 +358,7 @@ def _sanitize_metadata_error(value: object) -> str:
 
 
 def enqueue_strm_metadata_jobs(
-    items: object,
+    items: Iterable[object] | None,
     *,
     provider: str = "guangya",
     max_attempts: int = DEFAULT_STRM_METADATA_MAX_ATTEMPTS,
@@ -367,7 +370,7 @@ def enqueue_strm_metadata_jobs(
         return result
     database = db
     stamp = database.now()
-    safe_max_attempts = max(1, int(max_attempts or DEFAULT_STRM_METADATA_MAX_ATTEMPTS))
+    safe_max_attempts = max(1, (max_attempts or DEFAULT_STRM_METADATA_MAX_ATTEMPTS))
     with database.get_conn() as conn:
         for item in normalized:
             source_id = str(item.get("source_id") or "").strip()
@@ -378,7 +381,7 @@ def enqueue_strm_metadata_jobs(
             snapshot = _metadata_snapshot(item)
             row = conn.execute(
                 "SELECT * FROM strm_metadata_queue WHERE provider=? AND source_id=? AND file_id=?",
-                (str(provider or "guangya"), source_id, file_id),
+                ((provider or "guangya"), source_id, file_id),
             ).fetchone()
             values = (*snapshot[:4], int(snapshot[4]), *snapshot[5:], safe_max_attempts)
             if row is None:
@@ -388,7 +391,7 @@ def enqueue_strm_metadata_jobs(
                     "rel_dir,target_rel_path,refresh_policy_json,status,max_attempts,next_attempt_at,created_at,updated_at"
                     ") VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)",
                     (
-                        str(provider or "guangya"), source_id, snapshot[0], file_id,
+                        (provider or "guangya"), source_id, snapshot[0], file_id,
                         snapshot[1], snapshot[2], snapshot[3], int(snapshot[4]),
                         snapshot[5], snapshot[6], snapshot[7], safe_max_attempts, stamp, stamp, stamp,
                     ),
@@ -445,7 +448,7 @@ def claim_due_strm_metadata_jobs(
     database = db
     stamp = database.now()
     now_epoch = time.time()
-    deadline = now_epoch + max(1, int(lease_seconds or 1))
+    deadline = now_epoch + max(1, (lease_seconds or 1))
     claimed: list[dict[str, Any]] = []
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -454,7 +457,7 @@ def claim_due_strm_metadata_jobs(
             "(status IN ('queued','retry_wait') AND next_attempt_at<=?) OR "
             "(status='running' AND lease_until<=?)) "
             "ORDER BY next_attempt_at,id LIMIT ?",
-            (str(provider or "guangya"), stamp, now_epoch, max(1, int(limit or 1))),
+            ((provider or "guangya"), stamp, now_epoch, max(1, (limit or 1))),
         ).fetchall()
         for row in rows:
             previous_generation = int(row["lease_generation"] or 0)
@@ -465,7 +468,7 @@ def claim_due_strm_metadata_jobs(
                 "(status IN ('queued','retry_wait') AND next_attempt_at<=?) OR "
                 "(status='running' AND lease_until<=?))",
                 (
-                    str(owner or ""), deadline, stamp, stamp, int(row["id"]),
+                    (owner or ""), deadline, stamp, stamp, int(row["id"]),
                     previous_generation, stamp, now_epoch,
                 ),
             )
@@ -474,7 +477,7 @@ def claim_due_strm_metadata_jobs(
             payload = dict(row)
             payload["status"] = "running"
             payload["dirty"] = 0
-            payload["lease_owner"] = str(owner or "")
+            payload["lease_owner"] = (owner or "")
             payload["lease_until"] = deadline
             payload["lease_generation"] = previous_generation + 1
             claimed.append(payload)
@@ -489,17 +492,17 @@ def renew_strm_metadata_job_lease(
     lease_seconds: int = DEFAULT_STRM_METADATA_LEASE_SECONDS,
 ) -> bool:
     """续租当前元数据任务；owner 或代次变化时拒绝迟到 worker。"""
-    owner = str(expected_owner or "").strip()
+    owner = (expected_owner or "").strip()
     if not owner:
         return False
-    deadline = time.time() + max(1, int(lease_seconds or 1))
+    deadline = time.time() + max(1, (lease_seconds or 1))
     with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE strm_metadata_queue SET lease_until=?,updated_at=? "
             "WHERE id=? AND status='running' AND lease_owner=? AND lease_generation=?",
             (
-                deadline, db.now(), int(job_id), owner,
-                int(expected_lease_generation),
+                deadline, db.now(), job_id, owner,
+                expected_lease_generation,
             ),
         )
         return cur.rowcount == 1
@@ -511,7 +514,7 @@ def settle_strm_metadata_job(
     expected_lease_generation: int,
     expected_revision: int,
     expected_owner: str = "",
-    refresh_paths: object = (),
+    refresh_paths: Iterable[object] | None = (),
     cancel_reason: str = "",
 ) -> str:
     """按租约交接成功或取消；快照已变化时只重新排队最新版本。"""
@@ -524,15 +527,15 @@ def settle_strm_metadata_job(
         row = conn.execute(
             "SELECT status,dirty,revision,lease_owner,lease_generation,source_id,file_id,refresh_policy_json "
             "FROM strm_metadata_queue WHERE id=?",
-            (int(job_id),),
+            (job_id,),
         ).fetchone()
         if (
             row is None or str(row["status"]) != "running"
-            or int(row["lease_generation"] or 0) != int(expected_lease_generation)
-            or (expected_owner and str(row["lease_owner"] or "") != str(expected_owner))
+            or int(row["lease_generation"] or 0) != expected_lease_generation
+            or (expected_owner and str(row["lease_owner"] or "") != expected_owner)
         ):
             return "stale"
-        requeue = bool(row["dirty"]) or int(row["revision"] or 0) != int(expected_revision)
+        requeue = bool(row["dirty"]) or int(row["revision"] or 0) != expected_revision
         status = "queued" if requeue else "cancelled" if cancel_reason else "completed"
         cancelled = status == "cancelled"
         cur = conn.execute(
@@ -542,8 +545,8 @@ def settle_strm_metadata_job(
             (
                 status, stamp, stamp if status == "completed" else None,
                 "Cancelled" if cancelled else "", _sanitize_metadata_error(cancel_reason) if cancelled else "",
-                stamp, int(job_id),
-                int(expected_lease_generation),
+                stamp, job_id,
+                expected_lease_generation,
             ),
         )
         if cur.rowcount != 1:
@@ -556,7 +559,7 @@ def settle_strm_metadata_job(
         return status
 
 
-def _normalize_refresh_paths(paths: object) -> tuple[str, ...]:
+def _normalize_refresh_paths(paths: Iterable[object] | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(
         str(path or "").strip()
         for path in (paths or ())
@@ -566,14 +569,17 @@ def _normalize_refresh_paths(paths: object) -> tuple[str, ...]:
 
 def _enqueue_strm_refresh_paths(
     conn: sqlite3.Connection,
-    paths: object,
+    paths: Iterable[object] | None,
     *,
     stamp: str,
     allow_emby: bool,
-    request_owners: object = None,
-) -> list[dict[str, object]]:
-    from app.repositories.strm_request_ownership import _attach_request_work, refresh_work_key
-    entries: list[dict[str, object]] = []
+    request_owners: Iterable[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    from app.repositories.strm_request_ownership import (
+        _attach_request_work,
+        refresh_work_key,
+    )
+    entries: list[dict[str, Any]] = []
     for path in _normalize_refresh_paths(paths):
         token = uuid.uuid4().hex
         conn.execute(
@@ -589,20 +595,20 @@ def _enqueue_strm_refresh_paths(
 
 
 def enqueue_strm_refresh_paths(
-    paths: object, *, allow_emby: bool = True, request_owners: object = None,
-) -> list[dict[str, object]]:
+    paths: Iterable[object] | None, *, allow_emby: bool = True, request_owners: Iterable[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """持久登记变化，返回本次写入的事件快照；交接只允许确认该快照。"""
     database = db
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         return _enqueue_strm_refresh_paths(
-            conn, paths, stamp=database.now(), allow_emby=bool(allow_emby),
+            conn, paths, stamp=database.now(), allow_emby=allow_emby,
             request_owners=request_owners,
         )
 
 
 def resolve_strm_failure_with_refresh(
-    failure_id: int, paths: object, *, allow_emby: bool = True,
+    failure_id: int, paths: Iterable[object] | None, *, allow_emby: bool = True,
     expected_status: str = "retrying",
 ) -> bool:
     """失败恢复的 ACK 与刷新意图同事务；入队失败不得丢失可重试台账。"""
@@ -612,7 +618,7 @@ def resolve_strm_failure_with_refresh(
         cur = conn.execute(
             "UPDATE strm_failures SET status='resolved',updated_at=?,resolved_at=? "
             "WHERE id=? AND status=?",
-            (stamp, stamp, int(failure_id), str(expected_status)),
+            (stamp, stamp, failure_id, expected_status),
         )
         if cur.rowcount != 1:
             return False
@@ -620,9 +626,9 @@ def resolve_strm_failure_with_refresh(
         return True
 
 
-def list_strm_refresh_entries(*, limit: int = 5000) -> list[dict[str, object]]:
+def list_strm_refresh_entries(*, limit: int = 5000) -> list[dict[str, Any]]:
     """读取未被统一队列接管的事件快照，保留 provider 边界和条件 ACK 令牌。"""
-    safe_limit = max(1, min(int(limit or 5000), 20000))
+    safe_limit = max(1, min((limit or 5000), 20000))
     with db.get_conn() as conn:
         rows = conn.execute(
             "SELECT path,allow_emby,event_token FROM strm_refresh_outbox "
@@ -639,7 +645,7 @@ def count_strm_refresh_paths() -> int:
         ).fetchone()[0] or 0)
 
 
-def acknowledge_strm_refresh_paths(entries: list[dict[str, object]]) -> int:
+def acknowledge_strm_refresh_paths(entries: list[dict[str, Any]]) -> int:
     """只确认已交接的事件版本；迟到 ACK 不得删除同路径的新变化。"""
     params = []
     for entry in entries:
@@ -652,7 +658,10 @@ def acknowledge_strm_refresh_paths(entries: list[dict[str, object]]) -> int:
         params.append((path, int(bool(entry["allow_emby"])), token))
     if not params:
         return 0
-    from app.repositories.strm_request_ownership import _complete_request_work, refresh_work_key
+    from app.repositories.strm_request_ownership import (
+        _complete_request_work,
+        refresh_work_key,
+    )
     removed = 0
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -677,16 +686,14 @@ def strm_metadata_job_is_current(
         row = conn.execute(
             "SELECT status,dirty,revision,lease_owner,lease_generation "
             "FROM strm_metadata_queue WHERE id=?",
-            (int(job_id),),
+            (job_id,),
         ).fetchone()
-    return bool(
-        row is not None
+    return (row is not None
         and str(row["status"] or "") == "running"
         and not bool(row["dirty"])
-        and int(row["revision"] or 0) == int(expected_revision)
-        and int(row["lease_generation"] or 0) == int(expected_lease_generation)
-        and (not expected_owner or str(row["lease_owner"] or "") == str(expected_owner))
-    )
+        and int(row["revision"] or 0) == expected_revision
+        and int(row["lease_generation"] or 0) == expected_lease_generation
+        and (not expected_owner or str(row["lease_owner"] or "") == expected_owner))
 
 
 def fail_or_retry_strm_metadata_job(
@@ -716,20 +723,20 @@ def fail_or_retry_strm_metadata_job(
         row = conn.execute(
             "SELECT status,dirty,revision,attempts,max_attempts,lease_owner,lease_generation "
             "FROM strm_metadata_queue WHERE id=?",
-            (int(job_id),),
+            (job_id,),
         ).fetchone()
         if (
             row is None or str(row["status"]) != "running"
-            or int(row["lease_generation"] or 0) != int(expected_lease_generation)
-            or (expected_owner and str(row["lease_owner"] or "") != str(expected_owner))
+            or int(row["lease_generation"] or 0) != expected_lease_generation
+            or (expected_owner and str(row["lease_owner"] or "") != expected_owner)
         ):
             return "stale"
-        if bool(row["dirty"]) or int(row["revision"] or 0) != int(expected_revision):
+        if bool(row["dirty"]) or int(row["revision"] or 0) != expected_revision:
             conn.execute(
                 "UPDATE strm_metadata_queue SET status='queued',dirty=0,attempts=0,"
                 "next_attempt_at=?,lease_owner='',lease_until=0,last_error_type='',last_error='',"
                 "updated_at=? WHERE id=? AND status='running' AND lease_generation=?",
-                (stamp, stamp, int(job_id), int(expected_lease_generation)),
+                (stamp, stamp, job_id, expected_lease_generation),
             )
             return "queued"
         count_attempt = consume_attempt and not handoff_only
@@ -737,8 +744,8 @@ def fail_or_retry_strm_metadata_job(
         exhausted = count_attempt and attempts >= max(1, int(row["max_attempts"] or 1))
         status = "failed" if exhausted else "retry_wait"
         delay = 0 if exhausted else min(
-            max(1, int(max_backoff_seconds or 1)),
-            max(1, int(base_backoff_seconds or 1)) * (2 ** max(0, attempts - 1)),
+            max(1, (max_backoff_seconds or 1)),
+            max(1, (base_backoff_seconds or 1)) * (2 ** max(0, attempts - 1)),
         )
         next_attempt = stamp if exhausted else _future_stamp(delay)
         cur = conn.execute(
@@ -746,9 +753,9 @@ def fail_or_retry_strm_metadata_job(
             "lease_owner='',lease_until=0,last_error_type=?,last_error=?,updated_at=? "
             "WHERE id=? AND status='running' AND lease_generation=?",
             (
-                status, attempts, next_attempt, str(error_type or "Error")[:100],
-                _sanitize_metadata_error(error), stamp, int(job_id),
-                int(expected_lease_generation),
+                status, attempts, next_attempt, (error_type or "Error")[:100],
+                _sanitize_metadata_error(error), stamp, job_id,
+                expected_lease_generation,
             ),
         )
         return status if cur.rowcount == 1 else "stale"
@@ -761,10 +768,10 @@ def recover_stale_strm_metadata_jobs(
     database = db
     stamp = database.now()
     where = "provider=? AND status='running'"
-    params: list[object] = [str(provider or "guangya")]
+    params: list[object] = [(provider or "guangya")]
     if force and owner:
         where += " AND lease_owner=?"
-        params.append(str(owner))
+        params.append(owner)
     elif not force:
         where += " AND lease_until<=?"
         params.append(time.time())
@@ -776,7 +783,7 @@ def recover_stale_strm_metadata_jobs(
             f"updated_at=? WHERE {where}",
             (stamp, stamp, *params),
         )
-        return int(cur.rowcount or 0)
+        return (cur.rowcount or 0)
 
 
 def cancel_strm_metadata_job(
@@ -791,14 +798,14 @@ def cancel_strm_metadata_job(
             "WHERE provider=? AND source_id=? AND file_id=? AND status<>'cancelled'",
             (
                 _sanitize_metadata_error(reason or "远端元数据已删除"), stamp,
-                str(provider or "guangya"), str(source_id), str(file_id),
+                (provider or "guangya"), source_id, file_id,
             ),
         )
         return cur.rowcount == 1
 
 
 def cancel_stale_strm_metadata_jobs(
-    source_id: str, valid_file_ids: object, *, provider: str = "guangya",
+    source_id: str, valid_file_ids: Iterable[object] | None, *, provider: str = "guangya",
     reason: str = "完整扫描确认远端元数据已失效",
 ) -> int:
     valid = {str(item) for item in (valid_file_ids or []) if str(item)}
@@ -809,7 +816,7 @@ def cancel_stale_strm_metadata_jobs(
         rows = conn.execute(
             "SELECT id,file_id FROM strm_metadata_queue WHERE provider=? AND source_id=? "
             "AND status<>'cancelled'",
-            (str(provider or "guangya"), str(source_id)),
+            ((provider or "guangya"), source_id),
         ).fetchall()
         for row in rows:
             if str(row["file_id"]) in valid:
@@ -820,12 +827,12 @@ def cancel_stale_strm_metadata_jobs(
                 "updated_at=? WHERE id=? AND status<>'cancelled'",
                 (_sanitize_metadata_error(reason), stamp, int(row["id"])),
             )
-            cancelled += int(cur.rowcount or 0)
+            cancelled += (cur.rowcount or 0)
     return cancelled
 
 
 def cancel_retired_strm_metadata_jobs(
-    active_source_ids: object, *, provider: str = "guangya",
+    active_source_ids: Iterable[object] | None, *, provider: str = "guangya",
 ) -> int:
     """取消已不在配置来源集中的元数据任务，防止退役清理后被后台复活。"""
     active = {str(item) for item in (active_source_ids or []) if str(item)}
@@ -836,7 +843,7 @@ def cancel_retired_strm_metadata_jobs(
         rows = conn.execute(
             "SELECT id,source_id FROM strm_metadata_queue WHERE provider=? "
             "AND status<>'cancelled'",
-            (str(provider or "guangya"),),
+            ((provider or "guangya"),),
         ).fetchall()
         for row in rows:
             if str(row["source_id"]) in active:
@@ -848,11 +855,11 @@ def cancel_retired_strm_metadata_jobs(
                 "updated_at=? WHERE id=? AND status<>'cancelled'",
                 (stamp, int(row["id"])),
             )
-            cancelled += int(cur.rowcount or 0)
+            cancelled += (cur.rowcount or 0)
     return cancelled
 
 
-def requeue_strm_metadata_jobs(job_ids: object) -> int:
+def requeue_strm_metadata_jobs(job_ids: Iterable[int | str] | None) -> int:
     ids = [int(item) for item in (job_ids or []) if str(item).strip().isdigit()]
     if not ids:
         return 0
@@ -868,7 +875,7 @@ def requeue_strm_metadata_jobs(job_ids: object) -> int:
                 "AND status IN ('failed','retry_wait','cancelled')",
                 (stamp, stamp, job_id),
             )
-            updated += int(cur.rowcount or 0)
+            updated += (cur.rowcount or 0)
     return updated
 
 
@@ -881,7 +888,7 @@ def count_strm_metadata_jobs(*, provider: str = "guangya") -> dict[str, int]:
         rows = conn.execute(
             "SELECT status,COUNT(*) AS total FROM strm_metadata_queue "
             "WHERE provider=? GROUP BY status",
-            (str(provider or "guangya"),),
+            ((provider or "guangya"),),
         ).fetchall()
     for row in rows:
         status = str(row["status"] or "")
@@ -897,18 +904,18 @@ def count_strm_metadata_jobs(*, provider: str = "guangya") -> dict[str, int]:
 def list_strm_metadata_queue(
     *, provider: str = "guangya", status: str = "all", limit: int = 200,
 ) -> list[sqlite3.Row]:
-    safe_limit = max(1, min(int(limit or 200), 1000))
+    safe_limit = max(1, min((limit or 200), 1000))
     with db.get_conn() as conn:
         if status == "all":
             return conn.execute(
                 "SELECT * FROM strm_metadata_queue WHERE provider=? "
                 "ORDER BY updated_at DESC,id DESC LIMIT ?",
-                (str(provider or "guangya"), safe_limit),
+                ((provider or "guangya"), safe_limit),
             ).fetchall()
         return conn.execute(
             "SELECT * FROM strm_metadata_queue WHERE provider=? AND status=? "
             "ORDER BY updated_at DESC,id DESC LIMIT ?",
-            (str(provider or "guangya"), str(status), safe_limit),
+            ((provider or "guangya"), status, safe_limit),
         ).fetchall()
 
 
@@ -952,14 +959,14 @@ def _change_key(change: dict[str, Any]) -> str:
 def _load_changes(raw: object) -> list[dict[str, Any]]:
     try:
         parsed = json.loads(str(raw or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return []
     if not isinstance(parsed, list):
         return []
     return [item for item in parsed if isinstance(item, dict)]
 
 
-def merge_strm_changes(*groups: object) -> list[dict[str, Any]]:
+def merge_strm_changes(*groups: Iterable[object] | None) -> list[dict[str, Any]]:
     """按变化键去重合并；同一快照以后到值为准，溢出时强制全量。"""
     merged: dict[str, dict[str, Any]] = {}
     for group in groups:
@@ -991,7 +998,7 @@ def merge_strm_changes(*groups: object) -> list[dict[str, Any]]:
     return [*changes[-(_MAX_QUEUED_CHANGES - 1):], marker]
 
 
-def group_changes_by_target(changes: object) -> dict[tuple[str, str], list[dict[str, Any]]]:
+def group_changes_by_target(changes: Iterable[object] | None) -> dict[tuple[str, str], list[dict[str, Any]]]:
     """把 STRM 变化清单按 (source_id, 目标相对目录) 分组。"""
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in changes or []:
@@ -1005,10 +1012,28 @@ def group_changes_by_target(changes: object) -> dict[tuple[str, str], list[dict[
     return grouped
 
 
+@overload
 def enqueue_strm_change_targets(
-    changes: object, *, provider: str = DEFAULT_STRM_PROVIDER,
+    changes: Iterable[object] | None, *, provider: str = DEFAULT_STRM_PROVIDER,
     not_before_seconds: float | None = 0.0,
-    download_request_ids: object = None,
+    download_request_ids: Iterable[int | str] | None = None,
+    with_owners: Literal[False] = False,
+) -> int: ...
+
+
+@overload
+def enqueue_strm_change_targets(
+    changes: Iterable[object] | None, *, provider: str = DEFAULT_STRM_PROVIDER,
+    not_before_seconds: float | None = 0.0,
+    download_request_ids: Iterable[int | str] | None = None,
+    with_owners: Literal[True],
+) -> tuple[int, list[dict[str, Any]]]: ...
+
+
+def enqueue_strm_change_targets(
+    changes: Iterable[object] | None, *, provider: str = DEFAULT_STRM_PROVIDER,
+    not_before_seconds: float | None = 0.0,
+    download_request_ids: Iterable[int | str] | None = None,
     with_owners: bool = False,
 ) -> int | tuple[int, list[dict[str, Any]]]:
     """登记变化目标目录；同步进行中的目标转入 dirty，不丢事件。
@@ -1036,7 +1061,10 @@ def enqueue_strm_change_targets(
         # 同时读到旧快照，后提交者会覆盖另一批变化。把读取、合并和写入
         # 放进同一立即写事务，保持“不丢事件”的队列契约。
         conn.execute("BEGIN IMMEDIATE")
-        from app.repositories.strm_request_ownership import _begin_request_owners, _attach_request_work
+        from app.repositories.strm_request_ownership import (
+            _attach_request_work,
+            _begin_request_owners,
+        )
         owners = _begin_request_owners(conn, download_request_ids, stamp)
         for (source_id, rel_dir), items in grouped.items():
             row = conn.execute(
@@ -1061,38 +1089,41 @@ def enqueue_strm_change_targets(
                         next_attempt_at or stamp,
                     ),
                 )
-            elif str(row["state"]) in {"running", "dirty"}:
-                if next_attempt_at is None:
-                    conn.execute(
-                        "UPDATE strm_change_queue SET state='dirty',dirty=1,"
-                        "pending_changes_json=?,updated_at=? WHERE id=?",
-                        (payload, stamp, int(row["id"])),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE strm_change_queue SET state='dirty',dirty=1,"
-                        "pending_changes_json=?,updated_at=?,next_attempt_at=? WHERE id=?",
-                        (payload, stamp, next_attempt_at, int(row["id"])),
-                    )
+                assert created.lastrowid is not None
+                target_id = created.lastrowid
             else:
-                resolved_next_attempt = (
-                    str(row["next_attempt_at"] or stamp)
-                    if next_attempt_at is None else next_attempt_at
-                )
-                conn.execute(
-                    "UPDATE strm_change_queue SET state='queued',dirty=0,attempts=0,"
-                    "last_error='',pending_changes_json=?,updated_at=?,next_attempt_at=? "
-                    "WHERE id=?",
-                    (payload, stamp, resolved_next_attempt, int(row["id"])),
-                )
-            target_id = int(created.lastrowid) if row is None else int(row["id"])
+                target_id = int(row["id"])
+                if str(row["state"]) in {"running", "dirty"}:
+                    if next_attempt_at is None:
+                        conn.execute(
+                            "UPDATE strm_change_queue SET state='dirty',dirty=1,"
+                            "pending_changes_json=?,updated_at=? WHERE id=?",
+                            (payload, stamp, int(row["id"])),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE strm_change_queue SET state='dirty',dirty=1,"
+                            "pending_changes_json=?,updated_at=?,next_attempt_at=? WHERE id=?",
+                            (payload, stamp, next_attempt_at, int(row["id"])),
+                        )
+                else:
+                    resolved_next_attempt = (
+                        str(row["next_attempt_at"] or stamp)
+                        if next_attempt_at is None else next_attempt_at
+                    )
+                    conn.execute(
+                        "UPDATE strm_change_queue SET state='queued',dirty=0,attempts=0,"
+                        "last_error='',pending_changes_json=?,updated_at=?,next_attempt_at=? "
+                        "WHERE id=?",
+                        (payload, stamp, resolved_next_attempt, int(row["id"])),
+                    )
             _attach_request_work(conn, owners, "change", str(target_id))
             written += 1
     return (written, owners) if with_owners else written
 
 
 def reschedule_strm_change_targets(
-    changes: object, *, not_before_seconds: float,
+    changes: Iterable[object] | None, *, not_before_seconds: float,
     provider: str = DEFAULT_STRM_PROVIDER,
 ) -> int:
     """把同一内存合并批次的全部目标统一到新的最早领取时间。"""
@@ -1111,7 +1142,7 @@ def reschedule_strm_change_targets(
                 "AND state IN ('queued','dirty')",
                 (next_attempt_at, stamp, provider, source_id, rel_dir),
             )
-            updated += int(cur.rowcount or 0)
+            updated += (cur.rowcount or 0)
     return updated
 
 
@@ -1127,11 +1158,11 @@ def claim_strm_change_targets(
     database = db
     stamp = database.now()
     now_epoch = time.time()
-    deadline = now_epoch + max(1, int(lease_seconds or 1))
-    safe_owner = str(owner or "").strip()
+    deadline = now_epoch + max(1, (lease_seconds or 1))
+    safe_owner = (owner or "").strip()
     if not safe_owner:
         raise ValueError("STRM 变化目标领取必须提供 owner")
-    selected = tuple(dict.fromkeys(str(value).strip() for value in source_ids or () if str(value).strip()))
+    selected = tuple(dict.fromkeys(value.strip() for value in source_ids or () if value.strip()))
     if source_ids is not None and not selected:
         return []
     source_filter = " AND source_id IN (" + ",".join("?" for _ in selected) + ")" if selected else ""
@@ -1143,7 +1174,7 @@ def claim_strm_change_targets(
             "  (state='queued' AND next_attempt_at<=?)"
             "  OR (state IN ('running','dirty') AND lease_until<=?)"
             ")" + source_filter + " ORDER BY next_attempt_at, id LIMIT ?",
-            (provider, stamp, now_epoch, *selected, max(1, int(limit or 1))),
+            (provider, stamp, now_epoch, *selected, max(1, (limit or 1))),
         ).fetchall()
         for row in rows:
             previous_generation = int(row["lease_generation"] or 0)
@@ -1181,17 +1212,17 @@ def claim_strm_change_targets(
 
 
 def renew_strm_change_target_leases(
-    claimed: object,
+    claimed: Iterable[object] | None,
     *,
     owner: str,
     lease_seconds: int = DEFAULT_STRM_LEASE_SECONDS,
 ) -> int:
     """续租仍由当前 owner/代次持有的目标，迟到 worker 无权延长新租约。"""
-    safe_owner = str(owner or "").strip()
+    safe_owner = (owner or "").strip()
     rows = [dict(item) for item in (claimed or []) if isinstance(item, dict)]
     if not safe_owner or not rows:
         return 0
-    deadline = time.time() + max(1, int(lease_seconds or 1))
+    deadline = time.time() + max(1, (lease_seconds or 1))
     stamp = db.now()
     renewed = 0
     with db.get_conn() as conn:
@@ -1205,7 +1236,7 @@ def renew_strm_change_target_leases(
                     int(item.get("lease_generation") or 0),
                 ),
             )
-            renewed += int(cur.rowcount or 0)
+            renewed += (cur.rowcount or 0)
     return renewed
 
 
@@ -1221,7 +1252,7 @@ def complete_strm_change_target(
             "SELECT state,pending_changes_json,next_attempt_at FROM strm_change_queue "
             "WHERE id=? AND state IN ('running','dirty') AND lease_owner=? "
             "AND lease_generation=?",
-            (int(target_id), str(expected_owner or ""), int(expected_lease_generation)),
+            (target_id, (expected_owner or ""), expected_lease_generation),
         ).fetchone()
         if row is None:
             return "stale"
@@ -1238,8 +1269,8 @@ def complete_strm_change_target(
             "updated_at=?,next_attempt_at=? WHERE id=? AND state IN ('running','dirty') "
             "AND lease_owner=? AND lease_generation=?",
             (
-                state, stamp, next_attempt_at, int(target_id), str(expected_owner or ""),
-                int(expected_lease_generation),
+                state, stamp, next_attempt_at, target_id, (expected_owner or ""),
+                expected_lease_generation,
             ),
         )
         if cur.rowcount == 1 and state == "completed":
@@ -1266,7 +1297,7 @@ def fail_strm_change_target(
             "SELECT attempts,pending_changes_json,inflight_changes_json "
             "FROM strm_change_queue WHERE id=? AND state IN ('running','dirty') "
             "AND lease_owner=? AND lease_generation=?",
-            (int(target_id), str(expected_owner or ""), int(expected_lease_generation)),
+            (target_id, (expected_owner or ""), expected_lease_generation),
         ).fetchone()
         if row is None:
             return "stale"
@@ -1275,24 +1306,24 @@ def fail_strm_change_target(
             _load_changes(row["pending_changes_json"]),
             _load_changes(row["inflight_changes_json"]),
         )
-        exhausted = attempts >= max(1, int(max_attempts or 1))
+        exhausted = attempts >= max(1, (max_attempts or 1))
         state = "failed" if exhausted else "queued"
-        delay = 0 if exhausted else max(1, int(backoff_seconds or 1)) * min(attempts, 6)
+        delay = 0 if exhausted else max(1, (backoff_seconds or 1)) * min(attempts, 6)
         cur = conn.execute(
             "UPDATE strm_change_queue SET state=?,dirty=0,attempts=?,last_error=?,"
             "pending_changes_json=?,inflight_changes_json='[]',lease_owner='',lease_until=0,"
             "updated_at=?,next_attempt_at=? WHERE id=? AND state IN ('running','dirty') "
             "AND lease_owner=? AND lease_generation=?",
             (
-                state, attempts, str(error or "")[:300],
+                state, attempts, (error or "")[:300],
                 json.dumps(pending, ensure_ascii=False), stamp, _future_stamp(delay),
-                int(target_id), str(expected_owner or ""), int(expected_lease_generation),
+                target_id, (expected_owner or ""), expected_lease_generation,
             ),
         )
         return state if cur.rowcount == 1 else "stale"
 
 
-def release_strm_change_targets(claimed: object, *, reason: str = "") -> int:
+def release_strm_change_targets(claimed: Iterable[object] | None, *, reason: str = "") -> int:
     """协作式停止：仅释放调用方仍持有的租约，不干扰重新领取者。"""
     rows = [dict(item) for item in (claimed or []) if isinstance(item, dict)]
     if not rows:
@@ -1324,11 +1355,11 @@ def release_strm_change_targets(claimed: object, *, reason: str = "") -> int:
                 "lease_until=0,updated_at=?,next_attempt_at=? WHERE id=? "
                 "AND state IN ('running','dirty') AND lease_owner=? AND lease_generation=?",
                 (
-                    str(reason or "")[:300], json.dumps(pending, ensure_ascii=False),
+                    (reason or "")[:300], json.dumps(pending, ensure_ascii=False),
                     stamp, stamp, target_id, owner, generation,
                 ),
             )
-            released += int(cur.rowcount or 0)
+            released += (cur.rowcount or 0)
     return released
 
 
@@ -1362,7 +1393,7 @@ def recover_stale_strm_change_targets(*, provider: str = DEFAULT_STRM_PROVIDER) 
                     int(row["id"]), int(row["lease_generation"] or 0), now_epoch,
                 ),
             )
-            recovered += int(cur.rowcount or 0)
+            recovered += (cur.rowcount or 0)
     return recovered
 
 def count_pending_strm_change_targets(*, provider: str = DEFAULT_STRM_PROVIDER) -> int:
@@ -1427,7 +1458,7 @@ def list_strm_change_queue(
         return conn.execute(
             "SELECT * FROM strm_change_queue WHERE provider=? "
             "ORDER BY updated_at DESC, id DESC LIMIT ?",
-            (provider, max(1, int(limit or 1))),
+            (provider, max(1, (limit or 1))),
         ).fetchall()
 
 

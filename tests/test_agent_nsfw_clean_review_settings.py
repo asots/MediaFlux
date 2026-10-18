@@ -10,6 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
+
 from app import config
 from app.routes.api import get_config, save_config
 
@@ -34,17 +37,18 @@ class NsfwCleanReviewSettingsTests(unittest.TestCase):
         self.invalidate = self.stack.enter_context(patch("app.agent.feature_gate.invalidate_agent_runtime_generation"))
         self.wake = self.stack.enter_context(patch(WAKE))
         config.write_env_file(self.env_file, {}, replace=False)
-        from tests.support import isolated_test_database
         from app.agent.feature_gate import initialize_runtime_fence
+        from tests.support import isolated_test_database
 
         self.stack.enter_context(isolated_test_database())
         initialize_runtime_fence()
-        self.request = SimpleNamespace(
-            session={"logged_in": True},
-            app=SimpleNamespace(state=SimpleNamespace(
+        self.request = Request({
+            "type": "http",
+            "session": {"logged_in": True},
+            "app": SimpleNamespace(state=SimpleNamespace(
                 background_services_enabled=False, media_proxy_manager=None,
             )),
-        )
+        })
 
     def test_missing_child_permission_defaults_off_even_when_parent_enabled(self):
         config.set_and_save({PARENT_KEY: "1"})
@@ -71,8 +75,9 @@ class NsfwCleanReviewSettingsTests(unittest.TestCase):
         for invalid in ("", "enabled", "2", None, [], {}):
             with self.subTest(value=invalid):
                 response = save_config(self.request, {KEY: invalid})
+                assert isinstance(response, JSONResponse)
                 self.assertEqual(response.status_code, 400)
-                self.assertIn(KEY, json.loads(response.body)["error"])
+                self.assertIn(KEY, json.loads(bytes(response.body))["error"])
                 self.assertEqual(self.env_file.read_bytes(), before)
         self.wake.assert_not_called()
         self.invalidate.assert_not_called()
@@ -105,6 +110,7 @@ class NsfwCleanReviewSettingsTests(unittest.TestCase):
             self.assertEqual(payload[KEY], "1")
             self.assertIn(KEY, payload["__managed_fields"])
             response = save_config(self.request, {KEY: "0"})
+        assert isinstance(response, JSONResponse)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(config.read_env_snapshot(self.env_file)[1][KEY], "0")
         self.wake.assert_not_called()

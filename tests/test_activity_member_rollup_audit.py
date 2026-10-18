@@ -98,7 +98,9 @@ class ActivityMemberRollupAuditTests(IsolatedDatabaseTestCase):
                 yield conn
 
         with patch.object(db, "get_conn", traced):
+            assert self.task is not None
             snapshot = activity.snapshot("local_media", self.task)
+        assert snapshot is not None
         self.assertEqual(
             snapshot.get("item_status_counts"), {"failed": 1, "verified": 1_000}
         )
@@ -218,6 +220,7 @@ class ActivityMemberRollupAuditTests(IsolatedDatabaseTestCase):
 
         with patch.object(db, "get_conn", traced):
             snapshot = activity.snapshot("download", request)
+        assert snapshot is not None
         self.assertEqual(len(snapshot["local_tasks"]), 1)
         self.assertEqual(snapshot["local_task_status_counts"], {})
         self.assertFalse(any("GROUP BY status" in sql for sql in statements))

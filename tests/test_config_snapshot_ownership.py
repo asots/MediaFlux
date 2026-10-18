@@ -42,7 +42,7 @@ def test_other_owner_contends_until_outer_exit(tmp_path, kind):
             _contender(paths, ready, start, attempted, entered)
         except BaseException as exc:
             errors.append(exc)
-    worker = ctx.Process(target=_contender, args=(paths, ready, start, attempted, entered)) if kind == 'spawn' else ctx.Thread(target=thread_target, daemon=True)
+    worker = multiprocessing.get_context('spawn').Process(target=_contender, args=(paths, ready, start, attempted, entered)) if kind == 'spawn' else threading.Thread(target=thread_target, daemon=True)
     try:
         with backup.config_snapshot_guard(paths):
             worker.start()
@@ -55,10 +55,12 @@ def test_other_owner_contends_until_outer_exit(tmp_path, kind):
         assert not worker.is_alive()
         assert not errors
         if kind == 'spawn':
+            assert not isinstance(worker, threading.Thread)
             assert worker.exitcode == 0
     finally:
         worker.join(1)
         if kind == 'spawn' and worker.is_alive():
+            assert not isinstance(worker, threading.Thread)
             worker.kill()
             worker.join(5)
         assert not worker.is_alive()

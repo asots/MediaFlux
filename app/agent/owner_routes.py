@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from app import config
@@ -33,7 +33,7 @@ def normalize_delivery_route(
     chat = value.get("chat_id")
     if isinstance(chat, bool) or not _TELEGRAM_CHAT_RE.fullmatch(str(chat)):
         raise TransportInputError("delivery_route.chat_id 无效")
-    target = str(int(chat))
+    target = str(int(str(chat)))
     if owner:
         identity = _TELEGRAM_OWNER_RE.fullmatch(owner)
         if identity is None or identity.group(1) != target:
@@ -78,7 +78,7 @@ def configured_telegram_user_ids() -> set[str]:
         part
         for part in re.split(
             r"[,;，；\s]+",
-            str(config.get("TG_AGENT_ALLOWED_USER_IDS", "") or "").strip(),
+            (config.get("TG_AGENT_ALLOWED_USER_IDS", "") or "").strip(),
         )
         if re.fullmatch(r"[1-9][0-9]*", part)
     }
@@ -104,6 +104,6 @@ def telegram_owner_route_is_currently_authorized(
         return False
     if not config.get_bool("TG_AGENT_ENABLED", False):
         return False
-    if str(config.get("TG_CHAT_ID", "") or "").strip() != route.chat_id:
+    if (config.get("TG_CHAT_ID", "") or "").strip() != route.chat_id:
         return False
     return route.user_id in configured_telegram_user_ids()

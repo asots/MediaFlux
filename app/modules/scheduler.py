@@ -15,28 +15,42 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
-from typing import Callable, Optional
+from typing import Any, Callable, Iterable, Optional, TypedDict
 
 from croniter import croniter
 
 from app import database as db
 from app.config import get, get_bool, get_int
 from app.logger import get_logger, log_throttled
-from app.modules.strm import (
-    DEFAULT_METADATA_EXTS, DEFAULT_VIDEO_EXTS, STRM_OPERATION_LOCK, STRM_SUBDIR,
-    clean_empty_strm_dirs, clean_retired_strm_sources, configured_strm_source_plans,
-    finalize_changed_paths, safe_path_component, sync_strm, sync_strm_incremental,
-)
 from app.modules.media_refresh import plan_refresh_targets
 from app.modules.organize_probe_notifications import (
-    merge_notification_scopes, notification_scopes, probe_scopes_from_changes,
-    publish_probe_scope, probe_downstream_state,
+    merge_notification_scopes,
+    notification_scopes,
+    probe_downstream_state,
+    probe_scopes_from_changes,
+    publish_probe_scope,
+)
+from app.modules.strm import (
+    DEFAULT_METADATA_EXTS,
+    DEFAULT_VIDEO_EXTS,
+    STRM_OPERATION_LOCK,
+    STRM_SUBDIR,
+    clean_empty_strm_dirs,
+    clean_retired_strm_sources,
+    configured_strm_source_plans,
+    finalize_changed_paths,
+    safe_path_component,
+    sync_strm,
+    sync_strm_incremental,
+)
+from app.modules.strm_notifications import (
+    ROUND_CLEANUP_BLOCKED_REASON,
+    append_change,
+    build_strm_detail_messages,
+    cleanup_notice_lines,
+    relative_change,
 )
 from app.modules.strm_recovery import reconcile_historical_strm
-from app.modules.strm_notifications import (
-    ROUND_CLEANUP_BLOCKED_REASON, append_change, build_strm_detail_messages,
-    cleanup_notice_lines, relative_change,
-)
 from app.notifier import NotificationEvent
 
 logger = get_logger(__name__)
@@ -45,16 +59,25 @@ TASK_NAME = "strm_sync"
 _REFRESH_PENDING_LABEL = "待重试（等待配置恢复）"
 
 
+class _ChangeOwnerOptions(TypedDict, total=False):
+    download_request_ids: list[int]
+    request_owners: list[dict[str, Any]]
+
+
+class _RefreshOwnerOptions(TypedDict, total=False):
+    request_owners: Iterable[dict[str, Any]]
+
+
 def _source_local_dir(strm_root: str, source: dict[str, str]) -> str:
     """返回与 STRM 目标生成规则一致的来源本地根目录。"""
     target = Path(strm_root).expanduser() / STRM_SUBDIR
-    rel_prefix = str(source.get("rel_prefix") or "").strip()
+    rel_prefix = (source.get("rel_prefix") or "").strip()
     if rel_prefix:
         target /= safe_path_component(rel_prefix)
     return str(target)
 
 
-def _normalize_selected_source_ids(value: object) -> list[str]:
+def _normalize_selected_source_ids(value: Any) -> list[str]:
     """把来源选择收敛为稳定列表，兼容旧排队状态中的布尔值。"""
     if value is None or isinstance(value, bool):
         return []
@@ -72,8 +95,8 @@ def _normalize_selected_source_ids(value: object) -> list[str]:
     ))
 
 
-def _merge_notification_threads(*groups) -> list[dict[str, object]]:
-    merged: dict[tuple[str, str, str], dict[str, object]] = {}
+def _merge_notification_threads(*groups) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
     for group in groups:
         for raw in group or []:
             if not isinstance(raw, dict):
@@ -94,14 +117,14 @@ def _merge_notification_threads(*groups) -> list[dict[str, object]]:
     return list(merged.values())
 
 
-def _request_ids(options: dict[str, object]) -> list[int]:
+def _request_ids(options: dict[str, Any]) -> list[int]:
     return [
         int(item) for item in (options.get("download_request_ids") or [])
         if str(item).isdigit()
     ]
 
 
-def _update_strm_requests(options: dict[str, object], **fields) -> None:
+def _update_strm_requests(options: dict[str, Any], **fields) -> None:
     owners = {int(owner["request_id"]): owner for owner in (options.get("download_request_owners") or [])}
     for request_id in _request_ids(options):
         owner = owners.get(request_id)
@@ -147,7 +170,7 @@ def _run_notification_side_effect(label: str, action: Callable[[], None]) -> Non
 
 
 def _publish_foreground_linked_notification_threads(
-    options: dict[str, object],
+    options: dict[str, Any],
     *,
     strm_status: str,
     media_refresh: str,
@@ -213,16 +236,14 @@ def _publish_foreground_linked_notification_threads(
             scoped_status, scoped_partial, scoped_error = probe_downstream_state(
                 ref, strm_status=strm_status, partial=partial, error=error,
             )
-            accepted = bool(
-                update_confirmation_lifecycle_downstream(
+            accepted = update_confirmation_lifecycle_downstream(
                     token,
                     chat_id=str(ref.get("chat_id") or ""),
                     strm_status=scoped_status,
                     media_refresh=media_refresh,
                     partial=scoped_partial,
                     error=scoped_error,
-                )
-            ) or accepted
+                ) or accepted
     except Exception as exc:
         logger.warning(
             "STRM 更新人工确认事务通知失败 type=%s", type(exc).__name__
@@ -231,7 +252,7 @@ def _publish_foreground_linked_notification_threads(
 
 
 def _publish_linked_notification_threads(
-    options: dict[str, object], *, strm_status: str, media_refresh: str,
+    options: dict[str, Any], *, strm_status: str, media_refresh: str,
     partial: bool = False, error: str = "",
 ) -> bool:
     accepted = False
@@ -244,25 +265,25 @@ def _publish_linked_notification_threads(
         )
         publish = publish_probe_scope if scope.get("probe") else _publish_foreground_linked_notification_threads
         try:
-            accepted = bool(publish(
+            accepted = publish(
                 scope, strm_status=strm_status, media_refresh=media_refresh,
                 partial=partial, error=scoped_error,
-            )) or accepted
+            ) or accepted
         except Exception as exc:
             logger.warning("STRM 更新通知范围失败 type=%s", type(exc).__name__)
     return accepted
 
 
-def _has_linked_notification_thread(options: dict[str, object]) -> bool:
+def _has_linked_notification_thread(options: dict[str, Any]) -> bool:
     return bool(
         _request_ids(options)
         or _merge_notification_threads(options.get("notification_threads"))
     )
 
 
-def _merge_organize_changes(*groups) -> list[dict[str, object]]:
+def _merge_organize_changes(*groups) -> list[dict[str, Any]]:
     """排队合并时同 source/kind/file 以后到的最终快照为准。"""
-    merged: dict[tuple[str, str, str], dict[str, object]] = {}
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
     for group in groups:
         for raw in group or []:
             if not isinstance(raw, dict):
@@ -294,7 +315,7 @@ def _organize_change_scope_key(
 
 
 def _claimed_changes_extend_notification_scope(
-    requested_changes: object, claimed_changes: object,
+    requested_changes: Iterable[object] | None, claimed_changes: Iterable[object] | None,
 ) -> bool:
     """判断持久队列是否补入了不属于本次实时请求的变化。"""
     requested_keys = {
@@ -314,7 +335,7 @@ class _ChangeTargetLeaseHeartbeat:
 
     def __init__(self, claimed: list[dict], lease_seconds: int):
         self._claimed = [dict(item) for item in claimed]
-        self._lease_seconds = max(30, int(lease_seconds or 30))
+        self._lease_seconds = max(30, (lease_seconds or 30))
         self._owner = str(self._claimed[0].get("lease_owner") or "") if self._claimed else ""
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -366,8 +387,8 @@ class STRMScheduler:
         self._current_trigger = ""
         self._next_run: Optional[datetime] = None
         self._loaded_cron = ""
-        self._run_options: dict[str, object] = {}
-        self._pending_organize_options: dict[str, object] | None = None
+        self._run_options: dict[str, Any] = {}
+        self._pending_organize_options: dict[str, Any] | None = None
         self._pending_organize_deadline: float | None = None
         self._pending_thread: Optional[threading.Thread] = None
         self._progress = {
@@ -395,8 +416,8 @@ class STRMScheduler:
             self._thread.start()
         self._recover_change_queue()
         self._recover_notification_outbox()
-        from app.modules.strm_metadata_worker import get_strm_metadata_worker
         from app.modules.organize_probe_worker import get_organize_probe_worker
+        from app.modules.strm_metadata_worker import get_strm_metadata_worker
 
         get_strm_metadata_worker().start()
         get_organize_probe_worker().start()
@@ -527,8 +548,8 @@ class STRMScheduler:
                 "STRM 工作线程未能在关闭超时内结束 trigger=%s",
                 self._current_trigger,
             )
-        from app.modules.strm_metadata_worker import get_strm_metadata_worker
         from app.modules.organize_probe_worker import get_organize_probe_worker
+        from app.modules.strm_metadata_worker import get_strm_metadata_worker
 
         probe_stopped = get_organize_probe_worker().stop(timeout=remaining())
         metadata_stopped = get_strm_metadata_worker().stop(timeout=remaining())
@@ -545,7 +566,7 @@ class STRMScheduler:
         self._wake_event.set()
 
     def _start_locked_worker(
-        self, trigger_type: str, options: dict[str, object]
+        self, trigger_type: str, options: dict[str, Any]
     ) -> dict:
         with self._state_lock:
             self._running = True
@@ -645,7 +666,7 @@ class STRMScheduler:
             logger.warning("应用停止，已取消尚未执行的整理联动 STRM")
 
     def _queue_organize_trigger(
-        self, options: dict[str, object], *, debounce_seconds: float = 0.0,
+        self, options: dict[str, Any], *, debounce_seconds: float = 0.0,
         reset_deadline: bool = False,
     ) -> dict:
         options = dict(options)
@@ -794,8 +815,8 @@ class STRMScheduler:
                 media_server_refresh_override: bool | None = None,
                 on_progress=None,
                 download_request_ids: list[int] | None = None,
-                notification_threads: list[dict[str, object]] | None = None,
-                organize_changes: list[dict[str, object]] | None = None,
+                notification_threads: list[dict[str, Any]] | None = None,
+                organize_changes: list[dict[str, Any]] | None = None,
                 force_full: bool = False,
                 sync_mode: str = "auto",
                 selected_source_ids: list[str] | None = None,
@@ -805,7 +826,7 @@ class STRMScheduler:
         with self._admission_lock:
             if self._stop_event.is_set():
                 return {"ok": False, "error": "STRM 调度器正在停止"}
-            normalized_mode = str(sync_mode or "auto").strip().lower()
+            normalized_mode = (sync_mode or "auto").strip().lower()
             if normalized_mode not in {"auto", "fast", "full"}:
                 return {"ok": False, "error": "STRM 同步模式无效"}
             if force_full:
@@ -821,8 +842,8 @@ class STRMScheduler:
                     pending_snapshot.get("persisted_queue_only")
                 )
             selected_ids = _normalize_selected_source_ids(selected_source_ids)
-            resolved_chat_id = str(chat_id or "").strip()
-            notification_scope_enabled = bool(
+            resolved_chat_id = (chat_id or "").strip()
+            notification_scope_enabled = (
                 notify_override is not False
                 or (
                     trigger_type == "organize"
@@ -838,14 +859,14 @@ class STRMScheduler:
                 "download_request_ids": list(download_request_ids or []),
                 "notification_threads": _merge_notification_threads(notification_threads),
                 "organize_changes": _merge_organize_changes(organize_changes),
-                "force_full": bool(force_full),
+                "force_full": force_full,
                 "sync_mode": normalized_mode,
                 "selected_source_ids": selected_ids,
                 "chat_ids": (
                     [resolved_chat_id]
                     if resolved_chat_id and notification_scope_enabled else []
                 ),
-                "uses_default_notification_scope": bool(
+                "uses_default_notification_scope": (
                     notification_scope_enabled and not resolved_chat_id
                 ),
                 "has_silent_notification_scope": not notification_scope_enabled,
@@ -860,9 +881,11 @@ class STRMScheduler:
                 elif has_pending_organize and not pending_is_persisted_queue:
                     # 无 debounce 的后续触发加入现有静默批次时，不得把持久截止时间提前。
                     persist_not_before = None
-            request_owners: list[dict[str, object]] = []
-            owner_kwargs = ({"download_request_ids": download_request_ids, "request_owners": request_owners}
-                            if download_request_ids else {})
+            request_owners: list[dict[str, Any]] = []
+            owner_kwargs: _ChangeOwnerOptions = (
+                {"download_request_ids": download_request_ids, "request_owners": request_owners}
+                if download_request_ids else {}
+            )
             if not self._persist_change_targets(
                 options.get("organize_changes"), not_before_seconds=persist_not_before, **owner_kwargs,
             ):
@@ -875,7 +898,7 @@ class STRMScheduler:
                 return self._queue_organize_trigger(
                     options,
                     debounce_seconds=quiet_seconds,
-                    reset_deadline=bool(
+                    reset_deadline=(
                         has_pending_organize
                         and pending_is_persisted_queue
                         and quiet_seconds <= 0
@@ -893,7 +916,7 @@ class STRMScheduler:
         trigger_type: str = "manual",
         *,
         on_progress=None,
-        organize_changes: list[dict[str, object]] | None = None,
+        organize_changes: list[dict[str, Any]] | None = None,
         force_full: bool = False,
         sync_mode: str = "auto",
     ) -> dict:
@@ -906,7 +929,7 @@ class STRMScheduler:
                 return {"ok": False, "error": "STRM 变化目标持久化失败，已取消同步"}
             if not self._run_lock.acquire(blocking=False):
                 return {"ok": False, "error": "STRM 同步任务正在运行"}
-            normalized_mode = str(sync_mode or "auto").strip().lower()
+            normalized_mode = (sync_mode or "auto").strip().lower()
             if normalized_mode not in {"auto", "fast", "full"}:
                 self._run_lock.release()
                 return {"ok": False, "error": "STRM 同步模式无效"}
@@ -918,7 +941,7 @@ class STRMScheduler:
                 self._run_options = {
                     "on_progress": on_progress,
                     "organize_changes": normalized_changes,
-                    "force_full": bool(force_full),
+                    "force_full": force_full,
                     "sync_mode": normalized_mode,
                 }
                 # CLI/TG 同步执行也纳入 stop() 的工作线程追踪，避免应用
@@ -927,9 +950,9 @@ class STRMScheduler:
         return self._execute_locked(trigger_type)
 
     def _persist_change_targets(
-        self, organize_changes: object, *, not_before_seconds: float | None = 0.0,
-        download_request_ids: object = None,
-        request_owners: list[dict[str, object]] | None = None,
+        self, organize_changes: Iterable[object] | None, *, not_before_seconds: float | None = 0.0,
+        download_request_ids: Iterable[int | str] | None = None,
+        request_owners: list[dict[str, Any]] | None = None,
     ) -> bool:
         """把整理变化写入唯一权威队列；失败时必须阻断同步，避免事件只存在内存。"""
         if not organize_changes and not download_request_ids:
@@ -1080,11 +1103,11 @@ class STRMScheduler:
         }
 
     def _set_progress(self, stage: str, completed: int, total: int, detail: str) -> None:
-        bounded_total = max(1, int(total or 0))
-        bounded_completed = max(0, min(int(completed or 0), bounded_total))
+        bounded_total = max(1, (total or 0))
+        bounded_completed = max(0, min((completed or 0), bounded_total))
         payload = {
-            "stage": str(stage), "completed": bounded_completed, "total": bounded_total,
-            "percent": int(bounded_completed * 100 / bounded_total), "detail": str(detail or ""),
+            "stage": stage, "completed": bounded_completed, "total": bounded_total,
+            "percent": int(bounded_completed * 100 / bounded_total), "detail": (detail or ""),
         }
         with self._state_lock:
             self._progress = payload
@@ -1314,7 +1337,7 @@ class STRMScheduler:
     def _run_incremental_sources(
         self,
         sources: list[dict[str, str]],
-        changes: list[dict[str, object]],
+        changes: list[dict[str, Any]],
         *,
         base_url: str,
         strm_root: str,
@@ -1323,7 +1346,7 @@ class STRMScheduler:
         threshold: int,
     ) -> tuple[dict, list[dict], bool, str]:
         """运行可信整理清单；返回 aggregate/source_results/stopped/fallback_reason。"""
-        prepared_changes: list[dict[str, object]] = []
+        prepared_changes: list[dict[str, Any]] = []
         for item in changes:
             if not isinstance(item, dict):
                 continue
@@ -1337,7 +1360,7 @@ class STRMScheduler:
                         continue
             prepared_changes.append(item)
         changes = prepared_changes
-        source_ids = {str(source["id"]) for source in sources}
+        source_ids = {source["id"] for source in sources}
         change_source_ids = {
             str(item.get("source_id") or "") for item in changes if isinstance(item, dict)
         }
@@ -1358,7 +1381,7 @@ class STRMScheduler:
         source_results: list[dict] = []
         stopped = False
         for source_index, source in enumerate(sources):
-            source_changes = grouped.get(str(source["id"]), [])
+            source_changes = grouped.get(source["id"], [])
             if not source_changes:
                 with self._state_lock:
                     self._source_runtime[source_index]["status"] = "skipped"
@@ -1380,7 +1403,7 @@ class STRMScheduler:
                 strm_root=strm_root,
                 video_exts=exts,
                 skip_threshold_mb=threshold,
-                rel_prefix=str(source.get("rel_prefix") or ""),
+                rel_prefix=(source.get("rel_prefix") or ""),
                 metadata_exts=metadata_exts,
                 source_name=source["name"],
                 on_progress=source_progress,
@@ -1474,7 +1497,7 @@ class STRMScheduler:
                 strm_root=strm_root,
                 video_exts=exts,
                 skip_threshold_mb=threshold,
-                rel_prefix=str(source.get("rel_prefix") or ""),
+                rel_prefix=(source.get("rel_prefix") or ""),
                 metadata_exts=metadata_exts,
                 clean_invalid=False,
                 clean_empty_dirs=False,
@@ -1527,7 +1550,7 @@ class STRMScheduler:
             stopped = True
             round_cleanup_safe = False
 
-        retirement = {
+        retirement: dict[str, Any] = {
             "sources": 0, "blocked": 0, "cleaned": 0,
             "empty_dirs_cleaned": 0, "removed_paths": [],
             "removed_dir_paths": [], "errors": [], "stopped": False,
@@ -1570,7 +1593,7 @@ class STRMScheduler:
         if round_cleanup_safe and active_ids_complete:
             self._set_progress("retirement", 0, 1, "清理已移除的 STRM 来源")
             try:
-                aggregate["metadata_queue_cancelled"] += int(
+                aggregate["metadata_queue_cancelled"] += (
                     db.cancel_retired_strm_metadata_jobs(
                         {source["id"] for source in sources}
                     ) or 0
@@ -1686,7 +1709,7 @@ class STRMScheduler:
     def _execute_locked(self, trigger_type: str) -> dict:
         options = dict(self._run_options)
         request_ids = _request_ids(options)
-        run_id = 0
+        run_id: int = 0
         claimed_targets: list[dict] = []
         lease_heartbeat: _ChangeTargetLeaseHeartbeat | None = None
         started = datetime.now()
@@ -1708,7 +1731,7 @@ class STRMScheduler:
             sources = (
                 [
                     source for source in configured_sources
-                    if str(source.get("id") or "") in selected_source_ids
+                    if (source.get("id") or "") in selected_source_ids
                 ]
                 if selected_source_ids else configured_sources
             )
@@ -2008,7 +2031,7 @@ class STRMScheduler:
             refresh_pending = any(
                 value in {False, "failed", "pending"} for value in media_refresh.values()
             ) or db.has_pending_strm_request_refresh(options.get("download_request_owners"))
-            partial = bool(strm_partial or refresh_pending)
+            partial = (strm_partial or refresh_pending)
             result["strm_partial"] = strm_partial
             result["refresh_pending"] = refresh_pending
             partial_error = (
@@ -2141,7 +2164,7 @@ class STRMScheduler:
         media_server_refresh_enabled: bool | None = None,
         immediate: bool = False,
         persist_only: bool = False,
-        request_owners: object = None,
+        request_owners: Iterable[dict[str, Any]] | None = None,
     ) -> dict[str, str]:
         """统一规划并保存刷新意图；关停时仅落盘，不唤醒消费者。"""
         if not has_changes:
@@ -2149,7 +2172,7 @@ class STRMScheduler:
             return {}
         allow_media_server_refresh = (
             True if media_server_refresh_enabled is None
-            else bool(media_server_refresh_enabled)
+            else media_server_refresh_enabled
         )
         if not allow_media_server_refresh:
             logger.info("整理联动已关闭媒体服务器刷新，跳过 Jellyfin/Emby")
@@ -2172,17 +2195,17 @@ class STRMScheduler:
         from app.modules.media_refresh_coordinator import enqueue_media_refresh_paths
 
         targets = list(plan.targets)
-        allow_emby = True if emby_enabled is None else bool(emby_enabled)
+        allow_emby = True if emby_enabled is None else emby_enabled
         # STRM 已经落盘，媒体库刷新必须独立交接。先写 durable outbox，再尝试
         # 投递统一刷新队列；投递失败只重试刷新，绝不重新生成 STRM。
-        owner_kwargs = {"request_owners": request_owners} if request_owners else {}
+        owner_kwargs: _RefreshOwnerOptions = {"request_owners": request_owners} if request_owners else {}
         entries = db.enqueue_strm_refresh_paths(targets, allow_emby=allow_emby, **owner_kwargs)
         if persist_only:
             return {"媒体库": "pending"}
         try:
             results = enqueue_media_refresh_paths(
                 targets,
-                immediate=bool(immediate),
+                immediate=immediate,
                 allow_emby=allow_emby,
             )
         except Exception as exc:
@@ -2210,7 +2233,7 @@ class STRMScheduler:
             )
         logger.info(
             "媒体库刷新已提交统一队列 immediate=%s targets=%s providers=%s",
-            bool(immediate),
+            immediate,
             len(targets),
             ",".join(f"{name}:{status}" for name, status in results.items()) or "none",
         )
@@ -2223,7 +2246,7 @@ class STRMScheduler:
             "organize": "整理联动",
             "cron": "定时任务",
             "telegram": "Telegram 命令",
-        }.get(str(trigger_type or ""), str(trigger_type or "未知"))
+        }.get((trigger_type or ""), (trigger_type or "未知"))
 
     @staticmethod
     def _build_success_event(stats: dict, refresh: dict, elapsed: float,
@@ -2332,7 +2355,7 @@ class STRMScheduler:
     def _foreground_notification_scopes(self, options: dict) -> list[dict]:
         scopes = notification_scopes(options)
         result = []
-        default_chat = str(get("TG_CHAT_ID", "") or "").strip()
+        default_chat = (get("TG_CHAT_ID", "") or "").strip()
         for scope in scopes:
             if scope.get("probe"):
                 continue
@@ -2421,22 +2444,22 @@ class STRMScheduler:
     ) -> tuple[list[str], bool, bool]:
         """解析合并任务的通知范围，并判断是否必须隐藏跨来源详情。"""
         recipients = list(dict.fromkeys(
-            str(item) for item in (chat_ids or []) if str(item)
+            item for item in (chat_ids or []) if item
         ))
         uses_default = (
             not recipients
             if uses_default_notification_scope is None
-            else bool(uses_default_notification_scope)
+            else uses_default_notification_scope
         )
-        configured_default = str(get("TG_CHAT_ID", "") or "").strip()
-        send_default = bool(
+        configured_default = (get("TG_CHAT_ID", "") or "").strip()
+        send_default = (
             uses_default
             and (not configured_default or configured_default not in recipients)
         )
         scope_count = (
             len(recipients)
             + int(send_default)
-            + int(bool(has_silent_notification_scope))
+            + int(has_silent_notification_scope)
         )
         return recipients, send_default, scope_count > 1
 
@@ -2474,7 +2497,7 @@ class STRMScheduler:
             )
             logger.warning(
                 "STRM 合并任务包含多个通知范围，已隐藏跨来源汇总详情 chats=%s default=%s silent=%s",
-                len(recipients), send_default, bool(has_silent_notification_scope),
+                len(recipients), send_default, has_silent_notification_scope,
             )
         else:
             event = STRMScheduler._build_success_event(
@@ -2482,12 +2505,13 @@ class STRMScheduler:
             )
         from app.modules.telegram_notification_center import publish_notification_event
         from app.modules.telegram_notification_policy import (
-            NotificationImportance, NotificationTopic,
+            NotificationImportance,
+            NotificationTopic,
         )
-        logical_key = f"strm-run:{int(run_id or 0)}:{trigger_type}"
+        logical_key = f"strm-run:{(run_id or 0)}:{trigger_type}"
         importance = (
             NotificationImportance.ERROR
-            if event.title.startswith("⚠️") else NotificationImportance.RESULT
+            if str(event.title).startswith("⚠️") else NotificationImportance.RESULT
         )
         if recipients:
             for recipient in recipients:
@@ -2533,7 +2557,7 @@ class STRMScheduler:
         if restricted:
             logger.warning(
                 "STRM 合并任务包含多个通知范围，已跳过文件明细 chats=%s default=%s silent=%s",
-                len(recipients), send_default, bool(has_silent_notification_scope),
+                len(recipients), send_default, has_silent_notification_scope,
             )
             return
         from app.modules.telegram_notification_center import publish_notification_event
@@ -2547,7 +2571,7 @@ class STRMScheduler:
                 f"📄 STRM 文件明细 {index}", lines=(message,),
                 layout="relaxed", field_emojis=False,
             )
-            logical_key = f"strm-detail:{int(run_id or 0)}:{index}"
+            logical_key = f"strm-detail:{(run_id or 0)}:{index}"
             if recipients:
                 for recipient in recipients:
                     publish_notification_event(
@@ -2590,11 +2614,14 @@ class STRMScheduler:
                     ),),
                     layout="relaxed",
                 )
-            from app.modules.telegram_notification_center import publish_notification_event
-            from app.modules.telegram_notification_policy import (
-                NotificationImportance, NotificationTopic,
+            from app.modules.telegram_notification_center import (
+                publish_notification_event,
             )
-            logical_key = f"strm-run:{int(run_id or 0)}:{trigger_type}:failed"
+            from app.modules.telegram_notification_policy import (
+                NotificationImportance,
+                NotificationTopic,
+            )
+            logical_key = f"strm-run:{(run_id or 0)}:{trigger_type}:failed"
             if recipients:
                 for recipient in recipients:
                     publish_notification_event(

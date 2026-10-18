@@ -8,6 +8,7 @@ from dataclasses import FrozenInstanceError
 from unittest.mock import patch
 
 import requests
+from requests.structures import CaseInsensitiveDict
 
 from app.clients.douban_public import DoubanPublicClient, DoubanPublicPage
 from app.discovery.models import (
@@ -86,11 +87,11 @@ class CapturingSession(requests.Session):
         self.prepared_requests.append(request)
         response = requests.Response()
         response.status_code = 200
-        response.headers = {"Content-Type": "application/json; charset=utf-8"}
+        response.headers = CaseInsensitiveDict({"Content-Type": "application/json; charset=utf-8"})
         response.url = request.url
         response.request = request
         response._content = json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
-        response._content_consumed = True
+        setattr(response, "_content_consumed", True)
         return response
 
 
@@ -353,8 +354,8 @@ class DoubanPublicClientTests(unittest.TestCase):
 
         page = client.list_items("tv_hot", "tv", 1, {"sort": "rank"})
 
-        self.assertIsInstance(page, DoubanPublicPage)
-        self.assertIsInstance(page.items, tuple)
+        assert isinstance(page, DoubanPublicPage)
+        assert isinstance(page.items, tuple)
         self.assertEqual(page.items, ({
             "id": "42",
             "media_type": "tv",
@@ -370,9 +371,9 @@ class DoubanPublicClientTests(unittest.TestCase):
         },))
         self.assertFalse(page.has_more)
         with self.assertRaises(FrozenInstanceError):
-            page.source = "changed"
+            setattr(page, "source", "changed")
         with self.assertRaises(FrozenInstanceError):
-            page.items += ({},)
+            setattr(page, "items", page.items + ({},))
 
     def test_public_list_shape_without_year_or_date_keeps_year_unknown(self):
         client, session = self.make_client(FakeResponse({
@@ -430,7 +431,7 @@ class DoubanPublicClientTests(unittest.TestCase):
         )
         responses = []
         for index, field in enumerate(scalar_fields, 1):
-            corrupt = {"id": str(index + 100), "title": f"Corrupt {field}"}
+            corrupt: dict[str, object] = {"id": str(index + 100), "title": f"Corrupt {field}"}
             corrupt[field] = {"nested": ["not", "scalar"]}
             responses.append(self.json_response([
                 {"id": str(index), "title": f"Valid {field}"},

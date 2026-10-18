@@ -233,7 +233,7 @@ def set_patrol_policy_confirmed(
     arguments: dict[str, Any], expected_context: str
 ) -> ToolResult:
     state = _capture(arguments)
-    if not secrets.compare_digest(_fingerprint(state), str(expected_context or "")):
+    if not secrets.compare_digest(_fingerprint(state), (expected_context or "")):
         raise AgentToolError(
             "巡检策略配置已变化，请重新预检",
             code="confirmation_stale",

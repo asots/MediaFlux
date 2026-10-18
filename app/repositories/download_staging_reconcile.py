@@ -55,7 +55,7 @@ def enqueue_confirmation_cleanup(conn, *, token: str, timestamp: str) -> int | N
     confirmation = conn.execute(
         "SELECT c.* FROM organize_confirmations c WHERE c.token=? AND c.status='completed' "
         'AND NOT EXISTS (SELECT 1 FROM organize_confirmations newer '
-        'WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id)', (str(token),),
+        'WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id)', (token,),
     ).fetchone()
     if confirmation is None or not _success(confirmation['result_json']):
         return None
@@ -108,7 +108,7 @@ def reorganized_source_evidence(source_id: str, *, conn=None) -> list[dict]:
             "(SELECT file_id FROM organize_log WHERE source='guangya' AND source_dir_id=?) "
             "AND l.id=(SELECT MAX(newer.id) FROM organize_log newer "
             "WHERE newer.source='guangya' AND newer.file_id=l.file_id) ORDER BY l.id,i.id",
-            (str(source_id),),
+            (source_id,),
         )]
     if not rows or any(
         row['source_dir_id'] != source_id or row['log_status'] != 'success'
@@ -252,7 +252,7 @@ def reconcile_reorganized_confirmations(source_ids: list[str], *, conn=None,
                         or evidence['legacy_incomplete'] or evidence['log_id'] is None
                         or int(evidence['primary_log_id'] or 0) > int(evidence['log_id'])
                         or evidence['operation_type'] not in ('organize', 'reorganize') or evidence['status'] != 'success'
-                        or str(evidence['source_dir_id']) != str(source_id)
+                        or str(evidence['source_dir_id']) != source_id
                         or str(evidence['original_parent_id']) != str(item['parent_id'])
                         or not evidence['target_parent_id']
                         or evidence['current_parent_id'] != evidence['target_parent_id']
@@ -296,7 +296,7 @@ def reconcile_reorganized_confirmations(source_ids: list[str], *, conn=None,
 
 def discover_legacy_confirmation_cleanup(*, limit: int = _MAX_BATCH) -> int:
     """按下载 ID 游标有界补建旧终态意图；不从名称猜关联，也不更新下载终态。"""
-    limit = max(1, min(int(limit), _MAX_BATCH))
+    limit = max(1, min(limit, _MAX_BATCH))
     with db.get_conn() as conn:
         conn.execute('BEGIN IMMEDIATE')
         saved = conn.execute('SELECT value FROM settings_kv WHERE key=?', (LEGACY_CURSOR_KEY,)).fetchone()
@@ -362,8 +362,8 @@ def list_due_cleanup_intents(*, limit: int = _MAX_BATCH, confirmation_token: str
     where = ''
     if confirmation_token:
         where = ' AND c.token=?'
-        params.append(str(confirmation_token))
-    params.append(max(1, min(int(limit), _MAX_BATCH)))
+        params.append(confirmation_token)
+    params.append(max(1, min(limit, _MAX_BATCH)))
     with db.get_conn() as conn:
         rows = conn.execute(
             'SELECT q.* FROM download_staging_reconcile q JOIN organize_confirmations c ON c.id=q.confirmation_id '
@@ -412,7 +412,7 @@ def defer_cleanup_intent(job: dict, *, error: str) -> bool:
         cur = conn.execute(
             "UPDATE download_staging_reconcile SET status='retry',attempt_count=?,next_attempt_at=?,last_error=?,updated_at=? "
             "WHERE id=? AND status=? AND attempt_count=? AND next_attempt_at=?",
-            (attempt, next_at, str(error)[:500], timestamp, int(job['id']), job['status'],
+            (attempt, next_at, error[:500], timestamp, int(job['id']), job['status'],
              job['attempt_count'], job['next_attempt_at']),
         )
     if cur.rowcount != 1:
@@ -428,7 +428,7 @@ def finish_cleanup_intent(job: dict, *, status: str, error: str = '') -> bool:
         cur = conn.execute(
             'UPDATE download_staging_reconcile SET status=?,last_error=?,updated_at=? '
             "WHERE id=? AND status=? AND attempt_count=? AND next_attempt_at=?",
-            (status, str(error)[:500], db.now(), int(job['id']), job['status'],
+            (status, error[:500], db.now(), int(job['id']), job['status'],
              job['attempt_count'], job['next_attempt_at']),
         )
     return cur.rowcount == 1

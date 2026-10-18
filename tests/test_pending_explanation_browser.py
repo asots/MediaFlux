@@ -21,9 +21,11 @@ class PendingExplanationBrowserTests(AgentShellBrowserCase):
             ThreadPoolExecutor(max_workers=1) as executor,
         ):
             runtime = NativeRuntime()
-            csrf = re.search(
+            search_result = re.search(
                 r'<meta name="csrf-token" content="([^"]+)"', self.html
-            ).group(1)
+            )
+            assert search_result is not None
+            csrf = search_result.group(1)
             with api_client(runtime, mp, csrf) as (client, owner):
                 client.get("/_test_login")
                 session_id = "session_browser_explain_001"

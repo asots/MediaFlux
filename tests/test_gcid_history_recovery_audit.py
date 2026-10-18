@@ -140,7 +140,9 @@ class GCIDHistoryRecoveryAuditTests(unittest.TestCase):
     def test_retry_receipt_write_failure_rolls_back_admission_before_private_call(self):
         with isolated_test_database("mediaflux.db"):
             task_id = self._task()
-            before = dict(db.get_gcid_import_task(task_id))
+            get_gcid_import_task_result = db.get_gcid_import_task(task_id)
+            assert get_gcid_import_task_result is not None
+            before = dict(get_gcid_import_task_result)
             before_ledger = db.kv_get(gcid_import._RETRY_REPLAY_KEY)
             fake = FakeImporter()
             with self._using(fake):
@@ -156,7 +158,9 @@ class GCIDHistoryRecoveryAuditTests(unittest.TestCase):
                             task_id, operation_token="receipt-failure"
                         )
                 self.assertEqual(fake.calls, [])
-                self.assertEqual(dict(db.get_gcid_import_task(task_id)), before)
+                get_gcid_import_task_result_2 = db.get_gcid_import_task(task_id)
+                assert get_gcid_import_task_result_2 is not None
+                self.assertEqual(dict(get_gcid_import_task_result_2), before)
                 self.assertEqual(
                     db.kv_get(gcid_import._RETRY_REPLAY_KEY), before_ledger
                 )
@@ -170,7 +174,9 @@ class GCIDHistoryRecoveryAuditTests(unittest.TestCase):
     def test_corrupted_historical_retry_ledger_is_not_overwritten_or_bypassed(self):
         with isolated_test_database("mediaflux.db"):
             task_id = self._task()
-            before = dict(db.get_gcid_import_task(task_id))
+            get_gcid_import_task_result_3 = db.get_gcid_import_task(task_id)
+            assert get_gcid_import_task_result_3 is not None
+            before = dict(get_gcid_import_task_result_3)
             fake = FakeImporter()
             for raw in ('{"broken":', "{}", '[[true,"token"]]', '[[1,""]]'):
                 with self.subTest(raw=raw), self._using(fake):
@@ -178,5 +184,7 @@ class GCIDHistoryRecoveryAuditTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "凭据损坏"):
                         gcid_import.retry_task(task_id, operation_token="new")
                     self.assertEqual(db.kv_get(gcid_import._RETRY_REPLAY_KEY), raw)
-                    self.assertEqual(dict(db.get_gcid_import_task(task_id)), before)
+                    get_gcid_import_task_result_4 = db.get_gcid_import_task(task_id)
+                    assert get_gcid_import_task_result_4 is not None
+                    self.assertEqual(dict(get_gcid_import_task_result_4), before)
             self.assertEqual(fake.calls, [])

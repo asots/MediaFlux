@@ -102,6 +102,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
             episode=1,
             subscription_revision=1,
         )
+        assert admission_id is not None
         db.begin_media_download_dispatch(
             admission_id,
             subscription_id=subscription_id,
@@ -145,19 +146,22 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                         db.get_download_request(request_id), [], [task], qb_available=False,
                     )
                     row = db.get_download_request(request_id)
+                    assert row is not None
                     self.assertEqual((row["status"], row["gy_status"]), ("downloading", "downloading"))
                     self.assertIsNone(row["completed_at"])
                     self.assertEqual(row["notification_event_status"], "")
                     event = build_download_lifecycle_event(row, probe_progress={})
                     self.assertEqual(event.state, "processing")
-                    self.assertNotIn("下载完成", event.title)
+                    self.assertNotIn("下载完成", str(event.title))
                     self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), 1)
                 self.organize.assert_not_called()
                 self.staging.assert_not_called()
                 self.tracker._update_request(
                     row, [], self._gy_batch(2), qb_available=False,
                 )
-                self.assertEqual(db.get_download_request(request_id)["gy_status"], "completed")
+                get_download_request_result = db.get_download_request(request_id)
+                assert get_download_request_result is not None
+                self.assertEqual(get_download_request_result["gy_status"], "completed")
                 self.staging.assert_called_once()
                 self.organize.assert_called_once()
 
@@ -170,6 +174,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                     db.get_download_request(request_id), [], self._gy_batch(5), qb_available=False,
                 )
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual((row["status"], row["gy_status"]), ("manual_review", "manual_review"))
                 self.assertTrue(row["error"])
                 self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), 1)
@@ -213,6 +218,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                     db.get_download_request(request_id), [], [task], qb_available=False
                 )
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual(
                     (row["status"], row["gy_status"]), ("failed", "failed")
                 )
@@ -249,6 +255,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
             active = db.list_active_media_download_admissions(subscription_id)
             retry = download_dispatcher.resubmit_download_request(request_id, "guangya")
 
+        assert row is not None
         self.assertEqual((row["status"], row["gy_status"]), ("downloading", "downloading"))
         self.assertIsNone(row["completed_at"])
         self.assertEqual(len(active), 1)
@@ -285,6 +292,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                     db.get_download_request(request_id), [], self._gy_batch(*states), qb_available=False,
                 )
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual((row["status"], row["gy_status"]), (expected, expected))
                 self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), int(expected != "failed"))
                 if expected == "completed":
@@ -293,6 +301,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                     self.organize.assert_not_called()
                     self.staging.assert_not_called()
                 if expected in {"submitted", "downloading"}:
+                    assert row is not None
                     self.assertIsNone(row["completed_at"])
                     self.assertEqual(row["notification_event_status"], "")
 
@@ -306,6 +315,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
             db.get_download_request(request_id), [], self._gy_batch(4, 2), qb_available=False,
         )
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual((row["status"], row["gy_status"]), ("manual_review", "manual_review"))
         self.assertEqual(row["notification_event_status"], "manual_review")
         self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), 1)
@@ -322,6 +332,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                     db.get_download_request(request_id), [], self._gy_batch(state), qb_available=False,
                 )
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual((row["status"], row["gy_status"]), ("manual_review", "manual_review"))
                 self.assertEqual((row["gy_task_ids"], row["gy_batch_count"]), ("[]", 2))
                 self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), 1)
@@ -343,6 +354,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         self.assertFalse(result["created"])
         self.assertEqual(result["request_id"], request_id)
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual((row["gy_status"], row["gy_task_ids"]), ("downloading", '["gy-1","gy-2"]'))
         qb.assert_called_once()
         gy.assert_not_called()
@@ -360,6 +372,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                     qb_available=False, gy_available=False,
                 )
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual((row["status"], row["gy_status"]), ("submitted", "submitted"))
                 self.assertIsNone(row["completed_at"])
                 self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), 1)
@@ -393,13 +406,17 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                 request_id, "guangya"
             )
         self.assertTrue(result["ok"])
-        self.assertEqual(db.get_download_request(request_id)["status"], "resubmitted")
+        get_download_request_result_2 = db.get_download_request(request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["status"], "resubmitted")
         with patch.object(self.tracker, "_update_backend_log") as backend_log:
             self.tracker._update_request(
                 snapshot, [self._qb_task(0.5)], [], gy_available=False
             )
+            get_download_request_result_3 = db.get_download_request(request_id)
+            assert get_download_request_result_3 is not None
             self.assertEqual(
-                db.get_download_request(request_id)["status"], "resubmitted"
+                get_download_request_result_3["status"], "resubmitted"
             )
             self.assertEqual(db.count_download_requests_requiring_attention(), 0)
             backend_log.assert_not_called()
@@ -413,6 +430,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
             gy_available=False,
         )
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(
             (row["status"], row["qb_status"], row["gy_status"]),
             ("resubmitted", "completed", "resubmitted"),
@@ -436,8 +454,10 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         with patch.object(self.tracker, "_update_backend_log") as backend_log:
             for snapshot in (old_snapshot, cancelled_snapshot):
                 self.tracker._update_request(snapshot, [self._qb_task()], [done])
+                get_download_request_result_4 = db.get_download_request(request_id)
+                assert get_download_request_result_4 is not None
                 self.assertEqual(
-                    db.get_download_request(request_id)["status"], "cancelled"
+                    get_download_request_result_4["status"], "cancelled"
                 )
             backend_log.assert_not_called()
         self.local_import.assert_not_called()
@@ -454,6 +474,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
             gy_available=False,
         )
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual((row["status"], row["qb_status"]), ("completed", "completed"))
         self.local_import.assert_called_once()
         handed_off = self.local_import.call_args.args[0]
@@ -487,6 +508,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         snapshot = db.get_download_request(request_id)
         # 模拟同一秒内后端认领更替，不能把秒级 updated_at 当成 CAS 版本。
         with db.get_conn() as conn:
+            assert snapshot is not None
             conn.execute(
                 "UPDATE download_requests SET qb_task_id=?,updated_at=? WHERE id=?",
                 ("b" * 40, snapshot["updated_at"], request_id),
@@ -495,6 +517,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
             snapshot, [self._qb_task()], [], gy_available=False
         )
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual((row["qb_task_id"], row["qb_status"]), ("b" * 40, "submitted"))
         self.local_import.assert_not_called()
         self.notify.assert_not_called()
@@ -521,7 +544,9 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                 [self._qb_task()],
                 [GuangYaClient._to_offline_task({"taskId": "gy-1", "status": 2})],
             )
-        self.assertEqual(db.get_download_request(request_id)["status"], "cancelled")
+        get_download_request_result_5 = db.get_download_request(request_id)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5["status"], "cancelled")
         with db.get_conn() as conn:
             self.assertEqual(
                 conn.execute(
@@ -553,7 +578,10 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
             self.tracker._update_request(
                 snapshot, [self._qb_task()], [], gy_available=False
             )
-        self.assertEqual(dict(db.get_download_request(request_id)), dict(snapshot))
+        get_download_request_result_8 = db.get_download_request(request_id)
+        assert get_download_request_result_8 is not None
+        assert snapshot is not None
+        self.assertEqual(dict(get_download_request_result_8), dict(snapshot))
         self.assertEqual(
             db.list_active_media_download_admissions(subscription_id)[0]["status"],
             "dispatching",
@@ -577,8 +605,10 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         self.tracker._update_request(
             snapshot, [self._qb_task()], [], gy_available=False
         )
+        get_download_request_result_6 = db.get_download_request(request_id)
+        assert get_download_request_result_6 is not None
         self.assertEqual(
-            db.get_download_request(request_id)["local_import_status"], "completed"
+            get_download_request_result_6["local_import_status"], "completed"
         )
         self.local_import.assert_not_called()
         self.notify.assert_not_called()
@@ -610,6 +640,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         ):
             DownloadTracker._notify_completion(db.get_download_request(request_id), "completed", "", {})
             request = db.get_download_request(request_id)
+            assert request is not None
             self.assertEqual(request["notification_delivery_status"], "sent")
             self.assertEqual(request["notification_attempts"], 0)
             with db.get_conn() as conn:
@@ -639,6 +670,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         with patch.object(center, "upsert_notification", side_effect=RuntimeError("outbox unavailable")):
             DownloadTracker._notify_completion(db.get_download_request(request_id), "failed", "failed", {})
         request = db.get_download_request(request_id)
+        assert request is not None
         self.assertEqual(request["notification_delivery_status"], "retry_wait")
         self.assertEqual(request["notification_attempts"], 1)
         self.assertTrue(request["notification_next_retry_at"])
@@ -668,8 +700,10 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
                 qb_available=False,
                 gy_available=False,
             )
+        get_download_request_result_7 = db.get_download_request(request_id)
+        assert get_download_request_result_7 is not None
         self.assertEqual(
-            db.get_download_request(request_id)["notification_delivery_status"], "sent"
+            get_download_request_result_7["notification_delivery_status"], "sent"
         )
         self.assertNotIn(
             request_id, {row["id"] for row in db.list_active_download_requests()}
@@ -700,6 +734,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
         ):
             self.assertEqual(self.tracker.run_once(), 1)
             row = db.get_download_request(request_id)
+            assert row is not None
             self.assertEqual((row["status"], row["gy_status"], row["organize_status"]), ("manual_review", "completed", "settling"))
             self.organize.assert_not_called()
             self.assertNotIn(request_id, {r["id"] for r in db.list_active_download_requests()})
@@ -707,6 +742,7 @@ class DownloadTrackerStateRaceTests(unittest.TestCase):
             self.assertEqual(self.tracker.run_once(), 1)
             self.organize.assert_called_once()
             row = db.get_download_request(request_id)
+            assert row is not None
             self.assertEqual(row["status"], "manual_review")
             self.assertEqual(row["gy_settle_stable_count"], 2)
             self.assertEqual(row["organize_started"], 1)

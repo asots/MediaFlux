@@ -51,7 +51,7 @@ def _capture_row(subscription_id: int, row: Any | None) -> dict[str, Any]:
             "has_urls": False,
             "revision": "missing",
         }
-    has_urls = any(str(item).strip() for item in str(row["urls"] or "").splitlines())
+    has_urls = any(item.strip() for item in str(row["urls"] or "").splitlines())
     return {
         "subscription_id": subscription_id,
         "name": str(row["name"] or "").strip()[:120],
@@ -203,7 +203,7 @@ def refresh_rss_subscription_confirmed(
     arguments: dict[str, int], expected_context: str
 ) -> ToolResult:
     state = _capture(arguments)
-    if not secrets.compare_digest(str(state["revision"]), str(expected_context or "")):
+    if not secrets.compare_digest(str(state["revision"]), (expected_context or "")):
         raise AgentToolError(
             "RSS 订阅配置已变化，请重新预检", code="confirmation_stale"
         )
@@ -488,7 +488,7 @@ def refresh_rss_subscriptions_confirmed(
 ) -> ToolResult:
     current = _capture_many(arguments)
     if not secrets.compare_digest(
-        str(current["fingerprint"]), str(expected_context or "")
+        str(current["fingerprint"]), (expected_context or "")
     ):
         raise AgentToolError(
             "相关 RSS 订阅配置已变化，请重新预检", code="confirmation_stale"

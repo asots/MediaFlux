@@ -215,7 +215,7 @@ def _details_match_source(source: dict[str, Any], details: dict[str, Any]) -> bo
     if not title or not year:
         return False
     detail_year = _tmdb_year(details)
-    return bool(detail_year == year and title in _tmdb_titles(details))
+    return (detail_year == year and title in _tmdb_titles(details))
 
 
 def _bind_unmapped_sources(
@@ -476,7 +476,7 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
                     break
                 remote_count += 1
                 try:
-                    episode_number = int(item.get("episode_number"))
+                    episode_number = int(item.get("episode_number") or 0)
                 except (TypeError, ValueError):
                     continue
                 if episode_number <= 0:

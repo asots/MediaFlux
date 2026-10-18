@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
-
 from datetime import datetime, timedelta
 from typing import Any
-
 
 _MAX_ATTEMPTS = 7
 _LEASE_SECONDS = 120
@@ -17,10 +15,10 @@ _CONTINUATION_GROUP_LENGTH = len(AGENT_CONTINUATION_EVENT_PREFIX) + 65
 
 def _future_stamp(delay_seconds: int, *, base_stamp: str = "") -> str:
     try:
-        base = datetime.strptime(str(base_stamp or ""), _STAMP_FORMAT)
+        base = datetime.strptime((base_stamp or ""), _STAMP_FORMAT)
     except (TypeError, ValueError):
         base = datetime.now()
-    return (base + timedelta(seconds=int(delay_seconds or 0))).strftime(
+    return (base + timedelta(seconds=(delay_seconds or 0))).strftime(
         _STAMP_FORMAT
     )
 
@@ -41,8 +39,8 @@ def upsert_notification(
     ``replace=False`` 是一次性幂等事件；已有 key 不会重发。
     ``replace=True`` 会递增 revision，并在同一 Telegram 消息上更新。
     """
-    key = str(event_key or "").strip()
-    payload = str(event_json or "").strip()
+    key = (event_key or "").strip()
+    payload = (event_json or "").strip()
     if not key or not payload:
         return None
     database = db
@@ -64,12 +62,12 @@ def upsert_notification(
                 "VALUES(?,?,?,?,?,?,?,1,0,'pending',0,0,?,'',?,?)",
                 (
                     key,
-                    str(thread_key or ""),
-                    str(topic or "system"),
-                    str(importance or "result"),
-                    str(chat_id or ""),
+                    (thread_key or ""),
+                    (topic or "system"),
+                    (importance or "result"),
+                    (chat_id or ""),
                     payload,
-                    int(preferred_message_id or 0) or None,
+                    (preferred_message_id or 0) or None,
                     stamp,
                     stamp,
                     stamp,
@@ -77,7 +75,7 @@ def upsert_notification(
             )
         elif replace:
             existing_message_id = int(row["message_id"] or 0)
-            message_id = existing_message_id or int(preferred_message_id or 0)
+            message_id = existing_message_id or (preferred_message_id or 0)
             if str(row["event_json"] or "") == payload:
                 status = str(row["status"] or "")
                 revive = status in {"failed", "suppressed"} or (
@@ -92,10 +90,10 @@ def upsert_notification(
                     "last_error=CASE WHEN ? THEN '' ELSE last_error END,updated_at=? "
                     "WHERE event_key=?",
                     (
-                        str(thread_key or ""),
-                        str(topic or "system"),
-                        str(importance or "result"),
-                        str(chat_id or ""),
+                        (thread_key or ""),
+                        (topic or "system"),
+                        (importance or "result"),
+                        (chat_id or ""),
                         message_id or None,
                         int(revive),
                         int(revive),
@@ -128,10 +126,10 @@ def upsert_notification(
                 "WHEN ? "
                 "THEN last_error ELSE '' END,updated_at=? WHERE event_key=?",
                 (
-                    str(thread_key or ""),
-                    str(topic or "system"),
-                    str(importance or "result"),
-                    str(chat_id or ""),
+                    (thread_key or ""),
+                    (topic or "system"),
+                    (importance or "result"),
+                    (chat_id or ""),
                     payload,
                     message_id or None,
                     int(keep_unknown),
@@ -151,7 +149,7 @@ def get_notification(event_key: str) -> dict[str, Any] | None:
     with db.get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM telegram_notification_outbox WHERE event_key=?",
-            (str(event_key or ""),),
+            ((event_key or ""),),
         ).fetchone()
         return dict(row) if row is not None else None
 
@@ -219,8 +217,8 @@ def claim_due_notifications(
         params: list[object] = [stamp, stale_before, AGENT_CONTINUATION_EVENT_PREFIX + "%"]
         if event_key:
             clauses.append("event_key=?")
-            params.append(str(event_key))
-        params.append(max(1, min(int(limit or 1), 100)))
+            params.append(event_key)
+        params.append(max(1, min((limit or 1), 100)))
         rows = conn.execute(
             "SELECT candidate.* FROM telegram_notification_outbox AS candidate WHERE "
             + " AND ".join(clauses)
@@ -257,12 +255,12 @@ def complete_notification(
         row = conn.execute(
             "SELECT revision FROM telegram_notification_outbox WHERE id=? "
             "AND status='sending' AND lease_generation=?",
-            (int(notification_id), int(lease_generation)),
+            (notification_id, lease_generation),
         ).fetchone()
         if row is None:
             return False
         latest_revision = int(row["revision"] or 0)
-        status = "sent" if latest_revision == int(claimed_revision) else "pending"
+        status = "sent" if latest_revision == claimed_revision else "pending"
         cur = conn.execute(
             "UPDATE telegram_notification_outbox SET status=?,delivered_revision=?,"
             "message_id=COALESCE(NULLIF(?,0),message_id),attempts=0,last_error='',"
@@ -270,13 +268,13 @@ def complete_notification(
             "AND lease_generation=?",
             (
                 status,
-                int(claimed_revision),
-                int(message_id or 0),
+                claimed_revision,
+                (message_id or 0),
                 stamp,
                 stamp,
                 stamp,
-                int(notification_id),
-                int(lease_generation),
+                notification_id,
+                lease_generation,
             ),
         )
         return bool(cur.rowcount)
@@ -301,7 +299,7 @@ def retry_notification(
         row = conn.execute(
             "SELECT attempts,revision,message_id FROM telegram_notification_outbox WHERE id=? "
             "AND status='sending' AND lease_generation=?",
-            (int(notification_id), int(lease_generation)),
+            (notification_id, lease_generation),
         ).fetchone()
         if row is None:
             return "stale"
@@ -311,16 +309,16 @@ def retry_notification(
         if outcome_unknown and not known_message_id:
             # 包括编辑被明确拒绝后转为新发送的未知结果；不能拿旧 ID 盲目重放。
             status = "outcome_unknown"
-        elif int(row["revision"] or 0) != int(claimed_revision):
+        elif int(row["revision"] or 0) != claimed_revision:
             status = "pending"
             attempts = 0
-            error = "PriorRevisionRetry:" + str(error or "DeliveryFailed")
+            error = "PriorRevisionRetry:" + (error or "DeliveryFailed")
         else:
             attempts += 1
             status = "failed" if attempts >= _MAX_ATTEMPTS else "retry_wait"
             if status == "retry_wait":
                 delay = max(
-                    int(retry_after_seconds or 0),
+                    (retry_after_seconds or 0),
                     min(3600, 15 * (2 ** min(attempts - 1, 7))),
                 )
                 next_attempt = _future_stamp(delay, base_stamp=stamp)
@@ -332,11 +330,11 @@ def retry_notification(
                 status,
                 attempts,
                 known_message_id or None,
-                str(error or "DeliveryFailed")[:300],
+                (error or "DeliveryFailed")[:300],
                 next_attempt,
                 stamp,
-                int(notification_id),
-                int(lease_generation),
+                notification_id,
+                lease_generation,
             ),
         )
         return status
@@ -358,24 +356,24 @@ def fail_notification(
         row = conn.execute(
             "SELECT revision FROM telegram_notification_outbox WHERE id=? "
             "AND status='sending' AND lease_generation=?",
-            (int(notification_id), int(lease_generation)),
+            (notification_id, lease_generation),
         ).fetchone()
         if row is None:
             return False
         latest_revision = int(row["revision"] or 0)
-        if latest_revision != int(claimed_revision):
+        if latest_revision != claimed_revision:
             cur = conn.execute(
                 "UPDATE telegram_notification_outbox SET status='pending',attempts=0,"
                 "message_id=CASE WHEN ? THEN NULL ELSE message_id END,"
                 "last_error=?,next_attempt_at=?,updated_at=? "
                 "WHERE id=? AND status='sending' AND lease_generation=?",
                 (
-                    int(bool(clear_message_id)),
-                    ("PriorRevisionRejected:" + str(error or "TelegramRequestRejected"))[:300],
+                    int(clear_message_id),
+                    ("PriorRevisionRejected:" + (error or "TelegramRequestRejected"))[:300],
                     stamp,
                     stamp,
-                    int(notification_id),
-                    int(lease_generation),
+                    notification_id,
+                    lease_generation,
                 ),
             )
             return bool(cur.rowcount)
@@ -385,12 +383,12 @@ def fail_notification(
             "last_error=?,next_attempt_at=?,updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                int(bool(clear_message_id)),
-                str(error or "TelegramRequestRejected")[:300],
+                int(clear_message_id),
+                (error or "TelegramRequestRejected")[:300],
                 stamp,
                 stamp,
-                int(notification_id),
-                int(lease_generation),
+                notification_id,
+                lease_generation,
             ),
         )
         return bool(cur.rowcount)
@@ -410,22 +408,22 @@ def suppress_notification(
         row = conn.execute(
             "SELECT revision FROM telegram_notification_outbox WHERE id=? "
             "AND status='sending' AND lease_generation=?",
-            (int(notification_id), int(lease_generation)),
+            (notification_id, lease_generation),
         ).fetchone()
         if row is None:
             return False
         latest_revision = int(row["revision"] or 0)
-        if latest_revision != int(claimed_revision):
+        if latest_revision != claimed_revision:
             cur = conn.execute(
                 "UPDATE telegram_notification_outbox SET status='pending',attempts=0,"
                 "last_error=?,next_attempt_at=?,updated_at=? "
                 "WHERE id=? AND status='sending' AND lease_generation=?",
                 (
-                    ("PriorRevisionSuppressed:" + str(reason or "NotificationPolicyDisabled"))[:300],
+                    ("PriorRevisionSuppressed:" + (reason or "NotificationPolicyDisabled"))[:300],
                     stamp,
                     stamp,
-                    int(notification_id),
-                    int(lease_generation),
+                    notification_id,
+                    lease_generation,
                 ),
             )
             return bool(cur.rowcount)
@@ -434,11 +432,11 @@ def suppress_notification(
             "delivered_revision=?,last_error=?,updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                int(claimed_revision),
-                str(reason or "NotificationPolicyDisabled")[:300],
+                claimed_revision,
+                (reason or "NotificationPolicyDisabled")[:300],
                 stamp,
-                int(notification_id),
-                int(lease_generation),
+                notification_id,
+                lease_generation,
             ),
         )
         return bool(cur.rowcount)
@@ -456,7 +454,7 @@ def _recover_deliveries(conn: sqlite3.Connection, stamp: str) -> int:
         "WHERE status='sending' OR (status='outcome_unknown' AND COALESCE(message_id,0)>0)",
         (_MAX_ATTEMPTS, stamp, stamp),
     )
-    return int(cur.rowcount or 0)
+    return (cur.rowcount or 0)
 
 
 def recover_notifications() -> int:
@@ -467,8 +465,8 @@ def recover_notifications() -> int:
 def purge_notifications(*, retention_days: int = 30, limit: int = 1000) -> int:
     """清理旧终态；尚有待投递分段的回复保留前缀回执，避免清理破坏顺序证据。"""
     database = db
-    normal_cutoff = _future_stamp(-max(1, int(retention_days)) * 86400)
-    diagnostic_cutoff = _future_stamp(-max(90, int(retention_days)) * 86400)
+    normal_cutoff = _future_stamp(-max(1, retention_days) * 86400)
+    diagnostic_cutoff = _future_stamp(-max(90, retention_days) * 86400)
     group_length = _CONTINUATION_GROUP_LENGTH
     with database.get_conn() as conn:
         cur = conn.execute(
@@ -484,9 +482,9 @@ def purge_notifications(*, retention_days: int = 30, limit: int = 1000) -> int:
             ) = 0) """
             "ORDER BY updated_at,id LIMIT ?)",
             (normal_cutoff, diagnostic_cutoff, AGENT_CONTINUATION_EVENT_PREFIX + "%",
-             max(1, min(int(limit), 10000))),
+             max(1, min(limit, 10000))),
         )
-        return int(cur.rowcount or 0)
+        return (cur.rowcount or 0)
 
 
 def pending_notification_count() -> int:
@@ -536,10 +534,10 @@ def _enqueue_confirmation_delivery(
         "next_attempt_at=excluded.next_attempt_at,last_error='',sent_at=NULL,"
         "updated_at=excluded.updated_at",
         (
-            str(token or ""),
-            str(event_json or "{}"),
-            str(chat_id or ""),
-            int(message_id) if message_id else None,
+            (token or ""),
+            (event_json or "{}"),
+            (chat_id or ""),
+            message_id if message_id else None,
             timestamp,
             timestamp,
             timestamp,

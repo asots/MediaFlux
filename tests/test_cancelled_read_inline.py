@@ -1,6 +1,7 @@
 """Private returned READ settlement: full facts, exact CAS and no authority revival."""
 import asyncio
 import json
+from typing import Any, cast
 from copy import deepcopy
 from dataclasses import replace
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.references import InMemoryReferenceStore
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import InMemorySessionStateStore
@@ -78,10 +80,12 @@ def test_real_returned_read(backend, mode):
         catalog = ToolCatalog([KernelToolSpec(name="library.inspect", domain="library", description="inspect",
             effect=ToolEffect.WRITE if mode == "late_write" else ToolEffect.READ,
             input_schema={"type": "object", "properties": {}},
-            **({"prepare": read, "execute_confirmed": forbidden_write} if mode == "late_write" else {"read": read}))])
+            read=read if mode != "late_write" else None,
+            prepare=read if mode == "late_write" else None,
+            execute_confirmed=forbidden_write if mode == "late_write" else None)])
         active = AgentSession(model=model(), catalog=catalog, retriever=CapabilityRetriever(),
             pipeline=ToolPipeline(catalog=catalog, state_store=store,
-                                  **({"reference_store": store} if backend == "sqlite" else {})), state_store=store)
+                                  reference_store=store if isinstance(store, SQLiteKernelStore) else None), state_store=store)
         holder["session"] = active
         events = [event async for event in active.run(AgentInput(owner="o", session_id="s", request_id="same", message="inspect"))]
         assert events[-1].type == AgentEventType.TURN_CANCELLED
@@ -93,6 +97,7 @@ def test_real_returned_read(backend, mode):
             with db.get_conn() as conn:
                 assert conn.execute("SELECT COUNT(*) FROM agent_kernel_refs").fetchone()[0] == 0
         else:
+            assert isinstance(active.pipeline.reference_store, InMemoryReferenceStore)
             assert not active.pipeline.reference_store._records
         cold = sqlite_store() if backend == "sqlite" else store
         after = await cold.load(owner="o", session_id="s")
@@ -196,7 +201,7 @@ def test_native_cold_followup():
     async def run():
         calls = [("native-call", "inspect_batch", {"selector": "one", "exclude_played": True})]
         payload = {"ok": True, "status": "partial", "data": {"value": "fact" * 2000 + "NATIVE_TAIL"}}
-        holder = {}; observed = []
+        holder: dict[str, Any] = {}; observed = []
         async def read(arguments, context):
             observed.append(deepcopy(arguments))
             holder["started"] = await reopened()
@@ -236,7 +241,7 @@ def test_exact_whole_state_capacity(backend, excess):
         )
         store = sqlite_store() if backend == "sqlite" else InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner="o", session_id="s", request_id="same")
-        rows = [{"role": "assistant", "content": "", "tool_calls": [
+        rows: list[dict[str, Any]] = [{"role": "assistant", "content": "", "tool_calls": [
             {"call_id": "same", "name": "library.inspect", "arguments": {}}]},
             {"role": "tool", "tool_call_id": "same", "tool_name": "library.inspect", "content": pending_content(True)}]
         state = await store.commit(lease, conversation=rows, updates=(
@@ -275,7 +280,7 @@ def test_checkpoint_cas(backend, mode):
         )
         store = sqlite_store() if backend == "sqlite" else InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner="o", session_id="s", request_id="same")
-        rows = [{"role": "user", "content": "original prefix"},
+        rows: list[dict[str, Any]] = [{"role": "user", "content": "original prefix"},
                 {"role": "assistant", "content": "", "provider_state": {"native": [True, 1, "signature"]},
                  "tool_calls": [{"call_id": "same", "name": "library.inspect", "arguments": {}}]},
                 {"role": "tool", "tool_call_id": "same", "tool_name": "library.inspect", "content": pending_content(mode != "pending")}]
@@ -300,7 +305,7 @@ def test_checkpoint_cas(backend, mode):
         if mode == "scope":
             receipt = replace(receipt, lease=replace(lease, owner="other"))
             receipt.put_once('{"ok":true}')
-        if mode == "forged": receipt = {"effect": "read", "content": "fake"}
+        if mode == "forged": receipt = cast(_CancelledReadInline, {"effect": "read", "content": "fake"})
         if mode == "capacity":
             from app.agent.kernel.state_types import StateUpdate
             await store.commit(lease, updates=(StateUpdate("metadata.filler", "z" * 220000),))
@@ -309,6 +314,7 @@ def test_checkpoint_cas(backend, mode):
         before = await cold.load(owner="o", session_id="s")
         if mode == "write_failure":
             if backend == "sqlite":
+                assert isinstance(store, SQLiteKernelStore)
                 original = store._write_state
                 def fail(conn, state):
                     original(conn, state)

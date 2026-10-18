@@ -99,7 +99,7 @@ def _model_safe(value: Any, *, depth: int = 0, key: str = "") -> Any:
     # 唯一固定应用内路由，不把calendar_url变成任意文件路径/外链的放行口。
     if key == "calendar_url":
         return "/discovery/calendar" if isinstance(safe, str) and safe == "/discovery/calendar" else "[页面地址无效]"
-    if _PRIVATE_MODEL_KEY_RE.search(str(key or "")):
+    if _PRIVATE_MODEL_KEY_RE.search((key or "")):
         return "[内部标识已隐藏；请使用返回的 opaque ref]"
     if isinstance(safe, str) and (
         _UNIX_PATH_RE.search(safe) or _WINDOWS_PATH_RE.search(safe)
@@ -146,7 +146,7 @@ def _arguments_safe(value: Any) -> Any:
     validate(value, 0)
     try:
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    except (ValueError, UnicodeError) as exc:
+    except ValueError as exc:
         raise ValueError("工具参数无法安全保存") from exc
     if len(encoded) > _ARGUMENT_MAX_BYTES:
         raise ValueError("工具参数超过安全保存容量")
@@ -157,7 +157,7 @@ class DefaultProjector:
     """把领域返回值投影为模型 DTO 与公开 DTO，不做二次 LLM 润色。"""
 
     def __init__(self, *, max_model_chars: int = 24_000) -> None:
-        self.max_model_chars = max(2_000, int(max_model_chars))
+        self.max_model_chars = max(2_000, max_model_chars)
 
     async def before_read(self, tool, context, state_store) -> None:
         """领域可在读取开始前失效其展示快照；默认投影没有展示状态。"""

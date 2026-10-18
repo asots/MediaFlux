@@ -16,8 +16,8 @@ from app.clients.douban_authenticated import (
     normalize_dbcl2,
 )
 from app.defaults import (
-    DEFAULT_AGENT_EPISODE_RESEARCH_ENABLED,
     DEFAULT_AGENT_EPISODE_RESEARCH_DAILY_LIMIT,
+    DEFAULT_AGENT_EPISODE_RESEARCH_ENABLED,
     DEFAULT_AGENT_LLM_ENABLED,
     DEFAULT_AGENT_STREAM_DISPLAY_ENABLED,
     DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS,
@@ -759,7 +759,7 @@ def _validate_nsfw_organize_updates(data: dict[str, Any]) -> dict[str, str]:
     if "GY_ORGANIZE_NSFW_TIMEOUT_SECONDS" in data:
         raw_timeout = str(data["GY_ORGANIZE_NSFW_TIMEOUT_SECONDS"] or "").strip()
         try:
-            timeout = int(raw_timeout or str(config.get("GY_ORGANIZE_NSFW_TIMEOUT_SECONDS", "8") or "8"))
+            timeout = int(raw_timeout or (config.get("GY_ORGANIZE_NSFW_TIMEOUT_SECONDS", "8") or "8"))
         except (TypeError, ValueError) as exc:
             raise ValueError("MetaTube 超时必须是 2 到 30 的整数") from exc
         if not 2 <= timeout <= 30:
@@ -771,7 +771,7 @@ def _validate_nsfw_organize_updates(data: dict[str, Any]) -> dict[str, str]:
     ) == "1"
     endpoint = normalized.get(
         "GY_ORGANIZE_NSFW_METATUBE_ENDPOINT",
-        str(config.get("GY_ORGANIZE_NSFW_METATUBE_ENDPOINT", "") or ""),
+        (config.get("GY_ORGANIZE_NSFW_METATUBE_ENDPOINT", "") or ""),
     )
     if enabled and not endpoint:
         raise ValueError("启用成人内容识别前必须配置 MetaTube 服务地址")
@@ -898,7 +898,7 @@ def test_media_connection(request: Request, data: Any = Body(default=None)):
         saved_url = str(getattr(profile, "url", "") or "").strip().rstrip("/")
         if profile is None or url != saved_url:
             return api_error("修改服务地址后，请重新输入 API Key 或 Token", 400)
-        token = str(profile.credential or "").strip()
+        token = (profile.credential or "").strip()
     if not token:
         return api_error("请输入有效的访问凭据", 400)
 
@@ -919,7 +919,7 @@ def test_media_connection(request: Request, data: Any = Body(default=None)):
             timeout=(3.5, 8),
             allow_redirects=False,
         )
-        if 300 <= int(response.status_code) < 400:
+        if 300 <= response.status_code < 400:
             return api_error("媒体服务器返回了重定向，请检查服务地址", 502)
         response.raise_for_status()
         info = response.json()
@@ -1076,10 +1076,10 @@ def get_config(request: Request):
     from app.modules.offline import DEFAULT_VIDEO_EXTS_CSV, normalize_video_extensions
 
     items["OFFLINE_ALLOWED_EXTS"] = ",".join(
-        normalize_video_extensions(str(items.get("OFFLINE_ALLOWED_EXTS") or ""))
+        normalize_video_extensions(items.get("OFFLINE_ALLOWED_EXTS") or "")
     ) or DEFAULT_VIDEO_EXTS_CSV
     for key in managed_fields:
-        default = str(items.get(key, _AGENT_SETTINGS_DEFAULTS.get(key, "")) or "")
+        default = (items.get(key, _AGENT_SETTINGS_DEFAULTS.get(key, "")) or "")
         items[key] = config.get(key, default)
     raw_sites = items.get(
         "INDEXER_ENABLED_SITES",
@@ -1091,8 +1091,8 @@ def get_config(request: Request):
             persisted_sites = (*persisted_sites, "sukebei")
         items["INDEXER_ENABLED_SITES"] = ",".join(persisted_sites)
     except ValueError:
-        items["INDEXER_ENABLED_SITES"] = str(raw_sites or "")
-    redacted = redact_config(items)
+        items["INDEXER_ENABLED_SITES"] = (raw_sites or "")
+    redacted: dict = redact_config(items)
     if items.get("DOUBAN_DBCL2"):
         redacted["DOUBAN_DBCL2"] = _CONFIG_MASK
     redacted["__managed_fields"] = managed_fields
@@ -1298,8 +1298,11 @@ def save_config(request: Request, data: Any = Body(default=None)):
     if extension_keys & data.keys():
         try:
             from app.modules.organize import (
-                DEFAULT_ORGANIZE_METADATA_EXTS, DEFAULT_ORGANIZE_VIDEO_EXTS,
-                METADATA_EXTS, VIDEO_EXTS, Organizer,
+                DEFAULT_ORGANIZE_METADATA_EXTS,
+                DEFAULT_ORGANIZE_VIDEO_EXTS,
+                METADATA_EXTS,
+                VIDEO_EXTS,
+                Organizer,
             )
 
             if "GY_ORGANIZE_VIDEO_EXTS" in data:
@@ -1347,13 +1350,14 @@ def save_config(request: Request, data: Any = Body(default=None)):
             )
             if scope_error:
                 current_scope = []
-            allowed = {str(item.get("id") or "").strip() for item in sources}
+            allowed = {(item.get("id") or "").strip() for item in sources}
             pruned_scope = [source_id for source_id in current_scope if source_id in allowed]
             canonical_scope = encode_organize_source_ids(pruned_scope)
             if canonical_scope != config.get("GY_ORGANIZE_NSFW_SOURCE_IDS", ""):
                 media_workflow_updates["GY_ORGANIZE_NSFW_SOURCE_IDS"] = canonical_scope
     if strm_source_config_changed:
         import json
+
         from app.modules.strm import parse_strm_sources
 
         current_canonical = config.get("GY_STRM_SOURCE_DIRS", "")
@@ -1522,24 +1526,22 @@ def save_config(request: Request, data: Any = Body(default=None)):
     changed_keys = frozenset(persisted_updates)
     previous_values = {key: config.get(key, "") for key in changed_keys}
     persist_started = time.perf_counter()
-    strm_reconcile_required = bool(
-        new_strm_sources is not None and "GY_STRM_SOURCE_DIRS" in changed_keys
-    )
+    strm_reconcile_required = (new_strm_sources is not None and "GY_STRM_SOURCE_DIRS" in changed_keys)
 
     def publish_config_updates() -> list[str]:
         nonlocal config_persisted
         if strm_reconcile_required:
             from app import database as db
 
-            new_ids = {str(item["id"]) for item in new_strm_sources or []}
+            new_ids = {item["id"] for item in new_strm_sources or []}
             retired_sources = [
                 (
-                    str(source["id"]),
-                    str(source.get("name") or source["id"]),
+                    source["id"],
+                    (source.get("name") or source["id"]),
                     old_strm_root,
                 )
                 for source in old_strm_sources
-                if str(source["id"]) not in new_ids
+                if source["id"] not in new_ids
             ]
             with config.runtime_config_publication(persisted_updates):
                 try:
@@ -1547,9 +1549,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
                         sorted(new_ids),
                         retired_sources,
                         configured_sources=new_strm_sources or [],
-                        configured_strm_root=str(
-                            persisted_updates.get("STRM_ROOT", old_strm_root) or ""
-                        ),
+                        configured_strm_root=(persisted_updates.get("STRM_ROOT", old_strm_root) or ""),
                     ) as reconciled_ids:
                         config.set_and_save(persisted_updates)
                         config_persisted = True

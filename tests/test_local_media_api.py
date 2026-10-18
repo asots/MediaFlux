@@ -139,6 +139,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         self.assertNotIn("secret123", created.text)
         scheduler.return_value.reload.assert_called_once()
         stored_source = db.get_local_media_source(source_id, owner="admin")
+        assert stored_source is not None
         self.assertEqual((stored_source.smb_user, stored_source.smb_pass), ("", ""))
         self.assertEqual(stored_source.stable_seconds, 0)
         self.assertFalse(stored_source.scan_enabled)
@@ -177,6 +178,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         self.assertNotIn("smb_user", updated.json())
         self.assertNotIn("has_smb_pass", updated.json())
         stored_source = db.get_local_media_source(source_id, owner="admin")
+        assert stored_source is not None
         self.assertEqual((stored_source.smb_user, stored_source.smb_pass), ("", ""))
 
         deleted = self.client.delete(f"/api/local-media/sources/{source_id}", headers=headers)
@@ -746,8 +748,10 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         self.assertEqual(blocked.status_code, 409, blocked.text)
         self.assertIn("人工核验", blocked.json()["error"])
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        get_local_media_task_result = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result is not None
         self.assertEqual(
-            db.get_local_media_task(task_id, owner="admin").status,
+            get_local_media_task_result.status,
             "waiting_stable",
         )
         self.assertEqual(db.list_local_media_task_items(task_id, owner="admin"), [])
@@ -843,6 +847,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
             str(self.movie_target / "Movie (2026).mkv"), role="video", size=123, owner="admin",
         )
         task = db.get_local_media_task(completed_id, owner="admin")
+        assert task is not None
         db.add_local_media_operation_step(
             completed_id, task.operation_token, 0, "move",
             str(self.local_root / "Movie.2026.mkv"), str(self.movie_target / "Movie (2026).mkv"),
@@ -881,7 +886,7 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
             {"requested": 3, "deleted": 1, "skipped_busy": 1, "missing": 1},
         )
         self.assertIsNone(db.get_local_media_task(completed_id, owner="admin"))
-        self.assertIsNotNone(db.get_local_media_task(busy_id, owner="admin"))
+        assert (db.get_local_media_task(busy_id, owner="admin")) is not None
         self.assertEqual(self.client.get(f"/api/local-media/tasks/{completed_id}").status_code, 404)
 
     def test_inspect_reports_scan_failure_without_generic_internal_error(self):
@@ -1001,7 +1006,9 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         ), patch("app.routes.local_media_api.notify_local_media_task"):
             response = self.client.post("/api/local-media/execute", json={"inspection_id": "fixture", "preview_digest": "preview:fixture", "rules_snapshot": "{}"}, headers={"X-CSRF-Token": csrf})
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(db.get_local_media_task(task_id, owner="admin").qb_hash, "fixture-qb-hash")
+        get_local_media_task_result_2 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_2 is not None
+        self.assertEqual(get_local_media_task_result_2.qb_hash, "fixture-qb-hash")
         service.execute_task.assert_called_once_with("admin", task_id, qb_client=qb_client)
         scheduler.qb_factory.assert_called_once_with()
         qb_client.close.assert_called_once_with()
@@ -1049,7 +1056,9 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
                 self.assertEqual(response.status_code, 400, response.text)
                 self.assertNotIn("private credential", response.text)
                 service.execute_task.assert_not_called()
-                self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "failed")
+                get_local_media_task_result_3 = db.get_local_media_task(task_id, owner="admin")
+                assert get_local_media_task_result_3 is not None
+                self.assertEqual(get_local_media_task_result_3.status, "failed")
                 self.assertEqual(path.read_bytes(), b"frozen source")
 
     def test_manual_execute_lost_claim_does_not_create_qb_client(self):

@@ -144,7 +144,9 @@ class EpisodeResearchWriteSafetyTests(IsolatedDatabaseTestCase):
             self.assertEqual(case.cloud.infos[subtitle.file_id].parent_id, "source")
             self.assertEqual(result["stats"]["moved"], 1)
             self.assertGreater(result["stats"].get("failed", 0), 0)
-            self.assertIn(db.get_organize_confirmation("episode-case")["status"], {"completed", "failed"})
+            get_organize_confirmation_result = db.get_organize_confirmation("episode-case")
+            assert get_organize_confirmation_result is not None
+            self.assertIn(get_organize_confirmation_result["status"], {"completed", "failed"})
 
     def test_subtitle_arriving_after_own_video_rename_blocks_companion_and_rolls_back_video(self):
         with self._build() as case:
@@ -206,6 +208,7 @@ class EpisodeResearchWriteSafetyTests(IsolatedDatabaseTestCase):
             self.assertEqual(result["stats"]["moved"], 1)
             self.assertGreater(result["stats"].get("failed", 0), 0)
             row = db.get_organize_confirmation("episode-case")
+            assert row is not None
             self.assertIn(row["status"], {"completed", "failed"})
             recorded = json.loads(row["result_json"])
             self.assertEqual(recorded["moved"], 1)
@@ -282,7 +285,9 @@ class EpisodeResearchWriteSafetyTests(IsolatedDatabaseTestCase):
             self.assertEqual(len(outsiders), 1)
             self.assertEqual(case.cloud.infos[outsiders[0].file_id], outsiders[0])
             self.assertEqual(case.cloud.deleted, [])
-            self.assertEqual(db.get_organize_confirmation("episode-case")["status"], "completed")
+            get_organize_confirmation_result_2 = db.get_organize_confirmation("episode-case")
+            assert get_organize_confirmation_result_2 is not None
+            self.assertEqual(get_organize_confirmation_result_2["status"], "completed")
 
     def test_human_atomic_claim_during_revalidation_prevents_agent_ownership(self):
         with self._build() as case:
@@ -308,6 +313,7 @@ class EpisodeResearchWriteSafetyTests(IsolatedDatabaseTestCase):
                 rename.assert_not_called()
             self.assertEqual(len(claims), 1)
             row = db.get_organize_confirmation("episode-case")
+            assert row is not None
             self.assertEqual((row["confirmation_actor"], row["status"]), ("human", "queued"))
             self.assertIsNone(confirmations._episode_research_for_execution(
                 "episode-case", case.payload, 0, "human",
@@ -318,12 +324,14 @@ class EpisodeResearchWriteSafetyTests(IsolatedDatabaseTestCase):
         with self._build() as case:
             decision = case.decision()
             receipt = copy.deepcopy(decision.episode_research_receipt)
+            assert receipt is not None
             receipt["candidate_index"] = 999
             with patch.object(confirmations, "Organizer") as organizer:
                 result = case.create(replace(decision, episode_research_receipt=receipt))
                 organizer.assert_not_called()
             self.assertNotEqual(result, "approved")
             row = db.get_organize_confirmation("episode-case")
+            assert row is not None
             self.assertEqual((row["status"], row["confirmation_actor"]), ("pending", ""))
             self._assert_all_frozen_files_stay_in_source(case)
 
@@ -339,7 +347,9 @@ class EpisodeResearchWriteSafetyTests(IsolatedDatabaseTestCase):
                 case.execute()
             organizer.assert_not_called()
             self._assert_all_frozen_files_stay_in_source(case)
-            self.assertEqual(db.get_organize_confirmation("episode-case")["status"], "failed")
+            get_organize_confirmation_result_3 = db.get_organize_confirmation("episode-case")
+            assert get_organize_confirmation_result_3 is not None
+            self.assertEqual(get_organize_confirmation_result_3["status"], "failed")
 
     def test_switch_or_effective_rules_change_after_revalidation_blocks_write(self):
         for fault in ("disabled", "rules_changed"):
@@ -402,6 +412,7 @@ class EpisodeResearchWriteSafetyTests(IsolatedDatabaseTestCase):
                 self.assertEqual(case.cloud.infos[item["file_id"]].parent_id, "source")
             row = db.get_organize_confirmation("episode-case")
             # completed 表示这次 job 已结束，并不要求把旧部分失败语义改为 failed。
+            assert row is not None
             self.assertIn(row["status"], {"completed", "failed"})
             recorded = json.loads(row["result_json"])
             self.assertEqual(recorded["moved"], 1)

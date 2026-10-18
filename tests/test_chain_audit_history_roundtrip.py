@@ -64,10 +64,14 @@ class HistoricalWorkflowRoundtripTests(unittest.TestCase):
                 paths.env_file.read_text(encoding="utf-8"), "WEB_PORT=1258\n"
             )
             self.assertFalse(recover_pending_restore(paths))
+            get_media_subscription_result = db.get_media_subscription(sid)
+            assert get_media_subscription_result is not None
             self.assertEqual(
-                db.get_media_subscription(sid)["title"], "Synthetic restored show"
+                get_media_subscription_result["title"], "Synthetic restored show"
             )
-            self.assertTrue(db.get_media_subscription(sid)["enabled"])
+            get_media_subscription_result_2 = db.get_media_subscription(sid)
+            assert get_media_subscription_result_2 is not None
+            self.assertTrue(get_media_subscription_result_2["enabled"])
 
             self.assertEqual(db.recover_stale_media_subscription_checks(), 1)
             self.assertEqual(db.recover_stale_media_subscription_checks(), 0)

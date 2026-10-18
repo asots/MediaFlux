@@ -1,6 +1,9 @@
 """解析 HTTP/传输错误不伪装成空清单，且任何失败都不创建远端任务。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import json
 import unittest
 from unittest.mock import Mock, patch
@@ -78,11 +81,11 @@ class OfflineResolutionFailureTests(unittest.TestCase):
                     client = self.client()
                     with patch("app.modules.rss._fetch_rss_payload", side_effect=error):
                         if entry == "automatic":
-                            result = offline.submit_offline(url, client=client, isolate_task=True)
+                            result = offline.submit_offline(url, client=cast(GuangYaClient, client), isolate_task=True)
                         elif entry == "preview":
-                            result = offline.preview_offline_selection(url, client=client, rules=self.rules)
+                            result = offline.preview_offline_selection(url, client=cast(GuangYaClient, client), rules=self.rules)
                         else:
-                            result = offline.submit_offline_selection(url, [0], client=client, rules=self.rules)
+                            result = offline.submit_offline_selection(url, [0], client=cast(GuangYaClient, client), rules=self.rules)
                     self.assert_safe_failure(result, client, message)
                     self.assertEqual(result["failure_code"], code)
                     self.assertEqual(result["retryable"], retryable)
@@ -106,7 +109,7 @@ class OfflineResolutionFailureTests(unittest.TestCase):
         for status in (400, 401, 403, 415, 429, 500, 502, 503, 504):
             with self.subTest(status=status):
                 client = self.client(self.http_error(status))
-                result = offline.submit_offline(self.url, client=client, torrent_data=b"fixture", isolate_task=True)
+                result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), torrent_data=b"fixture", isolate_task=True)
                 self.assert_safe_failure(result, client, f"HTTP {status}")
                 self.assertEqual(
                     (result.get("failure_code"), result.get("retryable")),
@@ -115,8 +118,8 @@ class OfflineResolutionFailureTests(unittest.TestCase):
                 self.assertEqual(result["resolve_attempts"], 1)
                 self.assertEqual(result["resolve_http_status"], status)
                 self.assertEqual(result["resolve_error_type"], "HTTPStatusError")
-                client.resolve_torrent.assert_called_once_with(b"fixture")
-                client.resolve_url.assert_not_called()
+                cast(Mock, client.resolve_torrent).assert_called_once_with(b"fixture")
+                cast(Mock, client.resolve_url).assert_not_called()
                 summary = public_dispatch_summary({
                     "succeeded": [], "failed": ["guangya"], "error": "guangya: " + result["error"],
                 })
@@ -133,7 +136,7 @@ class OfflineResolutionFailureTests(unittest.TestCase):
         ):
             with self.subTest(error=type(error).__name__):
                 client = self.client(error)
-                result = offline.submit_offline(self.url, client=client, torrent_data=b"fixture", isolate_task=True)
+                result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), torrent_data=b"fixture", isolate_task=True)
                 self.assert_safe_failure(result, client, message)
                 self.assertEqual(result.get("failure_code"), failure_code)
                 self.assertEqual(result.get("retryable"), retryable)
@@ -149,22 +152,22 @@ class OfflineResolutionFailureTests(unittest.TestCase):
                 with self.subTest(entry=entry, url=protocol_url.split(":")[0]):
                     client = self.client(self.http_error(403))
                     if entry == "automatic":
-                        result = offline.submit_offline(protocol_url, client=client, isolate_task=True)
+                        result = offline.submit_offline(protocol_url, client=cast(GuangYaClient, client), isolate_task=True)
                     elif entry == "preview":
-                        result = offline.preview_offline_selection(protocol_url, client=client, rules=self.rules)
+                        result = offline.preview_offline_selection(protocol_url, client=cast(GuangYaClient, client), rules=self.rules)
                     else:
-                        result = offline.submit_offline_selection(protocol_url, selected_indexes=[0], client=client, rules=self.rules)
+                        result = offline.submit_offline_selection(protocol_url, selected_indexes=[0], client=cast(GuangYaClient, client), rules=self.rules)
                     self.assert_safe_failure(result, client, "HTTP 403")
                     self.assertEqual(result["failure_code"], "guangya_auth_failed")
                     self.assertFalse(result["retryable"])
-                    client.resolve_url.assert_called_once_with(protocol_url)
+                    cast(Mock, client.resolve_url).assert_called_once_with(protocol_url)
                     self.assertEqual(result["resolve_attempts"], 1)
 
     def test_empty_and_excluded_torrent_manifests_still_fail_closed(self):
         for payload in ({"data": {"files": []}}, RESOLVE_EXCLUDED_ONLY_FIXTURE):
             with self.subTest(payload=payload):
                 client = self.client(payload=payload)
-                result = offline.submit_offline(self.url, client=client, torrent_data=b"fixture", isolate_task=True)
+                result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), torrent_data=b"fixture", isolate_task=True)
                 self.assertFalse(result["ok"])
                 self.assertIn("种子文件未解析到可验证文件列表", result["error"])
                 self.assertEqual(result["failure_code"], "guangya_manifest_unavailable")
@@ -182,7 +185,7 @@ class OfflineResolutionFailureTests(unittest.TestCase):
                 client = self.client(payload=payload)
                 result = offline.submit_offline_selection(
                     self.url, selected_indexes=selected_indexes,
-                    client=client, rules=self.rules,
+                    client=cast(GuangYaClient, client), rules=self.rules,
                 )
 
                 self.assertFalse(result["ok"])
@@ -196,10 +199,10 @@ class OfflineResolutionFailureTests(unittest.TestCase):
                 client = self.client(payload=RESOLVE_SUBFILES_FIXTURE)
                 client.logged_in = False
                 if entry == "automatic":
-                    result = offline.submit_offline(self.url, client=client)
+                    result = offline.submit_offline(self.url, client=cast(GuangYaClient, client))
                 else:
                     result = offline.submit_offline_selection(
-                        self.url, selected_indexes=[0], client=client, rules=self.rules,
+                        self.url, selected_indexes=[0], client=cast(GuangYaClient, client), rules=self.rules,
                     )
 
                 self.assertFalse(result["ok"])
@@ -212,7 +215,7 @@ class OfflineResolutionFailureTests(unittest.TestCase):
 
     def test_valid_torrent_uses_only_verified_remote_indexes(self):
         client = self.client(payload=RESOLVE_SUBFILES_FIXTURE)
-        result = offline.submit_offline(self.url, client=client, torrent_data=b"fixture")
+        result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), torrent_data=b"fixture")
         self.assertTrue(result["ok"])
         self.assertEqual(client.torrent_resolve_calls, [b"fixture"])
         self.assertEqual(client.resolve_calls, [])
@@ -222,7 +225,7 @@ class OfflineResolutionFailureTests(unittest.TestCase):
     def test_exception_after_excluded_response_never_reuses_previous_manifest(self):
         client = self.client()
         client.resolve_url = Mock(side_effect=[RESOLVE_EXCLUDED_ONLY_FIXTURE, self.http_error(503)])
-        result = offline.submit_offline(self.url, client=client, isolate_task=True)
+        result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), isolate_task=True)
         self.assert_safe_failure(result, client, "HTTP 503")
         self.assertEqual(result["resolve_attempts"], 2)
         self.assertEqual(client.resolve_url.call_count, 2)
@@ -232,21 +235,21 @@ class OfflineResolutionFailureTests(unittest.TestCase):
             {"fileIndex": 0, "name": "a.mkv", "size": 100},
             {"fileIndex": 0, "name": "b.mkv", "size": 100},
         ]}})
-        result = offline.submit_offline(self.url, client=client, torrent_data=b"fixture")
+        result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), torrent_data=b"fixture")
         self.assert_safe_failure(result, client, "光鸭资源解析响应无效")
 
     def test_wrapped_http_error_is_classified_without_polling_again(self):
         error = RuntimeError("fixture-secret")
         error.__cause__ = self.http_error(415)
         client = self.client(error)
-        result = offline.submit_offline(self.url, client=client, isolate_task=True)
+        result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), isolate_task=True)
         self.assert_safe_failure(result, client, "HTTP 415")
         self.assertEqual(result["resolve_error_type"], "HTTPStatusError")
-        client.resolve_url.assert_called_once_with(self.url)
+        cast(Mock, client.resolve_url).assert_called_once_with(self.url)
 
     def test_business_runtime_error_preserves_bounded_magnet_polling(self):
         client = self.client(RuntimeError("fixture-secret"))
-        result = offline.submit_offline(self.url, client=client, isolate_task=True)
+        result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), isolate_task=True)
         self.assert_safe_failure(result, client, "光鸭资源解析失败")
         self.assertEqual(result["resolve_attempts"], 4)
-        self.assertEqual(client.resolve_url.call_count, 4)
+        self.assertEqual(cast(Mock, client.resolve_url).call_count, 4)

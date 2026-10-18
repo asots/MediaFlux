@@ -24,7 +24,7 @@ _WINDOWS_OR_UNC_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/]{2})")
 
 def is_windows_or_unc_path(raw_path: str) -> bool:
     """判断原始路径是否是 Windows 盘符或 UNC 形式。"""
-    return bool(_WINDOWS_OR_UNC_RE.match(str(raw_path or "").strip()))
+    return bool(_WINDOWS_OR_UNC_RE.match((raw_path or "").strip()))
 
 
 def require_container_absolute_path(raw_path: str | Path, *, label: str = "目录路径") -> Path:
@@ -40,7 +40,7 @@ def require_container_absolute_path(raw_path: str | Path, *, label: str = "目�
 
 def normalize_qb_path(raw_path: str) -> str:
     """将 POSIX、Windows 和 UNC 路径归一为仅用于比较的斜杠形式。"""
-    value = str(raw_path or "").strip()
+    value = (raw_path or "").strip()
     if not value:
         raise PathMappingError("路径不能为空")
     if "\x00" in value:
@@ -129,12 +129,13 @@ class PathMapping:
         prefix_anchor, prefix_parts = normalized_path_parts(self.normalized_prefix)
         value_anchor, value_parts = normalized_path_parts(normalized)
         windows_style = path_uses_casefold(self.normalized_prefix)
-        normalize = str.casefold if windows_style else str
-        if (
-            normalize(value_anchor) != normalize(prefix_anchor)
-            or tuple(map(normalize, value_parts[:len(prefix_parts)]))
-            != tuple(map(normalize, prefix_parts))
-        ):
+        value_prefix = value_parts[:len(prefix_parts)]
+        if windows_style:
+            value_anchor = value_anchor.casefold()
+            prefix_anchor = prefix_anchor.casefold()
+            value_prefix = tuple(part.casefold() for part in value_prefix)
+            prefix_parts = tuple(part.casefold() for part in prefix_parts)
+        if value_anchor != prefix_anchor or value_prefix != prefix_parts:
             raise PathMappingError("路径不匹配 qB 前缀")
         parts = value_parts[len(prefix_parts):]
         if any(part in {".", ".."} for part in parts):

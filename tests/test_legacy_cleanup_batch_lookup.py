@@ -68,8 +68,10 @@ class LegacyCleanupBatchLookupTests(unittest.TestCase):
         self.fixture.drain(limit=40)
         self.assertEqual(len(self.fixture.cloud.deleted), 40)
         for rid in ids:
+            get_download_request_result = db.get_download_request(rid)
+            assert get_download_request_result is not None
             self.assertEqual(
-                db.get_download_request(rid)["gy_staging_cleanup_status"], "completed"
+                get_download_request_result["gy_staging_cleanup_status"], "completed"
             )
         self.assertEqual(queue.discover_legacy_confirmation_cleanup(limit=40), 0)
         self.fixture.drain(limit=40)

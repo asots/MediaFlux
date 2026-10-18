@@ -70,7 +70,7 @@ def _row_dict(row: Mapping[str, Any] | Any) -> dict[str, Any]:
         keys = tuple(row.keys())
     except (AttributeError, TypeError):
         return {}
-    return {str(key): row[key] for key in keys}
+    return {key: row[key] for key in keys}
 
 
 def _source_rows(conn: Any) -> list[Any]:
@@ -92,7 +92,7 @@ def _target_rows(conn: Any, source_id: int) -> list[Any]:
     return conn.execute(
         "SELECT * FROM local_library_targets WHERE source_id=? AND owner=? "
         "ORDER BY category ASC,id ASC",
-        (int(source_id), "admin"),
+        (source_id, "admin"),
     ).fetchall()
 
 
@@ -250,7 +250,7 @@ def set_local_media_source_trigger_enabled_confirmed(
                 error="确认快照已失效。",
             )
         if not secrets.compare_digest(
-            common._fingerprint(snapshot, default=str), str(expected_context or "")
+            common._fingerprint(snapshot, default=str), (expected_context or "")
         ):
             return ToolResult(
                 ok=False,

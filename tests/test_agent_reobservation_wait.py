@@ -251,6 +251,7 @@ def background_case(native_case):
     def freeze(arguments, context):
         # 只给真实领域预检附加本次私有来源，不伪造确认/受理/完成状态。
         assert context.reobservation_source is None
+        assert real.prepare is not None
         result = real.prepare(arguments, context)
         prepared.append(deepcopy(arguments))
         return replace(result, metadata={**result.metadata, "reobservation_source": deepcopy(source)})
@@ -339,7 +340,9 @@ async def failed_background_candidate(case, prepared, client):
         rows = conn.execute("SELECT * FROM organize_operation_jobs").fetchall()
     assert len(rows) == 1 and rows[0]["status"] == "pending"
     worker = _run_real_worker(jobs.claim_organize_operation_job(rows[0]["job_id"]))
-    assert jobs.get_organize_operation_job(rows[0]["job_id"])["status"] in {"failed", "partial"}
+    get_organize_operation_job_result = jobs.get_organize_operation_job(rows[0]["job_id"])
+    assert get_organize_operation_job_result is not None
+    assert get_organize_operation_job_result["status"] in {"failed", "partial"}
     assert client.write_calls == [("rename", "admitted.mp4")]
     assert case.media.executed == ["A"] and case.media.target("A").is_file()
     assert not case.media.source("A").exists()

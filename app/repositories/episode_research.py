@@ -120,7 +120,7 @@ def _decode_payload(raw: object) -> dict[str, Any]:
 
 
 def _valid_timestamp(value: object) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value > 0
+    return isinstance(value, (int, float)) and type(value) in (int, float) and math.isfinite(value) and value > 0
 
 
 def get_episode_research_cache(

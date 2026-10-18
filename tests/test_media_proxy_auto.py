@@ -8,17 +8,30 @@ import logging
 import socket
 import threading
 import time
+import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-import unittest
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import anyio
 import httpx
+from aiohttp import (
+    ClientResponse,
+    ClientSession,
+    RequestInfo,
+    TraceConfig,
+    TraceRequestRedirectParams,
+)
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict, CIMultiDictProxy
 from starlette.datastructures import Headers
-from starlette.websockets import WebSocketDisconnect
+from starlette.requests import Request
+from starlette.routing import Route, WebSocketRoute
+from starlette.testclient import _TestClientTransport
+from starlette.websockets import WebSocket, WebSocketDisconnect
+from yarl import URL
 
 from app.modules import media_proxy
 
@@ -54,7 +67,7 @@ class _FakeUpstreamResponse:
 
 class _FakeDecodingErrorResponse(_FakeUpstreamResponse):
     async def aiter_bytes(self):
-        if False:  # pragma: no cover - 让本函数保持 async iterator 形态
+        if TYPE_CHECKING:  # pragma: no cover - 让本函数保持 async iterator 形态
             yield b""
         raise httpx.DecodingError("invalid compressed body")
 
@@ -89,7 +102,7 @@ class _FakeAsyncClient:
 
     async def send(self, request: httpx.Request, stream: bool = False) -> _FakeUpstreamResponse:
         self.__class__.requests.append(request)
-        self.__class__.send_streams.append(bool(stream))
+        self.__class__.send_streams.append(stream)
         if not self.__class__.responses:
             raise AssertionError("测试未配置上游响应")
         return self.__class__.responses.pop(0)
@@ -464,7 +477,7 @@ class HybridMediaProxyTests(unittest.TestCase):
             logical_url=str(logical),
             connect_url=str(connect),
             host_header=logical.netloc.decode("ascii"),
-            sni_hostname=str(logical.host),
+            sni_hostname=logical.host,
             addresses=("203.0.113.10",),
         )
 
@@ -1456,7 +1469,7 @@ class HybridMediaProxyTests(unittest.TestCase):
         )
         target = media_proxy._websocket_upstream_url(
             "http://127.0.0.1:8096/emby",
-            websocket,
+            cast(WebSocket, websocket),
             "emby/socket",
         )
 
@@ -1809,7 +1822,7 @@ class HybridMediaProxyTests(unittest.TestCase):
         )
         instance = {**self._instance(), "upstream_url": "http://127.0.0.1:8096/emby"}
         with patch("app.modules.media_proxy.httpx.AsyncClient", _FakeAuthAsyncClient):
-            allowed = asyncio.run(media_proxy._client_is_authorized(instance, request))
+            allowed = asyncio.run(media_proxy._client_is_authorized(instance, cast(Request, request)))
 
         self.assertTrue(allowed)
         upstream_request = _FakeAuthAsyncClient.requests[0]
@@ -1831,7 +1844,7 @@ class HybridMediaProxyTests(unittest.TestCase):
             _FakeAuthAsyncClient,
         ):
             allowed = asyncio.run(
-                media_proxy._client_is_authorized(instance, request)
+                media_proxy._client_is_authorized(instance, cast(Request, request))
             )
 
         self.assertTrue(allowed)
@@ -1850,7 +1863,7 @@ class HybridMediaProxyTests(unittest.TestCase):
             query_params={},
         )
         with patch("app.modules.media_proxy.httpx.AsyncClient", _FakeAuthAsyncClient):
-            allowed = asyncio.run(media_proxy._client_is_authorized(self._instance(), request))
+            allowed = asyncio.run(media_proxy._client_is_authorized(self._instance(), cast(Request, request)))
 
         self.assertTrue(allowed)
         upstream_request = _FakeAuthAsyncClient.requests[0]
@@ -2140,7 +2153,7 @@ class HybridMediaProxyTests(unittest.TestCase):
         self.assertEqual(
             media_proxy._websocket_upstream_url(
                 "http://127.0.0.1:8096/emby",
-                websocket,
+                cast(WebSocket, websocket),
                 "emby/socket",
             ),
             "ws://127.0.0.1:8096/emby/socket?api_key=client-token",
@@ -2197,6 +2210,7 @@ class HybridMediaProxyTests(unittest.TestCase):
             for headers in header_sets:
                 with self.subTest(headers=headers):
                     websocket = DuplicateCredentialWebSocket(headers)
+                    assert isinstance(websocket_route, WebSocketRoute)
                     asyncio.run(websocket_route.endpoint(websocket, "socket"))
                     self.assertEqual(websocket.closed.get("code"), 1008)
 
@@ -2225,7 +2239,7 @@ class HybridMediaProxyTests(unittest.TestCase):
                 captured["target"] = target
                 captured["kwargs"] = kwargs
                 raise media_proxy.WSServerHandshakeError(
-                    None,
+                    RequestInfo(URL(target), "GET", CIMultiDictProxy(CIMultiDict())),
                     (),
                     status=403,
                     message="Invalid response status",
@@ -2277,8 +2291,10 @@ class HybridMediaProxyTests(unittest.TestCase):
                 RejectingWebSocketSession,
             ),
         ):
+            assert isinstance(websocket_route, WebSocketRoute)
             asyncio.run(websocket_route.endpoint(websocket, "socket"))
 
+        assert isinstance(captured['kwargs'], dict)
         headers = httpx.Headers(captured["kwargs"]["headers"])
         self.assertEqual(
             headers["Authorization"],
@@ -2313,7 +2329,7 @@ class HybridMediaProxyTests(unittest.TestCase):
                 captured["target"] = target
                 captured["kwargs"] = kwargs
                 raise media_proxy.WSServerHandshakeError(
-                    None,
+                    RequestInfo(URL(target), "GET", CIMultiDictProxy(CIMultiDict())),
                     (),
                     status=403,
                     message="Invalid response status",
@@ -2380,14 +2396,18 @@ class HybridMediaProxyTests(unittest.TestCase):
         self.assertNotIn("10.0.0.8", str(headers))
         self.assertNotIn("X-Emby-Token", headers)
         trace_configs = captured["trace_configs"]
+        assert isinstance(trace_configs, list)
         self.assertEqual(len(trace_configs), 1)
+        assert isinstance(trace_configs[0], TraceConfig)
         self.assertEqual(len(trace_configs[0].on_request_redirect), 1)
         self.assertFalse(
             any(key.lower().startswith("sec-websocket-") for key in headers)
         )
         self.assertEqual(kwargs["protocols"], ["jellyfin"])
         self.assertIs(captured["connector"], connector)
-        self.assertTrue(captured["session"].closed)
+        session = captured["session"]
+        assert isinstance(session, RejectingWebSocketSession)
+        self.assertTrue(session.closed)
         throttled.assert_called_once()
         self.assertEqual(
             throttled.call_args.args[2],
@@ -2416,7 +2436,7 @@ class HybridMediaProxyTests(unittest.TestCase):
 
             async def ws_connect(self, target: str, **kwargs):
                 raise media_proxy.WSServerHandshakeError(
-                    None,
+                    RequestInfo(URL(target), "GET", CIMultiDictProxy(CIMultiDict())),
                     (),
                     status=403,
                     message="Invalid response status",
@@ -2540,9 +2560,15 @@ class HybridMediaProxyTests(unittest.TestCase):
                 captured["session"] = self
 
             async def ws_connect(self, _target: str, **_kwargs):
-                trace = captured["trace_configs"][0]
+                traces = captured["trace_configs"]
+                assert isinstance(traces, list)
+                trace = traces[0]
+                assert isinstance(trace, TraceConfig)
                 callback = trace.on_request_redirect[0]
-                await callback(None, None, None)
+                params = TraceRequestRedirectParams(
+                    "GET", URL(_target), CIMultiDict(), cast(ClientResponse, SimpleNamespace()),
+                )
+                await callback(cast(ClientSession, self), SimpleNamespace(), params)
                 raise AssertionError("redirect callback must abort the second hop")
 
             async def close(self) -> None:
@@ -2571,7 +2597,9 @@ class HybridMediaProxyTests(unittest.TestCase):
                     pass
 
         self.assertEqual(closed.exception.code, 1011)
-        self.assertTrue(captured["session"].closed)
+        session = captured["session"]
+        assert isinstance(session, RedirectingWebSocketSession)
+        self.assertTrue(session.closed)
         self.assertEqual(
             throttled.call_args.args[2],
             "media-proxy-ws-redirect:7",
@@ -2658,10 +2686,13 @@ class HybridMediaProxyTests(unittest.TestCase):
                 RuntimeError,
                 "downstream disconnected",
             ):
+                assert isinstance(websocket_route, WebSocketRoute)
                 asyncio.run(websocket_route.endpoint(downstream, "socket"))
 
         self.assertTrue(upstream.closed)
-        self.assertTrue(captured_session["value"].closed)
+        session = captured_session["value"]
+        assert isinstance(session, ConnectedSession)
+        self.assertTrue(session.closed)
         self.assertTrue(downstream.closed)
 
     def test_websocket_forwards_downstream_close_code_and_reason_upstream(self):
@@ -2747,6 +2778,7 @@ class HybridMediaProxyTests(unittest.TestCase):
         ), patch(
             "app.modules.media_proxy.ClientSession", Session,
         ):
+            assert isinstance(websocket_route, WebSocketRoute)
             asyncio.run(websocket_route.endpoint(downstream, "socket"))
 
         self.assertEqual(upstream.close_calls, [{
@@ -2847,6 +2879,7 @@ class HybridMediaProxyTests(unittest.TestCase):
         ), patch(
             "app.modules.media_proxy.ClientSession", Session,
         ):
+            assert isinstance(websocket_route, WebSocketRoute)
             asyncio.run(websocket_route.endpoint(downstream, "socket"))
 
         self.assertEqual(downstream.close_calls[-1], {
@@ -2910,6 +2943,7 @@ class HybridMediaProxyTests(unittest.TestCase):
             patch("app.modules.media_proxy.database.get_media_proxy_binding", return_value=None),
             patch("app.modules.media_proxy.httpx.AsyncClient", _FakeAsyncClient),
         ):
+            assert isinstance(route, Route)
             response = asyncio.run(route.endpoint(request, path="Items/local-item/PlaybackInfo"))
 
         self.assertNotIn("content-encoding", response.headers)
@@ -3018,6 +3052,7 @@ class HybridMediaProxyTests(unittest.TestCase):
             patch("app.modules.media_proxy.httpx.AsyncClient", _FakeAsyncClient),
             patch("app.modules.media_proxy._playback_info_response_limit", return_value=4),
         ):
+            assert isinstance(route, Route)
             response = asyncio.run(route.endpoint(request, path="Items/local-item/PlaybackInfo"))
 
         self.assertEqual(response.status_code, 502)
@@ -3031,7 +3066,7 @@ class HybridMediaProxyTests(unittest.TestCase):
             headers={"content-length": "5"},
         )
         with self.assertRaises(media_proxy.ProxyUpstreamBodyTooLarge):
-            asyncio.run(media_proxy._read_bounded_upstream_body(upstream, 4))
+            asyncio.run(media_proxy._read_bounded_upstream_body(cast(httpx.Response, upstream), 4))
 
     def test_guangya_redirect_disables_caching_and_referrers(self):
         self._grant_file("client-token", "header-item", "header-source", "private-file")
@@ -4696,7 +4731,7 @@ class HybridMediaProxyTests(unittest.TestCase):
         class SlowAsyncClient(_FakeAsyncClient):
             requests: list[httpx.Request] = []
             init_kwargs: list[dict] = []
-            instances: list["SlowAsyncClient"] = []
+            instances: list["_FakeAsyncClient"] = []
 
             async def send(
                 self, request: httpx.Request, stream: bool = False
@@ -4759,7 +4794,7 @@ class HybridMediaProxyTests(unittest.TestCase):
         class QueuedProbeAsyncClient(_FakeAsyncClient):
             requests: list[httpx.Request] = []
             init_kwargs: list[dict] = []
-            instances: list["QueuedProbeAsyncClient"] = []
+            instances: list["_FakeAsyncClient"] = []
 
             async def send(
                 self, request: httpx.Request, stream: bool = False
@@ -7072,6 +7107,7 @@ class HybridMediaProxyTests(unittest.TestCase):
                 )
                 # 同一 ASGI app/事件循环中模拟请求来自另一台终端，避免
                 # TestClient 重启 lifespan 干扰播放记录器。
+                assert isinstance(client._transport, _TestClientTransport)
                 client._transport.client = ("10.0.0.11", 50001)
                 stolen_capability = client.get(
                     direct_url,

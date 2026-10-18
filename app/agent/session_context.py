@@ -1,14 +1,14 @@
 """Agent 短期会话上下文的安全 SQLite 持久化。"""
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass
 import hashlib
 import hmac
 import json
 import logging
 import math
 import time
+from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from app import database as db
@@ -168,9 +168,9 @@ class SQLiteAgentSessionContextRepository:
     ) -> None:
         self._secret_provider = secret_provider
         self._clock = clock
-        self.max_payload_bytes = max(1024, int(max_payload_bytes))
-        self.max_rows = max(128, int(max_rows))
-        self.max_epochs = max(128, int(max_epochs))
+        self.max_payload_bytes = max(1024, max_payload_bytes)
+        self.max_rows = max(128, max_rows)
+        self.max_epochs = max(128, max_epochs)
 
     def replace_latest(
         self,
@@ -352,7 +352,8 @@ class SQLiteAgentSessionContextRepository:
             self._touch_generation(
                 conn, owner_digest=owner_digest, context_type=normalized_type, now=now,
             )
-            new_revision = int(cursor.lastrowid)
+            new_revision = cursor.lastrowid
+            assert new_revision is not None
         return PersistedAgentContext(
             payload=deepcopy(payload), expires_at=expiry,
             revision=new_revision, generation=generation,
@@ -422,7 +423,7 @@ class SQLiteAgentSessionContextRepository:
                 "DELETE FROM agent_session_context WHERE owner_digest=?",
                 (owner_digest,),
             )
-        return max(0, int(deleted.rowcount or 0))
+        return max(0, (deleted.rowcount or 0))
 
     def invalidate_context(self, *, owner: str, context_type: str) -> int:
         """推进单个上下文世代并仅删除该类型，阻止迟到写入复活。"""
@@ -443,7 +444,7 @@ class SQLiteAgentSessionContextRepository:
                 "WHERE owner_digest=? AND context_type=?",
                 (owner_digest, normalized_type),
             )
-        return max(0, int(deleted.rowcount or 0))
+        return max(0, (deleted.rowcount or 0))
 
     def mutate_latest(
         self,
@@ -513,7 +514,7 @@ class SQLiteAgentSessionContextRepository:
             payload=payload,
             expires_at=expiry,
         )
-        bounded_items = max(1, min(int(max_items), 32))
+        bounded_items = max(1, min(max_items, 32))
         now = float(self._clock())
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -557,7 +558,7 @@ class SQLiteAgentSessionContextRepository:
             payload=payload,
             expires_at=expiry,
         )
-        bounded_items = max(1, min(int(max_items), 16))
+        bounded_items = max(1, min(max_items, 16))
         now = float(self._clock())
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -614,7 +615,7 @@ class SQLiteAgentSessionContextRepository:
     ) -> tuple[PersistedAgentContext, ...]:
         owner_digest = self._owner_digest(owner)
         current = self._finite_number(now, "now")
-        bounded_limit = max(1, min(int(limit), 32))
+        bounded_limit = max(1, min(limit, 32))
         with db.get_conn() as conn:
             self._prune(conn, now=current)
             rows = conn.execute(
@@ -646,7 +647,7 @@ class SQLiteAgentSessionContextRepository:
         normalized_type = self._context_type(context_type, allow_download=False)
         owner_digest = self._owner_digest(owner)
         current = self._finite_number(now, "now")
-        bounded_limit = max(1, min(int(limit), 16))
+        bounded_limit = max(1, min(limit, 16))
         with db.get_conn() as conn:
             self._prune(conn, now=current)
             rows = conn.execute(
@@ -677,7 +678,7 @@ class SQLiteAgentSessionContextRepository:
                 "WHERE owner_digest=? AND context_type=?",
                 (owner_digest, normalized_type),
             )
-        return max(0, int(cursor.rowcount or 0))
+        return max(0, (cursor.rowcount or 0))
 
     def delete_downloads(self, *, owner: str) -> int:
         """删除指定会话的全部最近下载提交上下文。"""
@@ -688,7 +689,7 @@ class SQLiteAgentSessionContextRepository:
                 "WHERE owner_digest=? AND context_type='download_submission'",
                 (owner_digest,),
             )
-        return max(0, int(cursor.rowcount or 0))
+        return max(0, (cursor.rowcount or 0))
 
     def delete_owner(self, *, owner: str) -> int:
         """删除指定会话的全部持久化上下文。"""
@@ -698,17 +699,17 @@ class SQLiteAgentSessionContextRepository:
                 "DELETE FROM agent_session_context WHERE owner_digest=?",
                 (owner_digest,),
             )
-        return max(0, int(cursor.rowcount or 0))
+        return max(0, (cursor.rowcount or 0))
 
     def owner_digest_for_tests(self, owner: str) -> str:
         """仅供回归测试核验不落库原始 owner。"""
         return self._owner_digest(owner)
 
     def _owner_digest(self, owner: str) -> str:
-        normalized = str(owner or "").strip()
+        normalized = (owner or "").strip()
         if not normalized or len(normalized) > 512:
             raise ValueError("Agent 会话 owner 无效")
-        secret = str(self._secret_provider() or "")
+        secret = (self._secret_provider() or "")
         if not secret:
             raise ValueError("Agent 会话指纹密钥不可用")
         return hmac.new(
@@ -719,7 +720,7 @@ class SQLiteAgentSessionContextRepository:
 
     @staticmethod
     def _context_type(value: str, *, allow_download: bool) -> str:
-        normalized = str(value or "").strip()
+        normalized = (value or "").strip()
         allowed = _CONTEXT_TYPES if allow_download else _CONTEXT_TYPES - {"download_submission"}
         if normalized not in allowed:
             raise ValueError("Agent 会话上下文类型无效")
@@ -773,7 +774,7 @@ class SQLiteAgentSessionContextRepository:
                 int(row["context_generation"] or 0)
                 if "context_generation" in row_keys else 0
             )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, TypeError, ValueError):
             return None
         if (
             not isinstance(envelope, dict)
@@ -805,7 +806,7 @@ class SQLiteAgentSessionContextRepository:
         payload: dict[str, Any],
         expires_at: float,
     ) -> str:
-        secret = str(self._secret_provider() or "")
+        secret = (self._secret_provider() or "")
         if not secret:
             raise ValueError("Agent 会话完整性密钥不可用")
         canonical_payload = json.dumps(
@@ -842,13 +843,13 @@ class SQLiteAgentSessionContextRepository:
     def _positive_int(value: int, label: str) -> int:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"Agent 会话上下文 {label} 无效")
-        return int(value)
+        return value
 
     @staticmethod
     def _nonnegative_int(value: int, label: str) -> int:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"Agent 会话上下文 {label} 无效")
-        return int(value)
+        return value
 
     @staticmethod
     def _advance_generation(
@@ -907,7 +908,7 @@ class SQLiteAgentSessionContextRepository:
         total = int(conn.execute(
             "SELECT COUNT(*) FROM agent_session_context"
         ).fetchone()[0] or 0)
-        if total - max(0, int(reclaimed_rows)) + 1 > self.max_rows:
+        if total - max(0, reclaimed_rows) + 1 > self.max_rows:
             raise RuntimeError("Agent 会话上下文容量已满")
 
     def _require_epoch_capacity(

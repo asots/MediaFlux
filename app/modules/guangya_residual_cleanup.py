@@ -12,7 +12,7 @@ import time
 import unicodedata
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Generator, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,11 +21,11 @@ from typing import Any
 
 from app.clients.guangya import GuangYaClient, GuangYaFile, verify_guangya_write
 from app.config import PATHS
+from app.modules.guangya_journal import append_guangya_journal
 from app.modules.guangya_rename import GuangYaRenamePlanError, GuangYaRenamePlanStale
 from app.modules.organize import DEFAULT_ORGANIZE_VIDEO_EXTS
-from app.modules.guangya_journal import append_guangya_journal
-from app.modules.web_secret import get_web_secret
 from app.modules.process_lock import CrossProcessLock
+from app.modules.web_secret import get_web_secret
 from app.private_files import protect_private_file
 from app.repositories.organize_operation_jobs import organize_operation_owner_digest
 
@@ -106,7 +106,7 @@ class _TreeSummary:
 
     @property
     def qualifies(self) -> bool:
-        return bool(
+        return (
             self.file_count > 0
             and not self.has_video
             and not self.has_unsafe
@@ -125,7 +125,7 @@ def _plan_directory() -> Path:
 
 
 @contextmanager
-def _plan_state_lock() -> Iterator[None]:
+def _plan_state_lock() -> Generator[None, None, None]:
     """确认、GC、预览淘汰与执行凭据更新共用目录内锁，不持有网络/SQLite锁。"""
     lock = CrossProcessLock("guangya-cleanup-state", directory=_plan_directory())
     if not lock.acquire():
@@ -145,13 +145,13 @@ def _ensure_private_directory(path: Path) -> None:
 
 
 def _plan_path(plan_id: str) -> Path:
-    if not _SAFE_PLAN_ID.fullmatch(str(plan_id or "")):
+    if not _SAFE_PLAN_ID.fullmatch(plan_id or ""):
         raise GuangYaCleanupPlanError("残留清理计划编号无效")
     return _plan_directory() / f"{plan_id}.json"
 
 
 def _journal_path(plan_id: str) -> Path:
-    if not _SAFE_PLAN_ID.fullmatch(str(plan_id or "")):
+    if not _SAFE_PLAN_ID.fullmatch(plan_id or ""):
         raise GuangYaCleanupPlanError("残留清理计划编号无效")
     return _plan_directory() / f"{plan_id}.jsonl"
 
@@ -166,7 +166,7 @@ def _canonical(payload: dict[str, Any]) -> bytes:
 
 
 def _auth(payload: dict[str, Any]) -> str:
-    secret = str(get_web_secret() or "").encode("utf-8")
+    secret = (get_web_secret() or "").encode("utf-8")
     if not secret:
         raise GuangYaCleanupPlanError("残留清理计划签名密钥不可用")
     return hmac.new(
@@ -236,7 +236,7 @@ def _append_journal(plan_id: str, event: dict[str, Any]) -> None:
 
 
 def _owner_digest(owner: str) -> str:
-    value = str(owner or "").strip()
+    value = (owner or "").strip()
     if not value:
         raise GuangYaCleanupPlanError("残留清理计划缺少会话身份")
     return organize_operation_owner_digest(value)
@@ -281,8 +281,8 @@ def _maintain_cleanup_plans_unlocked() -> dict[str, int]:
                 continue
             plan_ids.add(path.stem)
             journal = _journal_path(path.stem)
-            size = int(path.stat().st_size) + (
-                int(journal.stat().st_size)
+            size = path.stat().st_size + (
+                journal.stat().st_size
                 if journal.is_file() and not journal.is_symlink()
                 else 0
             )
@@ -363,8 +363,8 @@ def _store_cleanup_preview(payload: dict[str, Any], *, replacing: bool = False) 
         _atomic_write(payload)
         capacity = _maintain_cleanup_plans_unlocked()
         if (
-            int(capacity.get("active") or 0) > _MAX_ACTIVE_PLANS + int(replacing)
-            or int(capacity.get("bytes") or 0) > _MAX_STORAGE_BYTES + (_MAX_PLAN_BYTES if replacing else 0)
+            (capacity.get("active") or 0) > _MAX_ACTIVE_PLANS + int(replacing)
+            or (capacity.get("bytes") or 0) > _MAX_STORAGE_BYTES + (_MAX_PLAN_BYTES if replacing else 0)
         ):
             _discard_cleanup_plan_unlocked(str(payload["plan_id"]))
             raise GuangYaCleanupPlanError("私有残留清理计划空间已满，请稍后重试")
@@ -383,7 +383,7 @@ def load_cleanup_plan(
     ):
         raise GuangYaCleanupPlanError("残留清理计划不属于当前会话")
     if expected_fingerprint and not hmac.compare_digest(
-        str(payload.get("fingerprint") or ""), str(expected_fingerprint)
+        str(payload.get("fingerprint") or ""), expected_fingerprint
     ):
         raise GuangYaCleanupPlanStale("残留清理计划已变化，请重新预览")
     current = time.time()
@@ -435,7 +435,7 @@ def _update_execution(plan_id: str, status: str, execution: dict[str, Any]) -> N
         _atomic_write(payload)
 
 def _extension(item: GuangYaFile) -> str:
-    declared = str(item.extension or "").strip().lower().lstrip(".")
+    declared = (item.extension or "").strip().lower().lstrip(".")
     if declared:
         return declared
     match = re.search(r"[.。．]([A-Za-z0-9]{1,10})$", item.name)
@@ -452,7 +452,7 @@ def _safe_public_name(value: object, fallback: str) -> str:
 def _configured_video_exts() -> set[str]:
     from app import config
 
-    raw = str(config.get("GY_ORGANIZE_VIDEO_EXTS", "") or "")
+    raw = (config.get("GY_ORGANIZE_VIDEO_EXTS", "") or "")
     if not raw.strip():
         return set(DEFAULT_ORGANIZE_VIDEO_EXTS)
     values = {
@@ -474,7 +474,7 @@ def _supports_guarded_empty_delete(client: Any) -> bool:
 
 def _is_cleanup_review_candidate(item: GuangYaFile) -> bool:
     """只判断文件是否可以交给 Agent 按文件名复核，不直接判定为垃圾。"""
-    name = str(item.name or "")
+    name = (item.name or "")
     lowered = name.casefold()
     if lowered in _SYSTEM_JUNK:
         return True
@@ -494,13 +494,13 @@ def _is_cleanup_review_candidate(item: GuangYaFile) -> bool:
 
 def _snapshot(item: GuangYaFile) -> dict[str, Any]:
     return {
-        "file_id": str(item.file_id),
-        "parent_id": str(item.parent_id),
-        "name": str(item.name),
-        "is_dir": bool(item.is_dir),
-        "size": max(0, int(item.size or 0)),
-        "etag": str(item.etag or ""),
-        "updated_at": max(0, int(item.updated_at or 0)),
+        "file_id": item.file_id,
+        "parent_id": item.parent_id,
+        "name": item.name,
+        "is_dir": item.is_dir,
+        "size": max(0, (item.size or 0)),
+        "etag": (item.etag or ""),
+        "updated_at": max(0, (item.updated_at or 0)),
     }
 
 
@@ -545,35 +545,35 @@ def build_cleanup_plan(
 ) -> dict[str, Any]:
     normalized_sources: list[dict[str, str]] = []
     for index, source in enumerate(sources, start=1):
-        source_id = str(source.get("id") or "").strip()
+        source_id = (source.get("id") or "").strip()
         if not source_id or source_id == "0":
             raise GuangYaCleanupPlanError("整理来源 ID 无效")
         if all(item["id"] != source_id for item in normalized_sources):
             normalized_sources.append(
                 {
                     "id": source_id,
-                    "name": str(source.get("name") or f"来源{index}"),
+                    "name": (source.get("name") or f"来源{index}"),
                 }
             )
     sources = normalized_sources
     if not sources:
         raise GuangYaCleanupPlanError("未配置光鸭整理来源")
-    safe_max = max(1, min(int(max_candidates), _MAX_CANDIDATES))
+    safe_max = max(1, min(max_candidates, _MAX_CANDIDATES))
     video_exts = _configured_video_exts()
     nodes: dict[str, _Node] = {}
     source_children: dict[int, list[str]] = {}
     scanned_items = 0
     scanned_dirs = 0
     protected_source_ids = {
-        str(source.get("id") or "").strip()
+        (source.get("id") or "").strip()
         for source in sources
-        if str(source.get("id") or "").strip()
+        if (source.get("id") or "").strip()
     }
     protected_boundaries = 0
 
     for source_index, source in enumerate(sources, start=1):
-        source_id = str(source.get("id") or "").strip()
-        source_name = str(source.get("name") or f"来源{source_index}")
+        source_id = (source.get("id") or "").strip()
+        source_name = (source.get("name") or f"来源{source_index}")
         queue = deque([(source_id, "/")])
         source_children[source_index] = []
         while queue:
@@ -587,7 +587,7 @@ def build_cleanup_plan(
                     if parent_id in nodes:
                         nodes[parent_id].files.append(item)
                     continue
-                if str(item.file_id) in protected_source_ids:
+                if item.file_id in protected_source_ids:
                     protected_boundaries += 1
                     continue
                 scanned_dirs += 1
@@ -595,12 +595,12 @@ def build_cleanup_plan(
                     raise GuangYaCleanupPlanError("整理来源目录数量超过安全上限")
                 path = parent_path.rstrip("/") + "/" + item.name
                 node = _Node(item, source_index, source_name, parent_path, path)
-                nodes[str(item.file_id)] = node
+                nodes[item.file_id] = node
                 if parent_id in nodes:
-                    nodes[parent_id].children.append(str(item.file_id))
+                    nodes[parent_id].children.append(item.file_id)
                 else:
-                    source_children[source_index].append(str(item.file_id))
-                queue.append((str(item.file_id), path))
+                    source_children[source_index].append(item.file_id)
+                queue.append((item.file_id, path))
 
     summaries: dict[str, _TreeSummary] = {}
     for node_id in reversed(list(nodes)):
@@ -608,7 +608,7 @@ def build_cleanup_plan(
         summary = _TreeSummary()
         for item in node.files:
             summary.file_count += 1
-            summary.total_size += max(0, int(item.size or 0))
+            summary.total_size += max(0, (item.size or 0))
             if _extension(item) in video_exts:
                 summary.has_video = True
             elif not _is_cleanup_review_candidate(item):
@@ -639,7 +639,7 @@ def build_cleanup_plan(
             if not supports_empty_delete:
                 unsupported_empty_dirs += 1
                 preserved_dirs += 1
-            elif str(node.item.etag or "") or int(node.item.updated_at or 0) > 0:
+            elif (node.item.etag or "") or (node.item.updated_at or 0) > 0:
                 empty_ids.append(node_id)
             else:
                 preserved_dirs += 1
@@ -686,14 +686,14 @@ def build_cleanup_plan(
         }
         for node_id in empty_ids
     ]
-    empties.sort(key=lambda row: (-int(row["depth"]), row["root"]["name"].casefold()))
+    empties.sort(key=lambda row: (-row["depth"], row["root"]["name"].casefold()))
 
     plan_id = uuid.uuid4().hex
     current = time.time()
     fingerprint_payload = {
         "owner_digest": _owner_digest(owner),
-        "credential_generation": int(client.credential_generation),
-        "sources": [str(item.get("id") or "") for item in sources],
+        "credential_generation": client.credential_generation,
+        "sources": [(item.get("id") or "") for item in sources],
         "candidates": candidates,
         "candidate_decisions": {},
         "residuals": [],
@@ -904,24 +904,25 @@ def revise_cleanup_plan(
 
 
 def _matches(item: GuangYaFile | None, snapshot: dict[str, Any]) -> bool:
-    return bool(
+    return (
         item is not None
-        and str(item.file_id) == str(snapshot.get("file_id") or "")
-        and str(item.name) == str(snapshot.get("name") or "")
-        and bool(item.is_dir) == bool(snapshot.get("is_dir"))
-        and max(0, int(item.size or 0)) == max(0, int(snapshot.get("size") or 0))
-        and str(item.etag or "") == str(snapshot.get("etag") or "")
+        and item.file_id == str(snapshot.get("file_id") or "")
+        and item.name == str(snapshot.get("name") or "")
+        and item.is_dir == bool(snapshot.get("is_dir"))
+        and max(0, (item.size or 0)) == max(0, int(snapshot.get("size") or 0))
+        and (item.etag or "") == str(snapshot.get("etag") or "")
     )
 
 
 def _rescan_tree(client: GuangYaClient, root: dict[str, Any]) -> list[dict[str, Any]]:
     root_id = str(root.get("file_id") or "")
     parent_id = str(root.get("parent_id") or "0")
-    current = {str(item.file_id): item for item in client.list_dir(parent_id)}.get(
+    current = {item.file_id: item for item in client.list_dir(parent_id)}.get(
         root_id
     )
     if not _matches(current, root):
         raise GuangYaCleanupPlanStale("残留目录状态已变化，请重新预览")
+    assert current is not None
     entries = [_snapshot(current)]
     queue = deque([root_id])
     while queue:
@@ -929,7 +930,7 @@ def _rescan_tree(client: GuangYaClient, root: dict[str, Any]) -> list[dict[str, 
         for item in client.list_dir(directory_id):
             entries.append(_snapshot(item))
             if item.is_dir:
-                queue.append(str(item.file_id))
+                queue.append(item.file_id)
             if len(entries) > _MAX_RESIDUAL_FILES + _MAX_RESIDUAL_DIRS + 1:
                 raise GuangYaCleanupPlanStale("残留目录内容已变化，请重新预览")
     return entries
@@ -942,14 +943,14 @@ def _find_unique_dir(client: GuangYaClient, parent_id: str, name: str) -> str:
     if len(matches) > 1:
         raise GuangYaCleanupPlanStale("隔离目录名称不唯一，已停止清理")
     if matches:
-        return str(matches[0].file_id)
-    created = str(client.create_dir(name, parent_id) or "")
+        return matches[0].file_id
+    created = (client.create_dir(name, parent_id) or "")
     matches = [
         item for item in client.list_dir(parent_id) if item.is_dir and item.name == name
     ]
-    if len(matches) != 1 or (created and str(matches[0].file_id) != created):
+    if len(matches) != 1 or (created and matches[0].file_id != created):
         raise GuangYaCleanupPlanError("隔离目录创建后校验失败")
-    return str(matches[0].file_id)
+    return matches[0].file_id
 
 
 def _validated_selected_residuals(plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1024,7 +1025,7 @@ def execute_cleanup_plan(
     try:
         if (
             not client.logged_in
-            or int(client.credential_generation) != expected_generation
+            or client.credential_generation != expected_generation
         ):
             raise GuangYaCleanupPlanStale("光鸭登录凭据已变化，请重新预览")
         residuals = _validated_selected_residuals(plan)
@@ -1043,7 +1044,7 @@ def execute_cleanup_plan(
                 cancel_check()
             root = dict(item.get("root") or {})
             parent = {
-                str(row.file_id): row
+                row.file_id: row
                 for row in client.list_dir(str(root.get("parent_id") or "0"))
             }
             current = parent.get(str(root.get("file_id") or ""))
@@ -1117,7 +1118,7 @@ def execute_cleanup_plan(
             try:
                 applied = verify_guangya_write(
                     lambda: _matches(next((row for row in client.list_dir(container_id)
-                                           if str(row.file_id) == str(root.get("file_id") or "")), None), root),
+                                           if row.file_id == str(root.get("file_id") or "")), None), root),
                     cancel_check=cancel_check,
                 )
             except Exception:
@@ -1150,11 +1151,11 @@ def execute_cleanup_plan(
             root = dict(item.get("root") or {})
             try:
                 parent = {
-                    str(row.file_id): row
+                    row.file_id: row
                     for row in client.list_dir(str(root.get("parent_id") or "0"))
                 }
                 current = parent.get(str(root.get("file_id") or ""))
-                unchanged = bool(
+                unchanged = (
                     _matches(current, root)
                     and not client.list_dir(str(root.get("file_id") or ""))
                 )
@@ -1186,7 +1187,7 @@ def execute_cleanup_plan(
             verification_unavailable = False
             try:
                 applied = verify_guangya_write(
-                    lambda: all(str(row.file_id) != str(root.get("file_id") or "")
+                    lambda: all(row.file_id != str(root.get("file_id") or "")
                                 for row in client.list_dir(str(root.get("parent_id") or "0"))),
                     cancel_check=cancel_check,
                 )

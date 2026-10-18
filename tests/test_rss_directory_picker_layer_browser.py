@@ -31,6 +31,7 @@ DIRECTORIES = {
 class RssDirectoryPickerLayerBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = _chromium_executable(cls.playwright)
         if executable is None:

@@ -6,9 +6,9 @@ from fastapi.responses import JSONResponse
 
 from app import config
 from app.clients.guangya import (
-    GuangYaClient,
     TOKEN_EXPIRY_MAX,
     TOKEN_EXPIRY_MIN,
+    GuangYaClient,
     close_guangya_client,
 )
 from app.logger import get_logger
@@ -286,18 +286,18 @@ def delete_item(request: Request, data: dict | None = Body(default=None)):
                 raise DirectoryScrapeConflictError("项目名称已变化，请刷新后重新确认")
             if expected_parent_id and item.parent_id != expected_parent_id:
                 raise DirectoryScrapeConflictError("项目所在目录已变化，请刷新后重新确认")
-            if expected_is_dir is not None and bool(item.is_dir) is not expected_is_dir:
+            if expected_is_dir is not None and item.is_dir is not expected_is_dir:
                 raise DirectoryScrapeConflictError("项目类型已变化，请刷新后重新确认")
-            if expected_etag and str(item.etag or "") != expected_etag:
+            if expected_etag and (item.etag or "") != expected_etag:
                 raise DirectoryScrapeConflictError("项目版本已变化，请刷新后重新确认")
-            if expected_updated_at and int(item.updated_at or 0) != expected_updated_at:
+            if expected_updated_at and (item.updated_at or 0) != expected_updated_at:
                 raise DirectoryScrapeConflictError("项目更新时间已变化，请刷新后重新确认")
             candidate = DeleteCandidate(
                 file_id=file_id,
                 name=item.name,
                 parent_id=item.parent_id,
-                size=max(0, int(item.size or 0)),
-                gcid=str(item.etag or ""),
+                size=max(0, (item.size or 0)),
+                gcid=(item.etag or ""),
             )
             try:
                 assert_guangya_download_delete_allowed(client, item)
@@ -316,7 +316,7 @@ def delete_item(request: Request, data: dict | None = Body(default=None)):
             return {
                 "ok": True,
                 "file_id": file_id,
-                "is_dir": bool(item.is_dir),
+                "is_dir": item.is_dir,
                 "audit_id": int(audit.get("audit_id") or 0),
                 "stats": {"deleted": 1},
             }
@@ -398,14 +398,14 @@ def organize_preview(request: Request, data: dict | None = Body(default=None)):
         aggregate: dict[str, int] = {}
         remaining = max_files
         protected_source_ids = {
-            str(source.get("id") or "").strip()
+            (source.get("id") or "").strip()
             for source in sources
-            if str(source.get("id") or "").strip()
+            if (source.get("id") or "").strip()
         }
         for source in sources:
             if max_files and remaining <= 0:
                 break
-            source_rules = rules.for_source(str(source.get("id") or ""))
+            source_rules = rules.for_source(source.get("id") or "")
             organizer = Organizer()
             try:
                 organizer._validate_target_outside_source(

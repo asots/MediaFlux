@@ -1,5 +1,6 @@
 """受限季集 runner 的纯离线协议测试；仅fake与注入client，不调用真实provider。"""
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 import copy
@@ -8,6 +9,7 @@ import json
 import threading
 import time
 import unittest
+import unittest.mock
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -199,6 +201,8 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_proposal_in_one_batch_invalidates_whole_session(self):
         other = proposal_call()
+        assert other.tool_call is not None
+        assert other.tool_call.arguments is not None
         other = call("propose", dict(other.tool_call.arguments), "second-proposal")
         model = ScriptedModel(rounds(*evidence_calls()) + [[proposal_call(), other]])
         result = await self.run_case(model)
@@ -289,7 +293,7 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "verified")
         args = session.call_args.kwargs
         self.assertIsNone(args["journal"])
-        self.assertIsInstance(args["state_store"], runner.InMemorySessionStateStore)
+        assert isinstance(args["state_store"], runner.InMemorySessionStateStore)
         self.assertIs(args["pipeline"].state_store, args["state_store"])
         limits = args["limits"]
         self.assertEqual((limits.max_model_rounds, limits.max_tool_calls, limits.max_output_tokens), (8, 14, 2000))
@@ -306,7 +310,10 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.closed_streams, len(model.requests))
 
     async def test_duplicate_proposal_in_later_round_fails(self):
-        duplicate = call("propose", dict(proposal_call().tool_call.arguments), "duplicate")
+        proposal_call_result = proposal_call().tool_call
+        assert proposal_call_result is not None
+        assert proposal_call_result.arguments is not None
+        duplicate = call("propose", dict(proposal_call_result.arguments), "duplicate")
         result = await self.run_case(success_model(suffix=rounds(duplicate)))
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["reason_code"], "decision_already_proposed")
@@ -524,7 +531,7 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
                     {"candidate_index": 1}):
             with self.subTest(bad=bad):
                 reader = FakeReader()
-                reader.inspect_candidate = lambda _index, data=bad: data
+                self.enterContext(patch.object(reader, "inspect_candidate", lambda _index, data=bad: data))
                 result = await self.run_case(success_model(), reader=reader)
                 self.assertEqual(result["status"], "failed")
                 self.assertFalse(any(c[0] == "validate" for c in reader.calls))
@@ -534,7 +541,7 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
                          {"candidate_index": 0, "group_id": "group-1"}, None):
             with self.subTest(response=response):
                 reader = FakeReader()
-                reader.read_group = lambda *args, value=response: value
+                self.enterContext(patch.object(reader, "read_group", lambda *args, value=response: value))
                 result = await self.run_case(success_model(), reader=reader)
                 self.assertEqual(result["status"], "failed")
                 self.assertFalse(any(c[0] == "validate" for c in reader.calls))
@@ -761,7 +768,7 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.reader.close_count, 1)
 
     async def test_new_safe_identity_context_is_projected_but_not_case_key(self):
-        value = payload()
+        value: dict[str, Any] = payload()
         value["files"][0]["source_title"] = "Test"
         value["context_titles"] = ["Test", "Release"]
         model = success_model()

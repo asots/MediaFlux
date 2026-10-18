@@ -62,6 +62,7 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
         self.assertEqual(self.editor.call_args.kwargs["message_id"], 77)
         self.assertEqual(self.editor.call_args.args[0].actions, ())
         row = repository.get_notification(first.event_key)
+        assert row is not None
         self.assertEqual(
             (row["revision"], row["delivered_revision"], row["message_id"]), (2, 2, 77)
         )
@@ -73,7 +74,9 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
         first = self.publish(self.initial)
         result = self.publish(self.initial, message_id=77)
         self.assertTrue(result.delivered)
-        self.assertEqual(repository.get_notification(first.event_key)["revision"], 1)
+        get_notification_result = repository.get_notification(first.event_key)
+        assert get_notification_result is not None
+        self.assertEqual(get_notification_result["revision"], 1)
         self.sender.assert_called_once()
         self.editor.assert_called_once()
 
@@ -86,14 +89,18 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
         self.assertFalse(result.queued)
         self.sender.assert_called_once()
         self.editor.assert_not_called()
-        self.assertFalse(repository.get_notification(first.event_key)["message_id"])
+        get_notification_result_2 = repository.get_notification(first.event_key)
+        assert get_notification_result_2 is not None
+        self.assertFalse(get_notification_result_2["message_id"])
 
     def test_later_preferred_id_cannot_replace_the_already_bound_thread(self):
         first = self.publish(self.initial)
         self.publish(self.terminal, message_id=77)
         result = self.publish(NotificationEvent("后处理完成"), message_id=99)
         self.assertTrue(result.delivered)
-        self.assertEqual(repository.get_notification(first.event_key)["message_id"], 77)
+        get_notification_result_3 = repository.get_notification(first.event_key)
+        assert get_notification_result_3 is not None
+        self.assertEqual(get_notification_result_3["message_id"], 77)
         self.assertEqual(self.editor.call_args.kwargs["message_id"], 77)
         self.assertEqual(self.editor.call_count, 2)
         self.sender.assert_called_once()
@@ -117,6 +124,7 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
         )
         self.assertTrue(center.drain_telegram_notifications(event_key=first.event_key))
         row = repository.get_notification(first.event_key)
+        assert row is not None
         self.assertEqual(
             (row["status"], row["revision"], row["delivered_revision"]), ("sent", 2, 2)
         )
@@ -132,17 +140,20 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
         ]
         result = self.publish(self.terminal)
         row = repository.get_notification(result.event_key)
+        assert row is not None
         self.assertEqual((row["status"], row["attempts"]), ("retry_wait", 1))
         self.assertEqual((row["message_id"], row["delivered_revision"]), (77, 1))
         self.assertFalse(center.drain_telegram_notifications(event_key=result.event_key))
         self.assertEqual(self.editor.call_count, 1)
         with db.get_conn() as conn:
+            assert row is not None
             conn.execute(
                 "UPDATE telegram_notification_outbox SET next_attempt_at=? WHERE id=?",
                 (db.now(), row["id"]),
             )
         self.assertTrue(center.drain_telegram_notifications(event_key=result.event_key))
         row = repository.get_notification(result.event_key)
+        assert row is not None
         self.assertEqual((row["status"], row["revision"], row["delivered_revision"]), ("sent", 2, 2))
         self.assertEqual(self.editor.call_args.kwargs["message_id"], 77)
         self.assertEqual(self.editor.call_args.args[0].actions, ())
@@ -155,15 +166,21 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
         result = self.publish(self.terminal, message_id=77)
         for attempt in range(1, repository._MAX_ATTEMPTS + 1):
             row = repository.get_notification(result.event_key)
+            assert row is not None
             self.assertEqual(row["attempts"], attempt)
             if attempt == repository._MAX_ATTEMPTS:
+                assert row is not None
                 self.assertEqual(row["status"], "failed")
                 break
+            assert row is not None
             self.assertEqual(row["status"], "retry_wait")
             db.init_db()
             repository.recover_notifications()
-            self.assertEqual(repository.get_notification(result.event_key)["attempts"], attempt)
+            get_notification_result_4 = repository.get_notification(result.event_key)
+            assert get_notification_result_4 is not None
+            self.assertEqual(get_notification_result_4["attempts"], attempt)
             with db.get_conn() as conn:
+                assert row is not None
                 conn.execute(
                     "UPDATE telegram_notification_outbox SET next_attempt_at=? WHERE id=?",
                     (db.now(), row["id"]),
@@ -189,8 +206,11 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
                     )
                 recovery()
                 row = repository.get_notification(known.event_key)
+                assert row is not None
                 self.assertEqual((row["status"], row["attempts"]), ("retry_wait", 2))
-                self.assertEqual(repository.get_notification(unknown.event_key)["status"], "outcome_unknown")
+                get_notification_result_5 = repository.get_notification(unknown.event_key)
+                assert get_notification_result_5 is not None
+                self.assertEqual(get_notification_result_5["status"], "outcome_unknown")
                 self.assertTrue(center.drain_telegram_notifications(event_key=known.event_key))
                 self.assertFalse(center.drain_telegram_notifications(event_key=unknown.event_key))
         self.sender.assert_not_called()
@@ -203,7 +223,9 @@ class NotificationReceiptRecoveryAuditTests(unittest.TestCase):
                 (repository._MAX_ATTEMPTS,),
             )
         self.assertEqual(repository.recover_notifications(), 1)
-        self.assertEqual(repository.get_notification(result.event_key)["status"], "failed")
+        get_notification_result_6 = repository.get_notification(result.event_key)
+        assert get_notification_result_6 is not None
+        self.assertEqual(get_notification_result_6["status"], "failed")
         db.init_db()
         self.assertFalse(center.drain_telegram_notifications(event_key=result.event_key))
         self.editor.assert_not_called()

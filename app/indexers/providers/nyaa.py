@@ -48,7 +48,7 @@ class NyaaAdapter(DirectResultAdapter):
         self.site_name = site_name
         self.base_url = base_url
         self.http = http
-        self.default_enabled = bool(default_enabled)
+        self.default_enabled = default_enabled
         # 主站可能按来源 IP 限流；镜像与主站同引擎、
         # 布局仅有类名差异，主站限流/不可用时逐个回落。
         self.mirror_base_urls = tuple(mirror_base_urls)
@@ -169,7 +169,7 @@ class NyaaAdapter(DirectResultAdapter):
             if item is not None:
                 items.append(item)
         has_more = any(
-            _search_page_number(anchor.get("href"), base_url=base_url) > request.page
+            _search_page_number(str(anchor.get("href") or ""), base_url=base_url) > request.page
             for anchor in soup.select(".pagination a[href]")
         )
         return IndexerPage(
@@ -288,7 +288,8 @@ class NyaaAdapter(DirectResultAdapter):
             )
         )
         if any(value is not None for value in by_class):
-            return by_class
+            seeders, leechers, completed = by_class
+            return seeders, leechers, completed
         if len(cells) >= 8:
             return (
                 _integer(cells[5].get_text(strip=True)),
@@ -337,7 +338,7 @@ def _search_sort_params(sort_mode: str) -> dict[str, str]:
         "size_desc": ("size", "desc"),
         "size_asc": ("size", "asc"),
     }
-    field, order = mappings.get(str(sort_mode or ""), ("seeders", "desc"))
+    field, order = mappings.get((sort_mode or ""), ("seeders", "desc"))
     return {"s": field, "o": order}
 
 
@@ -357,7 +358,7 @@ def _page_number(href: str | None) -> int:
 
 def _search_page_number(href: str | None, *, base_url: str) -> int:
     try:
-        candidate = fixed_host_join(base_url, str(href or ""))
+        candidate = fixed_host_join(base_url, (href or ""))
     except HttpSecurityError:
         return 0
     base_path = urlsplit(base_url).path.rstrip("/")

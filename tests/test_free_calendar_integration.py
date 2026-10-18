@@ -1,24 +1,24 @@
 """三站脱敏真实结构 → HTTP/缓存/TMDB/鉴权API 全链路离线回放。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from tests.test_discovery_api import _BaseClientTests
 from app import database
 from app.discovery.cache import DiscoveryCache
 from app.discovery.calendar.http import CalendarHttp
-from app.routes.discovery_image import decode_poster_token
 from app.discovery.calendar.metadata import CalendarMetadata
-from app.discovery.calendar.service import CalendarService
-from app.discovery.calendar.providers.tencent import TencentCalendarProvider
 from app.discovery.calendar.providers.iqiyi import IqiyiCalendarProvider
+from app.discovery.calendar.providers.tencent import TencentCalendarProvider
 from app.discovery.calendar.providers.youku import YoukuCalendarProvider
+from app.discovery.calendar.service import CalendarService
+from app.routes.discovery_image import decode_poster_token
+from tests.test_discovery_api import _BaseClientTests
 
 FIXTURES = Path(__file__).parent / "fixtures" / "calendar"
 
@@ -247,6 +247,7 @@ class CurrentAnimeCalendarIntegrationTests(FreeCalendarIntegrationTests):
         self.assertEqual(len(unique), 47)
         self.assertEqual(sum(len(card["events"]) for card in cards), 92)
         payload = self.cache.get(self.service.key("youku")).payload
+        assert payload is not None
         cached = {entry["stable_id"]: entry for entry in payload["entries"]}
         self.assertEqual(set(cached), set(unique))
         for stable_id, card in unique.items():
@@ -344,6 +345,7 @@ class PlatformPosterCaptureIntegrationTests(_BaseClientTests):
                 token = card["poster_url"].rsplit("/", 1)[1]
                 key = decode_poster_token("calendar-" + card["source"], token)
                 payload = self.cache.get(self.service.key(card["source"])).payload
+                assert payload is not None
                 cached = next(row for row in payload["entries"] if row["stable_id"] == card["stable_id"])
                 self.assertEqual(cached["platform_poster_key"], key)
                 self.assertEqual(card["free_progress"], "")

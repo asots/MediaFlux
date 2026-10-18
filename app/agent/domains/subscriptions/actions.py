@@ -111,7 +111,7 @@ def media_subscription_create_arguments(arguments: dict[str, Any]) -> dict[str, 
         raise AgentToolError(
             "check_interval_minutes 仅支持 4320（每 3 天）或 10080（每 7 天）"
         )
-    normalized = {
+    normalized: dict[str, Any] = {
         "provider": provider,
         "external_id": external_id,
         "media_type": media_type,
@@ -119,7 +119,7 @@ def media_subscription_create_arguments(arguments: dict[str, Any]) -> dict[str, 
     if season is not None:
         normalized["season"] = int(season)
     if check_interval_minutes is not None:
-        normalized["check_interval_minutes"] = int(check_interval_minutes)
+        normalized["check_interval_minutes"] = check_interval_minutes
     return normalized
 
 
@@ -160,8 +160,8 @@ def _resolved_tmdb_id(provider: str, external_id: str, media_type: str) -> str:
 
 def _decode_create_context(value: str) -> dict[str, Any]:
     try:
-        payload = json.loads(str(value or ""))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        payload = json.loads((value or ""))
+    except (TypeError, ValueError) as exc:
         raise AgentToolError("确认上下文无效", code="confirmation_invalid") from exc
     if not isinstance(payload, dict):
         raise AgentToolError("确认上下文无效", code="confirmation_invalid")
@@ -203,7 +203,7 @@ def prepare_create_media_subscription(
             "影视数据源返回的条目标识不一致", code="precondition_failed"
         )
     title = _safe_title(card.title, fallback="该媒体")
-    year = str(card.year or "").strip()[:12]
+    year = (card.year or "").strip()[:12]
     season_label = f"第 {int(season)} 季" if season is not None else "全部缺失内容"
     context = {
         "operation": "create",
@@ -317,7 +317,7 @@ def create_media_subscription_confirmed(
     except MediaSubscriptionError as exc:
         return ToolResult(
             ok=False,
-            status=str(exc.code or "unavailable")[:40],
+            status=(exc.code or "unavailable")[:40],
             summary="媒体追更订阅创建失败",
             error=str(exc)[:240],
         )
@@ -419,7 +419,7 @@ def delete_media_subscription_confirmed(
         state = db.media_subscription_mutation_snapshot(conn, subscription_id)
     if (
         not state.get("exists")
-        or not secrets.compare_digest(common._fingerprint(state), str(expected_context or ""))
+        or not secrets.compare_digest(common._fingerprint(state), (expected_context or ""))
         or not get_media_subscription_service().delete_subscription(
             subscription_id, expected_snapshot=state
         )
@@ -514,7 +514,7 @@ def set_media_subscription_enabled_confirmed(
         conn.execute("BEGIN IMMEDIATE")
         state = db.media_subscription_mutation_snapshot(conn, subscription_id)
         if not state.get("exists") or not secrets.compare_digest(
-            common._fingerprint(state), str(expected_context or "")
+            common._fingerprint(state), (expected_context or "")
         ):
             return ToolResult(
                 ok=False,
@@ -571,9 +571,9 @@ def set_media_subscription_enabled_confirmed(
             "subscription_number": subscription_id,
             "enabled": requested,
             "affected": 1,
-            "expired_candidates": max(0, int(expired or 0)),
-            "cancelled_admissions": max(0, int(cancelled_admissions or 0)),
-            "cancelled_runs": max(0, int(cancelled_runs or 0)),
+            "expired_candidates": max(0, (expired or 0)),
+            "cancelled_admissions": max(0, (cancelled_admissions or 0)),
+            "cancelled_runs": max(0, (cancelled_runs or 0)),
             "runtime_refreshed": runtime_refreshed,
         },
         evidence=[

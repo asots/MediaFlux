@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from collections.abc import Mapping
 from typing import Any
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolPipeline
 from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_ports import SessionStateStore
 from app.agent.kernel.state_types import AgentInput, CancellationToken
 from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolResult
@@ -36,12 +38,12 @@ from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import ScriptedModel, collect
 
 
-async def _ignore_progress(_payload: dict[str, Any]) -> None:
+async def _ignore_progress(_payload: Mapping[str, Any]) -> None:
     return None
 
 
 async def _context(
-    state: InMemorySessionStateStore,
+    state: SessionStateStore,
     *,
     owner: str = "owner-1",
     session_id: str = "session-1",
@@ -195,9 +197,9 @@ class EffectPlanStoreSafetyTests(unittest.TestCase):
                 generation=1,
                 plan_id=old.plan_id,
             )
-        self.assertIsNotNone(store.get_active_plan(
+        assert (store.get_active_plan(
             owner="owner", session_id="session", generation=2, plan_id=new.plan_id,
-        ))
+        )) is not None
         self.assertIsNone(store.get_active_plan(
             owner="owner", session_id="session", generation=1, plan_id=new.plan_id,
         ))
@@ -392,7 +394,7 @@ class EffectLifecycleIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         context = await _context(state, owner=owner)
         preview = await pipeline.execute("strm.run_once", {}, context=context)
-        self.assertIsNotNone(preview.effect_plan)
+        assert preview.effect_plan is not None
         before = current_agent_runtime_generation()
 
         with patch("app.agent.feature_gate._runtime_generation", before):

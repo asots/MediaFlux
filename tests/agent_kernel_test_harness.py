@@ -5,6 +5,7 @@ ToolPipeline -> EffectPlan -> execute_confirmed 的真实生命周期。
 """
 
 from __future__ import annotations
+from collections.abc import Mapping
 
 import asyncio
 import secrets
@@ -26,7 +27,7 @@ from app.agent.kernel.tool_calls import PipelineResult, ToolCallContext
 from app.agent.models import ToolContext
 
 
-async def _ignore_progress(_payload: dict[str, Any]) -> None:
+async def _ignore_progress(_payload: Mapping[str, Any]) -> None:
     return None
 
 
@@ -161,7 +162,7 @@ class KernelDomainTestHarness:
             "mode": mode,
             "tool_call": {
                 "name": result.tool.name,
-                "argument_keys": sorted(str(key) for key in result.arguments),
+                "argument_keys": sorted(result.arguments),
             },
             "result": dict(result.outcome.public_content),
         }
@@ -221,6 +222,7 @@ class KernelDomainTestHarness:
                 "agent_disabled",
             }:
                 raise AgentToolError(str(exc), code=exc.code) from exc
+            assert prepared.result.effect_plan is not None
             return {
                 "mode": "result",
                 "result": {

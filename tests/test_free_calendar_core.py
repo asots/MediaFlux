@@ -49,10 +49,10 @@ class RawMetadata:
 
 class Source:
     source = "tencent"
-    allowed_hosts = frozenset({"v.qq.com"})
+    allowed_hosts: frozenset[str] | set[str] = frozenset({"v.qq.com"})
     calls = 0
     failure = False
-    entries = (entry(),)
+    entries: tuple[CalendarEntry, ...] = (entry(),)
     async def fetch(self, http):
         self.calls += 1
         if self.failure:
@@ -79,7 +79,9 @@ class CalendarCoreTests(unittest.TestCase):
         data = self.service.get_week()
         self.assertEqual(data["items_count"], 1)
         self.assertEqual(data["sources"][0]["ignored"], 2)
-        cached_rows = self.cache.get(self.service.key("tencent")).payload["entries"]
+        get_result = self.cache.get(self.service.key("tencent")).payload
+        assert get_result is not None
+        cached_rows = get_result["entries"]
         self.assertEqual([row["category"] for row in cached_rows], ["animation"])
         self.assertTrue(all(card["category"] == "animation" for day in data["days"] for card in day["items"]))
 
@@ -87,7 +89,9 @@ class CalendarCoreTests(unittest.TestCase):
         previous_key = DiscoveryCache.make_key("calendar:tencent", "weekly-calendar-v3", "tv", 1, None)
         self.assertNotEqual(self.service.key("tencent"), previous_key)
         self.service.get_week()
-        payload = dict(self.cache.get(self.service.key("tencent")).payload)
+        get_result_5 = self.cache.get(self.service.key("tencent")).payload
+        assert get_result_5 is not None
+        payload = dict(get_result_5)
         payload["entries"].append({**entry(source_id="old_tv", category="tv", title="旧电视剧缓存").to_dict(),
                                    "mapping_status": "pending"})
         self.cache.set_success(self.service.key("tencent"), "calendar:tencent", payload,
@@ -100,7 +104,9 @@ class CalendarCoreTests(unittest.TestCase):
     def test_legacy_cache_backfills_platform_posters_without_clearing_current_cards(self):
         self.service.get_week()
         key = self.service.key("tencent")
-        payload = dict(self.cache.get(key).payload)
+        get_result_6 = self.cache.get(key).payload
+        assert get_result_6 is not None
+        payload = dict(get_result_6)
         payload["entries"][0].pop("platform_poster_key")
         self.cache.set_success(key, "calendar:tencent", payload, ttl_seconds=3600, stale_seconds=86400)
         self.tick += 301
@@ -208,7 +214,9 @@ class CalendarCoreTests(unittest.TestCase):
             result = self.service.get_week()
         self.assertFalse(result["refreshing"])
         self.assertEqual(self.source.calls, 1)
-        self.assertEqual(self.cache.get(self.service.key("tencent")).payload["metadata_rounds"], 8)
+        get_result_2 = self.cache.get(self.service.key("tencent")).payload
+        assert get_result_2 is not None
+        self.assertEqual(get_result_2["metadata_rounds"], 8)
 
     def test_only_explicit_weekdays_receive_cards_and_same_week_is_stable(self):
         data = self.service.get_week()
@@ -343,7 +351,9 @@ class CalendarCoreTests(unittest.TestCase):
 
     def test_raw_platform_facts_are_cached_before_optional_metadata(self):
         def enrich(entries):
-            self.assertEqual(self.cache.get(self.service.key("tencent")).payload["entries"][0]["free_progress"], entry().free_progress)
+            get_result_3 = self.cache.get(self.service.key("tencent")).payload
+            assert get_result_3 is not None
+            self.assertEqual(get_result_3["entries"][0]["free_progress"], entry().free_progress)
             return RawMetadata().enrich(entries)
         self.service.metadata = SimpleNamespace(enrich=enrich)
         self.assertEqual(self.service.get_week()["items_count"], 1)
@@ -353,7 +363,9 @@ class CalendarCoreTests(unittest.TestCase):
             "tmdb_id": "42", "poster_key": "poster.jpg", "mapping_status": "matched",
         }, ttl_seconds=3600, stale_seconds=86400)
         def enrich(entries):
-            staged = self.cache.get(self.service.key("tencent")).payload["entries"][0]
+            get_result_4 = self.cache.get(self.service.key("tencent")).payload
+            assert get_result_4 is not None
+            staged = get_result_4["entries"][0]
             self.assertEqual(staged["poster_key"], "poster.jpg")
             self.assertEqual(staged["tmdb_id"], "42")
             return [staged]
@@ -458,6 +470,7 @@ class CalendarSourceWaitTests(unittest.TestCase):
         self.start_refresh(service, ready, blocked)
         refresh = service._pending["tencent"]
         ready.release.set()
+        assert refresh is not None
         refresh.result(timeout=2)
         entered = self.observe_waiters(service)
         started = time.monotonic()
@@ -471,6 +484,7 @@ class CalendarSourceWaitTests(unittest.TestCase):
         self.assertEqual({row["id"]: row["status"] for row in data["sources"]}["iqiyi"], "loading")
         self.assertEqual(data["days"][2]["items"][0]["source"], "tencent")
         self.assertFalse(blocked.release.is_set())
+        assert service._pending['iqiyi'] is not None
         self.assertFalse(service._pending["iqiyi"].done())
         self.assertEqual((ready.calls, blocked.calls), (1, 1))
 
@@ -487,6 +501,7 @@ class CalendarSourceWaitTests(unittest.TestCase):
         with self.assertRaisesRegex(SourceUnavailable, "已停止"):
             waiting.result(timeout=2)
         self.assertFalse(service.closed)
+        assert refresh is not None
         self.assertFalse(refresh.done())
         self.assertFalse(source.release.is_set())
         source.release.set()
@@ -506,6 +521,7 @@ class CalendarSourceWaitTests(unittest.TestCase):
         self.assertEqual(data["items_count"], 1)
         self.assertEqual({row["id"]: row["status"] for row in data["sources"]}["iqiyi"], "loading")
         self.assertFalse(other.release.is_set())
+        assert service._pending['iqiyi'] is not None
         self.assertFalse(service._pending["iqiyi"].done())
         self.assertEqual((selected.calls, other.calls), (1, 1))
 
@@ -532,6 +548,7 @@ class CalendarSourceWaitTests(unittest.TestCase):
         self.assertEqual((data["items_count"], data["sources"][0]["status"]), (1, "ok"))
         self.assertEqual(data["days"][2]["items"][0]["free_progress"], source.entries[0].free_progress)
         self.assertFalse(metadata_release.is_set())
+        assert service._pending['tencent'] is not None
         self.assertFalse(service._pending["tencent"].done())
         self.assertEqual(source.calls, 1)
 
@@ -637,7 +654,7 @@ class CalendarDNSTimeoutTests(unittest.TestCase):
             service.get_week()
             self.assertTrue(entered.wait(2))
             future = service._pending["tencent"]
-            self.assertIsNotNone(future)
+            assert (future) is not None
             self.assertTrue(closed.wait(2))
             # HTTP关闭不等于缓存发布/队列清理已经完成。DNS始终由本测试持有，
             # 因此按真实阶段等待仍能证伪旧asyncio.run的默认executor join。
@@ -822,6 +839,7 @@ class CalendarHttpTests(unittest.IsolatedAsyncioTestCase):
                               max_requests=1, min_interval=0)
         try:
             data = await client.post_json("https://pbaccess.video.qq.com/public", json_body={"page_params": {"page_type": "channel"}})
+            assert isinstance(data, dict)
             self.assertEqual(data["data"]["CardList"], [])
             with self.assertRaises(SourceUnavailable):
                 await client.get_json("https://pbaccess.video.qq.com/public")

@@ -241,7 +241,7 @@ class AgentJobsScheduler:
                     logger.info("Agent 长任务批次进度因租约变化被丢弃")
             return
 
-        terminal_status = str(result.status or "inconclusive")
+        terminal_status = (result.status or "inconclusive")
         finalized = finalize_patrol_progress(
             merged,
             terminal_status=terminal_status,
@@ -296,7 +296,7 @@ class AgentJobsScheduler:
             and stalled_tmdb_id.isdigit()
             and int(stalled_tmdb_id) > current_value
         ):
-            stalls = max(0, int(stored_stalls)) + 1
+            stalls = max(0, stored_stalls) + 1
             if stalls >= 3:
                 # 防止单一条目永久阻塞整个用户任务。
                 merged["checked_series_count"] += 1
@@ -370,7 +370,7 @@ class AgentJobsScheduler:
     def _load_input(raw: object) -> dict[str, Any]:
         try:
             value = json.loads(str(raw or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError("InvalidAgentJobInput") from exc
         if not isinstance(value, dict) or set(value) != {"as_of", "max_series"}:
             raise ValueError("InvalidAgentJobInput")
@@ -390,7 +390,7 @@ class AgentJobsScheduler:
     def _load_checkpoint(raw: object, *, as_of: str) -> dict[str, Any]:
         try:
             value = json.loads(str(raw or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError("InvalidAgentJobCheckpoint") from exc
         if not isinstance(value, dict) or set(value) != {
             "as_of", "cursor", "stall_attempts"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from typing import cast
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -79,7 +80,7 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
             db.claim_organize_confirmation(
                 token, chat_id="100", selected_index=0, actor=actor
             )
-            self.assertIsNotNone(db.claim_queued_organize_confirmation(token))
+            assert (db.claim_queued_organize_confirmation(token)) is not None
         return token
 
     def pending_manual(self):
@@ -96,7 +97,9 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         self.enabled = False
         with self.assertRaises(DirectoryScrapeConflictError):
             confirmations.start_confirmation(token, 0, chat_id="100", actor="agent")
-        self.assertEqual(db.get_organize_confirmation(token)["status"], "pending")
+        get_organize_confirmation_result = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result is not None
+        self.assertEqual(get_organize_confirmation_result["status"], "pending")
         manager = SimpleNamespace(
             start_operation=lambda *_a, **_kw: {"ok": True, "task_id": "t"}
         )
@@ -104,8 +107,10 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
             "app.modules.organize_tasks.get_organize_manager", return_value=manager
         ):
             confirmations.start_confirmation(token, 0, chat_id="100", actor="human")
+        get_organize_confirmation_result_2 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_2 is not None
         self.assertEqual(
-            db.get_organize_confirmation(token)["confirmation_actor"], "human"
+            get_organize_confirmation_result_2["confirmation_actor"], "human"
         )
         self.enabled = True
         with self.assertRaisesRegex(ValueError, "人工"):
@@ -121,7 +126,9 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
 
         with self.assertRaises(DirectoryScrapeConflictError):
             confirmations.start_confirmation(token, 0, chat_id="100", actor="agent")
-        self.assertEqual(db.get_organize_confirmation(token)["status"], "pending")
+        get_organize_confirmation_result_3 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_3 is not None
+        self.assertEqual(get_organize_confirmation_result_3["status"], "pending")
 
     def test_disable_queued_review_hands_off_without_network_or_auto_retry(self):
         token = self.ticket(running=True)
@@ -139,7 +146,9 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
                 actor="agent",
             )
         client.assert_not_called()
-        self.assertEqual(db.get_organize_confirmation(token)["status"], "failed")
+        get_organize_confirmation_result_4 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_4 is not None
+        self.assertEqual(get_organize_confirmation_result_4["status"], "failed")
         manual = self.pending_manual()
         self.assertEqual(len(manual), 1)
         self.assertNotEqual(manual[0]["review_status"], "pending")
@@ -182,7 +191,9 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
                 chat_id="100",
                 actor="agent",
             )
-        self.assertEqual(db.get_organize_confirmation(token)["status"], "failed")
+        get_organize_confirmation_result_5 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_5 is not None
+        self.assertEqual(get_organize_confirmation_result_5["status"], "failed")
         self.assertEqual(self.pending_manual(), [])
 
     def run_worker(self, *, decision="new", revoke=False, fail_after_commit=False, actor="agent", provider="clean_title"):
@@ -198,14 +209,14 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
                 super().__init__(**kwargs)
                 self.guard = kwargs.get("before_plan_write")
 
-            def _validate_target_outside_source(self, *_args):
+            def _validate_target_outside_source(self, source_id, target_id):
                 pass
 
-            def organize(self, _parent, rules, **kwargs):
-                calls.append((kwargs["dry_run"], rules.clean_empty))
+            def organize(self, source_dir_id, rules, dry_run=True, max_files=0, cancel_event=None, **kwargs):
+                calls.append((dry_run, rules.clean_empty))
                 assert kwargs["source_member_ids"] == frozenset({"file-0"})
                 assert kwargs["group_pipeline"] is False
-                if not kwargs["dry_run"]:
+                if not dry_run:
                     if revoke:
                         outer.enabled = False
                     if self.guard:
@@ -215,7 +226,7 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
                     cloud.children["parent"].remove("file-0")
                     remote.parent_id = "archive"
                     cloud.children["archive"].append("file-0")
-                return [plan], {} if kwargs["dry_run"] else {"moved": 1, "empty_dirs_cleaned": 0}
+                return [plan], {} if dry_run else {"moved": 1, "empty_dirs_cleaned": 0}
 
             @staticmethod
             def trigger_post_actions(*_args, **_kwargs):
@@ -227,7 +238,7 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         cloud = _CloudTree()
         cloud.add_dir("parent", "source")
         cloud.add_dir("archive", "0")
-        cloud.nodes["file-0"] = remote
+        cloud.nodes["file-0"] = cast(SimpleNamespace, remote)
         cloud.children["parent"].append("file-0")
         self.cloud = cloud
         with (
@@ -262,6 +273,7 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["stats"]["empty_dirs_cleaned"], 1)
         self.assertEqual(result["stats"]["moved"], 1)
         row = db.get_organize_confirmation(token)
+        assert row is not None
         self.assertEqual(row["status"], "completed")
         self.assertEqual(row["confirmation_actor"], "agent")
         event = confirmations._confirmation_result_event(
@@ -270,7 +282,7 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
             {"moved": 1},
             actor="agent",
         )
-        self.assertIn("Agent", event.title)
+        self.assertIn("Agent", str(event.title))
         self.assertIn("清洗入库 · 无完整元数据", str(event.fields))
 
     def test_human_clean_confirmation_cleans_source_parent(self):
@@ -315,11 +327,14 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         ):
             token, result, _ = self.run_worker()
         generic_cleanup.assert_not_called()
-        event = confirmations.deserialize_notification_event(db.get_organize_confirmation_delivery(token)["event_json"])
+        get_organize_confirmation_delivery_result = db.get_organize_confirmation_delivery(token)
+        assert get_organize_confirmation_delivery_result is not None
+        event = confirmations.deserialize_notification_event(get_organize_confirmation_delivery_result["event_json"])
         self.assertNotIn("已清理 0 个", str(event.fields))
         self.assertIn(("目录清理", "由下载流程核验收尾，结果见下载记录"), event.fields)
         self.assertEqual(result["stats"]["download_staging_policy"], "cleanup_empty")
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["organize_status"], "completed")
         self.assertEqual(row["gy_staging_cleanup_status"], "completed")
         self.assertEqual(self.cloud.deleted, ["parent"])
@@ -349,7 +364,7 @@ class CleanConfirmationTests(IsolatedDatabaseTestCase):
         guard = confirmations._AgentCleanWriteBoundary(self.payload, self.candidate)
         client = Mock()
         client.list_dir.return_value = list(target_files)
-        organizer = Organizer(client=client, scraper=object(), before_plan_write=guard)
+        organizer = Organizer(client=client, recognition_enabled=False, before_plan_write=guard)
         plan = OrganizePlan(
             file_id="file-0",
             original_name="ABC-123.mp4",

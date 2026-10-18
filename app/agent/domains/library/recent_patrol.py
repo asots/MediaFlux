@@ -36,8 +36,8 @@ class RecentPatrolStore:
         wall_clock: Callable[[], float] = time.time,
         repository: AgentSessionContextRepository | None = None,
     ) -> None:
-        self.ttl_seconds = max(1, int(ttl_seconds))
-        self.max_entries = max(1, int(max_entries))
+        self.ttl_seconds = max(1, ttl_seconds)
+        self.max_entries = max(1, max_entries)
         self._clock = clock
         self._wall_clock = wall_clock
         self._repository = repository
@@ -46,7 +46,7 @@ class RecentPatrolStore:
         self._entries: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
 
     def capture(self, *, owner: str, result: ToolResult) -> None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return
         snapshot = build_safe_patrol_snapshot(result)
@@ -70,7 +70,7 @@ class RecentPatrolStore:
                     logger.warning("Agent 巡检上下文持久化失败 type=%s", type(exc).__name__)
 
     def get(self, *, owner: str) -> dict[str, Any] | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return None
         with self._owner_lock(owner_key):
@@ -88,7 +88,7 @@ class RecentPatrolStore:
             self._entries.clear()
 
     def clear_owner(self, *, owner: str) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return False
         removed = False

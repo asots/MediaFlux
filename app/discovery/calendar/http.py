@@ -99,7 +99,7 @@ class CalendarHttp:
             ),
             user_agent=CALENDAR_USER_AGENT,
         )
-        self._max_requests = max(1, min(int(max_requests), 8))
+        self._max_requests = max(1, min(max_requests, 8))
         self._min_interval = max(0.0, float(min_interval))
         self._requests = 0
         self._last_request = 0.0
@@ -138,7 +138,7 @@ class CalendarHttp:
 
     async def get_text(self, url, *, params=None):
         response = await self.request("GET", url, params=params)
-        content_type = str(response.headers.get("content-type", "")).lower()
+        content_type = response.headers.get("content-type", "").lower()
         charset = "gb18030" if any(x in content_type for x in ("gbk", "gb2312", "gb18030")) else "utf-8"
         return response.body.decode(charset, errors="replace")
 

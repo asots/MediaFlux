@@ -1,6 +1,10 @@
 """人工确认成功后只收尾已确认原父链，不扫描或删除无关目录。"""
 from __future__ import annotations
 
+from typing import Any, cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 from unittest.mock import patch
 
 from app import database as db
@@ -16,10 +20,10 @@ class ConfirmationSourceCleanupTests(IsolatedDatabaseTestCase):
         self.cloud = _CloudTree()
         self.cloud.add_dir('leaf', 'stage')
         self.rules = OrganizeRules(target_dir_id='target', clean_empty=True)
-        self.organizer = Organizer(client=self.cloud, scraper=object())
+        self.organizer = Organizer(client=cast(GuangYaClient, self.cloud), scraper=cast(TMDBScraper, object()))
         self.addCleanup(self.organizer.close)
         self.payload = {'source_dir_id': 'source', 'source_parent_id': 'leaf'}
-        self.stats = {'moved': 1}
+        self.stats: dict[str, Any] = {'moved': 1}
         self.protected = self.enterContext(patch.object(
             db, 'list_protected_guangya_staging_ids', return_value=[],
         ))
@@ -118,7 +122,7 @@ class ConfirmationSourceCleanupTests(IsolatedDatabaseTestCase):
             self.clean()
         self.assertEqual(self.cloud.deleted, [])
         event = confirmations._confirmation_result_event(self.payload, {}, self.stats)
-        self.assertIn("部分完成", event.title)
+        self.assertIn("部分完成", str(event.title))
         self.assertIn("read rejected", str(event.fields))
 
     def test_cleanup_result_is_visible_in_confirmation_message(self):

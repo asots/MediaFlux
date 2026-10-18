@@ -69,13 +69,13 @@ def strm_run_history_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         raise AgentToolError(
             "status 必须是 all、running、success、partial、failed 或 skipped"
         )
-    return {"limit": int(limit), "status": status}
+    return {"limit": limit, "status": status}
 
 
 def _safe_run(row: Any, ordinal: int) -> dict[str, Any]:
     try:
         payload = json.loads(str(row["result"] or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         payload = {}
     payload = payload if isinstance(payload, dict) else {}
     stats_raw = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}

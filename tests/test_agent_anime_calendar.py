@@ -1,5 +1,7 @@
 """三平台追漫日历Agent只读动作；真实结构回放/缓存与公共投影均隔离网络及生产DB。"""
 from __future__ import annotations
+from typing import cast
+from typing import Any
 
 import copy
 import json
@@ -27,7 +29,7 @@ from tests.support import isolated_test_database
 FIXTURES = Path(__file__).with_name("fixtures") / "calendar" / "youku"
 
 
-def snapshot(*, today="2026-09-10", start="2026-09-07", status="partial"):
+def snapshot(*, today="2026-09-10", start="2026-09-07", status="partial") -> dict[str, Any]:
     monday = date.fromisoformat(start)
     return {"timezone": "Asia/Shanghai", "today": today, "week_start": start,
             "days": [{"date": (monday + timedelta(days=i)).isoformat(), "items": []} for i in range(7)],
@@ -37,7 +39,7 @@ def snapshot(*, today="2026-09-10", start="2026-09-07", status="partial"):
             "refreshing": False}
 
 
-def card(index=1, *, source="youku", day="2026-09-10", **changes):
+def card(index=1, *, source="youku", day="2026-09-10", **changes) -> dict[str, Any]:
     value = {"source": source, "source_id": f"show_{index}", "stable_id": f"{source}:show_{index}",
              "title": f"测试动漫{index}", "category": "animation", "free_progress": "", "stale": False,
              "events": [{"date": day, "weekday": date.fromisoformat(day).isoweekday(),
@@ -56,7 +58,7 @@ def model_rows(data):
 
 class AgentAnimeCalendarTests(unittest.TestCase):
     def setUp(self):
-        self.data = snapshot()
+        self.data: dict[str, Any] = snapshot()
         self.service = Mock(get_week=Mock(side_effect=lambda **kwargs: copy.deepcopy(self.data)))
         self.getter = self.enterContext(patch("app.agent.domains.discovery.calendar_actions.get_calendar_service", return_value=self.service))
         self.enabled = self.enterContext(patch("app.agent.domains.discovery.calendar_actions.config.get_bool", return_value=True))
@@ -81,7 +83,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
                           {"limit": 21}, {"limit": "1"}, {"refresh": True}, {"force": True}, {"url": "secret"},
                           {1: "wrong key"}, {"cookie": "private"}, {"auth": "private"}):
             with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
-                anime_calendar(arguments)
+                anime_calendar(cast(dict[str, Any], arguments))
         self.getter.assert_not_called()
 
     def test_disabled_feature_does_not_create_calendar_service(self):
@@ -91,6 +93,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         self.getter.assert_not_called()
 
     def test_today_source_keyword_filter_is_case_insensitive_readonly_and_allowlisted(self):
+        assert self.data is not None
         self.data["days"][3]["items"] = [card(1, title="DR. Stone"), card(2), card(3, source="iqiyi")]
         result = anime_calendar({"source": "youku", "query": "dr. stone"})
         self.assertEqual((result.ok, result.status, result.data["returned"]), (True, "partial", 1))
@@ -132,6 +135,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         free = dict(member, update_time="", audience="free", schedule="非会员更新，时刻未注明")
         unknown = dict(member, update_time="14:00", audience="unknown", schedule="14:00更新1话")
         base.update(events=[member, free, unknown, member], free_progress="已核验免费至第3集")
+        assert self.data is not None
         self.data["days"][3]["items"] = [base, copy.deepcopy(base)]
         result = anime_calendar({})
         self.assertEqual((result.data["total"], result.data["total_programmes"]), (3, 1))
@@ -142,9 +146,11 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         self.assertTrue(all(row["free_progress"] == "已核验免费至第3集" for row in by_audience.values()))
 
     def test_schedule_result_has_no_unsolicited_playback_disclaimer(self):
+        assert self.data is not None
         self.data["days"][3]["items"] = [card()]
         for status in ("ok", "partial"):
             with self.subTest(status=status):
+                assert self.data is not None
                 self.data["sources"][2]["status"] = status
                 result = anime_calendar({"source": "youku"})
                 self.assertEqual(result.suggestions, [])
@@ -157,6 +163,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
                     self.assertNotIn(warning, guidance)
 
     def test_page_limit_and_has_more_describe_events_not_full_site(self):
+        assert self.data is not None
         self.data["days"][3]["items"] = [card(i) for i in range(25, 0, -1)]
         first = anime_calendar({"limit": 10})
         second = anime_calendar({"limit": 10, "page": 2})
@@ -170,11 +177,13 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         self.assertIn("本页", beyond.summary)
         self.assertTrue({row["stable_id"] for row in first.data["items"]}.isdisjoint({row["stable_id"] for row in second.data["items"]}))
         old_order = [row["stable_id"] for row in first.data["items"]]
+        assert self.data is not None
         self.data["days"][3]["items"].reverse()
         self.assertEqual(old_order, [row["stable_id"] for row in anime_calendar({"limit": 10}).data["items"]])
 
     def test_week_returns_all_53_events_across_seven_days_without_pagination(self):
         for index in range(53):
+            assert self.data is not None
             day = self.data["days"][index % 7]
             day["items"].append(card(index, source="tencent", day=day["date"]))
         result = anime_calendar({"day": "week", "source": "tencent"})
@@ -199,6 +208,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
                                       ("stale", "unavailable", False), ("partial", "empty", True), ("ok", "empty", True)):
             with self.subTest(status=status):
                 self.service.get_week.reset_mock()
+                assert self.data is not None
                 self.data["sources"][2]["status"] = status
                 result = anime_calendar({"source": "youku"})
                 self.assertEqual((result.ok, result.status), (ok, expected))
@@ -206,14 +216,18 @@ class AgentAnimeCalendarTests(unittest.TestCase):
                 self.assertIn("不代表", result.data["scope_note"])
                 if status == "loading":
                     self.assertEqual(result.data["retry_after"], 5)
+        assert self.data is not None
         self.data["sources"][2]["status"] = "stale"
+        assert self.data is not None
         self.data["days"][3]["items"] = [card()]
         result = anime_calendar({"source": "youku"})
         self.assertTrue(result.data["items"][0]["stale"])
         self.assertEqual(result.status, "partial")
 
     def test_selected_healthy_source_is_not_failed_by_other_unavailable_sources(self):
+        assert self.data is not None
         self.data["sources"][0]["status"] = "unavailable"
+        assert self.data is not None
         self.data["days"][3]["items"] = [card(1, source="tencent"), card(2, source="youku")]
         result = anime_calendar({"source": "youku"})
         self.assertEqual((result.status, result.data["total"]), ("partial", 1))
@@ -222,7 +236,9 @@ class AgentAnimeCalendarTests(unittest.TestCase):
 
     def test_source_failure_and_optional_metadata_refresh_do_not_erase_valid_facts(self):
         self.data["refreshing"] = True
+        assert self.data is not None
         self.data["days"][3]["items"] = [card()]
+        assert self.data is not None
         self.data["sources"][0]["status"] = "unavailable"
         result = anime_calendar({})
         self.assertTrue(result.ok)
@@ -237,7 +253,9 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         for change in ({"audience": "VIP"}, {"update_time": "25:00"}, {"update_time": False}, {"date": "2026-09-11"}):
             event = dict(good["events"][0], **change)
             invalid.append(card(8, events=[event]))
+        assert self.data is not None
         self.data["days"][3]["items"] = [good, *invalid]
+        assert self.data is not None
         self.data["sources"][2].update(message="cookie=secret; https://evil.invalid/private", fetched_at="private")
         result = anime_calendar({"source": "youku"})
         self.assertEqual(result.data["total"], 1)
@@ -254,7 +272,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         variants.append(wrong_day)
         for value in variants:
             with self.subTest(value=type(value).__name__):
-                self.data = value
+                self.data = cast(dict[str, Any], value)
                 result = anime_calendar({})
                 self.assertEqual((result.ok, result.status), (False, "unavailable"))
         self.service.get_week.side_effect = SourceUnavailable("cookie=private; https://evil.invalid/secret")
@@ -268,6 +286,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
                      free_schedule="非会员每周四更新", free_update_time="")
         no_rule = card(2, events=[], free_progress="免费观看第3集")
         wrong_day = card(3, events=[], free_weekdays=(3,), free_schedule="非会员每周三更新")
+        assert self.data is not None
         self.data["days"][3]["items"] = [known, no_rule, wrong_day]
         result = anime_calendar({})
         self.assertEqual(result.data["total"], 1)
@@ -290,9 +309,11 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         self.assertNotIn("never-public", json.dumps(model))
 
     def test_maximum_sized_page_keeps_facts_under_default_projector_context_limit(self):
+        assert self.data is not None
         self.data["days"][3]["items"] = [card(i, source_id="s" * 120 + str(i), title="题" * 200,
             free_progress="免" * 120, events=[{"date": "2026-09-10", "update_time": "10:00",
                 "schedule": "排" * 400, "audience": "member"}]) for i in range(20)]
+        assert self.data is not None
         for source in self.data["sources"]:
             source["message"] = "范" * 300
         result = anime_calendar({"query": "题" * 80})
@@ -308,10 +329,12 @@ class AgentAnimeCalendarTests(unittest.TestCase):
                 title = '"' * 200 if mode in {"title", "all"} else "题" * 200
                 progress = '"' * 120 if mode == "all" else "免" * 120
                 schedule = '"更新"' * 80 if mode != "title" else "排" * 400
+                assert self.data is not None
                 self.data["days"][3]["items"] = [card(i, source="tencent", source_id="s" * 126 + f"{i:02}",
                     title=title, free_progress=progress,
                     events=[{"date": "2026-09-10", "update_time": "10:00", "schedule": schedule, "audience": "member"}])
                     for i in range(21)]
+                assert self.data is not None
                 for source in self.data["sources"]:
                     source["message"] = '"' * 300 if mode == "all" else "范" * 300
                 result = anime_calendar({"day": "week", "limit": 20})
@@ -335,6 +358,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
                 self.assertNotIn("model_omitted_fields", model["data"])
 
     def test_last_permitted_page_marks_limit_without_recommending_invalid_next_page(self):
+        assert self.data is not None
         self.data["days"][3]["items"] = [card(i) for i in range(101)]
         result = anime_calendar({"page": 100, "limit": 1})
         self.assertEqual((result.data["total"], result.data["returned"]), (101, 1))
@@ -344,6 +368,7 @@ class AgentAnimeCalendarTests(unittest.TestCase):
         self.assertIn("第100页", "".join(result.suggestions))
 
     def test_original_source_snapshot_is_not_mutated(self):
+        assert self.data is not None
         self.data["days"][3]["items"] = [card()]
         before = copy.deepcopy(self.data)
         self.service.get_week.side_effect = lambda **kwargs: self.data

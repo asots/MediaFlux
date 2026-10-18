@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import base64
 import copy
 from dataclasses import replace
@@ -267,7 +270,7 @@ def test_guangya_submit_routes_from_raw_input_but_resolves_and_submits_enriched_
     rules = fixture_rules()
 
     def submit_with_fixture_client(url, **kwargs):
-        return offline.submit_offline(url, client=client, **kwargs)
+        return offline.submit_offline(url, client=cast(GuangYaClient, client), **kwargs)
 
     original_analyze = offline.analyze_offline_url
     decisions = []
@@ -319,7 +322,7 @@ def test_offline_private_torrent_bytes_bypass_public_magnet_enrichment():
         result = offline.submit_offline(
             source,
             title="Raw title",
-            client=client,
+            client=cast(GuangYaClient, client),
             torrent_data=private_torrent,
             public_magnet_title="Should not be injected",
         )

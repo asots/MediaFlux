@@ -30,10 +30,10 @@ def enqueue_agent_download_verification(
             "AND targets IN ('qb','guangya','both') "
             "AND status IN ('submitted','downloading','completed','failed'))",
             (
-                int(request_id), str(title), str(tmdb_id), int(season), int(episode),
-                str(as_of), str(library_name or "")[:80], str(owner or "")[:512],
-                str(chat_id or "")[:32],
-                timestamp, timestamp, timestamp, int(request_id),
+                request_id, title, tmdb_id, season, episode,
+                as_of, (library_name or "")[:80], (owner or "")[:512],
+                (chat_id or "")[:32],
+                timestamp, timestamp, timestamp, request_id,
             ),
         )
         return cur.rowcount == 1
@@ -45,7 +45,7 @@ def get_agent_download_verification(request_id: int) -> sqlite3.Row | None:
             "SELECT request_id,title,tmdb_id,season,episode,as_of,library_name,owner,chat_id,status,result,attempts,"
             "lease_generation,next_check_at,last_checked_at,created_at,updated_at "
             "FROM agent_download_verifications WHERE request_id=?",
-            (int(request_id),),
+            (request_id,),
         ).fetchone()
 
 
@@ -55,7 +55,7 @@ def claim_due_agent_download_verification(
     stale_before: str | None = None,
 ) -> sqlite3.Row | None:
     """原子领取一个到期复核任务，避免并发 worker 重复审计。"""
-    timestamp = str(current_time or db.now())
+    timestamp = (current_time or db.now())
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
@@ -63,7 +63,7 @@ def claim_due_agent_download_verification(
                 "UPDATE agent_download_verifications SET status='retry_wait',"
                 "next_check_at=?,updated_at=? "
                 "WHERE status='running' AND updated_at<=?",
-                (timestamp, timestamp, str(stale_before)),
+                (timestamp, timestamp, stale_before),
             )
         row = conn.execute(
             "SELECT request_id FROM agent_download_verifications "
@@ -97,15 +97,15 @@ def renew_agent_download_verification_lease(
     renewed_at: str | None = None,
 ) -> bool:
     """续期正在运行的复核任务；租约变化后旧 worker 不得继续持有。"""
-    timestamp = str(renewed_at or db.now())
+    timestamp = (renewed_at or db.now())
     with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verifications SET updated_at=? "
             "WHERE request_id=? AND status='running' AND lease_generation=?",
             (
                 timestamp,
-                int(request_id),
-                max(0, int(expected_lease_generation)),
+                request_id,
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -126,11 +126,11 @@ def update_agent_download_verification(
         raise ValueError("自动复核状态无效")
     if result not in {"", "visible", "missing", "inconclusive"}:
         raise ValueError("自动复核结果无效")
-    safe_attempts = max(0, min(int(attempts), 100))
+    safe_attempts = max(0, min(attempts, 100))
     values: list[object] = [
-        status, status, result, safe_attempts, str(next_check_at or db.now()),
-        last_checked_at, db.now(), int(request_id),
-        max(0, int(expected_lease_generation)),
+        status, status, result, safe_attempts, (next_check_at or db.now()),
+        last_checked_at, db.now(), request_id,
+        max(0, expected_lease_generation),
     ]
     with db.get_conn() as conn:
         cur = conn.execute(
@@ -159,12 +159,12 @@ def finish_agent_download_verification(
         raise ValueError("自动复核终态无效")
     if result not in {"", "visible", "missing", "inconclusive"}:
         raise ValueError("自动复核结果无效")
-    payload = str(payload_json or "").strip()
+    payload = (payload_json or "").strip()
     if not payload or len(payload) > 4096:
         raise ValueError("自动复核通知载荷无效")
     timestamp = db.now()
-    due_at = str(next_check_at or timestamp)
-    safe_attempts = max(0, min(int(attempts), 100))
+    due_at = (next_check_at or timestamp)
+    safe_attempts = max(0, min(attempts, 100))
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
@@ -173,8 +173,8 @@ def finish_agent_download_verification(
             "WHERE request_id=? AND lease_generation=? AND status='running'",
             (
                 status, result, safe_attempts, due_at,
-                last_checked_at, timestamp, int(request_id),
-                max(0, int(expected_lease_generation)),
+                last_checked_at, timestamp, request_id,
+                max(0, expected_lease_generation),
             ),
         )
         if cur.rowcount != 1:
@@ -185,7 +185,7 @@ def finish_agent_download_verification(
             "next_attempt_at,last_error_type,sent_at,created_at,updated_at) "
             "SELECT request_id,owner,chat_id,?,'pending',0,0,?,'',NULL,?,? "
             "FROM agent_download_verifications WHERE request_id=?",
-            (payload, due_at, timestamp, timestamp, int(request_id)),
+            (payload, due_at, timestamp, timestamp, request_id),
         )
         return True
 
@@ -203,7 +203,7 @@ def claim_due_agent_download_verification_notification(
     stale_before: str | None = None,
 ) -> sqlite3.Row | None:
     """原子领取一条下载核验通知；generation 隔离过期发送者。"""
-    timestamp = str(current_time or db.now())
+    timestamp = (current_time or db.now())
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
@@ -212,7 +212,7 @@ def claim_due_agent_download_verification_notification(
                 "SET status='discarded',lease_generation=lease_generation+1,"
                 "payload_json='',last_error_type='DeliveryOutcomeUnknown',updated_at=? "
                 "WHERE status='sending' AND updated_at<=?",
-                (timestamp, str(stale_before)),
+                (timestamp, stale_before),
             )
         row = conn.execute(
             "SELECT id FROM agent_download_verification_notification_outbox "
@@ -243,15 +243,15 @@ def complete_agent_download_verification_notification(
     expected_lease_generation: int,
     sent_at: str | None = None,
 ) -> bool:
-    timestamp = str(sent_at or db.now())
+    timestamp = (sent_at or db.now())
     with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_download_verification_notification_outbox "
             "SET status='sent',payload_json='',sent_at=?,last_error_type='',updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                timestamp, timestamp, int(notification_id),
-                max(0, int(expected_lease_generation)),
+                timestamp, timestamp, notification_id,
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -271,8 +271,8 @@ def release_agent_download_verification_notification(
             "SET status='retry_wait',next_attempt_at=?,last_error_type='',updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                str(next_attempt_at or timestamp), timestamp, int(notification_id),
-                max(0, int(expected_lease_generation)),
+                (next_attempt_at or timestamp), timestamp, notification_id,
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -285,7 +285,7 @@ def retry_agent_download_verification_notification(
     next_attempt_at: str,
     error_type: str = "",
 ) -> bool:
-    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
+    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", (error_type or ""))[:80]
     timestamp = db.now()
     with db.get_conn() as conn:
         cur = conn.execute(
@@ -294,8 +294,8 @@ def retry_agent_download_verification_notification(
             "next_attempt_at=?,last_error_type=?,updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                str(next_attempt_at or timestamp), safe_error_type, timestamp,
-                int(notification_id), max(0, int(expected_lease_generation)),
+                (next_attempt_at or timestamp), safe_error_type, timestamp,
+                notification_id, max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -307,7 +307,7 @@ def discard_agent_download_verification_notification(
     expected_lease_generation: int,
     error_type: str = "",
 ) -> bool:
-    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_type or ""))[:80]
+    safe_error_type = re.sub(r"[^A-Za-z0-9_.-]", "", (error_type or ""))[:80]
     timestamp = db.now()
     with db.get_conn() as conn:
         cur = conn.execute(
@@ -315,8 +315,8 @@ def discard_agent_download_verification_notification(
             "SET status='discarded',payload_json='',last_error_type=?,updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                safe_error_type, timestamp, int(notification_id),
-                max(0, int(expected_lease_generation)),
+                safe_error_type, timestamp, notification_id,
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -333,7 +333,7 @@ def discard_agent_download_verification_notifications() -> int:
             "WHERE status IN ('pending','retry_wait','sending')",
             (timestamp,),
         )
-        return max(0, int(cur.rowcount))
+        return max(0, cur.rowcount)
 
 
 def _recover_after_restart(conn, timestamp: str) -> None:

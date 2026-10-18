@@ -15,6 +15,7 @@ from app.clients.emby import EmbyClient
 from app.clients.jellyfin import JellyfinClient
 from app.modules.media_server_path_mapping import (
     MediaServerPathMapping,
+    MediaServerRefreshOptions,
     configured_media_server_refresh_options,
 )
 from app.modules.media_server_profiles import list_configured_profiles
@@ -32,7 +33,7 @@ def _path_within(path: Path, root: Path) -> bool:
 
 
 def _client_for_provider(
-    provider: str, profile: Any, *, refresh_options: dict[str, object]
+    provider: str, profile: Any, *, refresh_options: MediaServerRefreshOptions
 ) -> Any:
     if provider == "jellyfin":
         return JellyfinClient(profile.url, profile.credential, **refresh_options)
@@ -42,7 +43,7 @@ def _client_for_provider(
 
 
 def _server_config_digest(
-    provider: str, profile: Any, refresh_options: dict[str, object]
+    provider: str, profile: Any, refresh_options: MediaServerRefreshOptions
 ) -> str:
     mappings = refresh_options.get("path_mappings") or ()
     canonical = {
@@ -56,9 +57,7 @@ def _server_config_digest(
             }
             for item in mappings
         ],
-        "allow_global_refresh_fallback": bool(
-            refresh_options.get("allow_global_refresh_fallback", False)
-        ),
+        "allow_global_refresh_fallback": (refresh_options.get("allow_global_refresh_fallback", False)),
     }
     try:
         secret = get_web_secret().encode("utf-8")
@@ -218,7 +217,7 @@ def _bound_task_scope(task: Any) -> dict[str, Any]:
             "client": client,
             "paths": paths,
             "binding": binding,
-            "server_label": str(profile.label),
+            "server_label": (profile.label),
         }
     except Exception:
         close_media_server_client(client)

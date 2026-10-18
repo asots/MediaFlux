@@ -43,7 +43,7 @@ def _positive_id(value: Any, *, field: str) -> int:
         or value > 2_147_483_647
     ):
         raise AgentToolError(f"{field} 必须是正整数")
-    return int(value)
+    return value
 
 
 def _identity(provider: Any, external_id: Any, media_type: Any) -> tuple[str, str, str]:
@@ -235,8 +235,8 @@ def _encode_context(payload: dict[str, Any]) -> str:
 
 def _decode_context(value: str) -> dict[str, Any]:
     try:
-        payload = json.loads(str(value or ""))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        payload = json.loads((value or ""))
+    except (TypeError, ValueError) as exc:
         raise AgentToolError("确认上下文无效", code="confirmation_invalid") from exc
     if not isinstance(payload, dict):
         raise AgentToolError("确认上下文无效", code="confirmation_invalid")
@@ -256,7 +256,7 @@ def _canonical_card(card: MediaCard, expected: tuple[str, str, str]) -> dict[str
         "media_type": card.media_type,
         "title": title,
         "year": _safe_text(card.year, 12),
-        "poster_key": str(card.poster_key or "")[:500],
+        "poster_key": (card.poster_key or "")[:500],
     }
 
 
@@ -372,7 +372,8 @@ def add_watchlist_confirmed(
                 db.now(),
             ),
         )
-        watchlist_number = int(cur.lastrowid)
+        watchlist_number = cur.lastrowid
+        assert watchlist_number is not None
     return ToolResult(
         ok=True,
         status="completed",

@@ -58,7 +58,9 @@ class BatchConvergenceTests(unittest.TestCase):
         )
 
         def remote_submit(row, **kwargs):
-            self.assertEqual(db.get_download_request(row["id"])["status"], "submitting")
+            get_download_request_result = db.get_download_request(row["id"])
+            assert get_download_request_result is not None
+            self.assertEqual(get_download_request_result["status"], "submitting")
             started.set()
             self.assertTrue(alias_returned.wait(5), "重复项必须先返回；不得串行化")
             return dict(outcome)
@@ -115,7 +117,9 @@ class BatchConvergenceTests(unittest.TestCase):
 
     def test_duplicate_failure_uses_final_submission_not_submitting(self):
         result, first, alias = self.run_overlap({"ok": False, "error": "synthetic-private-detail"})
-        self.assertEqual(db.get_download_request(first["request_id"])["status"], "failed")
+        get_download_request_result_2 = db.get_download_request(first["request_id"])
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["status"], "failed")
         self.assert_merged(result, first, alias, "failed")
         self.assertEqual(result.data["failed"], 1)
         self.assertEqual(result.data["succeeded"], 0)
@@ -137,6 +141,7 @@ class BatchConvergenceTests(unittest.TestCase):
         self.assertEqual(alias["batch_result"]["failed"], ["guangya"])
         self.assertEqual(result.data["succeeded"], 1)
         self.assertEqual(result.status, "partial")
+        assert result.error is not None
         self.assertIn("部分下载目标", result.error)
 
     def test_duplicate_unknown_outcome_stays_review_required(self):
@@ -145,6 +150,7 @@ class BatchConvergenceTests(unittest.TestCase):
         self.assertEqual(result.status, "review_required")
         self.assertEqual(result.data["review_required"], 1)
         self.assertEqual(result.data["failed"], 0)
+        assert result.error is not None
         self.assertIn("勿直接重复提交", result.error)
         self.assertFalse(alias["can_resubmit"])
 
@@ -179,7 +185,9 @@ class BatchConvergenceTests(unittest.TestCase):
         self.assertEqual(result.data.get("merged", 0), 0)
         self.assertEqual(result.status, "partial")
         self.assertNotIn("other-owner", str(result.to_dict()))
-        self.assertEqual(db.get_download_request(existing["id"])["status"], "submitting")
+        get_download_request_result_3 = db.get_download_request(existing["id"])
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["status"], "submitting")
 
     def test_same_request_different_backends_are_not_merged(self):
         existing = dispatcher.create_request(
@@ -218,7 +226,9 @@ class BatchConvergenceTests(unittest.TestCase):
         with patch.object(db, "get_download_request", side_effect=AssertionError("不得查询全局任务")):
             self.assertEqual(indexer_actions._converge_batch_duplicates(items), 0)
         self.assertEqual(items, before)
-        self.assertEqual(db.get_download_request(existing["id"])["gy_status"], "submitting")
+        get_download_request_result_4 = db.get_download_request(existing["id"])
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["gy_status"], "submitting")
 
     def test_independent_downloads_still_submit_concurrently(self):
         remote_barrier = threading.Barrier(2)

@@ -143,14 +143,14 @@ class _RefreshRecorder:
     def _library_items(self, library_id: str):
         if self.items_error:
             raise RuntimeError("接口失败")
-        return self.items.get(str(library_id), [])
+        return self.items.get(library_id, [])
 
     def _library_roots(
         self, library_id: str, *, locations: tuple[str, ...] = (),
     ) -> list[dict]:
         wanted = {self.client._media_path_key(item) for item in locations}
         return [
-            item for item in self.items.get(str(library_id), [])
+            item for item in self.items.get(library_id, [])
             if str(item.get("Type") or "").casefold() == "folder"
             and (
                 not wanted
@@ -159,7 +159,7 @@ class _RefreshRecorder:
         ]
 
     def _refresh_library(self, library_id: str) -> bool:
-        self.refreshed.append(str(library_id))
+        self.refreshed.append(library_id)
         return True
 
     def _refresh_all(self) -> bool:

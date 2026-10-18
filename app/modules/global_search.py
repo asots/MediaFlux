@@ -16,7 +16,7 @@ from app.services import search_media_servers
 logger = get_logger(__name__)
 
 
-def normalize_search_query(value: str) -> str:
+def normalize_search_query(value: str | int) -> str:
     query = unicodedata.normalize("NFKC", str(value or "")).strip()
     if (
         not query
@@ -33,7 +33,7 @@ def _type_label(value: str) -> str:
         "series": "剧集",
         "episode": "单集",
         "tv": "剧集",
-    }.get(str(value or "").strip().lower(), str(value or "媒体"))
+    }.get((value or "").strip().lower(), (value or "媒体"))
 
 
 def _section(key: str, title: str, target_url: str, items: list[dict], error: str = "") -> dict:
@@ -51,16 +51,16 @@ _LOCAL_MEDIA_SOURCE_FETCH_LIMIT = _MEDIA_SECTION_LIMIT * 2
 
 
 def _series_id(item: MediaItem) -> str:
-    item_type = str(item.type or "").casefold()
-    series_id = str(item.series_id or "").strip()
+    item_type = (item.type or "").casefold()
+    series_id = (item.series_id or "").strip()
     if not series_id and item_type in {"series", "tv"}:
-        series_id = str(item.id or "").strip()
+        series_id = (item.id or "").strip()
     return series_id
 
 
 def _series_title_key(item: MediaItem) -> str:
-    item_type = str(item.type or "").casefold()
-    title = str(
+    item_type = (item.type or "").casefold()
+    title = (
         item.series_name if item_type == "episode" else item.display_name
     ).strip()
     return "".join(
@@ -79,10 +79,10 @@ def _series_identity(item: MediaItem) -> str:
 
 def _local_media_payload(item: MediaItem, source: dict) -> dict | None:
     """把本地单集提升为剧集卡片，避免搜索结果被多集重复占满。"""
-    item_type = str(item.type or "").casefold()
+    item_type = (item.type or "").casefold()
     is_episode = item_type == "episode"
     is_series = is_episode or item_type in {"series", "tv"}
-    title = str(item.series_name if is_episode else item.display_name).strip()
+    title = (item.series_name if is_episode else item.display_name).strip()
     if not title:
         # 没有剧名的孤立 Episode 无法安全归并，宁可不展示错误的单集卡片。
         return None
@@ -102,16 +102,16 @@ def _local_media_payload(item: MediaItem, source: dict) -> dict | None:
         "provider": provider,
         "source_label": server_name,
         "type_label": type_label,
-        "year": str(item.year or ""),
+        "year": (item.year or ""),
         "is_local": True,
         "is_episode": False,
-        "series_name": title if is_series else str(item.series_name or ""),
+        "series_name": title if is_series else (item.series_name or ""),
         "episode_context": "",
         # 单集简介属于具体分集，折叠成剧集卡片后不能继续冒充整部剧简介。
-        "overview": "" if is_episode else str(item.overview or ""),
+        "overview": "" if is_episode else (item.overview or ""),
         "original_title": (
             "" if is_series else (
-                str(item.name or "") if item.name != item.display_name else ""
+                (item.name or "") if item.name != item.display_name else ""
             )
         ),
         "rating": None,
@@ -208,12 +208,12 @@ def _discovery_section(query: str) -> dict:
             "provider": card.provider,
             "source_label": card.provider.upper(),
             "type_label": type_label,
-            "year": str(card.year or ""),
+            "year": (card.year or ""),
             "is_local": False,
-            "overview": str(card.overview or ""),
-            "original_title": str(card.original_title or ""),
+            "overview": (card.overview or ""),
+            "original_title": (card.original_title or ""),
             "rating": card.rating,
-            "rating_source": str(card.rating_source or ""),
+            "rating_source": (card.rating_source or ""),
         })
     error = "该来源暂时不可用" if not items and result.errors else ""
     return _section(

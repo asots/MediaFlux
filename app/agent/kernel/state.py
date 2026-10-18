@@ -61,7 +61,7 @@ def _consume_delivered_effect_receipts(state: SessionState) -> None:
     if remaining:
         state.metadata["effect_waits"] = remaining
         next_polls = [
-            record.get("next_poll_at")
+            record["next_poll_at"]
             for record in remaining.values()
             if isinstance(record, Mapping)
             and not record.get("delivered")
@@ -343,7 +343,7 @@ class InMemorySessionStateStore:
             return (lease, state.clone()) if lease else None
 
     async def due_effect_waits(self, *, limit: int = 16) -> list[dict[str, Any]]:
-        maximum = max(0, int(limit))
+        maximum = max(0, limit)
         if not maximum:
             return []
         now = self._clock()
@@ -399,7 +399,7 @@ class TurnCoordinator:
                 if previous[2]:
                     raise SessionBusyError("confirmed effect is executing")
                 previous[1].cancel("superseded", previous[3])
-            self._active[key] = (lease, token, bool(protected), task)
+            self._active[key] = (lease, token, protected, task)
         return token
 
     async def cancel(

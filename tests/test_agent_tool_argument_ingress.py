@@ -1,5 +1,6 @@
 """Tool-argument ingress contracts through the real HTTP adapter and pipeline."""
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 import json
@@ -42,7 +43,7 @@ def field(name, value):
     return {} if value is MISSING else {name: value}
 
 
-def frames(protocol, initial=MISSING, deltas=(), final=MISSING, *, index=0, done="item"):
+def frames(protocol, initial=MISSING, deltas=(), final=MISSING, *, index=0, done="item") -> list[dict[str, Any] | str]:
     """Full input and increments stay separate; only Responses done is authoritative."""
     cid = f"call-{index}"
     if protocol == "chat_completions":
@@ -52,17 +53,20 @@ def frames(protocol, initial=MISSING, deltas=(), final=MISSING, *, index=0, done
             {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}, "[DONE]",
         ]
     if protocol == "anthropic_messages":
-        return [{"type": "content_block_start", "index": index, "content_block": {
+        blocks: list[dict[str, Any] | str] = [{"type": "content_block_start", "index": index, "content_block": {
             "type": "tool_use", "id": cid, "name": "lookup", **field("input", initial),
-        }}] + [{"type": "content_block_delta", "index": index, "delta": {
+        }}]
+        blocks.extend({"type": "content_block_delta", "index": index, "delta": {
             "type": "input_json_delta", **field("partial_json", value),
-        }} for value in deltas] + [
+        }} for value in deltas)
+        blocks.extend([
             {"type": "content_block_stop", "index": index},
             {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
             {"type": "message_stop"},
-        ]
+        ])
+        return blocks
     item = {"type": "function_call", "id": f"item-{index}", "call_id": cid, "name": "lookup"}
-    result = [{"type": "response.output_item.added", "output_index": index,
+    result: list[dict[str, Any] | str] = [{"type": "response.output_item.added", "output_index": index,
                "item": {**item, **field("arguments", initial)}}]
     result.extend({"type": "response.function_call_arguments.delta", "output_index": index,
                    "item_id": item["id"], **field("delta", value)} for value in deltas)
@@ -178,7 +182,12 @@ def assert_rejected(protocol, reply, emitted=()):
 def assert_accepted(protocol, reply, value):
     seen, error = asyncio.run(observe(protocol, reply))
     assert error is None
-    assert [dict(e.tool_call.arguments) for e in seen if e.tool_call] == [value]
+    actual_calls = []
+    for e in seen:
+        if e.tool_call:
+            assert e.tool_call.arguments is not None
+            actual_calls.append(dict(e.tool_call.arguments))
+    assert actual_calls == [value]
     assert seen[-1].type is ModelEventType.FINISH
 
 
@@ -301,7 +310,12 @@ def test_chat_identity_fragments_multi_index_and_choice_filter_are_unchanged():
     ]
     seen, error = asyncio.run(observe("chat_completions", event_wire(events)))
     assert error is None
-    assert [(e.tool_call.call_id, e.tool_call.name, dict(e.tool_call.arguments)) for e in seen if e.tool_call] == [
+    actual_calls = []
+    for e in seen:
+        if e.tool_call:
+            assert e.tool_call.arguments is not None
+            actual_calls.append((e.tool_call.call_id, e.tool_call.name, dict(e.tool_call.arguments)))
+    assert actual_calls == [
         ("first", "lookup", {"no": False}), ("second", "inspect", {}),
     ]
 

@@ -235,8 +235,8 @@ class PausedMutationMedia(MediaFixture):
         self.mutated = threading.Event()
         self.release = threading.Event()
 
-    def execute(self, arguments, fingerprint, context):
-        result = super().execute(arguments, fingerprint, context)
+    def execute(self, arguments, fingerprint, _context):
+        result = super().execute(arguments, fingerprint, _context)
         self.mutated.set()
         assert self.release.wait(10), f"{OFFLINE}：实际写入暂停未及时释放"
         return result
@@ -295,6 +295,7 @@ class NativeCase:
         )
 
     async def preview(self):
+        assert self.session is not None
         events = [event async for event in self.session.run(
             AgentInput(message=GOAL, owner=self.owner, session_id=self.sid, request_id="source-turn")
         )]
@@ -312,6 +313,7 @@ class NativeCase:
         return plan_id, self.users(state)
 
     async def confirm(self, plan_id):
+        assert self.session is not None
         events = [event async for event in self.session.confirm(
             owner=self.owner, session_id=self.sid, plan_id=plan_id, request_id="confirm-turn",
         )]
@@ -326,6 +328,7 @@ class NativeCase:
         assert self.media.prepared == prepares, f"{OFFLINE}：预检次数/动作不符"
         assert self.media.executed == executions, f"{OFFLINE}：实际执行次数/动作不符"
         assert len(self.media.reads) == reads, f"{OFFLINE}：没有沿原 confirm 调用自动读取诊断"
+        assert self.script is not None
         assert len(self.script.requests) == len(self.script.model_requests) == requests, (
             f"{OFFLINE}：原生模型请求数不符，不能要求额外用户消息"
         )
@@ -341,6 +344,7 @@ class NativeCase:
 
     def assert_source(self, state, original_users):
         assert self.users(state) == original_users, f"{OFFLINE}：确认/诊断不得新增虚构 user 消息"
+        assert self.script is not None
         self.script.assert_user_inputs([GOAL])
 
     def assert_failure(self, events, state, plan_id):
@@ -357,6 +361,7 @@ class NativeCase:
         persisted = json.loads(content[content.index("{"):])
         assert persisted["ok"] is False and persisted["status"] == effect_result["status"]
         # 第一个续行 HTTP 请求已带入真实失败，不是旧预览或模型自述。
+        assert self.script is not None
         if len(self.script.requests) > 1:
             failed_rows = [row for row in self.script.requests[1]["messages"] if row.get("role") == "tool"]
             assert any(json.loads(row["content"]).get("ok") is False for row in failed_rows)
@@ -745,6 +750,7 @@ def test_new_user_supersedes_failed_diagnosis_and_preserves_publication_facts(ca
             assert current.metadata["confirmed_publication"] == before.metadata["confirmed_publication"]
             live = await case.session.coordinator.describe(owner=case.owner, session_id=case.sid)
             assert live["request_id"] == "new-user-turn" and live["generation"] == current.generation
+            cancelled = None
             if cancel_new_publication:
                 # 真正撤销新 publication；旧确认事实不能使新的停止失效。
                 assert await case.session.cancel(owner=case.owner, session_id=case.sid, request_id="new-user-turn")
@@ -757,6 +763,7 @@ def test_new_user_supersedes_failed_diagnosis_and_preserves_publication_facts(ca
             case.events.extend(newer)
             saved = await case.cold_store().load(owner=case.owner, session_id=case.sid)
             if cancel_new_publication:
+                assert cancelled is not None
                 assert newer[-1].type is AgentEventType.TURN_CANCELLED
                 await case.assert_cancelled_publication_event(newer[-1])
                 assert saved.generation == cancelled.generation

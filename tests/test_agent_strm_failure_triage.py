@@ -84,7 +84,7 @@ class StrmFailureTriageUnitTests(IsolatedDatabaseTestCase):
             summary["by_action"]["metadata"],
             {"total": 2, "open": 0, "retrying": 1, "resolved": 1},
         )
-        self.assertIsInstance(repeated_id, int)
+        assert isinstance(repeated_id, int)
         serialized = json.dumps(summary, ensure_ascii=False)
         for secret in ("SECRET", "/private", "UUID", "PATH", "source-", ".mkv"):
             self.assertNotIn(secret, serialized)

@@ -77,7 +77,7 @@ def person_filmography_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _popularity(value: object) -> float:
+def _popularity(value: Any) -> float:
     if isinstance(value, bool):
         return 0.0
     try:

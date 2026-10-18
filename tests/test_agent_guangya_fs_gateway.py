@@ -1,6 +1,9 @@
 """光鸭通用能力网关与确认写入链路测试。"""
 
 from __future__ import annotations
+from app.agent.session_context import AgentSessionContextRepository
+from app.clients.guangya import GuangYaClient
+from typing import cast
 
 import json
 import tempfile
@@ -14,8 +17,8 @@ from app import database as db
 from app.agent.domain_catalog import DomainActions
 from app.agent.domains.guangya import fs_change_actions as change_actions
 from app.agent.domains.guangya import workspace_actions
-from app.agent.domains.guangya.fs_change_actions import GuangyaFsChangeActions
-from app.agent.domains.guangya.workspace_actions import GuangyaWorkspaceActions
+from app.agent.domains.guangya.fs_change_actions import GuangyaFsChangeActions, _Flow as ChangeFlow
+from app.agent.domains.guangya.workspace_actions import GuangyaWorkspaceActions, _Flow as WorkspaceFlow
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile, GuangYaWriteRejected
@@ -107,7 +110,7 @@ class FakeGatewayClient:
         for file_id in file_ids:
             item = self._pop(str(file_id))
             if item.is_dir:
-                self.directories.pop(str(item.file_id), None)
+                self.directories.pop(item.file_id, None)
         return True
 
     def create_dir(self, name, parent_id="0"):
@@ -212,7 +215,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=trigger_strm,
@@ -256,7 +259,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             mock.patch("app.config.get", side_effect=get_config),
         ):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
         return result, scheduler
 
@@ -320,7 +323,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
                 with mock.patch.object(client, "rename", side_effect=rename), mock.patch.object(guangya_fs_change, "_append_journal", side_effect=save):
                     with self.assertRaises(WorkerExit):
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                 self.assertEqual(calls, ["rename"])
                 self.assertTrue(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1)["resumable"])
                 # 新worker领队列后、更新计划代数前再崩溃，也不能遗失同一检查点。
@@ -328,17 +331,19 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 if crash_at == "changed_after_checkpoint":
                     original_rename("rename", "externally-changed.mp4")
                 with mock.patch.object(client, "rename", wraps=original_rename) as resumed:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                 safe = crash_at in {"after_write", "after_checkpoint"}
                 self.assertEqual(result["requires_manual"], not safe)
                 self.assertEqual(resumed.call_count, int(safe))
                 self.assertEqual(result["stats"]["renamed"], 2 if safe else 0)
-                self.assertEqual(client.file_info("move").name, "B-done.mp4" if safe else "Move.mp4")
+                file_info_result = client.file_info("move")
+                assert file_info_result is not None
+                self.assertEqual(file_info_result.name, "B-done.mp4" if safe else "Move.mp4")
                 self.assertEqual(result["operation_items"][1]["status"], "completed" if safe else "not_started")
                 if safe:
                     resumed.assert_called_once_with("move", "B-done.mp4")
                 with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                    guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
 
     def test_recovery_never_guesses_copy_trash_or_create_success_from_name_or_absence(self):
         class WorkerExit(BaseException):
@@ -357,9 +362,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     raise WorkerExit()
                 with mock.patch.object(client, method, side_effect=crash):
                     with self.assertRaises(WorkerExit):
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                 with mock.patch.object(client, method, wraps=original) as replay, mock.patch.object(client, "rename", wraps=client.rename) as rename:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                 self.assertTrue(result["requires_manual"])
                 self.assertEqual(result["operation_items"][0]["status"], "unknown")
                 self.assertEqual(result["operation_items"][1]["status"], "not_started")
@@ -386,7 +391,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         raise OrganizeOperationCancelled("cancelled while persisting")
                 with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), mock.patch.object(guangya_fs_change, "cloud_change_sources", return_value={"source": "/source"}), mock.patch.object(guangya_fs_change, "trigger_cloud_changes") as sync, mock.patch.object(client, "rename", wraps=client.rename) as rename:
                     with self.assertRaises(OrganizeOperationCancelled) as caught:
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1, cancel_check=check)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1, cancel_check=check)
                 self.assertEqual(rename.call_count, int(phase == "sync"))
                 sync.assert_not_called()
                 row = caught.exception.operation_result["operation_items"][0]
@@ -398,13 +403,13 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             with self.subTest(count=count):
                 client = FakeGatewayClient()
                 client.directories["source"] = [GuangYaFile(str(index), f"Old-{index}.mkv", False, parent_id="source", size=1, etag=str(index)) for index in range(count)]
-                obs = guangya_workspace.create_directory_observation(client, owner="owner", path="/source", recursive=True, max_items=500)
+                obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/source", recursive=True, max_items=500)
                 operations = [{"op": "rename", "object_ref": row["handle"], "new_name": f"Done-{row['file_id']}.mkv"} for row in obs["entries"]]
-                plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=obs, operations=operations, trigger_strm=False)
+                plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=obs, operations=operations, trigger_strm=False)
                 guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
                 payload = self._queued_payload(plan)
                 with mock.patch.object(guangya_fs_change, "_atomic_write", wraps=guangya_fs_change._atomic_write) as snapshot:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                 self.assertFalse(result["partial"])
                 self.assertEqual(snapshot.call_count, 2, "完整计划只能启动/终态写入，不能随N重复重写")
                 journal_sizes.append(guangya_fs_change._journal_path(plan["plan_id"]).stat().st_size)
@@ -421,7 +426,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             raise WorkerExit()
         with mock.patch.object(client, "rename", side_effect=crash):
             with self.assertRaises(WorkerExit):
-                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
         path = guangya_fs_change._journal_path(plan["plan_id"])
         original_bytes = path.read_bytes()
         for kind in ("truncated", "missing_all_stages", "tampered", "wrong_job", "missing_sequence"):
@@ -458,7 +463,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 raise OSError("disk unavailable")
             return original_save(plan_id, record)
         with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=save), mock.patch.object(client, "rename", wraps=client.rename) as rename:
-            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
         rename.assert_not_called()
         self.assertTrue(result["requires_manual"])
         self.assertTrue(all(item["status"] == "not_started" for item in result["operation_items"]))
@@ -489,19 +494,23 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 plan, payload = self._interrupted_relocation(client, move_first=move_first)
                 progress = guangya_fs_change._read_fs_checkpoints(guangya_fs_change._read(plan["plan_id"]))
                 self.assertEqual(progress["operation_items"][0]["completed_actions"], ["move" if move_first else "rename"])
-                self.assertEqual(progress["stage_sources"]["1"], guangya_fs_change._snapshot(client.file_info("rename")))
+                self.assertEqual(progress["stage_sources"]["1"], guangya_fs_change._snapshot(cast(GuangYaFile, client.file_info("rename"))))
                 with mock.patch.object(client, "move", wraps=client.move) as moved, mock.patch.object(client, "rename", wraps=client.rename) as renamed:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                 self.assertFalse(result["partial"])
                 self.assertEqual((result["stats"]["relocated"], result["stats"]["renamed"], result["stats"]["failed"]), (1, 1, 0))
                 self.assertEqual(moved.call_count, int(not move_first))
                 self.assertEqual(renamed.call_count, 1 + int(move_first))  # 第二个独立改名始终执行一次。
-                self.assertEqual(client.file_info("rename").parent_id, "target")
-                self.assertEqual(client.file_info("rename").name, "Move.mp4" if move_first else "Done.mp4")
+                file_info_result_2 = client.file_info("rename")
+                assert file_info_result_2 is not None
+                self.assertEqual(file_info_result_2.parent_id, "target")
+                file_info_result_3 = client.file_info("rename")
+                assert file_info_result_3 is not None
+                self.assertEqual(file_info_result_3.name, "Move.mp4" if move_first else "Done.mp4")
                 self.assertNotIn("stage_sources", result)
                 self.assertNotIn("parent_id", json.dumps(result))
                 with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                    guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
 
     def test_late_resume_preflight_failure_keeps_already_completed_stage(self):
         client = FakeGatewayClient()
@@ -518,7 +527,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     client.directories[current.parent_id].append(current)
             return preflight(*args, **kwargs)
         with mock.patch.object(guangya_fs_change, "_preflight_operation", side_effect=mutate_before_write), mock.patch.object(client, "rename", wraps=client.rename) as renamed:
-            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
         self.assertTrue(result["partial"])
         row = result["operation_items"][0]
         self.assertEqual((row["status"], row["completed_actions"], row["reason"]), ("partial", ["move"], "precondition_failed"))
@@ -531,7 +540,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client = FakeGatewayClient()
                 plan, payload = self._interrupted_relocation(client, move_first=move_first, stop_before_second=True)
                 with mock.patch.object(client, "move", wraps=client.move) as moved, mock.patch.object(client, "rename", wraps=client.rename) as renamed:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                 self.assertTrue(result["requires_manual"])
                 self.assertEqual(result["operation_items"][0]["reason"], "verification_pending")
                 self.assertEqual(result["operation_items"][1]["status"], "not_started")
@@ -552,7 +561,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         current.name = "externally-moved-target"
                     return current
                 with mock.patch.object(client, "file_info", side_effect=newer_info), mock.patch.object(client, "rename", wraps=client.rename) as rename:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                 self.assertTrue(result["requires_manual"])
                 self.assertEqual(result["operation_items"][0]["reason"], "precondition_failed")
                 rename.assert_not_called()
@@ -570,10 +579,10 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 raise WorkerExit()
         with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), mock.patch.object(client, "rename", wraps=client.rename) as rename:
             with self.assertRaises(WorkerExit):
-                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
             rename.assert_not_called()
         with mock.patch.object(client, "rename", wraps=client.rename) as rename:
-            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=5)
+            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=5)
         self.assertTrue(result["requires_manual"])
         self.assertEqual(result["operation_items"][0]["reason"], "verification_pending")
         rename.assert_not_called()
@@ -609,7 +618,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         guangya_fs_change._write_fs_checkpoint(plan["plan_id"], payload["job_id"], state,
                             item=plan["operations"][0], outcome=state["operation_items"][0])
                     with mock.patch.object(client, "move", wraps=client.move) as moved, mock.patch.object(client, "rename", wraps=client.rename) as renamed:
-                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                     self.assertTrue(result["requires_manual"])
                     self.assertEqual(result["operation_items"][0]["status"], "partial")
                     self.assertEqual(result["operation_items"][1]["status"], "not_started")
@@ -627,9 +636,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             raise WorkerExit()
         with mock.patch.object(client, "move", side_effect=crash):
             with self.assertRaises(WorkerExit):
-                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
         with mock.patch.object(client, "move", wraps=original_move) as moved, mock.patch.object(client, "rename", wraps=client.rename) as renamed:
-            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
         self.assertTrue(result["requires_manual"])
         self.assertEqual(result["operation_items"][0]["status"], "partial")
         self.assertEqual(result["operation_items"][0]["completed_actions"], ["move"])
@@ -641,9 +650,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         class WorkerExit(BaseException):
             pass
         client = FakeGatewayClient()
-        obs = guangya_workspace.create_directory_observation(client, owner="owner", path="/source", recursive=True, max_items=100)
+        obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/source", recursive=True, max_items=100)
         ref = next(item["handle"] for item in obs["entries"] if item["file_id"] == "move")
-        plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=obs, trigger_strm=False,
+        plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=obs, trigger_strm=False,
             operations=[{"op": "create_directory", "parent_path": "/target", "name": "new"},
                         {"op": "move", "object_ref": ref, "target_path": "/target/new"}])
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
@@ -656,13 +665,15 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 raise WorkerExit()
         with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=save):
             with self.assertRaises(WorkerExit):
-                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
         created_id = client.list_dir("target")[0].file_id
         with mock.patch.object(client, "create_dir", side_effect=AssertionError("must not recreate")):
-            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
         self.assertFalse(result["partial"])
         self.assertEqual((result["stats"]["created"], result["stats"]["moved"]), (1, 1))
-        self.assertEqual(client.file_info("move").parent_id, created_id)
+        file_info_result_4 = client.file_info("move")
+        assert file_info_result_4 is not None
+        self.assertEqual(file_info_result_4.parent_id, created_id)
 
     def test_recovery_does_not_repeat_unknown_strm_submission(self):
         class WorkerExit(BaseException):
@@ -672,9 +683,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         payload = self._queued_payload(plan)
         with mock.patch.object(guangya_fs_change, "cloud_change_sources", return_value={"source": "/source"}), mock.patch.object(guangya_fs_change, "trigger_cloud_changes", side_effect=WorkerExit):
             with self.assertRaises(WorkerExit):
-                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
         with mock.patch.object(guangya_fs_change, "trigger_cloud_changes", side_effect=AssertionError("unknown sync replay")) as sync, mock.patch.object(client, "rename", side_effect=AssertionError("rename replay")):
-            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
         self.assertTrue(result["requires_manual"])
         self.assertEqual(result["stats"]["strm_scope_unknown"], 1)
         self.assertEqual(result["stats"]["renamed"], 1)
@@ -683,13 +694,13 @@ class GuangYaFSGatewayTests(unittest.TestCase):
     def test_verified_terminal_plan_recovers_queue_receipt_without_repeating_writes(self):
         client = FakeGatewayClient()
         plan, payload = self._recovery_plan(client)
-        first = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+        first = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
         self.assertTrue(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:owner", lease_generation=1)["resumable"])
         terminal_execution = guangya_fs_change._read(plan["plan_id"])["execution"]
         client.logged_in = False  # 已核验历史回执不依赖当前是否仍登录。
         client.credential_generation += 1
         with mock.patch.object(client, "rename", side_effect=AssertionError("terminal replay")):
-            recovered = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+            recovered = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
         self.assertEqual(recovered, first)
         self.assertEqual(guangya_fs_change._read(plan["plan_id"])["execution"], {**terminal_execution, "lease_generation": 3})
         self.assertFalse(guangya_fs_change.inspect_fs_change_plan_recovery(payload, job_id=payload["job_id"], owner_digest="digest:someone-else", lease_generation=3)["resumable"])
@@ -1083,7 +1094,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             ),
         ):
             plan = guangya_fs_change.build_fs_change_plan(
-                client, owner="owner", observation=observation, operations=operations, trigger_strm=True
+                cast(GuangYaClient, client), owner="owner", observation=observation, operations=operations, trigger_strm=True
             )
         guangya_fs_change.confirm_fs_change_plan(
             plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
@@ -1105,7 +1116,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             mock.patch("app.config.get", side_effect=lambda key, default="": config_values.get(key, default)),
         ):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
 
         self.assertTrue(result["partial"])
@@ -1129,7 +1140,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             ),
         ):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
 
         self.assertFalse(result["partial"])
@@ -1175,7 +1186,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             ),
         ):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
 
         self.assertFalse(result["partial"])
@@ -1245,12 +1256,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     self.assertIsNone(result.effect_plan)
                     self.assertFalse(saved.pending_effect_plan_id)
                 else:
-                    self.assertIsNotNone(result.effect_plan)
+                    assert (result.effect_plan) is not None
                     self.assertEqual(saved.pending_effect_plan_id, result.effect_plan.plan_id)
                     self.assertEqual(result.outcome.public_content["status"], "confirmation_required")
                     self.assertEqual(result.effect_plan.arguments["operations"][0]["new_name"], new_name)
                     self.assertTrue(await pipeline.cancel_effect(result.effect_plan.plan_id, lease=context.lease))
-                self.assertEqual(client.file_info("move").name, "Move.mp4")
+                file_info_result_5 = client.file_info("move")
+                assert file_info_result_5 is not None
+                self.assertEqual(file_info_result_5.name, "Move.mp4")
         asyncio.run(run())
 
     def test_preview_resolves_object_refs_across_recent_owner_observations(self):
@@ -1307,8 +1320,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 self.assertTrue(result.ok)
                 self.assertEqual(result.status, "confirmation_required")
                 self.assertEqual(result.data["total"], 3)
-        self.assertEqual(client.file_info("draft").name, "draft.txt", "预览不能写入")
-        self.assertEqual(client.file_info("source").parent_id, "0")
+        file_info_result_6 = client.file_info("draft")
+        assert file_info_result_6 is not None
+        self.assertEqual(file_info_result_6.name, "draft.txt", "预览不能写入")
+        file_info_result_7 = client.file_info("source")
+        assert file_info_result_7 is not None
+        self.assertEqual(file_info_result_7.parent_id, "0")
 
     def test_preview_arguments_accept_full_season_batch(self):
         operations = [
@@ -1338,7 +1355,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
 
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=False,
@@ -1384,7 +1401,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     before = deepcopy(client.directories)
                     with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "重复名称"):
                         guangya_fs_change.build_fs_change_plan(
-                            client, owner="owner", observation=observation,
+                            cast(GuangYaClient, client), owner="owner", observation=observation,
                             operations=operations, trigger_strm=False,
                         )
                     self.assertEqual(client.directories, before)
@@ -1396,18 +1413,24 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
         plan = guangya_fs_change.build_fs_change_plan(
-            client, owner="owner", observation=observation, trigger_strm=False,
+            cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[
                 {"op": "relocate", "object_ref": refs["Move.mp4"], "new_name": "Shared.mp4", "target_path": "/target"},
                 {"op": "rename", "object_ref": refs["广告-ABC.mp4"], "new_name": "Shared.mp4"},
             ],
         )
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
-        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result["partial"])
-        self.assertEqual(client.file_info("rename").name, "Shared.mp4")
-        self.assertEqual(client.file_info("move").name, "Shared.mp4")
-        self.assertEqual(client.file_info("move").parent_id, "target")
+        file_info_result_8 = client.file_info("rename")
+        assert file_info_result_8 is not None
+        self.assertEqual(file_info_result_8.name, "Shared.mp4")
+        file_info_result_9 = client.file_info("move")
+        assert file_info_result_9 is not None
+        self.assertEqual(file_info_result_9.name, "Shared.mp4")
+        file_info_result_10 = client.file_info("move")
+        assert file_info_result_10 is not None
+        self.assertEqual(file_info_result_10.parent_id, "target")
 
     def test_created_destinations_under_distinct_case_sensitive_parents_do_not_collide(self):
         client = FakeGatewayClient()
@@ -1417,7 +1440,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
         plan = guangya_fs_change.build_fs_change_plan(
-            client, owner="owner", observation=observation, trigger_strm=False,
+            cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[
                 {"op": "create_directory", "parent_path": "/target", "name": "New"},
                 {"op": "create_directory", "parent_path": "/TARGET", "name": "New"},
@@ -1426,10 +1449,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             ],
         )
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
-        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["relocated"], 2)
-        self.assertNotEqual(client.file_info("rename").parent_id, client.file_info("move").parent_id)
+        file_info_result_11 = client.file_info("rename")
+        assert file_info_result_11 is not None
+        file_info_result_12 = client.file_info("move")
+        assert file_info_result_12 is not None
+        self.assertNotEqual(file_info_result_11.parent_id, file_info_result_12.parent_id)
 
     def test_relocate_checks_new_source_name_conflict_before_any_write(self):
         client = FakeGatewayClient()
@@ -1441,7 +1468,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         before = deepcopy(client.directories)
         with mock.patch.object(client, "rename", wraps=client.rename) as rename:
             with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
             rename.assert_not_called()
         self.assertEqual(client.directories, before)
 
@@ -1451,7 +1478,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
         plan = guangya_fs_change.build_fs_change_plan(
-            client, owner="owner", observation=observation, trigger_strm=False,
+            cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[
                 {"op": "rename", "object_ref": refs["广告-ABC.mp4"], "new_name": "Shared.mp4"},
                 {"op": "rename", "object_ref": refs["Move.mp4"], "new_name": "Distinct.mp4"},
@@ -1465,7 +1492,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         before = deepcopy(client.directories)
         with mock.patch.object(client, "rename", wraps=client.rename) as rename:
             with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "重复名称"):
-                guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
             rename.assert_not_called()
         self.assertEqual(client.directories, before)
 
@@ -1486,7 +1513,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         ]
         normalized = change_actions.guangya_fs_change_arguments({"operations": operations})
         plan = guangya_fs_change.build_fs_change_plan(
-            client, owner="owner", observation=observation,
+            cast(GuangYaClient, client), owner="owner", observation=observation,
             operations=normalized["operations"], trigger_strm=False,
         )
         self.assertEqual(client.directories["target"], [], "预览不能创建目录或移动文件")
@@ -1497,7 +1524,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
         )
         payload = self._queued_payload(plan)
-        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["created"], 2)
         self.assertEqual(result["stats"]["relocated"], 2)
@@ -1507,7 +1534,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual({item.name for item in client.directories[season.file_id]},
                          {"Series - S01E01.mp4", "Series - S01E02.mp4"})
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
 
     def test_failed_parent_creation_blocks_nested_create_and_move(self):
         client = FakeGatewayClient()
@@ -1517,7 +1544,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client, owner="owner", observation=observation, trigger_strm=False,
+            cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[
                 {"op": "create_directory", "parent_path": "/target", "name": "Series"},
                 {"op": "create_directory", "parent_path": "/target/Series", "name": "Season 01"},
@@ -1529,7 +1556,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
         before = deepcopy(client.directories)
         with mock.patch.object(client, "create_dir", side_effect=GuangYaWriteRejected("拒绝", code="denied")) as create:
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertEqual(create.call_count, 1)
         self.assertEqual(result["stats"]["failed"], 3)
         self.assertEqual(result["stats"]["precondition_failed"], 2)
@@ -1545,7 +1572,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     observed.data["observation_ref"], owner="owner"
                 )
                 plan = guangya_fs_change.build_fs_change_plan(
-                    client, owner="owner", observation=observation, trigger_strm=False,
+                    cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                     operations=[
                         {"op": "create_directory", "parent_path": "/target", "name": "Series"},
                         {"op": "create_directory", "parent_path": "/target/Series", "name": "Season 01"},
@@ -1569,12 +1596,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     return preflight(client, item, **kwargs)
 
                 with mock.patch.object(guangya_fs_change, "_preflight_operation", side_effect=change_ancestor):
-                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
                 self.assertTrue(changed)
                 self.assertEqual(result["stats"]["created"], change_after)
                 self.assertEqual(result["stats"]["moved"], 0)
                 self.assertEqual(result["stats"]["precondition_failed"], 3 - change_after)
-                self.assertEqual(client.file_info("move").parent_id, "source")
+                file_info_result_13 = client.file_info("move")
+                assert file_info_result_13 is not None
+                self.assertEqual(file_info_result_13.parent_id, "source")
 
     def test_nested_create_orders_root_parent_before_reversed_children(self):
         client = FakeGatewayClient()
@@ -1583,7 +1612,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client, owner="owner", observation=observation, trigger_strm=False,
+            cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[
                 {"op": "create_directory", "parent_path": "/Library/Series", "name": "Season 01"},
                 {"op": "create_directory", "parent_path": "/Library", "name": "Series"},
@@ -1594,7 +1623,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         guangya_fs_change.confirm_fs_change_plan(
             plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
         )
-        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertEqual(result["stats"]["created"], 3)
         self.assertEqual(result["stats"]["failed"], 0)
 
@@ -1607,7 +1636,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "重复名称"):
             guangya_fs_change.build_fs_change_plan(
-                client, owner="owner", observation=observation, trigger_strm=False,
+                cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                 operations=[
                     {"op": "create_directory", "parent_path": "/target", "name": "Series"},
                     {"op": "create_directory", "parent_path": "/target/Series", "name": "Move.mp4"},
@@ -1649,7 +1678,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             operations=normalized["operations"],
@@ -1664,7 +1693,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
         )
         result = guangya_fs_change.execute_fs_change_plan(
-            self._queued_payload(plan), client_factory=lambda: client
+            self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
         )
 
         self.assertFalse(result["partial"])
@@ -1730,7 +1759,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             }), context)
         self.assertIn(f"改名 {count} 项", confirmation.summary)
         self.assertIn(f"移动 {count} 项", confirmation.summary)
-        plan = guangya_fs_change._read(self._domain_actions.fs_change._flow("owner").plan_id)
+        flow_result = self._domain_actions.fs_change._flow("owner")
+        assert flow_result is not None
+        plan = guangya_fs_change._read(flow_result.plan_id)
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
         return client, plan
 
@@ -1744,23 +1775,33 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         def rename(file_id, new_name):
             original_rename(file_id, new_name)
             # 真实云盘在修改子文件后会更新父目录etag/更新时间，不能误报外部漂移。
-            folder = next(item for item in client.directories["source"] if item.file_id == client.file_info(file_id).parent_id)
+            info = client.file_info(file_id)
+            assert info is not None
+            folder = next(item for item in client.directories["source"] if item.file_id == info.parent_id)
             folder.etag = "after-own-rename"
             folder.updated_at += 1
             return True
 
         with mock.patch.object(client, "rename", side_effect=rename):
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["renamed"], 10)
         self.assertEqual(result["stats"]["moved"], 10)
         self.assertEqual(client.directories["source"], [])
         self.assertEqual(len(client.directories["target"]), 10)
         for index in range(10):
-            self.assertEqual(client.file_info(f"folder-{index}").parent_id, "target")
-            self.assertEqual(client.file_info(f"video-{index}").name, f"Code-{index}.mp4")
-            self.assertEqual(client.file_info(f"video-{index}").parent_id, f"folder-{index}")
-            self.assertEqual(client.file_info(f"poster-{index}").parent_id, f"folder-{index}")
+            file_info_result_14 = client.file_info(f"folder-{index}")
+            assert file_info_result_14 is not None
+            self.assertEqual(file_info_result_14.parent_id, "target")
+            file_info_result_15 = client.file_info(f"video-{index}")
+            assert file_info_result_15 is not None
+            self.assertEqual(file_info_result_15.name, f"Code-{index}.mp4")
+            file_info_result_16 = client.file_info(f"video-{index}")
+            assert file_info_result_16 is not None
+            self.assertEqual(file_info_result_16.parent_id, f"folder-{index}")
+            file_info_result_17 = client.file_info(f"poster-{index}")
+            assert file_info_result_17 is not None
+            self.assertEqual(file_info_result_17.parent_id, f"folder-{index}")
 
     def test_failed_child_rename_never_moves_its_parent(self):
         client, plan = self._folder_move_with_child_renames(count=2)
@@ -1772,13 +1813,19 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             return original_rename(file_id, new_name)
 
         with mock.patch.object(client, "rename", side_effect=rename):
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertTrue(result["partial"])
         self.assertEqual(result["stats"]["renamed"], 1)
         self.assertEqual(result["stats"]["moved"], 1)
-        self.assertEqual(client.file_info("folder-0").parent_id, "source")
-        self.assertEqual(client.file_info("video-0").name, "site.example@Code-0.mp4")
-        self.assertEqual(client.file_info("folder-1").parent_id, "target")
+        file_info_result_18 = client.file_info("folder-0")
+        assert file_info_result_18 is not None
+        self.assertEqual(file_info_result_18.parent_id, "source")
+        file_info_result_19 = client.file_info("video-0")
+        assert file_info_result_19 is not None
+        self.assertEqual(file_info_result_19.name, "site.example@Code-0.mp4")
+        file_info_result_20 = client.file_info("folder-1")
+        assert file_info_result_20 is not None
+        self.assertEqual(file_info_result_20.parent_id, "target")
 
     def test_child_rename_does_not_allow_parent_trash(self):
         with self.assertRaisesRegex(AgentToolError, "父目录"):
@@ -1789,20 +1836,28 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         payload = self._queued_payload(plan)
 
         def cancel():
-            if client.file_info("video-0").name == "Code-0.mp4":
+            info = client.file_info("video-0")
+            assert info is not None
+            if info.name == "Code-0.mp4":
                 raise RuntimeError("cancelled")
 
         with self.assertRaisesRegex(RuntimeError, "cancelled"):
-            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, cancel_check=cancel)
-        self.assertEqual(client.file_info("folder-0").parent_id, "source")
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), cancel_check=cancel)
+        file_info_result_21 = client.file_info("folder-0")
+        assert file_info_result_21 is not None
+        self.assertEqual(file_info_result_21.parent_id, "source")
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
-        self.assertEqual(client.file_info("folder-0").parent_id, "source")
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
+        file_info_result_22 = client.file_info("folder-0")
+        assert file_info_result_22 is not None
+        self.assertEqual(file_info_result_22.parent_id, "source")
 
     def test_copy_scope_uses_frozen_operation_counts(self):
         self.assertEqual(change_actions._change_summary({"total": 2, "copy": 2}), "复制 2 项")
         # 展示文案从计划计数取得，不增改历史 preview_safe 参与签名的字段。
-        self.assertNotIn("copy_count", change_actions._safe_preview({"total": 2, "sample_changes": []}))
+        preview = change_actions._safe_preview({"total": 2, "sample_changes": []})
+        assert preview is not None
+        self.assertNotIn("copy_count", preview)
 
     def test_own_child_rename_does_not_mask_external_parent_rename(self):
         client, plan = self._folder_move_with_child_renames()
@@ -1814,10 +1869,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             return True
 
         with mock.patch.object(client, "rename", side_effect=rename):
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertTrue(result["partial"])
         self.assertEqual(result["stats"]["moved"], 0)
-        self.assertEqual(client.file_info("folder-0").parent_id, "source")
+        file_info_result_23 = client.file_info("folder-0")
+        assert file_info_result_23 is not None
+        self.assertEqual(file_info_result_23.parent_id, "source")
 
     def test_relocate_with_correct_name_moves_without_rejected_noop_rename(self):
         client = FakeGatewayClient()
@@ -1825,18 +1882,22 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         target = next(item for item in observed.data["entries"] if item["object_name"] == "Move.mp4")
         observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
         plan = guangya_fs_change.build_fs_change_plan(
-            client, owner="owner", observation=observation, trigger_strm=False,
+            cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
             operations=[{"op": "relocate", "object_ref": target["object_ref"], "target_path": "/target", "new_name": "Move.mp4"}],
         )
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
         with mock.patch.object(client, "rename", side_effect=GuangYaWriteRejected("rename", code="160")) as rename:
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["relocated"], 1)
         self.assertEqual(result["stats"]["failed"], 0)
         rename.assert_not_called()
-        self.assertEqual(client.file_info("move").parent_id, "target")
-        self.assertEqual(client.file_info("move").name, "Move.mp4")
+        file_info_result_24 = client.file_info("move")
+        assert file_info_result_24 is not None
+        self.assertEqual(file_info_result_24.parent_id, "target")
+        file_info_result_25 = client.file_info("move")
+        assert file_info_result_25 is not None
+        self.assertEqual(file_info_result_25.name, "Move.mp4")
 
     def test_relocate_combines_move_and_rename_for_one_observed_object(self):
         client = FakeGatewayClient()
@@ -1863,7 +1924,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=False,
@@ -1875,7 +1936,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
         )
         result = guangya_fs_change.execute_fs_change_plan(
-            self._queued_payload(plan), client_factory=lambda: client
+            self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
         )
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["relocated"], 1)
@@ -1904,7 +1965,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=False,
@@ -1927,7 +1988,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
         )
         result = guangya_fs_change.execute_fs_change_plan(
-            self._queued_payload(plan), client_factory=lambda: client
+            self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
         )
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["renamed"], 1)
@@ -1961,7 +2022,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     operations.append({"op": "relocate", "object_ref": refs["广告-ABC.mp4"],
                                        "target_path": target, "new_name": "Move.mp4"})
                     plan = guangya_fs_change.build_fs_change_plan(
-                        client, owner="owner", observation=observation,
+                        cast(GuangYaClient, client), owner="owner", observation=observation,
                         operations=operations, trigger_strm=False,
                     )
                     self.assertTrue(plan["operations"][-1]["move_first"])
@@ -1979,20 +2040,24 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
                     def rename_after(fid, name):
                         calls.append("rename")
-                        self.assertNotEqual(client.file_info(fid).parent_id, "source")
+                        file_info_result_26 = client.file_info(fid)
+                        assert file_info_result_26 is not None
+                        self.assertNotEqual(file_info_result_26.parent_id, "source")
                         return rename(fid, name)
 
                     with mock.patch.object(client, "move", side_effect=relocate), \
                             mock.patch.object(client, "rename", side_effect=rename_after):
                         result = guangya_fs_change.execute_fs_change_plan(
-                            self._queued_payload(plan), client_factory=lambda: client
+                            self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
                         )
                     self.assertEqual(calls, ["move"] if move_fails else ["move", "rename"])
                     self.assertEqual(result["partial"], move_fails)
                     self.assertEqual(result["stats"]["relocated"], int(not move_fails))
                     untouched = client.file_info("move")
+                    assert untouched is not None
                     self.assertEqual((untouched.name, untouched.parent_id), ("Move.mp4", "source"))
                     selected = client.file_info("rename")
+                    assert selected is not None
                     self.assertEqual(selected.name, "广告-ABC.mp4" if move_fails else "Move.mp4")
                     self.assertEqual(selected.parent_id == "source", move_fails)
 
@@ -2022,7 +2087,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             return list_dir(parent)
 
         def move_after_rename(ids, parent):
-            if client.file_info(ids[0]).name != "ABC.mp4":
+            info = client.file_info(ids[0])
+            assert info is not None
+            if info.name != "ABC.mp4":
                 raise GuangYaWriteRejected("move", code="name_conflict")
             return move(ids, parent)
 
@@ -2031,14 +2098,18 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 mock.patch.object(client, "list_dir", side_effect=delayed_list), \
                 mock.patch("app.clients.guangya.sleep"):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
         self.assertFalse(result["partial"])
         self.assertGreaterEqual(reads, 3)
         moved.assert_called_once()
         renamed.assert_called_once()
-        self.assertEqual(client.file_info("rename").name, "ABC.mp4")
-        self.assertEqual(client.file_info("occupied").name, "广告-ABC.mp4")
+        file_info_result_27 = client.file_info("rename")
+        assert file_info_result_27 is not None
+        self.assertEqual(file_info_result_27.name, "ABC.mp4")
+        file_info_result_28 = client.file_info("occupied")
+        assert file_info_result_28 is not None
+        self.assertEqual(file_info_result_28.name, "广告-ABC.mp4")
 
     def test_move_first_waits_for_move_visibility_before_renaming(self):
         client = FakeGatewayClient()
@@ -2063,7 +2134,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             return list_dir(parent)
 
         def rename_at_destination(fid, name):
-            if client.file_info(fid).parent_id != "target":
+            info = client.file_info(fid)
+            assert info is not None
+            if info.parent_id != "target":
                 raise GuangYaWriteRejected("rename", code="name_conflict")
             return rename(fid, name)
 
@@ -2072,15 +2145,19 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 mock.patch.object(client, "list_dir", side_effect=delayed_list), \
                 mock.patch("app.clients.guangya.sleep"):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["relocated"], 1)
         self.assertGreaterEqual(reads, 3)
         moved.assert_called_once()
         renamed.assert_called_once()
-        self.assertEqual(client.file_info("rename").name, "Move.mp4")
-        self.assertEqual(client.file_info("move").parent_id, "source")
+        file_info_result_29 = client.file_info("rename")
+        assert file_info_result_29 is not None
+        self.assertEqual(file_info_result_29.name, "Move.mp4")
+        file_info_result_30 = client.file_info("move")
+        assert file_info_result_30 is not None
+        self.assertEqual(file_info_result_30.parent_id, "source")
 
     def test_move_first_reconciles_rename_failure_without_replaying_move(self):
         for mode in ("rejected", "timeout_before_apply", "timeout_after_apply"):
@@ -2102,7 +2179,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
 
                 with mock.patch.object(client, "rename", side_effect=rename) as renamed, \
                         mock.patch.object(client, "move", wraps=client.move) as moved:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                     self.assertEqual(result["partial"], mode != "timeout_after_apply")
                     self.assertEqual(result["requires_manual"], mode == "timeout_before_apply")
                     item_result = result["operation_items"][0]
@@ -2114,11 +2191,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     self.assertNotIn("file_id", item_result)
                     self.assertEqual(result["stats"]["relocated"], int(mode == "timeout_after_apply"))
                     item = client.file_info("rename")
+                    assert item is not None
                     self.assertEqual(item.parent_id, "target")
                     self.assertEqual(item.name, "Move.mp4" if mode == "timeout_after_apply" else "广告-ABC.mp4")
-                    self.assertEqual(client.file_info("move").parent_id, "source")
+                    file_info_result_31 = client.file_info("move")
+                    assert file_info_result_31 is not None
+                    self.assertEqual(file_info_result_31.parent_id, "source")
                     with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                     renamed.assert_called_once()
                     moved.assert_called_once()
 
@@ -2142,12 +2222,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 if conflict != "after_preview":
                     with self.assertRaises(guangya_fs_change.GuangYaFSChangeError):
                         guangya_fs_change.build_fs_change_plan(
-                            client, owner="owner", observation=observation,
+                            cast(GuangYaClient, client), owner="owner", observation=observation,
                             operations=operations, trigger_strm=False,
                         )
                 else:
                     plan = guangya_fs_change.build_fs_change_plan(
-                        client, owner="owner", observation=observation,
+                        cast(GuangYaClient, client), owner="owner", observation=observation,
                         operations=operations, trigger_strm=False,
                     )
                     guangya_fs_change.confirm_fs_change_plan(
@@ -2158,10 +2238,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     ))
                     with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
                         guangya_fs_change.execute_fs_change_plan(
-                            self._queued_payload(plan), client_factory=lambda: client
+                            self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
                         )
-                self.assertEqual(client.file_info("rename").name, "广告-ABC.mp4")
-                self.assertEqual(client.file_info("rename").parent_id, "source")
+                file_info_result_32 = client.file_info("rename")
+                assert file_info_result_32 is not None
+                self.assertEqual(file_info_result_32.name, "广告-ABC.mp4")
+                file_info_result_33 = client.file_info("rename")
+                assert file_info_result_33 is not None
+                self.assertEqual(file_info_result_33.parent_id, "source")
 
     def test_child_backup_and_parent_relocation_share_one_confirmed_plan(self):
         for copy_fails in (False, True):
@@ -2173,7 +2257,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 )
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
                 plan = guangya_fs_change.build_fs_change_plan(
-                    client, owner="owner", observation=observation, trigger_strm=False,
+                    cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                     operations=[
                         {"op": "relocate", "object_ref": refs["source"],
                          "target_path": "/target", "new_name": "archived"},
@@ -2182,7 +2266,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 )
                 self.assertEqual([item["op"] for item in plan["operations"]], ["copy", "relocate"])
                 self.assertEqual(plan["operations"][1]["rename_dependencies"], ["move"])
-                self.assertEqual(client.file_info("source").parent_id, "0", "预览不得写入")
+                file_info_result_34 = client.file_info("source")
+                assert file_info_result_34 is not None
+                self.assertEqual(file_info_result_34.parent_id, "0", "预览不得写入")
                 guangya_fs_change.confirm_fs_change_plan(
                     plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
                 )
@@ -2191,26 +2277,38 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         mock.patch.object(client, "move", wraps=client.move) as move:
                     if copy_fails:
                         copy.side_effect = GuangYaWriteRejected("copy", code="rejected")
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                     copy.assert_called_once_with(["move"], "target")
                     self.assertEqual(result["partial"], copy_fails)
                     self.assertEqual(result["stats"]["copied"], int(not copy_fails))
                     self.assertEqual(result["stats"]["relocated"], int(not copy_fails))
-                    self.assertEqual(client.file_info("move").parent_id, "source", "复制必须保留源文件")
+                    file_info_result_35 = client.file_info("move")
+                    assert file_info_result_35 is not None
+                    self.assertEqual(file_info_result_35.parent_id, "source", "复制必须保留源文件")
                     if copy_fails:
                         move.assert_not_called()
-                        self.assertEqual(client.file_info("source").name, "source")
-                        self.assertEqual(client.file_info("source").parent_id, "0")
+                        file_info_result_36 = client.file_info("source")
+                        assert file_info_result_36 is not None
+                        self.assertEqual(file_info_result_36.name, "source")
+                        file_info_result_37 = client.file_info("source")
+                        assert file_info_result_37 is not None
+                        self.assertEqual(file_info_result_37.parent_id, "0")
                         self.assertEqual(result["stats"]["precondition_failed"], 1)
                     else:
                         move.assert_called_once_with(["source"], "target")
-                        self.assertEqual(client.file_info("source").name, "archived")
-                        self.assertEqual(client.file_info("source").parent_id, "target")
+                        file_info_result_38 = client.file_info("source")
+                        assert file_info_result_38 is not None
+                        self.assertEqual(file_info_result_38.name, "archived")
+                        file_info_result_39 = client.file_info("source")
+                        assert file_info_result_39 is not None
+                        self.assertEqual(file_info_result_39.parent_id, "target")
                         copied = next(row for row in client.list_dir("target") if row.name == "Move.mp4")
                         self.assertNotEqual(copied.file_id, "move")
-                        self.assertEqual(copied.size, client.file_info("move").size)
+                        file_info_result_40 = client.file_info("move")
+                        assert file_info_result_40 is not None
+                        self.assertEqual(copied.size, file_info_result_40.size)
                     with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                     copy.assert_called_once()
 
     def test_child_backup_does_not_authorize_trashing_nonempty_parent(self):
@@ -2222,13 +2320,15 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "先移出内容"):
             guangya_fs_change.build_fs_change_plan(
-                client, owner="owner", observation=observation, trigger_strm=False,
+                cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                 operations=[
                     {"op": "trash", "object_ref": refs["source"]},
                     {"op": "copy", "object_ref": refs["Move.mp4"], "target_path": "/target"},
                 ],
             )
-        self.assertEqual(client.file_info("source").parent_id, "0")
+        file_info_result_41 = client.file_info("source")
+        assert file_info_result_41 is not None
+        self.assertEqual(file_info_result_41.parent_id, "0")
         self.assertEqual(client.list_dir("target"), [])
 
     def _named_copy_plan(self, client, *, directory=False):
@@ -2246,7 +2346,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 _, payload = self._named_copy_plan(client, directory=directory)
                 with mock.patch.object(client, "copy", wraps=client.copy) as copied, \
                      mock.patch.object(client, "rename", wraps=client.rename) as renamed:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                 self.assertFalse(result["partial"])
                 self.assertEqual(result["stats"]["copied"], 1)
                 self.assertEqual(result["operation_items"][0]["completed_actions"], ["copy", "rename"])
@@ -2269,15 +2369,17 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                      mock.patch.object(guangya_fs_change, "_COPY_FOREGROUND_ATTEMPTS", 1):
                     for generation in (1, 2):
                         with self.assertRaises(guangya_fs_change.GuangYaFSCopyPending):
-                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=generation)
+                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=generation)
                         renamed.assert_not_called()
                     task.return_value = {"data": {"status": 2}}
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                     copied.assert_called_once()
                     renamed.assert_called_once()
                 self.assertFalse(result["partial"])
                 self.assertEqual(result["stats"]["copied"], 1)
-                self.assertEqual(client.file_info("source").parent_id, "0")
+                file_info_result_42 = client.file_info("source")
+                assert file_info_result_42 is not None
+                self.assertEqual(file_info_result_42.parent_id, "0")
                 self.assertEqual(guangya_fs_change._read(plan["plan_id"])["status"], "completed")
 
     def test_named_copy_resumes_verified_identity_or_verifies_interrupted_rename(self):
@@ -2299,20 +2401,24 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), \
                          mock.patch.object(client, "rename", side_effect=rename):
                         with self.assertRaises(WorkerExit):
-                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                     copied_id = client.list_dir("target")[0].file_id
                     with mock.patch.object(client, "copy") as copied, \
                          mock.patch.object(client, "rename", wraps=original_rename) as renamed, \
                          mock.patch.object(client, "task_status", side_effect=TimeoutError("history unavailable")) as task:
-                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=2)
+                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=2)
                         copied.assert_not_called()
                         task.assert_not_called()
                         self.assertEqual(renamed.call_count, int(boundary == "copy_verified"))
                     self.assertFalse(result["partial"])
                     self.assertEqual(result["stats"]["copied"], 1)
                     self.assertEqual(client.list_dir("target")[0].file_id, copied_id)
-                    self.assertEqual(client.file_info("source").name, "source")
-                    self.assertEqual(client.file_info("move").name, "Move.mp4")
+                    file_info_result_43 = client.file_info("source")
+                    assert file_info_result_43 is not None
+                    self.assertEqual(file_info_result_43.name, "source")
+                    file_info_result_44 = client.file_info("move")
+                    assert file_info_result_44 is not None
+                    self.assertEqual(file_info_result_44.name, "Move.mp4")
 
     def test_named_copy_rejects_initial_or_final_name_conflicts_before_writes(self):
         for name in ("Move.mp4", "Final.mp4"):
@@ -2321,7 +2427,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client.directories["target"].append(GuangYaFile("existing", name, False, parent_id="target"))
                 with self.assertRaises(guangya_fs_change.GuangYaFSChangeError):
                     self._named_copy_plan(client)
-                self.assertEqual(client.file_info("move").name, "Move.mp4")
+                file_info_result_45 = client.file_info("move")
+                assert file_info_result_45 is not None
+                self.assertEqual(file_info_result_45.name, "Move.mp4")
                 self.assertEqual(len(client.list_dir("target")), 1)
 
     def test_named_copy_rechecks_copy_identity_and_conflicts_before_renaming(self):
@@ -2340,48 +2448,56 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         else: client.directories["source"][1].etag = "new-content"
                 with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), \
                      mock.patch.object(client, "rename", wraps=client.rename) as renamed:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                     renamed.assert_not_called()
                 self.assertTrue(result["partial"])
                 self.assertEqual(result["stats"]["copied"], 0)
                 self.assertEqual(result["operation_items"][0]["completed_actions"], ["copy"])
-                self.assertEqual(client.file_info("move").name, "Move.mp4")
+                file_info_result_46 = client.file_info("move")
+                assert file_info_result_46 is not None
+                self.assertEqual(file_info_result_46.name, "Move.mp4")
 
     def test_named_copy_supports_new_target_and_omits_noop_rename(self):
         for new_target in (False, True):
             for new_name in ("Final.mp4", "Move.mp4"):
                 with self.subTest(new_target=new_target, new_name=new_name):
                     client = FakeGatewayClient()
-                    obs = guangya_workspace.create_directory_observation(client, owner="owner", path="/", recursive=True)
+                    obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/", recursive=True)
                     refs = {row["file_id"]: row["handle"] for row in obs["entries"]}
                     operations = ([{"op": "create_directory", "parent_path": "/", "name": "archive"}] if new_target else [])
                     operations.append({"op": "copy", "object_ref": refs["move"], "target_path": "/archive" if new_target else "/target", "new_name": new_name})
-                    plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=obs, operations=operations, trigger_strm=False)
+                    plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=obs, operations=operations, trigger_strm=False)
                     guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
                     with mock.patch.object(client, "rename", wraps=client.rename) as renamed:
-                        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client, lease_generation=1)
+                        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                     self.assertFalse(result["partial"])
                     self.assertEqual(result["stats"]["created"], int(new_target))
                     self.assertEqual(result["stats"]["copied"], 1)
                     self.assertEqual(renamed.call_count, int(new_name != "Move.mp4"))
-                    self.assertEqual(client.file_info("move").name, "Move.mp4")
+                    file_info_result_47 = client.file_info("move")
+                    assert file_info_result_47 is not None
+                    self.assertEqual(file_info_result_47.name, "Move.mp4")
 
     def test_named_copy_batch_can_reuse_the_temporary_original_name(self):
         client = FakeGatewayClient()
         client.directories["0"].append(GuangYaFile("second", "second", True, parent_id="0", etag="s2"))
         client.directories["second"] = [GuangYaFile("other", "Move.mp4", False, parent_id="second", size=99, etag="other")]
-        obs = guangya_workspace.create_directory_observation(client, owner="owner", path="/", recursive=True)
+        obs = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/", recursive=True)
         refs = {row["file_id"]: row["handle"] for row in obs["entries"]}
-        plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=obs, trigger_strm=False,
+        plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=obs, trigger_strm=False,
             operations=[{"op": "copy", "object_ref": refs[source], "target_path": "/target", "new_name": name}
                         for source, name in (("move", "A.mp4"), ("other", "B.mp4"))])
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
-        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client, lease_generation=1)
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["copied"], 2)
         self.assertEqual({row.name for row in client.list_dir("target")}, {"A.mp4", "B.mp4"})
-        self.assertEqual(client.file_info("move").name, "Move.mp4")
-        self.assertEqual(client.file_info("other").name, "Move.mp4")
+        file_info_result_48 = client.file_info("move")
+        assert file_info_result_48 is not None
+        self.assertEqual(file_info_result_48.name, "Move.mp4")
+        file_info_result_49 = client.file_info("other")
+        assert file_info_result_49 is not None
+        self.assertEqual(file_info_result_49.name, "Move.mp4")
 
     def test_cancel_after_verified_copy_prevents_rename(self):
         from app.modules.organize_tasks import OrganizeOperationCancelled
@@ -2399,9 +2515,11 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), \
              mock.patch.object(client, "rename", wraps=client.rename) as renamed:
             with self.assertRaises(OrganizeOperationCancelled):
-                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1, cancel_check=check)
+                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1, cancel_check=check)
             renamed.assert_not_called()
-        self.assertEqual(client.file_info("move").name, "Move.mp4")
+        file_info_result_50 = client.file_info("move")
+        assert file_info_result_50 is not None
+        self.assertEqual(file_info_result_50.name, "Move.mp4")
         self.assertEqual(client.list_dir("target")[0].name, "Move.mp4")
 
     def _copy_plan(self, client, *, source_id="trash"):
@@ -2429,7 +2547,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client = FakeGatewayClient()
                 plan, payload = self._copy_plan(client)
                 original_copy, original_list = client.copy, client.list_dir
-                copied_root = ""
+                copied_root: str = ""
                 task_calls = 0
                 def copy(ids, parent):
                     nonlocal copied_root
@@ -2464,18 +2582,22 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                      mock.patch("app.clients.guangya.sleep"):
                     if case == "running":
                         with self.assertRaises(guangya_fs_change.GuangYaFSCopyPending) as waiting:
-                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                         result = waiting.exception.operation_result
                         self.assertEqual(result["stats"]["failed"], 0)
                         self.assertFalse(result["requires_manual"])
                     else:
-                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                 complete = case in {"complete", "delayed_task"}
                 self.assertEqual(result["stats"]["copied"], int(complete))
                 self.assertEqual(result["stats"]["moved"], int(complete))
                 self.assertEqual(result["partial"], not complete and case != "running")
-                self.assertEqual(client.file_info("source").parent_id, "archive" if complete else "0")
-                self.assertEqual(client.file_info("trash").parent_id, "source")
+                file_info_result_51 = client.file_info("source")
+                assert file_info_result_51 is not None
+                self.assertEqual(file_info_result_51.parent_id, "archive" if complete else "0")
+                file_info_result_52 = client.file_info("trash")
+                assert file_info_result_52 is not None
+                self.assertEqual(file_info_result_52.parent_id, "source")
                 self.assertEqual(moved.call_count, int(complete))
                 copied.assert_called_once_with(["trash"], "target")
                 self.assertNotIn("copy_tasks", json.dumps(result))
@@ -2497,7 +2619,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     guangya_fs_change._atomic_write(stored)
                 with mock.patch.object(client, "copy", wraps=client.copy) as copied:
                     with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                 copied.assert_not_called()
 
     def test_directory_copy_snapshot_is_bounded_and_cancellable(self):
@@ -2515,7 +2637,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cancelled"):
                 guangya_fs_change._copy_tree_snapshot(client, "trash", cancel)
             listing.assert_not_called()
-        client.directories["empty"].append(client.file_info("trash"))
+        client.directories["empty"].append(cast(GuangYaFile, client.file_info("trash")))
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
             guangya_fs_change._copy_tree_snapshot(client, "trash")
 
@@ -2539,18 +2661,20 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                                 return tid
                             with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint), mock.patch.object(client, "copy", side_effect=copy):
                                 with self.assertRaises(WorkerExit):
-                                    guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                                    guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                             with mock.patch.object(client, "copy", wraps=original_copy) as copied, \
                                  mock.patch.object(client, "task_status", return_value={"data": {"status": 2 if complete else 1}}) as task:
                                 if checkpointed and not complete:
                                     with self.assertRaises(guangya_fs_change.GuangYaFSCopyPending) as waiting:
-                                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                                     result = waiting.exception.operation_result
                                 else:
-                                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                             copied.assert_not_called()
                             self.assertEqual(result["stats"]["copied"], int(checkpointed and complete))
-                            self.assertEqual(client.file_info("source").parent_id, "archive" if checkpointed and complete else "0")
+                            file_info_result_53 = client.file_info("source")
+                            assert file_info_result_53 is not None
+                            self.assertEqual(file_info_result_53.parent_id, "archive" if checkpointed and complete else "0")
                             self.assertEqual(task.call_count, int(checkpointed))
 
     def test_pending_copy_can_wait_across_leases_and_only_move_parent_after_completion(self):
@@ -2564,18 +2688,20 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                      mock.patch.object(guangya_fs_change, "_COPY_FOREGROUND_ATTEMPTS", 1):
                     for generation in (1, 2, 3):
                         with self.assertRaises(guangya_fs_change.GuangYaFSCopyPending) as waiting:
-                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=generation)
+                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=generation)
                         self.assertEqual(waiting.exception.position, 1)
                         self.assertEqual(waiting.exception.operation_result["stats"]["failed"], 0)
                         self.assertTrue(guangya_fs_change.inspect_fs_change_plan_recovery(payload,
                             job_id=payload["job_id"], owner_digest=plan["owner_digest"], lease_generation=generation)["resumable"])
                         self.assertEqual(guangya_fs_change._read(plan["plan_id"])["status"], "running")
-                        self.assertEqual(client.file_info("source").parent_id, "0")
+                        file_info_result_54 = client.file_info("source")
+                        assert file_info_result_54 is not None
+                        self.assertEqual(file_info_result_54.parent_id, "0")
                     self.assertEqual(copy.call_count, 1)
                     move.assert_not_called()
                     self.assertEqual(task.call_count, 3)
                     task.return_value = {"data": {"status": 2}}
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=4)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=4)
                     self.assertFalse(result["partial"])
                     self.assertEqual(copy.call_count, 1)
                     move.assert_called_once_with(["source"], "archive")
@@ -2588,13 +2714,15 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 with mock.patch.object(client, "task_status", side_effect=[RuntimeError("temporary read"), {"data": {"status": 1}}]), \
                      mock.patch.object(client, "copy", wraps=client.copy) as copy:
                     with self.assertRaises(guangya_fs_change.GuangYaFSCopyPending) as waiting:
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                 self.assertEqual(waiting.exception.operation_result["stats"]["failed"], 0)
                 self.assertEqual(waiting.exception.operation_result["stats"]["verification_failed"], 0)
-                self.assertEqual(client.file_info("source").parent_id, "0")
+                file_info_result_55 = client.file_info("source")
+                assert file_info_result_55 is not None
+                self.assertEqual(file_info_result_55.parent_id, "0")
                 copy.assert_called_once()
                 with mock.patch.object(client, "task_status", return_value={"data": {"status": 3}}), mock.patch.object(client, "copy", wraps=client.copy) as copy:
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=2)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=2)
                 self.assertEqual(result["operation_items"][0]["status"], "failed")
                 self.assertEqual(result["operation_items"][1]["status"], "blocked")
                 copy.assert_not_called()
@@ -2617,7 +2745,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                      mock.patch.object(guangya_fs_change, "_COPY_FOREGROUND_ATTEMPTS", 1), \
                      mock.patch.object(guangya_fs_change, "_append_journal", side_effect=fail_wait):
                     with self.assertRaises(guangya_fs_change.GuangYaFSCheckpointError) as failed:
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                     self.assertEqual(failed.exception.operation_result["stats"]["audit_failures"], 1)
                     self.assertTrue(failed.exception.operation_result["requires_manual"])
                     move.assert_not_called()
@@ -2628,6 +2756,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             for response in ("sync", "async", "lost"):
                 with self.subTest(source_id=source_id, response=response):
                     acknowledged = response != "lost"
+                    result = None
                     client = FakeGatewayClient()
                     _, payload = self._copy_plan(client, source_id=source_id)
                     original_copy = client.copy
@@ -2647,23 +2776,28 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                          mock.patch.object(guangya_fs_change, "_append_journal", side_effect=checkpoint):
                         if acknowledged:
                             with self.assertRaises(WorkerExit):
-                                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                         else:
-                            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                             self.assertEqual(result["stats"]["copied"], 0)
-                            self.assertEqual(client.file_info("source").parent_id, "0")
+                            file_info_result_56 = client.file_info("source")
+                            assert file_info_result_56 is not None
+                            self.assertEqual(file_info_result_56.parent_id, "0")
                         copied.assert_called_once()
                         self.assertEqual(task.call_count, int(response == "async"))
                     with mock.patch.object(client, "copy") as repeated, mock.patch.object(client, "task_status", side_effect=TimeoutError("task history unavailable")) as task:
                         if acknowledged:
-                            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=2)
+                            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=2)
                         else:
                             with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=2)
+                                guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=2)
                         repeated.assert_not_called()
                         task.assert_not_called()
+                    assert result is not None
                     self.assertEqual(result["stats"]["copied"], int(acknowledged))
-                    self.assertEqual(client.file_info("source").parent_id, "archive" if acknowledged else "0")
+                    file_info_result_57 = client.file_info("source")
+                    assert file_info_result_57 is not None
+                    self.assertEqual(file_info_result_57.parent_id, "archive" if acknowledged else "0")
 
     def test_file_copy_visible_target_does_not_override_provider_status(self):
         for status in (3, 999):
@@ -2673,11 +2807,13 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 with mock.patch.object(client, "task_status", return_value={"data": {"status": status}}), \
                      mock.patch.object(client, "move", wraps=client.move) as moved, \
                      mock.patch("app.clients.guangya.sleep"):
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                 self.assertEqual(result["stats"]["copied"], 0)
                 self.assertTrue(result["partial"])
                 moved.assert_not_called()
-                self.assertEqual(client.file_info("source").parent_id, "0")
+                file_info_result_58 = client.file_info("source")
+                assert file_info_result_58 is not None
+                self.assertEqual(file_info_result_58.parent_id, "0")
 
     def test_copy_keeps_source_and_verifies_new_target_object(self):
         client = FakeGatewayClient()
@@ -2691,7 +2827,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=False,
@@ -2709,12 +2845,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
 
         result = guangya_fs_change.execute_fs_change_plan(
-            self._queued_payload(plan), client_factory=lambda: client
+            self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
         )
 
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["copied"], 1)
-        self.assertIsNotNone(client.file_info("move"))
+        assert (client.file_info("move")) is not None
         self.assertEqual(
             [item.name for item in client.directories["target"]], ["Move.mp4"]
         )
@@ -2745,7 +2881,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 mock.patch.object(client, "list_dir", side_effect=delayed_list), \
                 mock.patch("app.clients.guangya.sleep"):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["moved"], 1)
@@ -2760,7 +2896,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client.copy(["move"], "target")
         client.delete(["move"])
         self.assertFalse(guangya_fs_change._verify_after(
-            client, plan["operations"][0], ""
+            cast(GuangYaClient, client), plan["operations"][0], ""
         ))
 
     def test_rename_unknown_write_outcome_requires_manual_review(self):
@@ -2777,7 +2913,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         with mock.patch.object(client, "rename", side_effect=disconnected) as write, \
                 mock.patch.object(guangya_fs_change, "_verify_after", side_effect=OSError("readback unavailable")):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
         self.assertTrue(result["partial"])
         self.assertTrue(result["requires_manual"])
@@ -2796,7 +2932,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=False,
@@ -2808,9 +2944,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client.directories["source"][2].etag = "changed"
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
             guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
-        self.assertIsNotNone(client.file_info("trash"))
+        assert (client.file_info("trash")) is not None
 
     def test_initial_execution_does_not_hide_newer_details_behind_old_listing(self):
         for drift in ("source_version", "source_missing", "target_name", "target_missing"):
@@ -2827,17 +2963,19 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     if file_id == "move" and drift.startswith("source"):
                         if drift == "source_missing":
                             return None
+                        assert current is not None
                         current.etag = "changed-after-preview"
                     if file_id == "target" and drift.startswith("target"):
                         if drift == "target_missing":
                             return None
+                        assert current is not None
                         current.name = "externally-renamed-target"
                     return current
 
                 with mock.patch.object(client, "file_info", side_effect=newer_info), \
                         mock.patch.object(client, "move", wraps=client.move) as moved:
                     with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                        guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                 moved.assert_not_called()
 
     def test_initial_execution_allows_target_content_version_changes(self):
@@ -2848,7 +2986,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         payload = self._queued_payload(plan)
         client.directories["0"][1].etag = "changed-by-other-child"
         with mock.patch.object(client, "move", wraps=client.move) as moved:
-            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
         self.assertEqual(result["operation_items"][0]["status"], "completed")
         moved.assert_called_once_with(["move"], "target")
 
@@ -2856,12 +2994,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client = FakeGatewayClient()
         snapshot = {"file_id": "move", "parent_id": "source"}
         with mock.patch.object(client, "file_info", side_effect=TimeoutError("detail unavailable")):
-            self.assertEqual(guangya_fs_change._find_current(client, snapshot).file_id, "move")
+            find_current_result = guangya_fs_change._find_current(cast(GuangYaClient, client), snapshot)
+            assert find_current_result is not None
+            self.assertEqual(find_current_result.file_id, "move")
             with mock.patch.object(client, "list_dir", side_effect=TimeoutError("list unavailable")):
-                self.assertIsNone(guangya_fs_change._find_current(client, snapshot))
+                self.assertIsNone(guangya_fs_change._find_current(cast(GuangYaClient, client), snapshot))
         with mock.patch.object(client, "file_info", return_value=None), \
                 mock.patch.object(client, "list_dir", wraps=client.list_dir) as listing:
-            self.assertIsNone(guangya_fs_change._find_current(client, snapshot))
+            self.assertIsNone(guangya_fs_change._find_current(cast(GuangYaClient, client), snapshot))
         listing.assert_not_called()
 
     def test_external_parent_change_invalidates_frozen_source_location(self):
@@ -2876,7 +3016,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=False,
@@ -2888,10 +3028,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         client.move(["trash"], "target")
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
             guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
-        self.assertIsNotNone(client.file_info("trash"))
-        self.assertEqual(client.file_info("trash").parent_id, "target")
+        assert (client.file_info("trash")) is not None
+        file_info_result_59 = client.file_info("trash")
+        assert file_info_result_59 is not None
+        self.assertEqual(file_info_result_59.parent_id, "target")
 
     def test_completed_plan_cannot_be_replayed(self):
         client = FakeGatewayClient()
@@ -2905,7 +3047,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=False,
@@ -2922,12 +3064,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         )
         payload = self._queued_payload(plan)
         first = guangya_fs_change.execute_fs_change_plan(
-            payload, client_factory=lambda: client
+            payload, client_factory=lambda: cast(GuangYaClient, client)
         )
         self.assertFalse(first["partial"])
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
             guangya_fs_change.execute_fs_change_plan(
-                payload, client_factory=lambda: client
+                payload, client_factory=lambda: cast(GuangYaClient, client)
             )
 
     def test_multiple_moves_to_same_target_ignore_own_directory_version_changes(self):
@@ -2951,7 +3093,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             observed.data["observation_ref"], owner="owner"
         )
         plan = guangya_fs_change.build_fs_change_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             observation=observation,
             trigger_strm=False,
@@ -2972,7 +3114,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"]
         )
         result = guangya_fs_change.execute_fs_change_plan(
-            self._queued_payload(plan), client_factory=lambda: client
+            self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
         )
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["moved"], 2)
@@ -3026,9 +3168,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     "owner_digest": "digest:owner",
                     "credential_generation": 31,
                 },
-                client_factory=lambda: client,
+                client_factory=lambda: cast(GuangYaClient, client),
             )
-        self.assertIsNotNone(client.file_info("rename"))
+        assert (client.file_info("rename")) is not None
         self.assertEqual(
             guangya_fs_change._read(plan["plan_id"])["status"], "confirmed"
         )
@@ -3059,11 +3201,11 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         }
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
             guangya_fs_change.execute_fs_change_plan(
-                {**base_payload, "job_id": "b" * 32}, client_factory=lambda: client
+                {**base_payload, "job_id": "b" * 32}, client_factory=lambda: cast(GuangYaClient, client)
             )
-        self.assertIsNotNone(client.file_info("rename"))
+        assert (client.file_info("rename")) is not None
         result = guangya_fs_change.execute_fs_change_plan(
-            {**base_payload, "job_id": job_id}, client_factory=lambda: client
+            {**base_payload, "job_id": job_id}, client_factory=lambda: cast(GuangYaClient, client)
         )
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["renamed"], 1)
@@ -3083,7 +3225,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             guangya_fs_change, "execute_recycle_bin_delete", side_effect=audited_delete
         ) as audited:
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["trashed"], 1)
@@ -3110,13 +3252,15 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 with mock.patch.object(guangya_fs_change, "_verify_after", side_effect=readback), \
                      mock.patch("app.clients.guangya.sleep"), \
                      mock.patch.object(client, "delete_empty_directory", wraps=client.delete_empty_directory) as delete:
-                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
                 self.assertFalse(result["partial"])
                 self.assertFalse(result["requires_manual"])
                 self.assertEqual(result["stats"]["audit_failures"], 0)
                 self.assertEqual(result["stats"]["verification_failed"], 0)
                 self.assertEqual(delete.call_count, 2, "回读恢复不能重发删除")
-                self.assertEqual(client.file_info("work").parent_id, "target")
+                file_info_result_60 = client.file_info("work")
+                assert file_info_result_60 is not None
+                self.assertEqual(file_info_result_60.parent_id, "target")
                 self.assertTrue(all(item["status"] == "completed" for item in result["operation_items"]))
 
     def test_unavailable_readback_remains_unknown_without_claiming_missing_audit(self):
@@ -3128,12 +3272,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             return verify(provider, item, *args, **kwargs)
         with mock.patch.object(guangya_fs_change, "_verify_after", side_effect=readback), \
              mock.patch.object(client, "delete_empty_directory", wraps=client.delete_empty_directory) as delete:
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertTrue(result["partial"] and result["requires_manual"])
         self.assertEqual(result["stats"]["audit_failures"], 0)
         self.assertEqual(result["stats"]["verification_failed"], 1)
         self.assertEqual(delete.call_count, 1)
-        self.assertEqual(client.file_info("work").parent_id, "source")
+        file_info_result_61 = client.file_info("work")
+        assert file_info_result_61 is not None
+        self.assertEqual(file_info_result_61.parent_id, "source")
         self.assertIn("unknown", [item["status"] for item in result["operation_items"]])
 
     def test_actual_delete_success_audit_failure_stops_without_replaying_delete(self):
@@ -3149,12 +3295,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     return update(audit_id, **fields)
                 with mock.patch.object(db, "update_organize_delete_audit", side_effect=write), \
                      mock.patch.object(client, "delete_empty_directory", wraps=client.delete_empty_directory) as delete:
-                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
                 self.assertTrue(result["partial"] and result["requires_manual"])
                 self.assertEqual(result["stats"]["audit_failures"], 1)
                 self.assertEqual(result["stats"]["trashed"], 1)
                 self.assertEqual(delete.call_count, 1)
-                self.assertEqual(client.file_info("work").parent_id, "source")
+                file_info_result_62 = client.file_info("work")
+                assert file_info_result_62 is not None
+                self.assertEqual(file_info_result_62.parent_id, "source")
                 self.assertTrue(any(item["status"] == "not_started" for item in result["operation_items"]))
 
     def test_entire_plan_keeps_unstarted_items_after_audit_failure_or_cancel(self):
@@ -3165,7 +3313,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 observed = self._query(client)
                 observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
                 refs = {row["object_name"]: row["object_ref"] for row in observed.data["entries"]}
-                plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation,
+                plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                     operations=[{"op": "rename", "object_ref": refs["广告-ABC.mp4"], "new_name": "A.mp4"},
                                 {"op": "rename", "object_ref": refs["Move.mp4"], "new_name": "B.mp4"}],
                     trigger_strm=False)
@@ -3189,26 +3337,30 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=append):
                     if stop == "cancel":
                         with self.assertRaises(OrganizeOperationCancelled) as caught:
-                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, cancel_check=check)
+                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), cancel_check=check)
                         result = caught.exception.operation_result
                     else:
-                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                 self.assertTrue(result["partial"])
                 self.assertEqual(result["requires_manual"], stop == "audit")
                 self.assertEqual(result["stats"]["renamed"], 1)
                 self.assertEqual([row["status"] for row in result["operation_items"]], ["completed", "not_started"])
                 self.assertEqual(result["operation_items"][0]["completed_actions"], ["rename"])
-                self.assertEqual(client.file_info("rename").name, "A.mp4")
-                self.assertEqual(client.file_info("move").name, "Move.mp4")
+                file_info_result_63 = client.file_info("rename")
+                assert file_info_result_63 is not None
+                self.assertEqual(file_info_result_63.name, "A.mp4")
+                file_info_result_64 = client.file_info("move")
+                assert file_info_result_64 is not None
+                self.assertEqual(file_info_result_64.name, "Move.mp4")
                 self.assertEqual([row["position"] for row in result["operation_items"]], [1, 2])
                 with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                    guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                    guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
 
     def test_creation_identity_survives_first_readback_error(self):
         client = FakeGatewayClient()
         observed = self._query(client)
         observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
-        plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation,
+        plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
             operations=[{"op": "create_directory", "parent_path": "/target", "name": "new"}], trigger_strm=False)
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
         verify = guangya_fs_change._verify_after
@@ -3221,7 +3373,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             return verify(client, item, created_id, **kwargs)
 
         with mock.patch.object(guangya_fs_change, "_verify_after", side_effect=flaky):
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result["partial"])
         self.assertEqual(identities, ["created-1", "created-1"])
         self.assertEqual(result["operation_items"][0]["status"], "completed")
@@ -3247,7 +3399,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             guangya_fs_change, "_append_journal", side_effect=flaky_append
         ):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
         self.assertTrue(result["partial"])
         self.assertTrue(result["requires_manual"])
@@ -3278,7 +3430,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             side_effect=flaky_update,
         ):
             result = guangya_fs_change.execute_fs_change_plan(
-                self._queued_payload(plan), client_factory=lambda: client
+                self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client)
             )
         self.assertTrue(result["partial"])
         self.assertTrue(result["requires_manual"])
@@ -3416,10 +3568,10 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 return None
 
         owner = "owner"
-        self._domain_actions.workspace._flows[owner] = object()
-        self._domain_actions.fs_change._flows[owner] = object()
-        self._domain_actions.workspace = GuangyaWorkspaceActions(EmptyRepository())
-        self._domain_actions.fs_change = GuangyaFsChangeActions(EmptyRepository(), workspace=self._domain_actions.workspace)
+        self._domain_actions.workspace._flows[owner] = cast(WorkspaceFlow, object())
+        self._domain_actions.fs_change._flows[owner] = cast(ChangeFlow, object())
+        self._domain_actions.workspace = GuangyaWorkspaceActions(cast(AgentSessionContextRepository | None, EmptyRepository()))
+        self._domain_actions.fs_change = GuangyaFsChangeActions(cast(AgentSessionContextRepository | None, EmptyRepository()), workspace=self._domain_actions.workspace)
         self.assertEqual(self._domain_actions.workspace.latest_guangya_observation_ref(owner), "")
         self.assertIsNone(self._domain_actions.fs_change._flow(owner))
         self.assertNotIn(owner, self._domain_actions.workspace._flows)
@@ -3435,7 +3587,11 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                             item.updated_at += 1
 
             def move(self, file_ids, parent_id):
-                parents = [self.file_info(file_id).parent_id for file_id in file_ids]
+                parents = []
+                for file_id in file_ids:
+                    info = self.file_info(file_id)
+                    assert info is not None
+                    parents.append(info.parent_id)
                 result = super().move(file_ids, parent_id)
                 self.touch(*parents, parent_id)
                 return result
@@ -3469,7 +3625,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             {'op': 'move', 'object_ref': entries['movie.mp4'], 'target_path': '/target/Work-A' if future_target else '/source/Work-A'},
         ]
         observation = guangya_workspace.load_directory_observation(observed.data['observation_ref'], owner='owner')
-        plan = guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation,
+        plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation,
                                                     operations=operations, trigger_strm=False)
         guangya_fs_change.confirm_fs_change_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
         return client, plan
@@ -3491,16 +3647,22 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     raw = [parent, child] if parent_first else [child, parent]
                     original = deepcopy(raw)
                     observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
-                    plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation, operations=raw, trigger_strm=False)
+                    plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, operations=raw, trigger_strm=False)
                     self.assertEqual(raw, original, "不能改写模型原始参数")
                     self.assertEqual([item["source"]["file_id"] for item in plan["operations"]], ["move", "trash"])
                     self.assertEqual(plan["operations"][0]["target_id"], "trash")
                     guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
-                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
                     self.assertFalse(result["partial"])
-                    self.assertEqual(client.file_info("move").parent_id, "trash")
-                    self.assertEqual(client.file_info("trash").parent_id, "source" if parent_op == "rename" else "target")
-                    self.assertEqual(client.file_info("trash").name, parent.get("new_name", "垃圾残余"))
+                    file_info_result_65 = client.file_info("move")
+                    assert file_info_result_65 is not None
+                    self.assertEqual(file_info_result_65.parent_id, "trash")
+                    file_info_result_66 = client.file_info("trash")
+                    assert file_info_result_66 is not None
+                    self.assertEqual(file_info_result_66.parent_id, "source" if parent_op == "rename" else "target")
+                    file_info_result_67 = client.file_info("trash")
+                    assert file_info_result_67 is not None
+                    self.assertEqual(file_info_result_67.name, parent.get("new_name", "垃圾残余"))
 
     def test_future_target_rejects_observed_directory_replaced_before_freeze(self):
         for name in ("Dir", "dir"):
@@ -3515,10 +3677,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client.directories["source"].append(replacement)
                 client.directories["replacement"] = []
                 with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-                    guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation,
+                    guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                         operations=[{"op": "move", "object_ref": refs["source"], "target_path": "/target"},
                                     {"op": "move", "object_ref": refs["Move.mp4"], "target_path": f"/target/source/{name}"}])
-                self.assertEqual(client.file_info("move").parent_id, "source")
+                file_info_result_68 = client.file_info("move")
+                assert file_info_result_68 is not None
+                self.assertEqual(file_info_result_68.parent_id, "source")
 
     def test_case_alias_target_dependency_uses_directory_identity(self):
         for first in (True, False):
@@ -3529,14 +3693,18 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
                 parent = {"op": "rename", "object_ref": refs["target"], "new_name": "archive"}
                 child = {"op": "move", "object_ref": refs["Move.mp4"], "target_path": "/TARGET"}
-                plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation,
+                plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                     operations=[parent, child] if first else [child, parent], trigger_strm=False)
                 self.assertEqual([op["source"]["file_id"] for op in plan["operations"]], ["move", "target"])
                 guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
-                result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
                 self.assertFalse(result["partial"])
-                self.assertEqual(client.file_info("move").parent_id, "target")
-                self.assertEqual(client.file_info("target").name, "archive")
+                file_info_result_69 = client.file_info("move")
+                assert file_info_result_69 is not None
+                self.assertEqual(file_info_result_69.parent_id, "target")
+                file_info_result_70 = client.file_info("target")
+                assert file_info_result_70 is not None
+                self.assertEqual(file_info_result_70.name, "archive")
 
     def test_creation_under_future_directory_guards_its_parent_change(self):
         class Client(FakeGatewayClient):
@@ -3554,7 +3722,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 observed = self._query(client)
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
                 observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
-                plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation,
+                plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                     operations=[{"op": "rename", "object_ref": refs["垃圾残余"], "new_name": "archive"},
                                 {"op": "create_directory", "parent_path": "/source/archive", "name": "New"}], trigger_strm=False)
                 guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
@@ -3572,11 +3740,13 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                             raise WorkerExit()
                     with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=interrupt_after_create):
                         with self.assertRaises(WorkerExit):
-                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=1)
+                            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=1)
                     client.create_dir = mock.Mock(side_effect=AssertionError("must not recreate"))
-                result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=3)
+                result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), lease_generation=3)
                 self.assertEqual(result["partial"], fail_create)
-                self.assertEqual(client.file_info("trash").name, "垃圾残余" if fail_create else "archive")
+                file_info_result_71 = client.file_info("trash")
+                assert file_info_result_71 is not None
+                self.assertEqual(file_info_result_71.name, "垃圾残余" if fail_create else "archive")
                 self.assertEqual([x.name for x in client.list_dir("trash")], [] if fail_create else ["New"])
 
     def test_nested_future_paths_compile_independent_of_argument_order(self):
@@ -3591,17 +3761,23 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     {"op": "rename", "object_ref": refs["垃圾残余"], "new_name": "New"},
                     {"op": "move", "object_ref": refs["Move.mp4"], "target_path": "/target/source/New"},
                 ]
-                plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation,
+                plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                     operations=list(reversed(operations)) if reverse else operations, trigger_strm=False)
                 self.assertEqual([op["source"]["file_id"] for op in plan["operations"]], ["move", "trash", "source"])
                 guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
                 if fail_child:
                     client.move = mock.Mock(side_effect=RuntimeError("provider unavailable"))
-                result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
                 self.assertEqual(result["partial"], fail_child)
-                self.assertEqual(client.file_info("move").parent_id, "source" if fail_child else "trash")
-                self.assertEqual(client.file_info("trash").name, "垃圾残余" if fail_child else "New")
-                self.assertEqual(client.file_info("source").parent_id, "0" if fail_child else "target")
+                file_info_result_72 = client.file_info("move")
+                assert file_info_result_72 is not None
+                self.assertEqual(file_info_result_72.parent_id, "source" if fail_child else "trash")
+                file_info_result_73 = client.file_info("trash")
+                assert file_info_result_73 is not None
+                self.assertEqual(file_info_result_73.name, "垃圾残余" if fail_child else "New")
+                file_info_result_74 = client.file_info("source")
+                assert file_info_result_74 is not None
+                self.assertEqual(file_info_result_74.parent_id, "0" if fail_child else "target")
 
     def test_future_path_cannot_make_self_move_or_copy_safe(self):
         for op in ("move", "copy"):
@@ -3611,11 +3787,15 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"] + observed.data["scope_objects"]}
                 observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
                 with self.assertRaises(guangya_fs_change.GuangYaFSChangeError):
-                    guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation,
+                    guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation,
                         operations=[{"op": "rename", "object_ref": refs["垃圾残余"], "new_name": "New"},
                                     {"op": op, "object_ref": refs["source"], "target_path": "/source/New"}])
-                self.assertEqual(client.file_info("source").parent_id, "0")
-                self.assertEqual(client.file_info("trash").name, "垃圾残余")
+                file_info_result_75 = client.file_info("source")
+                assert file_info_result_75 is not None
+                self.assertEqual(file_info_result_75.parent_id, "0")
+                file_info_result_76 = client.file_info("trash")
+                assert file_info_result_76 is not None
+                self.assertEqual(file_info_result_76.name, "垃圾残余")
 
     def test_directory_target_dependency_cycle_is_rejected_before_write(self):
         client = FakeGatewayClient()
@@ -3625,11 +3805,15 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "依赖"):
-            guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation, trigger_strm=False,
+            guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                 operations=[{"op": "move", "object_ref": refs["A"], "target_path": "/source/B"},
                             {"op": "move", "object_ref": refs["B"], "target_path": "/source/A"}])
-        self.assertEqual(client.file_info("a").parent_id, "source")
-        self.assertEqual(client.file_info("b").parent_id, "source")
+        file_info_result_77 = client.file_info("a")
+        assert file_info_result_77 is not None
+        self.assertEqual(file_info_result_77.parent_id, "source")
+        file_info_result_78 = client.file_info("b")
+        assert file_info_result_78 is not None
+        self.assertEqual(file_info_result_78.parent_id, "source")
         self.assertFalse(list(self.plan_dir.glob("*.json")))
 
     def test_existing_destination_is_not_replaced_by_planned_directory_alias(self):
@@ -3640,21 +3824,29 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         refs = {item["object_name"]: item["object_ref"] for item in observed.data["entries"]}
         observation = guangya_workspace.load_directory_observation(observed.data["observation_ref"], owner="owner")
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, "同名"):
-            guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation, trigger_strm=False,
+            guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                 operations=[{"op": "move", "object_ref": refs["Move.mp4"], "target_path": "/target/垃圾残余"},
                             {"op": "move", "object_ref": refs["垃圾残余"], "target_path": "/target"}])
-        self.assertEqual(client.file_info("move").parent_id, "source")
-        self.assertEqual(client.file_info("occupied").parent_id, "target")
+        file_info_result_79 = client.file_info("move")
+        assert file_info_result_79 is not None
+        self.assertEqual(file_info_result_79.parent_id, "source")
+        file_info_result_80 = client.file_info("occupied")
+        assert file_info_result_80 is not None
+        self.assertEqual(file_info_result_80.parent_id, "target")
 
     def test_future_parent_directory_target_uses_existing_identity_in_one_plan(self):
         client, plan = self._nested_archive_plan(future_target=True)
         child = next(item for item in plan["operations"] if item["source"]["file_id"] == "video")
         self.assertEqual(child["target_id"], "work")
         self.assertEqual(child["target_path"], "/source/Work-A")
-        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+        result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result["partial"])
-        self.assertEqual(client.file_info("work").parent_id, "target")
-        self.assertEqual(client.file_info("video").parent_id, "work")
+        file_info_result_81 = client.file_info("work")
+        assert file_info_result_81 is not None
+        self.assertEqual(file_info_result_81.parent_id, "target")
+        file_info_result_82 = client.file_info("video")
+        assert file_info_result_82 is not None
+        self.assertEqual(file_info_result_82.parent_id, "work")
         self.assertEqual(client.list_dir("source"), [])
         self.assertIsNone(client.file_info("mid"))
         self.assertIsNone(client.file_info("leaf"))
@@ -3684,13 +3876,19 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     return original_list(parent_id)
                 with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=after_checkpoint), \
                         mock.patch.object(client, "list_dir", side_effect=listing):
-                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
                 self.assertEqual(result["partial"], drift != "none")
-                self.assertEqual(client.file_info("work").parent_id, "target" if drift == "none" else "source")
+                file_info_result_83 = client.file_info("work")
+                assert file_info_result_83 is not None
+                self.assertEqual(file_info_result_83.parent_id, "target" if drift == "none" else "source")
                 if drift == "move":
-                    self.assertEqual(client.file_info("video").parent_id, "source", "不能自动撤销外部移动")
+                    file_info_result_84 = client.file_info("video")
+                    assert file_info_result_84 is not None
+                    self.assertEqual(file_info_result_84.parent_id, "source", "不能自动撤销外部移动")
                 if drift == "rename":
-                    self.assertEqual(client.file_info("video").name, "Changed.mp4", "不能自动撤销外部改名")
+                    file_info_result_85 = client.file_info("video")
+                    assert file_info_result_85 is not None
+                    self.assertEqual(file_info_result_85.name, "Changed.mp4", "不能自动撤销外部改名")
 
     def test_backup_output_survives_planned_source_changes_but_detects_replica_drift(self):
         for drift in (False, True):
@@ -3699,9 +3897,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client.directories["0"].append(GuangYaFile("archive", "archive", True, parent_id="0", etag="a"))
                 client.directories["archive"] = []
                 client.directories["trash"] = [GuangYaFile("nested", "Old.mkv", False, parent_id="trash", size=10, etag="n")]
-                observation = guangya_workspace.create_directory_observation(client, owner="owner", path="/source", recursive=True, max_items=100)
+                observation = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/source", recursive=True, max_items=100)
                 refs = {item["file_id"]: ref for ref,item in guangya_workspace.observation_entry_map(observation).items()}
-                plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation, trigger_strm=False,
+                plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, trigger_strm=False,
                     operations=[{"op": "copy", "object_ref": refs["trash"], "target_path": "/target"},
                                 {"op": "rename", "object_ref": refs["nested"], "new_name": "New.mkv"},
                                 {"op": "move", "object_ref": refs["source"], "target_path": "/archive"}])
@@ -3714,21 +3912,25 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         copied = client.list_dir("target")[0]
                         client.rename(client.list_dir(copied.file_id)[0].file_id, "External.mkv")
                 with mock.patch.object(guangya_fs_change, "_append_journal", side_effect=after_rename):
-                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                    result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
                 self.assertEqual(result["partial"], drift)
-                self.assertEqual(client.file_info("source").parent_id, "0" if drift else "archive")
-                self.assertEqual(client.file_info("nested").name, "New.mkv")
+                file_info_result_86 = client.file_info("source")
+                assert file_info_result_86 is not None
+                self.assertEqual(file_info_result_86.parent_id, "0" if drift else "archive")
+                file_info_result_87 = client.file_info("nested")
+                assert file_info_result_87 is not None
+                self.assertEqual(file_info_result_87.name, "New.mkv")
                 backup = client.list_dir("target")[0]
                 self.assertEqual(client.list_dir(backup.file_id)[0].name, "External.mkv" if drift else "Old.mkv")
 
     def test_parent_dependency_readback_lists_shared_directory_once(self):
         client = FakeGatewayClient()
         client.directories["source"] = [GuangYaFile(f"f{i}", f"Old-{i}.mkv", False, parent_id="source", size=10, etag=str(i)) for i in range(40)]
-        observation = guangya_workspace.create_directory_observation(client, owner="owner", path="/source", recursive=True, max_items=100)
+        observation = guangya_workspace.create_directory_observation(cast(GuangYaClient, client), owner="owner", path="/source", recursive=True, max_items=100)
         refs = {item["file_id"]: ref for ref,item in guangya_workspace.observation_entry_map(observation).items()}
         operations = [{"op": "rename", "object_ref": refs[f"f{i}"], "new_name": f"New-{i}.mkv"} for i in range(40)]
         operations.append({"op": "move", "object_ref": refs["source"], "target_path": "/target"})
-        plan = guangya_fs_change.build_fs_change_plan(client, owner="owner", observation=observation, operations=operations, trigger_strm=False)
+        plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="owner", observation=observation, operations=operations, trigger_strm=False)
         guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
         original_verify = guangya_fs_change._verify_after
         dependency_reads = []
@@ -3740,7 +3942,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
             dependency_reads.append(listing.call_count)
             return result
         with mock.patch.object(guangya_fs_change, "_verify_after", side_effect=verify):
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["renamed"], 40)
         self.assertEqual(len(dependency_reads), 40)
@@ -3755,18 +3957,26 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertTrue(all(item.get('require_empty') for item in plan['operations'] if item['op'] == 'trash'))
         self.assertTrue(client.file_info('leaf'), '预览阶段不能动文件')
         payload = self._queued_payload(plan)
-        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+        result = guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result['partial'])
         self.assertEqual(result['stats']['moved'], 3)
         self.assertEqual(result['stats']['trashed'], 2)
-        self.assertEqual(client.file_info('video').parent_id, 'work')
-        self.assertEqual(client.file_info('work').parent_id, 'target')
-        self.assertEqual(client.file_info('peer').parent_id, 'target')
-        self.assertEqual(client.file_info('peer-video').parent_id, 'peer')
+        file_info_result_88 = client.file_info('video')
+        assert file_info_result_88 is not None
+        self.assertEqual(file_info_result_88.parent_id, 'work')
+        file_info_result_89 = client.file_info('work')
+        assert file_info_result_89 is not None
+        self.assertEqual(file_info_result_89.parent_id, 'target')
+        file_info_result_90 = client.file_info('peer')
+        assert file_info_result_90 is not None
+        self.assertEqual(file_info_result_90.parent_id, 'target')
+        file_info_result_91 = client.file_info('peer-video')
+        assert file_info_result_91 is not None
+        self.assertEqual(file_info_result_91.parent_id, 'peer')
         self.assertIsNone(client.file_info('leaf'))
         self.assertIsNone(client.file_info('mid'))
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
 
     def test_unmoved_companion_blocks_empty_directory_cleanup_at_preview(self):
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, '未安排移出'):
@@ -3780,7 +3990,7 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 raise GuangYaWriteRejected('move', code='rejected')
             return original_move(file_ids, parent_id)
         with mock.patch.object(client, 'move', side_effect=move), mock.patch.object(client, 'delete_empty_directory', side_effect=AssertionError('不得删目录')):
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertTrue(result['partial'])
         self.assertEqual(result['stats']['moved'], 1, '独立作品仍可以完成')
         outcomes = result['operation_items']
@@ -3789,8 +3999,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(sum(row['status'] == 'blocked' for row in outcomes), 3)
         self.assertEqual(sum(row['status'] == 'failed' for row in outcomes), 1)
         self.assertTrue(all(row.get('reason') == 'dependency_failed' for row in outcomes if row['status'] == 'blocked'))
-        self.assertEqual(client.file_info('video').parent_id, 'leaf')
-        self.assertEqual(client.file_info('work').parent_id, 'source')
+        file_info_result_92 = client.file_info('video')
+        assert file_info_result_92 is not None
+        self.assertEqual(file_info_result_92.parent_id, 'leaf')
+        file_info_result_93 = client.file_info('work')
+        assert file_info_result_93 is not None
+        self.assertEqual(file_info_result_93.parent_id, 'source')
         self.assertTrue(client.file_info('mid'))
 
     def test_new_child_between_extraction_and_cleanup_is_never_deleted(self):
@@ -3802,26 +4016,36 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                 client.directories['leaf'].append(GuangYaFile('new-file', 'new.mp4', False, parent_id='leaf', etag='new'))
             return result
         with mock.patch.object(client, 'move', side_effect=move):
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertTrue(result['partial'])
         self.assertEqual(result['stats']['trashed'], 0)
-        self.assertEqual(client.file_info('new-file').parent_id, 'leaf')
-        self.assertEqual(client.file_info('work').parent_id, 'source')
-        self.assertEqual(client.file_info('video').parent_id, 'work')
+        file_info_result_94 = client.file_info('new-file')
+        assert file_info_result_94 is not None
+        self.assertEqual(file_info_result_94.parent_id, 'leaf')
+        file_info_result_95 = client.file_info('work')
+        assert file_info_result_95 is not None
+        self.assertEqual(file_info_result_95.parent_id, 'source')
+        file_info_result_96 = client.file_info('video')
+        assert file_info_result_96 is not None
+        self.assertEqual(file_info_result_96.parent_id, 'work')
 
     def test_cancel_after_nested_extraction_cannot_replay_the_plan(self):
         client, plan = self._nested_archive_plan()
         payload = self._queued_payload(plan)
         def cancel():
-            if client.file_info('video').parent_id == 'work':
+            info = client.file_info('video')
+            assert info is not None
+            if info.parent_id == 'work':
                 raise RuntimeError('cancelled')
         with self.assertRaisesRegex(RuntimeError, 'cancelled'):
-            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, cancel_check=cancel)
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client), cancel_check=cancel)
         self.assertTrue(client.file_info('mid'))
         self.assertTrue(client.file_info('leaf'))
-        self.assertEqual(client.file_info('work').parent_id, 'source')
+        file_info_result_97 = client.file_info('work')
+        assert file_info_result_97 is not None
+        self.assertEqual(file_info_result_97.parent_id, 'source')
         with self.assertRaises(guangya_fs_change.GuangYaFSChangeStale):
-            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client)
+            guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: cast(GuangYaClient, client))
 
     def test_operation_field_error_explains_schema_without_silently_dropping_fields(self):
         with self.assertRaisesRegex(AgentToolError, '缺少 target_path；多余 new_name'):
@@ -3840,23 +4064,25 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                               {'op': 'move', 'object_ref': entry['object_ref'], 'target_path': '/target'}]
                 if reverse:
                     operations.reverse()
-                plan = guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation, operations=operations, trigger_strm=False)
+                plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation, operations=operations, trigger_strm=False)
                 self.assertEqual(plan['stats']['total'], 1)
                 self.assertEqual(plan['stats']['unchanged'], 1)
                 self.assertEqual(plan['operations'][0]['op'], 'move')
                 guangya_fs_change.confirm_fs_change_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
-                outcome = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+                outcome = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
                 self.assertFalse(outcome['partial'])
                 self.assertEqual(outcome['stats']['moved'], 1)
                 self.assertEqual(outcome['stats']['renamed'], 0)
-                self.assertEqual(client.file_info('move').parent_id, 'target')
+                file_info_result_98 = client.file_info('move')
+                assert file_info_result_98 is not None
+                self.assertEqual(file_info_result_98.parent_id, 'target')
 
     def test_same_destination_relocate_only_renames_and_noop_move_is_omitted(self):
         client = FakeGatewayClient()
         result = self._query(client)
         entries = {e['object_name']: e['object_ref'] for e in result.data['entries']}
         observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
-        plan = guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation, trigger_strm=False, operations=[
+        plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation, trigger_strm=False, operations=[
             {'op': 'move', 'object_ref': entries['Move.mp4'], 'target_path': '/source'},
             {'op': 'relocate', 'object_ref': entries['广告-ABC.mp4'], 'target_path': '/source', 'new_name': 'ABC.mp4'},
         ])
@@ -3865,10 +4091,14 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         self.assertEqual(plan['stats']['total'], 1)
         guangya_fs_change.confirm_fs_change_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
         with mock.patch.object(client, 'move', side_effect=AssertionError('原地变更不得调用移动')):
-            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: client)
+            result = guangya_fs_change.execute_fs_change_plan(self._queued_payload(plan), client_factory=lambda: cast(GuangYaClient, client))
         self.assertFalse(result['partial'])
-        self.assertEqual(client.file_info('rename').name, 'ABC.mp4')
-        self.assertEqual(client.file_info('rename').parent_id, 'source')
+        file_info_result_99 = client.file_info('rename')
+        assert file_info_result_99 is not None
+        self.assertEqual(file_info_result_99.name, 'ABC.mp4')
+        file_info_result_100 = client.file_info('rename')
+        assert file_info_result_100 is not None
+        self.assertEqual(file_info_result_100.parent_id, 'source')
 
     def test_all_noops_clear_old_preview_and_never_create_empty_confirmation(self):
         from app.agent.session_context import SQLiteAgentSessionContextRepository
@@ -3885,7 +4115,9 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                     {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Different.mp4'}], 'trigger_strm': False}
                 with mock.patch.object(change_actions, 'GuangYaClient', return_value=client):
                     previous, previous_fingerprint = self._domain_actions.fs_change.prepare_guangya_fs_change_confirmation(change_actions.guangya_fs_change_arguments(args), context)
-                    old_plan = self._domain_actions.fs_change._flow('owner').plan_id
+                    flow_result_2 = self._domain_actions.fs_change._flow('owner')
+                    assert flow_result_2 is not None
+                    old_plan = flow_result_2.plan_id
                     self.assertEqual(previous.status, 'confirmation_required')
                     before = set(self.plan_dir.glob('*.json'))
                     args['operations'] = [
@@ -3903,8 +4135,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
                         self._domain_actions.fs_change.execute_guangya_fs_change_confirmed({}, previous_fingerprint, context)
                     with self.assertRaises(guangya_fs_change.GuangYaFSChangeError):
                         guangya_fs_change.load_fs_change_plan(old_plan, owner='owner')
-                self.assertEqual(client.file_info('move').parent_id, 'source')
-                self.assertEqual(client.file_info('move').name, 'Move.mp4')
+                file_info_result_101 = client.file_info('move')
+                assert file_info_result_101 is not None
+                self.assertEqual(file_info_result_101.parent_id, 'source')
+                file_info_result_102 = client.file_info('move')
+                assert file_info_result_102 is not None
+                self.assertEqual(file_info_result_102.name, 'Move.mp4')
 
     def test_noop_does_not_hide_snapshot_drift_or_real_name_conflicts(self):
         client = FakeGatewayClient()
@@ -3913,12 +4149,12 @@ class GuangYaFSGatewayTests(unittest.TestCase):
         observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
         client.rename('move', 'Changed.mp4')
         with self.assertRaises(guangya_workspace.GuangYaWorkspaceStale):
-            guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation, operations=[
+            guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation, operations=[
                 {'op': 'rename', 'object_ref': entry['object_ref'], 'new_name': 'Changed.mp4'}])
         result = self._query(client)
         refs = {e['object_name']: e['object_ref'] for e in result.data['entries']}
         observation = guangya_workspace.load_directory_observation(result.data['observation_ref'], owner='owner')
         with self.assertRaisesRegex(guangya_fs_change.GuangYaFSChangeError, '占用'):
-            guangya_fs_change.build_fs_change_plan(client, owner='owner', observation=observation, operations=[
+            guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner='owner', observation=observation, operations=[
                 {'op': 'rename', 'object_ref': refs['Changed.mp4'], 'new_name': 'Changed.mp4'},
                 {'op': 'rename', 'object_ref': refs['广告-ABC.mp4'], 'new_name': 'Changed.mp4'}])

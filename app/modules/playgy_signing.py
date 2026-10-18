@@ -18,18 +18,18 @@ def _signing_key() -> bytes:
     ).digest()
 
 
-def _canonical(file_id: str, etag: str, size: str | int, version: str = _VERSION) -> bytes:
-    payload = [str(version), str(file_id), str(etag or "0"), str(size or 0)]
+def _canonical(file_id: str | int, etag: str, size: str | int, version: str | int = _VERSION) -> bytes:
+    payload = [str(version), str(file_id), (etag or "0"), str(size or 0)]
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def encode_playgy_path_token(value: str) -> str:
-    payload = str(value or "").encode("utf-8")
+    payload = (value or "").encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
 def decode_playgy_path_token(value: str) -> str:
-    token = str(value or "").strip()
+    token = (value or "").strip()
     if not token:
         raise ValueError("播放路径令牌为空")
     padding = "=" * (-len(token) % 4)
@@ -38,16 +38,16 @@ def decode_playgy_path_token(value: str) -> str:
             f"{token}{padding}", altchars=b"-_", validate=True,
         )
         return payload.decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as exc:
+    except ValueError as exc:
         raise ValueError("播放路径令牌无效") from exc
 
 
-def sign_playgy(file_id: str, etag: str, size: str | int) -> str:
+def sign_playgy(file_id: str | int, etag: str, size: str | int) -> str:
     return hmac.new(_signing_key(), _canonical(file_id, etag, size), hashlib.sha256).hexdigest()
 
 
-def verify_playgy(file_id: str, etag: str, size: str | int, version: str, signature: str) -> bool:
-    if version != _VERSION or len(str(signature or "")) != 64:
+def verify_playgy(file_id: str | int, etag: str, size: str | int, version: str | int, signature: str) -> bool:
+    if version != _VERSION or len(signature or "") != 64:
         return False
     expected = sign_playgy(file_id, etag, size)
-    return hmac.compare_digest(expected, str(signature))
+    return hmac.compare_digest(expected, signature)

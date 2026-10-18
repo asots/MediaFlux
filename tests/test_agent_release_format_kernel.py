@@ -82,6 +82,7 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
             self.assertIn("不要要求用户写模板", instruction)
             self.assertIn("缺少信息先询问", instruction)
             self.assertTrue(any(message.role == "tool" for message in model.requests[1].messages))
+            assert view.approval is not None
             approval = view.approval.to_dict()
             self.assertEqual(approval["tool_name"], SAVE)
             self.assertIn("保存发布格式", approval["confirmation"]["action"])
@@ -125,7 +126,7 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
             view = await consume_events(runtime.session.run(AgentInput(
                 message=MESSAGE, owner=self.owner, session_id="private-session",
             )))
-            self.assertIsNotNone(view.approval, view.to_dict())
+            assert (view.approval) is not None, view.to_dict()
             plan_id = view.approval.plan_id
             denied = await consume_events(runtime.session.confirm(
                 owner=self.other_owner, session_id="private-session", plan_id=plan_id,
@@ -148,7 +149,7 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
             view = await consume_events(runtime.session.run(AgentInput(
                 message=MESSAGE, owner=self.owner, session_id="reload-session",
             )))
-            self.assertIsNotNone(view.approval, view.to_dict())
+            assert (view.approval) is not None, view.to_dict()
             model = TeachingModel(reobserve_after_failure=True)
             restored = self.runtime(model)
             state = await restored.store.load(owner=self.owner, session_id="reload-session")
@@ -165,7 +166,7 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
             self.assertTrue(any(message.role == "tool" and message.tool_name == PREVIEW
                                 for message in model.requests[1].messages))
             self.assertEqual(result.status, "approval_required", result.to_dict())
-            self.assertIsNotNone(result.approval)
+            assert (result.approval) is not None
             self.assertNotEqual(result.approval.plan_id, view.approval.plan_id)
             self.assertEqual(result.effect_result["status"], "confirmation_stale")
             self.assertEqual(formats.list_rules(), [])
@@ -184,7 +185,7 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
             view = await consume_events(runtime.session.run(AgentInput(
                 message=MESSAGE, owner=self.owner, session_id="stored-confirm-session",
             )))
-            self.assertIsNotNone(view.approval, view.to_dict())
+            assert (view.approval) is not None, view.to_dict()
             model = TeachingModel()
             restored = self.runtime(model)
             result = await consume_events(restored.session.confirm(

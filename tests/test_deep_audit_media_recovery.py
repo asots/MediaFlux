@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from app.clients.guangya import GuangYaClient
+from typing import cast
+
 import tests  # noqa: F401 -- 必须先隔离运行目录，再导入应用
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -52,7 +55,7 @@ def test_superseded_metadata_failure_does_not_poison_current_work(
     with isolated_test_database():
         db.enqueue_strm_metadata_jobs([metadata_job()])
         worker = metadata.STRMMetadataWorker()
-        worker._client = SimpleNamespace(credentials_current=True, logged_in=True)
+        worker._client = cast(GuangYaClient, SimpleNamespace(credentials_current=True, logged_in=True))
 
         def interrupted_download(*args, **kwargs):
             if interruption == "revision":
@@ -94,7 +97,7 @@ def test_current_metadata_failure_remains_retryable(tmp_path):
     with isolated_test_database():
         db.enqueue_strm_metadata_jobs([metadata_job()])
         worker = metadata.STRMMetadataWorker()
-        worker._client = SimpleNamespace(credentials_current=True, logged_in=True)
+        worker._client = cast(GuangYaClient, SimpleNamespace(credentials_current=True, logged_in=True))
         with (
             patch.object(metadata, "get_bool", return_value=True),
             patch.object(

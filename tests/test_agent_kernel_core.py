@@ -1,4 +1,9 @@
 from __future__ import annotations
+from app.agent.kernel.effects import ConfirmationEffectPlanStore
+from app.agent.kernel.pipeline import EffectLifecycle
+from app.agent.kernel.model import ModelAdapter
+from app.agent.kernel.state_ports import SessionStateStore
+from typing import cast
 
 import asyncio
 import json
@@ -6,6 +11,7 @@ import threading
 import time
 import unittest
 from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock
 
 from app.agent.errors import ToolPipelineError
 from app.agent.kernel.adapters import consume_events
@@ -490,6 +496,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(minimum=1, maximum=1),
             pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
         approval = await consume_events(session.run(AgentInput(message="整理这三个目录", owner="owner", session_id="session")))
+        assert approval.approval is not None
         result = await consume_events(session.confirm(owner="owner", session_id="session", plan_id=approval.approval.plan_id))
         self.assertEqual(result.status, "partial")
         self.assertIn("1/总 3", result.answer)
@@ -704,11 +711,12 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     for index in range(history_noise)
                 )],
             )
+        assert preview.approval is not None
         events = await collect(session.confirm(owner="owner", session_id="session", plan_id=preview.approval.plan_id))
         continued = await consume_events(_events_stream(events))
         self.assertEqual(writes, [1], "后续写操作必须再次获得确认，不能自动执行")
         self.assertEqual(continued.status, "approval_required")
-        self.assertIsNotNone(continued.approval)
+        assert (continued.approval) is not None
         self.assertNotEqual(continued.approval.plan_id, preview.approval.plan_id)
         self.assertEqual(len({(e.turn_id, e.request_id) for e in events}), 1)
         self.assertEqual(sum(e.type is AgentEventType.TURN_COMPLETED for e in events), 1)
@@ -764,6 +772,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         preview = await consume_events(session.run(AgentInput(message="处理两步", owner="o", session_id="s")))
         before = await state.load(owner="o", session_id="s")
         pending = {row["tool_call_id"]: row for row in before.conversation if row["role"] == "tool"}
+        assert preview.approval is not None
         self.assertEqual(pending["call-1"]["effect_plan_id"], preview.approval.plan_id)
         self.assertNotIn("effect_plan_id", pending["call-2"])
         final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
@@ -826,6 +835,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             message="把这个改成 S02E12", owner="owner", session_id="session",
         )))
 
+        assert preview.approval is not None
         events = await collect(session.confirm(
             owner="owner", session_id="session", plan_id=preview.approval.plan_id,
         ))
@@ -890,6 +900,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
             pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
         preview = await consume_events(session.run(AgentInput(message="提交并检查后续任务", owner="o", session_id="s")))
+        assert preview.approval is not None
         final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
         self.assertEqual(writes, [1])
         self.assertEqual(final.answer.count("#276"), 1)
@@ -942,6 +953,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             state_store=state,
         )
 
+        assert preview.effect_plan is not None
         events = await collect(
             session.confirm(
                 owner="owner",
@@ -970,6 +982,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
             pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
         preview = await consume_events(session.run(AgentInput(message="帮我移动目录", owner="owner", session_id="session")))
+        assert preview.approval is not None
         final = await consume_events(session.confirm(owner="owner", session_id="session", plan_id=preview.approval.plan_id))
         self.assertEqual(writes, [1])
         self.assertEqual(final.status, "partial")
@@ -991,11 +1004,12 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         preview = await consume_events(session.run(AgentInput(message="帮我移动目录", owner="owner", session_id="session")))
         from unittest.mock import patch
         commit = state.commit
-        async def fail_receipt(lease, *, conversation=None, updates=()):
+        async def fail_receipt(lease, *, conversation=None, updates=(), task_patch=None):
             if conversation and any("可信系统结果" in str(row.get("content")) for row in conversation):
                 raise RuntimeError("receipt unavailable")
-            return await commit(lease, conversation=conversation, updates=updates)
+            return await commit(lease, conversation=conversation, updates=updates, task_patch=task_patch)
         with patch.object(state, "commit", side_effect=fail_receipt):
+            assert preview.approval is not None
             final = await consume_events(session.confirm(owner="owner", session_id="session", plan_id=preview.approval.plan_id))
         self.assertEqual(writes, [1])
         self.assertEqual(final.status, "partial")
@@ -1083,14 +1097,14 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         class FailingProviderModel:
             async def stream(self, request, *, cancellation):
                 del request, cancellation
-                raise ModelProviderError("Provider 请求失败（HTTP 503）")
-                if False:  # pragma: no cover - async generator contract
-                    yield None
+                yield await AsyncMock(
+                    side_effect=ModelProviderError("Provider 请求失败（HTTP 503）"),
+                )()
 
         catalog = ToolCatalog([read_tool("agent.status", domain="agent")])
         state = InMemorySessionStateStore()
         session = AgentSession(
-            model=FailingProviderModel(),
+            model=cast(ModelAdapter, FailingProviderModel()),
             catalog=catalog,
             retriever=CapabilityRetriever(minimum=1, maximum=1),
             pipeline=ToolPipeline(catalog=catalog, state_store=state),
@@ -2034,7 +2048,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             model_selector=select_model)
         preview = await consume_events(session.run(AgentInput(
             message="暂停任务", owner="o", session_id="selected", channel="telegram")))
-        self.assertIsNotNone(preview.approval)
+        assert (preview.approval) is not None
         session.model = replacement
         result = await consume_events(session.confirm(owner="o", session_id="selected",
             plan_id=preview.approval.plan_id, channel="telegram"))
@@ -2070,11 +2084,11 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                                pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
         commit = store.commit
 
-        async def checkpoint(lease, *, conversation=None, updates=()):
+        async def checkpoint(lease, *, conversation=None, updates=(), task_patch=None):
             if conversation and any(row.get("effect_plan_id") for row in conversation):
                 entered.set()
                 await release.wait()
-            return await commit(lease, conversation=conversation, updates=updates)
+            return await commit(lease, conversation=conversation, updates=updates, task_patch=task_patch)
 
         with patch.object(store, "commit", side_effect=checkpoint):
             task = asyncio.create_task(consume_events(session.run(AgentInput(message="暂停下载", owner="o", session_id="s"))))
@@ -2109,6 +2123,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
                                pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
         preview = await consume_events(session.run(AgentInput(message="移动后继续处理其他文件", owner="o", session_id="s")))
+        assert preview.approval is not None
         task = asyncio.create_task(consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id)))
         await asyncio.wait_for(started.wait(), 2)
         def request_stop(state):
@@ -2147,6 +2162,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             await store.update_effect_state(owner="o", session_id="s", change=mark)
             await original_unprotect(lease, token)
         session.coordinator.unprotect = stop_before_unprotect
+        assert preview.approval is not None
         task = asyncio.create_task(consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id)))
         await asyncio.wait_for(started.wait(), 2)
         release.set()
@@ -2191,8 +2207,10 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                                pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
         preview = await consume_events(session.run(AgentInput(message="清空回收站", owner="o", session_id="s")))
         version[0] = 2
+        assert preview.approval is not None
         refreshed = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
         self.assertEqual(refreshed.status, "approval_required", refreshed.to_dict())
+        assert refreshed.approval is not None
         self.assertNotEqual(refreshed.approval.plan_id, preview.approval.plan_id)
         self.assertEqual(writes, [])
         self.assertEqual(len(model.requests), 3)
@@ -2243,7 +2261,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     message="手动清洗云盘视频到目标目录", owner="owner", session_id="session",
                 )))
                 self.assertEqual(calls, [])
-                self.assertIsNotNone(preview.approval)
+                assert (preview.approval) is not None
                 plan_id = preview.approval.plan_id
                 confirmed = await consume_events(session.confirm(
                     owner="owner", session_id="session", plan_id=plan_id,
@@ -2517,7 +2535,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preview_publication_failure_discards_frozen_effect(self) -> None:
         class FailingCommitStateStore(InMemorySessionStateStore):
-            async def commit(self, lease, *, conversation=None, updates=()):
+            async def commit(self, lease, *, conversation=None, updates=(), task_patch=None):
                 del lease, conversation, updates
                 raise RuntimeError("commit failed")
 
@@ -2567,8 +2585,8 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         lifecycle = RecordingLifecycle()
         pipeline = ToolPipeline(
             catalog=catalog,
-            state_store=state,
-            effect_lifecycle=lifecycle,
+            state_store=cast(SessionStateStore, state),
+            effect_lifecycle=cast(EffectLifecycle | None, lifecycle),
         )
         lease, _ = await state.begin_turn(
             owner="owner-1", session_id="session-1", request_id="request-1"
@@ -2872,7 +2890,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             pipeline=ToolPipeline(
                 catalog=catalog,
                 state_store=state,
-                effect_lifecycle=lifecycle,
+                effect_lifecycle=cast(EffectLifecycle | None, lifecycle),
             ),
             state_store=state,
         )
@@ -3249,6 +3267,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
             {"resource_candidates_ref": first_ref},
             context=context,
         )
+        assert preview.effect_plan is not None
         self.assertEqual(
             preview.effect_plan.arguments,
             {"resource_candidates_ref": first_ref},
@@ -3413,7 +3432,7 @@ class LatestWinsTests(unittest.IsolatedAsyncioTestCase):
         release_checkpoint = asyncio.Event()
 
         class DelayedCheckpointStore(InMemorySessionStateStore):
-            async def commit(self, lease, *, conversation=None, updates=()):
+            async def commit(self, lease, *, conversation=None, updates=(), task_patch=None):
                 if conversation and any(
                     item.get("tool_call_id") == "old-read"
                     for item in conversation
@@ -3421,7 +3440,7 @@ class LatestWinsTests(unittest.IsolatedAsyncioTestCase):
                     checkpoint_started.set()
                     await release_checkpoint.wait()
                 return await super().commit(
-                    lease, conversation=conversation, updates=updates
+                    lease, conversation=conversation, updates=updates, task_patch=task_patch
                 )
 
         class ReplacingModel:
@@ -3451,8 +3470,8 @@ class LatestWinsTests(unittest.IsolatedAsyncioTestCase):
             model=ReplacingModel(),
             catalog=catalog,
             retriever=CapabilityRetriever(minimum=1, maximum=1),
-            pipeline=ToolPipeline(catalog=catalog, state_store=state),
-            state_store=state,
+            pipeline=ToolPipeline(catalog=catalog, state_store=cast(SessionStateStore, state)),
+            state_store=cast(SessionStateStore, state),
         )
         old_task = asyncio.create_task(
             collect(
@@ -3878,6 +3897,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                                pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
         preview = await consume_events(session.run(AgentInput(message='改名', owner='owner', session_id='confirm-recovery')))
         self.assertEqual(writes, [])
+        assert preview.approval is not None
         final = await consume_events(session.confirm(owner='owner', session_id='confirm-recovery', plan_id=preview.approval.plan_id))
         self.assertTrue(final.effect_result['ok'])
         self.assertEqual(writes, [1])
@@ -3934,11 +3954,12 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             message='依次处理first和second', owner='owner', session_id='recovered-followup',
         )))
         self.assertEqual(writes, [])
+        assert original.approval is not None
         followup = await consume_events(session.confirm(owner='owner', session_id='recovered-followup',
                                                         plan_id=original.approval.plan_id))
         self.assertEqual(writes, ['first'])
         self.assertEqual(prepared, ['first', 'second'])
-        self.assertIsNotNone(followup.approval)
+        assert (followup.approval) is not None
         self.assertNotEqual(followup.approval.plan_id, original.approval.plan_id)
         self.assertEqual(model.requests[2].tools, model.requests[1].tools)
         self.assertNotIn('未完成的规划残稿', str(model.requests[2].messages))
@@ -3989,6 +4010,7 @@ class AgentAnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
                                pipeline=ToolPipeline(catalog=catalog, state_store=state), state_store=state)
         original = await consume_events(session.run(AgentInput(message='改名', owner='owner', session_id='explain-cut')))
+        assert original.approval is not None
         result = await consume_events(session.explain(owner='owner', session_id='explain-cut',
                                                      plan_id=original.approval.plan_id, message='只解释这个计划'))
         self.assertEqual(result.status, 'success')
@@ -4035,7 +4057,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
     async def preview(self, session, session_id):
         view = await consume_events(session.run(AgentInput(owner="owner", session_id=session_id, message="先改名再移动")))
-        self.assertIsNotNone(view.approval)
+        assert (view.approval) is not None
         return view.approval.plan_id
 
     async def confirm(self, session, session_id, plan_id):
@@ -4065,9 +4087,11 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     plan_id = await self.preview(session, sid)
                     if continuation:
                         view = await consume_events(_events_stream(await self.confirm(session, sid, plan_id)))
+                        assert view.approval is not None
                         plan_id = view.approval.plan_id
                     before = await session.state_store.load(owner="owner", session_id=sid)
                     now[0] = self.active(session, before, plan_id).expires_at + 1
+                    assert isinstance(session.model, ScriptedModel)
                     requests = len(session.model.requests)
                     self.assert_rejected(await self.confirm(session, sid, plan_id))
                     store = SQLiteKernelStore() if persistent else session.state_store
@@ -4080,6 +4104,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(public_conversation_messages(after.conversation), public_conversation_messages(before.conversation))
                     self.assertEqual(writes, [1] if continuation else [])
                     self.assert_rejected(await self.confirm(session, sid, plan_id))
+                    assert isinstance(session.model, ScriptedModel)
                     self.assertEqual(len(session.model.requests), requests)
 
     async def test_cancel_continuation_clears_pending_but_preserves_confirmed_receipt(self):
@@ -4091,6 +4116,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     sid = f"cancel-{persistent}-{expired}"
                     first = await self.preview(session, sid)
                     view = await consume_events(_events_stream(await self.confirm(session, sid, first)))
+                    assert view.approval is not None
                     second = view.approval.plan_id
                     before = await session.state_store.load(owner="owner", session_id=sid)
                     if expired:
@@ -4123,6 +4149,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 sid = f"replay-{persistent}"
                 first = await self.preview(session, sid)
                 view = await consume_events(_events_stream(await self.confirm(session, sid, first)))
+                assert view.approval is not None
                 second = view.approval.plan_id
                 before = await session.state_store.load(owner="owner", session_id=sid)
                 self.assert_rejected(await self.confirm(session, sid, first))
@@ -4133,7 +4160,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(after.pending_effect_plan_id, second)
                 self.assertEqual(after.metadata, before.metadata)
                 self.assertEqual(after.conversation, before.conversation)
-                self.assertIsNotNone(self.active(session, after, second))
+                assert (self.active(session, after, second)) is not None
                 final = await consume_events(_events_stream(await self.confirm(session, sid, second)))
                 self.assertEqual(final.status, "success")
                 self.assert_rejected(await self.confirm(session, sid, second))
@@ -4150,6 +4177,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 sid = f"late-cleanup-{persistent}"
                 first = await self.preview(session, sid)
                 view = await consume_events(_events_stream(await self.confirm(session, sid, first)))
+                assert view.approval is not None
                 second = view.approval.plan_id
                 store = session.state_store
                 before = await store.load(owner="owner", session_id=sid)
@@ -4159,11 +4187,11 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 entered, release = asyncio.Event(), asyncio.Event()
                 commit = store.commit
 
-                async def delayed_commit(lease, *, conversation=None, updates=()):
+                async def delayed_commit(lease, *, conversation=None, updates=(), task_patch=None):
                     if lease == late:
                         entered.set()
                         await release.wait()
-                    return await commit(lease, conversation=conversation, updates=updates)
+                    return await commit(lease, conversation=conversation, updates=updates, task_patch=task_patch)
 
                 with patch.object(store, "commit", side_effect=delayed_commit):
                     task = asyncio.create_task(store.commit(late, updates=cleanup))
@@ -4221,6 +4249,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 view = await consume_events(_events_stream(events))
                 self.assertEqual(view.status, "approval_required", "重复确认不能取消已执行操作的后续规划")
                 after = await session.state_store.load(owner="owner", session_id=sid)
+                assert view.approval is not None
                 self.assertEqual(after.pending_effect_plan_id, view.approval.plan_id)
                 self.assertEqual(writes, [1])
 
@@ -4237,7 +4266,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     self.assert_rejected(await self.confirm(session, sid, plan_id))
                 after = await session.state_store.load(owner="owner", session_id=sid)
                 self.assertEqual(after.pending_effect_plan_id, plan_id)
-                self.assertIsNotNone(self.active(session, after, plan_id))
+                assert (self.active(session, after, plan_id)) is not None
                 self.assertEqual(after.conversation, before.conversation)
                 self.assertEqual(writes, [])
 
@@ -4252,6 +4281,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 sid = f"claim-cancel-{persistent}"
                 plan_id = await self.preview(session, sid)
                 before = await session.state_store.load(owner="owner", session_id=sid)
+                assert isinstance(session.pipeline.effect_store, ConfirmationEffectPlanStore)
                 tickets = session.pipeline.effect_store.store
                 claim = tickets.claim_and_rotate_owner
                 entered, release = threading.Event(), threading.Event()
@@ -4268,7 +4298,7 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(await asyncio.to_thread(entered.wait, 2))
                         with self.assertRaises(SessionBusyError):
                             await session.cancel_effect(owner="owner", session_id=sid, plan_id=plan_id)
-                        self.assertIsNotNone(self.active(session, before, plan_id), "取消被拒绝时不得已先撤销票据")
+                        assert (self.active(session, before, plan_id)) is not None, "取消被拒绝时不得已先撤销票据"
                     finally:
                         release.set()
                         events = await asyncio.wait_for(task, 3)
@@ -4313,7 +4343,7 @@ class ConfirmedEffectReplayTests(unittest.IsolatedAsyncioTestCase):
 
     async def confirm(self, session):
         preview = await consume_events(session.run(AgentInput(owner="owner", session_id="replay", message="变更")))
-        self.assertIsNotNone(preview.approval)
+        assert (preview.approval) is not None
         return await collect(session.confirm(owner="owner", session_id="replay", plan_id=preview.approval.plan_id))
 
     async def test_same_write_after_live_read_reuses_receipt_without_replaying_updates(self):
@@ -4349,7 +4379,7 @@ class ConfirmedEffectReplayTests(unittest.IsolatedAsyncioTestCase):
         session, _, prepares, writes, _ = self.runtime([self.call("cloud.change", {"step": 2}, "next")])
         final = await consume_events(_events_stream(await self.confirm(session)))
         self.assertEqual(final.status, "approval_required")
-        self.assertIsNotNone(final.approval)
+        assert (final.approval) is not None
         self.assertEqual(prepares, [{"step": 1}, {"step": 2}])
         self.assertEqual(writes, [{"step": 1}])
 
@@ -4371,7 +4401,7 @@ class ConfirmedEffectReplayTests(unittest.IsolatedAsyncioTestCase):
         final = await consume_events(_events_stream(await self.confirm(session)))
         self.assertFalse(final.effect_result["ok"])
         self.assertEqual(final.status, "approval_required")
-        self.assertIsNotNone(final.approval)
+        assert (final.approval) is not None
         self.assertEqual(len(model.requests), 3)
         self.assertEqual(reads, [1])
         self.assertEqual(prepares, [{"step": 1}, {"step": 1}])
@@ -4388,6 +4418,7 @@ class ConfirmedEffectReplayTests(unittest.IsolatedAsyncioTestCase):
                                   turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(),
                                   report_progress=AsyncMock())
         preview = await pipeline.execute("cloud.change", {"step": 1}, context=context)
+        assert preview.effect_plan is not None
         completed = await pipeline.execute_confirmed(preview.effect_plan.plan_id, context=context)
         continuation = replace(context, confirmed_effect=completed)
         replay = await pipeline.execute("cloud.change", {"step": 1}, context=continuation)
@@ -4416,7 +4447,7 @@ class ConfirmedEffectReplayTests(unittest.IsolatedAsyncioTestCase):
             fresh, _ = await store.begin_turn(owner=owner, session_id=sid, request_id="fresh")
             foreign = replace(continuation, owner=owner, session_id=sid, lease=fresh, turn_id=fresh.turn_id)
             next_preview = await pipeline.execute("cloud.change", {"step": 1}, context=foreign)
-            self.assertIsNotNone(next_preview.effect_plan, "旧回执不能跨身份、会话或代次复用")
+            assert (next_preview.effect_plan) is not None, "旧回执不能跨身份、会话或代次复用"
             self.assertEqual(writes, [{"step": 1}])
         with self.assertRaises(StalePublicationError):
             await pipeline.execute("cloud.change", {"step": 1}, context=continuation)
@@ -4459,27 +4490,31 @@ class ArgumentRepairPreservationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ToolPipelineError):
             await pipeline.execute(tool.name, {"id": "NULL", "period": None}, context=context)
         null_fixed = await pipeline.execute(tool.name, {"id": "NULL"}, context=context)
+        assert null_fixed.effect_plan is not None
         self.assertEqual(null_fixed.effect_plan.arguments["period"], 10080)
         # 不同对象正常使用默认值，不消费A的修复约束。
         other = await pipeline.execute(tool.name, {"id": "B"}, context=context)
+        assert other.effect_plan is not None
         self.assertEqual(other.effect_plan.arguments["period"], 10080)
         with self.assertRaisesRegex(ToolPipelineError, "不能省略.*period"):
             await pipeline.execute(tool.name, {"id": "A"}, context=context)
         fixed = await pipeline.execute(tool.name, {**invalid, "period": 4320}, context=context)
+        assert fixed.effect_plan is not None
         self.assertEqual(fixed.effect_plan.arguments, {**invalid, "period": 4320})
         self.assertFalse(any(entry.guard_key for entry in context.schema_replacements.values()))
         # 成功后不是永久锁定字段；新调用仍遵守原来的可选契约。
         fresh = await pipeline.execute(tool.name, {"id": "A"}, context=context)
+        assert fresh.effect_plan is not None
         self.assertEqual(fresh.effect_plan.arguments["period"], 10080)
         with self.assertRaisesRegex(ToolPipelineError, "包含未知参数"):
             await pipeline.execute(tool.name, {"id": "C", "unknown": "never echo"}, context=context)
-        self.assertIsNotNone((await pipeline.execute(tool.name, {"id": "C"}, context=context)).effect_plan)
+        assert ((await pipeline.execute(tool.name, {"id": "C"}, context=context)).effect_plan) is not None
         # 另一轮独立上下文不会继承先前的修复要求。
         with self.assertRaises(ToolPipelineError):
             await pipeline.execute(tool.name, invalid, context=context)
         next_lease, _ = await store.begin_turn(owner="owner", session_id="repair", request_id="next")
         next_context = replace(context, lease=next_lease, turn_id=next_lease.turn_id)
-        self.assertIsNotNone((await pipeline.execute(tool.name, {"id": "A"}, context=next_context)).effect_plan)
+        assert ((await pipeline.execute(tool.name, {"id": "A"}, context=next_context)).effect_plan) is not None
 
     async def test_model_repair_cannot_freeze_a_defaulted_plan_before_correcting_the_field(self):
         prepared, writes = [], []

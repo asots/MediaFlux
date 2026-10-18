@@ -1,5 +1,9 @@
 """Offline native wire -> real Session -> SQLite -> actual transport boundaries."""
 
+from typing import cast
+from collections.abc import Callable
+from app.clients.http import FixedHostHttpClient
+
 import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
@@ -125,7 +129,7 @@ class NativeRuntime:
                 model="fixture",
                 protocol="chat_completions",
             ),
-            client_factory=lambda **_: Client(),
+            client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: Client()),
         )
         self.reopen()
 
@@ -280,7 +284,7 @@ def test_telegram_actual_callback_preserves_card(monkeypatch):
         monkeypatch.setattr(
             agent_adapter.config,
             "get",
-            lambda key, default=None: settings.get(key, get_config(key, default)),
+            lambda key, default="": settings.get(key, get_config(key, default)),
         )
         monkeypatch.setattr(agent_adapter, "is_agent_enabled", lambda: True)
         bot = Mock()

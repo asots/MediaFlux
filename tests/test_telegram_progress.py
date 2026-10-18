@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from threading import Event, Thread
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, patch
 
 import requests
+from telebot import TeleBot
 
 from app import database as db
 from app.bot import handlers as bot_handlers
@@ -12,15 +15,15 @@ from app.bot.handlers import _recover_stale_progress_until_delivered
 from app.bot.progress import (
     TelegramProgress,
     _register_pending,
-    cancel_active_operations,
     _retry_terminal_until_delivered,
+    cancel_active_operations,
     deliver_terminal_to_existing_message,
     recover_stale_operations,
 )
 from tests.support import IsolatedDatabaseTestCase
 
 
-class _RichBot:
+class _DraftBot:
     def __init__(self):
         self.rich_drafts = []
         self.rich_messages = []
@@ -31,14 +34,6 @@ class _RichBot:
     def send_chat_action(self, chat_id, action, message_thread_id=None):
         self.actions.append((chat_id, action, message_thread_id))
 
-    def send_rich_message_draft(self, chat_id, draft_id, message, **kwargs):
-        self.rich_drafts.append((chat_id, draft_id, message.html, kwargs))
-        return True
-
-    def send_rich_message(self, chat_id, message, **kwargs):
-        self.rich_messages.append((chat_id, message.html, kwargs))
-        return SimpleNamespace(message_id=12)
-
     def send_message_draft(self, chat_id, draft_id, text, **kwargs):
         self.text_drafts.append((chat_id, draft_id, text, kwargs))
         return True
@@ -48,7 +43,16 @@ class _RichBot:
         return SimpleNamespace(message_id=13)
 
 
-class _TextDraftBot(_RichBot):
+class _RichBot(_DraftBot):
+    def send_rich_message_draft(self, chat_id, draft_id, message, **kwargs):
+        self.rich_drafts.append((chat_id, draft_id, message.html, kwargs))
+        return True
+
+    def send_rich_message(self, chat_id, message, **kwargs):
+        self.rich_messages.append((chat_id, message.html, kwargs))
+        return SimpleNamespace(message_id=12)
+
+class _TextDraftBot(_DraftBot):
     send_rich_message_draft = None
     send_rich_message = None
 
@@ -700,7 +704,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
             recovered = _recover_stale_progress_until_delivered(
                 bot,
                 _TELEBOT,
-                stop_event,
+                cast(Event, stop_event),
                 operation_ids=("old-operation",),
                 delays=(0.01, 0.02),
             )
@@ -781,7 +785,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
 
         new_thread = ReplacementThread()
         new_thread_stop = __import__("threading").Event()
-        new_bot = object()
+        new_bot = cast(TeleBot, object())
 
         class OldThread:
             def is_alive(self):
@@ -789,10 +793,10 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
 
             def join(self, timeout):
                 bot_handlers._bot = new_bot
-                bot_handlers._bot_thread = new_thread
+                bot_handlers._bot_thread = cast(Thread, new_thread)
                 bot_handlers._bot_thread_stop = new_thread_stop
                 bot_handlers._progress_recovery_stop = new_stop
-                bot_handlers._progress_recovery_thread = new_thread
+                bot_handlers._progress_recovery_thread = cast(Thread, new_thread)
 
         saved = (
             bot_handlers._bot,
@@ -804,7 +808,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
         bot_handlers._bot = None
         bot_handlers._bot_thread = None
         bot_handlers._bot_thread_stop = None
-        bot_handlers._progress_recovery_thread = OldThread()
+        bot_handlers._progress_recovery_thread = cast(Thread, OldThread())
         bot_handlers._progress_recovery_stop = old_stop
         try:
             with patch(
@@ -850,7 +854,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
         bot_handlers._bot = None
         bot_handlers._bot_thread = None
         bot_handlers._bot_thread_stop = None
-        bot_handlers._progress_recovery_thread = recovery
+        bot_handlers._progress_recovery_thread = cast(Thread, recovery)
         bot_handlers._progress_recovery_stop = recovery_stop
         try:
             with patch(
@@ -936,7 +940,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
         with patch.object(bot_handlers, "init_bot", return_value=bot), patch.object(
             bot_handlers, "_ensure_command_menu", return_value=True
         ):
-            bot_handlers.start_bot_blocking(stop_event)
+            bot_handlers.start_bot_blocking(cast(Event, stop_event))
 
         self.assertEqual(bot.calls, 2)
 
@@ -959,7 +963,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
         with patch.object(bot_handlers, "init_bot", return_value=bot), patch.object(
             bot_handlers, "_ensure_command_menu", return_value=True
         ):
-            bot_handlers.start_bot_blocking(stop_event)
+            bot_handlers.start_bot_blocking(cast(Event, stop_event))
 
         self.assertEqual(stop_event.waits, [1.0])
 
@@ -967,7 +971,7 @@ class TelegramProgressTests(IsolatedDatabaseTestCase):
         stop_event = __import__("threading").Event()
         stop_event.set()
         with patch.object(bot_handlers, "init_bot") as initialize:
-            bot_handlers.start_bot_blocking(stop_event)
+            bot_handlers.start_bot_blocking(cast(Event, stop_event))
         initialize.assert_not_called()
 
     def test_init_stop_event_prevents_recovery_generation_creation(self):

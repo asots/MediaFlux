@@ -85,6 +85,7 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         self.drain()
         for request_id in ids:
             row = db.get_download_request(request_id)
+            assert row is not None
             self.assertEqual(row['gy_staging_cleanup_status'], 'completed')
             self.assertEqual(row['gy_staging_cleanup_error'], '')
         self.assertCountEqual(self.cloud.deleted, ['stage', 'stage-two', 'stage-three'])
@@ -110,7 +111,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
                 'done', result_json='{"moved":1}', event_json='{}', chat_id='',
                 message_id=None, enqueue_delivery=False,
             )
-        self.assertEqual(db.get_organize_confirmation('done')['status'], 'running')
+        get_organize_confirmation_result = db.get_organize_confirmation('done')
+        assert get_organize_confirmation_result is not None
+        self.assertEqual(get_organize_confirmation_result['status'], 'running')
 
     def test_read_error_persists_backoff_then_new_worker_recovers_once(self):
         self.enqueue()
@@ -127,7 +130,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         self.drain()
         self.assertEqual(self.cloud.deleted, ['stage'])
         self.assertEqual(self.job()['status'], 'completed')
-        self.assertEqual(db.get_organize_confirmation('done')['status'], 'completed')
+        get_organize_confirmation_result_2 = db.get_organize_confirmation('done')
+        assert get_organize_confirmation_result_2 is not None
+        self.assertEqual(get_organize_confirmation_result_2['status'], 'completed')
 
     def test_prewrite_process_interruption_keeps_durable_intent(self):
         self.enqueue()
@@ -144,7 +149,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
             with self.assertRaises(KeyboardInterrupt):
                 self.drain()
             self.assertEqual(delete.call_count, 1)
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'failed')
+        get_download_request_result = db.get_download_request(self.request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result['gy_staging_cleanup_status'], 'failed')
         self.due_now()
         self.drain()
         self.assertEqual(self.cloud.deleted, [])
@@ -155,6 +162,7 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         self.rules.clean_empty = False
         self.drain()
         row = db.get_download_request(self.request_id)
+        assert row is not None
         self.assertEqual(row['gy_staging_cleanup_status'], 'skipped')
         self.assertFalse(row['attention_cleared_at'])
         self.assertEqual(db.count_download_requests_requiring_attention(), 0)
@@ -171,6 +179,7 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.job()['status'], 'retained')
         self.assertEqual(self.cloud.deleted, [])
         row = db.get_download_request(self.request_id)
+        assert row is not None
         self.assertEqual(row['gy_staging_cleanup_status'], 'retained')
         self.assertNotIn('未识别', row['gy_staging_cleanup_error'])
 
@@ -287,7 +296,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.job()['status'], 'blocked')
 
     def test_precommit_download_identity_snapshot_cannot_rebind_to_replacement(self):
-        before = dict(db.get_download_request(self.request_id))
+        get_download_request_result_16 = db.get_download_request(self.request_id)
+        assert get_download_request_result_16 is not None
+        before = dict(get_download_request_result_16)
         db.update_organize_confirmation('done', result_json=json.dumps({
             'moved': 1, 'download_staging_identity': before,
         }))
@@ -304,7 +315,7 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
 
         def unavailable(**kwargs):
             audit_id = original(**kwargs)
-            self.cloud.file_info = lambda *_: (_ for _ in ()).throw(OSError('offline'))
+            self.cloud.file_info = lambda *_, **__: (_ for _ in ()).throw(OSError('offline'))
             return audit_id
 
         with patch.object(db, 'add_organize_delete_audit', side_effect=unavailable):
@@ -322,7 +333,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         with patch.object(worker, 'finish_cleanup_intent', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
             self.drain()
         self.assertEqual(self.cloud.deleted, ['stage'])
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'completed')
+        get_download_request_result_2 = db.get_download_request(self.request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2['gy_staging_cleanup_status'], 'completed')
         self.due_now()
         self.drain()
         self.assertEqual(self.cloud.deleted, ['stage'])
@@ -344,7 +357,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         db.update_download_request(self.request_id, gy_staging_cleanup_error='下载隔离目录仍有媒体、伴随或其他文件，已保留')
         self.rules.clean_empty = False
         self.drain()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_3 = db.get_download_request(self.request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3['gy_staging_cleanup_status'], 'retained')
         self.assertEqual(db.count_download_requests_requiring_attention(), 1)
         self.assertEqual(self.cloud.reads, [])
 
@@ -358,7 +373,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
                 worker.reconcile_with_client(rules=self.rules, writer_lock=self.writer_lock)
         finally:
             self.writer_lock.release()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'skipped')
+        get_download_request_result_4 = db.get_download_request(self.request_id)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4['gy_staging_cleanup_status'], 'skipped')
 
     def test_policy_skip_can_later_be_manually_cleaned_with_all_original_guards(self):
         from app.modules.download_staging_cleanup import cleanup_download_staging
@@ -411,7 +428,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         )
         self.rules.clean_empty = False
         self.drain()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_5 = db.get_download_request(self.request_id)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5['gy_staging_cleanup_status'], 'retained')
         self.assertEqual(db.count_download_requests_requiring_attention(), 1)
         self.assertEqual(self.cloud.reads, [])
 
@@ -428,7 +447,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
             self.drain()
         self.assertEqual(self.cloud.deleted, [])
         self.assertEqual(self.job()['status'], 'blocked')
-        self.assertEqual(db.get_download_request(self.request_id)['gy_task_id'], 'late-replacement')
+        get_download_request_result_6 = db.get_download_request(self.request_id)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6['gy_task_id'], 'late-replacement')
 
     def test_replaced_success_card_during_audit_does_not_authorize_old_intent(self):
         self.enqueue()
@@ -542,7 +563,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         }))
         self.enqueue()
         self.drain()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'skipped')
+        get_download_request_result_7 = db.get_download_request(self.request_id)
+        assert get_download_request_result_7 is not None
+        self.assertEqual(get_download_request_result_7['gy_staging_cleanup_status'], 'skipped')
         self.assertEqual(self.cloud.reads, [])
 
     def test_agent_clean_title_with_enabled_policy_can_cleanup_after_restart(self):
@@ -556,7 +579,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         }))
         self.enqueue()
         self.drain()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'completed')
+        get_download_request_result_8 = db.get_download_request(self.request_id)
+        assert get_download_request_result_8 is not None
+        self.assertEqual(get_download_request_result_8['gy_staging_cleanup_status'], 'completed')
         self.assertEqual(self.cloud.deleted, ['stage'])
 
     def test_legacy_agent_clean_without_saved_policy_never_gains_delete_authority(self):
@@ -568,7 +593,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         db.update_organize_confirmation('done', confirmation_actor='agent')
         self.assertEqual(queue.discover_legacy_confirmation_cleanup(), 1)
         self.drain()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'skipped')
+        get_download_request_result_9 = db.get_download_request(self.request_id)
+        assert get_download_request_result_9 is not None
+        self.assertEqual(get_download_request_result_9['gy_staging_cleanup_status'], 'skipped')
         self.assertEqual(self.cloud.deleted, [])
         self.assertEqual(self.cloud.reads, [])
 
@@ -599,7 +626,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         self.rules.clean_empty = False
         with patch.object(worker, 'finish_cleanup_intent', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
             self.drain()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'skipped')
+        get_download_request_result_10 = db.get_download_request(self.request_id)
+        assert get_download_request_result_10 is not None
+        self.assertEqual(get_download_request_result_10['gy_staging_cleanup_status'], 'skipped')
         self.due_now()
         self.rules.clean_empty = True
         self.drain()
@@ -610,9 +639,13 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
     def test_repository_policy_cas_cannot_overwrite_failed_even_without_an_audit_row(self):
         from app.repositories.download_staging import update_staging_cleanup
         db.update_download_request(self.request_id, gy_staging_cleanup_status='failed')
-        row = dict(db.get_download_request(self.request_id))
+        get_download_request_result_17 = db.get_download_request(self.request_id)
+        assert get_download_request_result_17 is not None
+        row = dict(get_download_request_result_17)
         self.assertFalse(update_staging_cleanup(row, status='skipped', error='policy'))
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'failed')
+        get_download_request_result_11 = db.get_download_request(self.request_id)
+        assert get_download_request_result_11 is not None
+        self.assertEqual(get_download_request_result_11['gy_staging_cleanup_status'], 'failed')
         self.assertEqual(db.count_download_requests_requiring_attention(), 1)
 
     def test_worker_refreshes_permanent_source_at_final_audit_guard(self):
@@ -638,7 +671,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
             '隔离目录仍有 2 项未整理或未识别：video.mkv、unconfirmed.srt'
         ))
         self.drain()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_12 = db.get_download_request(self.request_id)
+        assert get_download_request_result_12 is not None
+        self.assertEqual(get_download_request_result_12['gy_staging_cleanup_status'], 'retained')
         self.assertEqual(db.count_download_requests_requiring_attention(), 1)
         self.assertEqual(self.cloud.reads, [])
 
@@ -656,7 +691,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
             self.drain()
         self.assertEqual(self.cloud.deleted, ['child'])
         self.assertEqual(self.job()['status'], 'retry')
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_13 = db.get_download_request(self.request_id)
+        assert get_download_request_result_13 is not None
+        self.assertEqual(get_download_request_result_13['gy_staging_cleanup_status'], 'retained')
         self.due_now()
         self.drain()
         self.assertEqual(self.cloud.deleted, ['child', 'stage'])
@@ -677,7 +714,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
 
         with patch.object(self.cloud, 'file_info', side_effect=interrupt), self.assertRaises(KeyboardInterrupt):
             self.drain()
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_14 = db.get_download_request(self.request_id)
+        assert get_download_request_result_14 is not None
+        self.assertEqual(get_download_request_result_14['gy_staging_cleanup_status'], 'retained')
         self.assertEqual(self.cloud.deleted, ['child'])
         self.due_now()
         self.drain()
@@ -696,7 +735,9 @@ class DownloadStagingReconciliationTests(IsolatedDatabaseTestCase):
         with patch.object(db, 'update_organize_delete_audit', side_effect=audit_unavailable):
             self.drain()
         self.assertEqual(self.cloud.deleted, ['child'])
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'failed')
+        get_download_request_result_15 = db.get_download_request(self.request_id)
+        assert get_download_request_result_15 is not None
+        self.assertEqual(get_download_request_result_15['gy_staging_cleanup_status'], 'failed')
         self.assertEqual(self.job()['status'], 'blocked')
         self.due_now()
         self.drain()

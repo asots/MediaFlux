@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
@@ -11,20 +12,14 @@ from app.clients.base import close_media_server_client
 from app.clients.qbittorrent import close_qbittorrent_client
 from app.logger import get_logger
 from app.modules.local_directory_browser import VIRTUAL_ROOT, browse_local_directories
-from app.modules.local_path_mapping import (
-    LEGACY_SOURCE_PATH_ERROR,
-    PathMappingError,
-    assert_within,
-    is_windows_or_unc_path,
-    validate_source_target_roots,
-)
 from app.modules.local_media_candidates import (
     candidate_payload,
     discover_local_media_directory_candidates,
 )
-from app.modules.local_media_models import LOCAL_BUSY_TASK_STATUSES, LOCAL_MEDIA_CATEGORIES
-from app.modules.media_server_path_mapping import MediaServerPathMapping
-from app.modules.media_server_profiles import list_configured_profiles
+from app.modules.local_media_models import (
+    LOCAL_BUSY_TASK_STATUSES,
+    LOCAL_MEDIA_CATEGORIES,
+)
 from app.modules.local_media_notifications import notify_local_media_task
 from app.modules.local_media_recognition_summary import (
     merge_recognition_summaries,
@@ -32,8 +27,20 @@ from app.modules.local_media_recognition_summary import (
     summary_from_task,
 )
 from app.modules.local_media_scheduler import get_local_media_scheduler
-from app.modules.local_media_service import LocalMediaServiceError, get_local_media_service
+from app.modules.local_media_service import (
+    LocalMediaServiceError,
+    get_local_media_service,
+)
+from app.modules.local_path_mapping import (
+    LEGACY_SOURCE_PATH_ERROR,
+    PathMappingError,
+    assert_within,
+    is_windows_or_unc_path,
+    validate_source_target_roots,
+)
 from app.modules.local_storage import LocalStorageError
+from app.modules.media_server_path_mapping import MediaServerPathMapping
+from app.modules.media_server_profiles import list_configured_profiles
 from app.web import api_error, require_api_login
 
 logger = get_logger(__name__)
@@ -80,9 +87,9 @@ def _boolean(payload: dict, key: str, default: bool) -> bool:
 def _optional_integer(
     payload: dict, key: str, *, minimum: int, maximum: int, label: str,
 ) -> int | None:
-    if key not in payload or payload.get(key) in (None, ""):
-        return None
     value = payload.get(key)
+    if value is None or value == "":
+        return None
     if isinstance(value, bool):
         raise ValueError(f"{label}必须是整数")
     try:
@@ -120,7 +127,7 @@ def _candidate_payloads(source, candidates, *, organize_ready: bool, error: str,
             items.append(candidate_payload(
                 source, candidate, organize_ready=organize_ready, allow_nested=allow_nested,
             ))
-        except (FileNotFoundError, OSError, PathMappingError):
+        except (OSError, PathMappingError):
             error = error or "目录扫描不完整：部分条目在读取期间发生变化"
     return items, error
 
@@ -267,7 +274,7 @@ def _validated_targets(payload: dict) -> list[dict[str, str]] | None:
 
 
 def _validated_container_directory(value: str, label: str) -> Path:
-    raw = str(value or "").strip()
+    raw = (value or "").strip()
     if is_windows_or_unc_path(raw):
         raise ValueError(
             f"{label}必须填写 Docker 容器内路径；请先把宿主机或 NAS 目录挂载到容器，"
@@ -305,7 +312,7 @@ def list_directories(
 ):
     require_api_login(request)
     try:
-        if str(request.query_params.get("network_root") or "").strip():
+        if (request.query_params.get("network_root") or "").strip():
             return api_error(LEGACY_SOURCE_PATH_ERROR, 400)
         allowed_root = None
         if source_id:
@@ -334,7 +341,7 @@ def list_media_servers(request: Request):
 def list_media_server_libraries(provider: str, request: Request):
     require_api_login(request)
     try:
-        normalized = str(provider or "").strip().lower()
+        normalized = (provider or "").strip().lower()
         if normalized not in {"jellyfin", "emby"}:
             raise ValueError("媒体服务器类型无效")
         profiles = {item.server_type: item for item in list_configured_profiles()}
@@ -692,6 +699,7 @@ def execute_media(request: Request, data: dict | None = Body(default=None)):
     require_api_login(request)
     payload = data or {}
     qb_client = None
+    notification_task_id: int | None = None
     try:
         if not _text(payload, "preview_digest", max_length=144):
             raise LocalMediaServiceError("缺少预览确认，请重新检查并生成预览后确认")
@@ -700,6 +708,7 @@ def execute_media(request: Request, data: dict | None = Body(default=None)):
             _OWNER, _text(payload, "inspection_id", required=True, max_length=64),
             preview_digest=_text(payload, "preview_digest", max_length=144),
         )
+        notification_task_id = task_id
         if not db.claim_local_media_task(task_id, expected="waiting_stable", owner=_OWNER):
             raise LocalMediaServiceError("任务已被其他操作认领")
         task = db.get_local_media_task(task_id, owner=_OWNER)
@@ -720,8 +729,8 @@ def execute_media(request: Request, data: dict | None = Body(default=None)):
         notify_local_media_task(task_id, result, owner=_OWNER)
         return result
     except Exception as exc:
-        if "task_id" in locals():
-            notify_local_media_task(task_id, owner=_OWNER, error=str(exc))
+        if notification_task_id is not None:
+            notify_local_media_task(notification_task_id, owner=_OWNER, error=str(exc))
         return _safe_error(exc)
     finally:
         close_qbittorrent_client(qb_client)
@@ -741,7 +750,7 @@ def retry_task(task_id: int, request: Request, data: dict | None = Body(default=
     require_api_login(request)
     payload = data or {}
     try:
-        retry_fields: dict[str, object] = {}
+        retry_fields: dict[str, Any] = {}
         if "tmdb_id" in payload:
             retry_fields["tmdb_id"] = _text(payload, "tmdb_id", max_length=32)
         if "media_type" in payload:

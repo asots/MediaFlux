@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 from copy import deepcopy
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ class MediaClient:
     timeout = 3
 
     def __init__(self):
-        self.items = {
+        self.items: dict[str, dict[str, Any]] = {
             "movie1": {
                 "Id": "movie1",
                 "Name": "示例电影",
@@ -496,6 +497,7 @@ def test_atomic_domain_tools_have_single_confirmation_without_public_prepare(
     collector = ToolSpecCollector()
     register_specs(collector)
     specs = {spec.name: spec for spec in collector.items}
+    assert specs['media.user.inspect'].context_handler is not None
     inspected = specs["media.user.inspect"].context_handler(
         {"profile_ref": "configured:jellyfin", "item_ref": media_ref}, context
     )
@@ -506,8 +508,10 @@ def test_atomic_domain_tools_have_single_confirmation_without_public_prepare(
             "item_ref": inspected.data["item"]["object_ref"],
         }
     )
+    assert favorite.context_confirmation_preparer is not None
     result, fingerprint = favorite.context_confirmation_preparer(args, context)
     assert result.ok and not client.calls
+    assert favorite.context_confirmed_handler is not None
     result = favorite.context_confirmed_handler(args, fingerprint, context)
     assert result.ok and len(client.calls) == 1
 

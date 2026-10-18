@@ -178,7 +178,7 @@ def safe_policy_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _read_value(definition: SafePolicyDefinition) -> str | int:
     if definition.kind == "choice":
-        value = str(config.get(definition.key, str(definition.default)) or "")
+        value = (config.get(definition.key, str(definition.default)) or "")
         normalized = value.strip().lower()
         return normalized if normalized in definition.choices else definition.default
     value = config.get_int(definition.key, int(definition.default))
@@ -246,7 +246,7 @@ def _capture(arguments: dict[str, Any]) -> dict[str, Any]:
             if peer_definition is not None
             else False
         ),
-        "tmdb_key_configured": bool(str(config.get("TMDB_API_KEY", "") or "").strip()),
+        "tmdb_key_configured": bool((config.get("TMDB_API_KEY", "") or "").strip()),
     }
 
 
@@ -421,7 +421,7 @@ def _refresh_wallpaper_runtime() -> bool:
     try:
         from app.modules.login_wallpaper import schedule_login_wallpaper_refresh
 
-        return bool(schedule_login_wallpaper_refresh(force=True))
+        return (schedule_login_wallpaper_refresh(force=True))
     except Exception as exc:
         logger.warning("Agent 登录壁纸运行时刷新失败 type=%s", type(exc).__name__)
         return False
@@ -511,7 +511,7 @@ def set_safe_policy_confirmed(
     arguments: dict[str, Any], expected_context: str
 ) -> ToolResult:
     state = _capture(arguments)
-    if not secrets.compare_digest(_fingerprint(state), str(expected_context or "")):
+    if not secrets.compare_digest(_fingerprint(state), (expected_context or "")):
         raise AgentToolError(
             "目标策略配置已变化，请重新预检",
             code="confirmation_stale",

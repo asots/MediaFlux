@@ -40,8 +40,8 @@ def telegram_test_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _private_state() -> dict[str, Any]:
-    token = str(config.get("TG_BOT_TOKEN", "") or "").strip()
-    chat_id = str(config.get("TG_CHAT_ID", "") or "").strip()
+    token = (config.get("TG_BOT_TOKEN", "") or "").strip()
+    chat_id = (config.get("TG_CHAT_ID", "") or "").strip()
     token_valid = bool(token and ":" in token and len(token) <= 256)
     chat_id_valid = bool(_CHAT_ID_PATTERN.fullmatch(chat_id))
     # 指纹只保存不可逆摘要；预览、票据、审计与模型上下文均不会包含原值。
@@ -161,7 +161,7 @@ def send_telegram_test_notification_confirmed(
 ) -> ToolResult:
     telegram_test_arguments(arguments)
     state = _private_state()
-    if not hmac.compare_digest(_fingerprint(state), str(expected_context or "")):
+    if not hmac.compare_digest(_fingerprint(state), (expected_context or "")):
         raise AgentToolError(
             "Telegram 通知配置已变化，请重新预检",
             code="confirmation_stale",

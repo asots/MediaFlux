@@ -71,7 +71,9 @@ class RecognitionKnowledgePersistenceTests(RecognitionKnowledgeTestCase):
             knowledge.delete_entry(builtin["id"])
         knowledge.reset_runtime_state_for_tests()
         knowledge.ensure_seed_knowledge()
-        self.assertTrue(knowledge.get_entry(builtin["id"])["disabled"])
+        get_entry_result = knowledge.get_entry(builtin["id"])
+        assert get_entry_result is not None
+        self.assertTrue(get_entry_result["disabled"])
 
 
     def test_disabled_entry_blocks_ai_relearning_and_preserves_user_choice(self):
@@ -85,7 +87,7 @@ class RecognitionKnowledgePersistenceTests(RecognitionKnowledgeTestCase):
             "source": "user",
             "disabled": True,
         })
-        self.assertIsNotNone(knowledge.lookup_any("Blocked-Group"))
+        assert (knowledge.lookup_any("Blocked-Group")) is not None
         self.assertIsNone(
             TMDBScraper._unknown_release_group_candidate(
                 "[Blocked-Group] Correct Anime S01E01.mkv"
@@ -314,6 +316,7 @@ class AIReleaseGroupClientTests(unittest.TestCase):
         result = AIRecognitionClient(
             api_url="https://ai.example/v1/chat/completions", model="test", session=session,
         ).classify_release_group(AIReleaseGroupInput("Example-Sub", "Example Show S01E01"))
+        assert session.kwargs is not None
         schema = session.kwargs["json"]["response_format"]["json_schema"]
         self.assertEqual(schema["name"], "release_group_classification")
         self.assertTrue(schema["strict"])

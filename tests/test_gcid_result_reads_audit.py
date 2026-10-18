@@ -82,7 +82,9 @@ class GCIDResultReadsAuditTests(IsolatedDatabaseTestCase):
         )
         self.assertEqual(len(result["failed_samples"]), 3)
         self.assertEqual(reads["detail_rows"], 3)
-        self.assertEqual(db.get_gcid_import_task(task_id)["failed_count"], 2000)
+        get_gcid_import_task_result = db.get_gcid_import_task(task_id)
+        assert get_gcid_import_task_result is not None
+        self.assertEqual(get_gcid_import_task_result["failed_count"], 2000)
 
     def test_sample_limits_and_existing_full_detail_reads_keep_contract(self):
         task_id = self._task(8)

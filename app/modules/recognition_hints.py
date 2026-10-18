@@ -40,7 +40,7 @@ def enabled_hint_providers(media_type: str) -> tuple[str, ...]:
         and get_bool("DISCOVERY_DOUBAN_ENABLED", True)
     ):
         providers.append("douban")
-    if str(media_type or "").lower() == "tv" and get_bool(
+    if (media_type or "").lower() == "tv" and get_bool(
         "ORGANIZE_BANGUMI_HINTS_ENABLED", False
     ):
         providers.append("bangumi")
@@ -53,11 +53,11 @@ def search_recognition_hints(
     *,
     timeout_seconds: float = _AUTO_TIMEOUT_SECONDS,
 ) -> RecognitionHintResult:
-    normalized = " ".join(str(query or "").split()).strip()
+    normalized = " ".join((query or "").split()).strip()
     providers = enabled_hint_providers(media_type)
     if not normalized or not providers:
         return RecognitionHintResult((), providers)
-    key = (normalized.casefold(), str(media_type or "").lower(), providers)
+    key = (normalized.casefold(), (media_type or "").lower(), providers)
     now = time.monotonic()
     with _lock:
         cached = _cache.get(key)
@@ -77,7 +77,7 @@ def search_recognition_hints(
         )
         items = tuple(
             card for card in result.items
-            if card.media_type in {str(media_type or "").lower(), "all"}
+            if card.media_type in {(media_type or "").lower(), "all"}
         )[:8]
         value = RecognitionHintResult(
             items,

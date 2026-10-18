@@ -106,7 +106,7 @@ def drain_media_subscription_notifications(*, limit: int = 20) -> bool:
         try:
             event_type = str(item.get("event_type") or "")
             payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-            missing_actionable = bool(
+            missing_actionable = (
                 event_type == "missing" and int(payload.get("auto_submitted") or 0) <= 0
             )
             outcome = publish_notification_event(
@@ -125,7 +125,7 @@ def drain_media_subscription_notifications(*, limit: int = 20) -> bool:
             # 不应把同一条被策略拒绝的结果反复移交和重试。
             accepted = (
                 bool(outcome)
-                or str(outcome.status or "") in {"disabled", "suppressed"}
+                or (outcome.status or "") in {"disabled", "suppressed"}
                 or not notifications_enabled()
             )
             if accepted:
@@ -136,7 +136,7 @@ def drain_media_subscription_notifications(*, limit: int = 20) -> bool:
             retry_notification(
                 item["id"],
                 lease_generation=generation,
-                error=str(outcome.status or "telegram_unavailable"),
+                error=(outcome.status or "telegram_unavailable"),
             )
         except Exception as exc:
             # 单条内容、移交或 ACK 失败不能扣住同批次的其他领取项。

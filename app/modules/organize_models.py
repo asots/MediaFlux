@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from app.modules.episode_mapping import EpisodeMappingPlan
+from app.modules.media_probe import MediaProfile
 from app.modules.media_variant import MediaVariant
 from app.modules.organize_groups import OrganizeGroupTask
 from app.modules.organize_runtime import OrganizeTaskRuntime
@@ -29,7 +30,7 @@ class OrganizeScanUnsafeError(RuntimeError):
 class _OrganizeAuditWriteError(RuntimeError):
     def __init__(self, log_id: int, cause: Exception):
         super().__init__(str(cause))
-        self.log_id = int(log_id)
+        self.log_id = log_id
         self.__cause__ = cause
 
 
@@ -41,7 +42,7 @@ class OrganizePlan:
     original_parent_id: str = "0"
     size: int = 0
     etag: str = ""
-    match: MatchResult = None
+    match: MatchResult | None = None
     main_category: str = ""
     region: str = ""
     year: str = ""
@@ -68,7 +69,7 @@ class OrganizePlan:
     # 追加在末尾以保持历史位置参数构造的语义兼容。
     source_group_id: str = ""
     source_group_path: str = ""
-    media_profile: object | None = field(default=None, repr=False, compare=False)
+    media_profile: MediaProfile | None = field(default=None, repr=False, compare=False)
     media_probe_complete: bool = False
     media_probe_pending: bool = False
     conflict_existing_id: str = ""
@@ -80,6 +81,7 @@ class OrganizePlan:
 
     def require_confirmation(self, reason: str, *, constraint: str = "") -> None:
         """将身份/位置拒绝统一投影到识别结果和执行计划，不覆盖位置证据。"""
+        assert self.match is not None
         self.match.need_confirm = True
         self.match.status = "low_confidence"
         self.match.error = reason
@@ -92,6 +94,7 @@ class OrganizePlan:
 
     def mark_matched(self) -> None:
         """身份/位置证明通过后，清除先前的待确认状态；证据由调用方保留。"""
+        assert self.match is not None
         self.match.need_confirm = False
         self.match.status = "matched"
         self.match.error = ""
@@ -154,7 +157,7 @@ class OrganizeContext:
     def probe_cache_only(self) -> bool:
         if self.media_probe_cache_only is None:
             return self.dry_run
-        return bool(self.media_probe_cache_only)
+        return self.media_probe_cache_only
 
     def cancelled(self) -> bool:
         return bool(self.cancel_event and self.cancel_event.is_set())

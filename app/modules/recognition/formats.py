@@ -5,8 +5,6 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import lru_cache
 import hashlib
 import json
 import posixpath
@@ -15,6 +13,8 @@ import secrets
 import sqlite3
 import threading
 import unicodedata
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -148,7 +148,7 @@ def normalize_request(value: object) -> dict[str, Any]:
     for item in raw_examples:
         if not isinstance(item, dict) or set(item) - {"filename", "title", "episode", "season"}:
             raise ValueError("样本字段无效")
-        example = {
+        example: dict[str, Any] = {
             "filename": _filename(item.get("filename")),
             "title": _text(item.get("title"), "样本标题", 180),
             "episode": _number(item.get("episode"), "样本集号"),

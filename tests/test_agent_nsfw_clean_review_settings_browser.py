@@ -54,6 +54,7 @@ MOCK_FETCH = r"""(config) => {
 class NsfwCleanReviewSettingsBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         candidates = [
             Path(os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or cls.playwright.chromium.executable_path),
@@ -77,8 +78,8 @@ class NsfwCleanReviewSettingsBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.playwright.stop()
 
-    def _page(self, width, config, *, touch=False):
-        page = self.browser.new_page(viewport={"width": width, "height": 900}, reduced_motion="reduce", has_touch=touch)
+    def _page(self: unittest.TestCase, width, config, *, touch=False):
+        page = getattr(self, "browser").new_page(viewport={"width": width, "height": 900}, reduced_motion="reduce", has_touch=touch)
         self.addCleanup(page.close)
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -131,7 +132,7 @@ class NsfwCleanReviewSettingsBrowserTests(unittest.TestCase):
             return {x: rect.x + scrollX, y: rect.y + scrollY, width: rect.width, height: rect.height};
         }""")
 
-    def _assert_same_rect(self, before, after):
+    def _assert_same_rect(self: unittest.TestCase, before, after):
         for key in ("x", "y", "width", "height"):
             self.assertAlmostEqual(before[key], after[key], delta=0.5, msg=f"{key}: {before} → {after}")
 
@@ -148,9 +149,17 @@ class NsfwCleanReviewSettingsBrowserTests(unittest.TestCase):
                 self.assertFalse(child.is_checked())
                 self.assertFalse(child.is_disabled())
                 self._assert_same_rect(before_load, self._rect(option))
-                self.assertLessEqual(option.bounding_box()["x"] + option.bounding_box()["width"], width + 0.5)
-                self.assertGreaterEqual(option.locator("label.toggle").bounding_box()["width"], 44)
-                self.assertGreaterEqual(option.locator("label.toggle").bounding_box()["height"], 44)
+                bounding_box_result = option.bounding_box()
+                assert bounding_box_result is not None
+                bounding_box_result_2 = option.bounding_box()
+                assert bounding_box_result_2 is not None
+                self.assertLessEqual(bounding_box_result["x"] + bounding_box_result_2["width"], width + 0.5)
+                bounding_box_result_3 = option.locator("label.toggle").bounding_box()
+                assert bounding_box_result_3 is not None
+                self.assertGreaterEqual(bounding_box_result_3["width"], 44)
+                bounding_box_result_4 = option.locator("label.toggle").bounding_box()
+                assert bounding_box_result_4 is not None
+                self.assertGreaterEqual(bounding_box_result_4["height"], 44)
                 self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"))
 
                 parent.locator("..").click()

@@ -67,6 +67,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
             )
         self.assertEqual(scheduler.reload.call_count, 2)
         row = db.get_rss_subscription(self.sid)
+        assert row is not None
         self.assertEqual(int(row["enabled"]), 0)
         self.assertEqual(int(row["refresh_interval_minutes"]), 0)
         self.assertTrue(confirmed["result"]["data"]["runtime_refreshed"])
@@ -100,7 +101,9 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         confirmed = service.confirm(prepared["action_plan"]["plan_id"], owner="owner")
         self.assertFalse(confirmed["result"]["ok"])
         self.assertEqual(confirmed["result"]["status"], "conflict")
-        self.assertEqual(int(db.get_rss_subscription(self.sid)["enabled"]), 1)
+        get_rss_subscription_result = db.get_rss_subscription(self.sid)
+        assert get_rss_subscription_result is not None
+        self.assertEqual(int(get_rss_subscription_result["enabled"]), 1)
 
     def test_delete_is_cascaded_locally_and_stale_entry_count_conflicts(self):
         db.add_rss_entry_with_media(self.sid, "PRIVATE_TITLE", "secret-guid")
@@ -113,7 +116,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         db.add_rss_entry_with_media(self.sid, "LATE_PRIVATE_TITLE", "late-guid")
         conflict = service.confirm(prepared["action_plan"]["plan_id"], owner="owner")
         self.assertEqual(conflict["result"]["status"], "conflict")
-        self.assertIsNotNone(db.get_rss_subscription(self.sid))
+        assert (db.get_rss_subscription(self.sid)) is not None
         with patch("app.modules.rss_scheduler.get_rss_scheduler", return_value=Mock()):
             _, confirmed = self._confirm(
                 "rss.delete_subscription", {"subscription_id": self.sid}
@@ -121,7 +124,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         self.assertTrue(confirmed["result"]["ok"])
         self.assertEqual(confirmed["result"]["data"]["deleted_entries"], 2)
         self.assertIsNone(db.get_rss_subscription(self.sid))
-        self.assertIsNotNone(db.get_rss_subscription(other))
+        assert (db.get_rss_subscription(other)) is not None
         with db.get_conn() as conn:
             self.assertEqual(
                 conn.execute(
@@ -141,7 +144,9 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
             )
         self.assertTrue(confirmed["result"]["ok"])
         self.assertFalse(confirmed["result"]["data"]["runtime_refreshed"])
-        self.assertEqual(int(db.get_rss_subscription(self.sid)["enabled"]), 0)
+        get_rss_subscription_result_2 = db.get_rss_subscription(self.sid)
+        assert get_rss_subscription_result_2 is not None
+        self.assertEqual(int(get_rss_subscription_result_2["enabled"]), 0)
         history = db.list_agent_action_history(
             owner_digest=action_history_owner_digest("owner"), limit=1
         )[0]
@@ -186,6 +191,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         created_id = int(created["result"]["data"]["subscription_id"])
         self.assertEqual(created["result"]["data"]["subscription_number"], created_id)
         row = db.get_rss_subscription(created_id)
+        assert row is not None
         self.assertEqual(row["name"], "Anime Feed")
         self.assertEqual(row["media_tmdb_id"], "12345")
         update_arguments = rss_update_subscription_arguments(
@@ -202,6 +208,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
             updated = service.confirm(prepared["action_plan"]["plan_id"], owner="owner")
         self.assertTrue(updated["result"]["ok"])
         row = db.get_rss_subscription(created_id)
+        assert row is not None
         self.assertEqual(row["name"], "Anime Feed Updated")
         self.assertEqual(int(row["refresh_interval_minutes"]), 60)
 
@@ -251,8 +258,10 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
                 prepared["action_plan"]["plan_id"], owner="owner"
             )
         self.assertTrue(confirmed["result"]["ok"])
+        get_rss_subscription_result_3 = db.get_rss_subscription(self.sid)
+        assert get_rss_subscription_result_3 is not None
         self.assertEqual(
-            db.get_rss_subscription(self.sid)["urls"], "https://updated.example/rss"
+            get_rss_subscription_result_3["urls"], "https://updated.example/rss"
         )
 
     def test_shared_config_integer_fields_reject_lossy_values(self):
@@ -320,6 +329,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
 
         def update_in_transaction(sub_id, fields, **kwargs):
             connection = kwargs.get("connection")
+            assert connection is not None
             observed.append((connection is not None, bool(connection.in_transaction)))
             return original_update(sub_id, fields, **kwargs)
 
@@ -333,6 +343,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         self.assertTrue(confirmed["result"]["ok"])
         self.assertEqual(observed, [(True, True)])
         current = db.get_rss_subscription(self.sid)
+        assert current is not None
         self.assertEqual(current["name"], "Atomic Feed")
         self.assertEqual(current["media_tmdb_id"], "12345")
         self.assertEqual(current["media_default_season"], 2)
@@ -348,6 +359,8 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         confirmed = service.confirm(prepared["action_plan"]["plan_id"], owner="owner")
         self.assertFalse(confirmed["result"]["ok"])
         self.assertEqual(confirmed["result"]["status"], "conflict")
+        get_rss_subscription_result_4 = db.get_rss_subscription(self.sid)
+        assert get_rss_subscription_result_4 is not None
         self.assertEqual(
-            db.get_rss_subscription(self.sid)["exclude_keywords"], "PRIVATE_FILTER"
+            get_rss_subscription_result_4["exclude_keywords"], "PRIVATE_FILTER"
         )

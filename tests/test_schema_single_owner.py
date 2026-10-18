@@ -81,7 +81,9 @@ class SchemaSingleOwnerTests(IsolatedDatabaseTestCase):
         with self._without_ddl():
             audit_id = db.add_organize_delete_audit(trigger="audit-test", file_id="audit-file", reason="test", status="pending")
             self.assertTrue(db.update_organize_delete_audit(audit_id, status="success"))
-            self.assertEqual(db.get_organize_delete_audit(audit_id)["status"], "success")
+            get_organize_delete_audit_result = db.get_organize_delete_audit(audit_id)
+            assert get_organize_delete_audit_result is not None
+            self.assertEqual(get_organize_delete_audit_result["status"], "success")
             self.assertTrue(any(row["id"] == audit_id for row in db.list_organize_delete_audits()))
 
     def test_retired_strm_source_crud_uses_initialized_schema_only(self):

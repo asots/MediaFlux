@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, TypedDict
 
 from app.logger import redact_sensitive_text
 
@@ -40,7 +40,7 @@ def _next_check(interval_minutes: int, *, base: str | None = None) -> str:
             start = datetime.now()
     else:
         start = datetime.now()
-    return (start + timedelta(minutes=max(5, min(int(interval_minutes or 60), 10080)))).strftime(
+    return (start + timedelta(minutes=max(5, min((interval_minutes or 60), 10080)))).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
@@ -65,7 +65,7 @@ def add_media_subscription(
     check_interval_minutes: int = 4320,
 ) -> int:
     stamp = now()
-    interval = max(5, min(int(check_interval_minutes or 4320), 10080))
+    interval = max(5, min((check_interval_minutes or 4320), 10080))
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO media_subscriptions("
@@ -75,8 +75,8 @@ def add_media_subscription(
             ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 provider, external_id, tmdb_id, media_type, title, original_title, year, poster_key,
-                int(bool(enabled)), monitor_mode, _json(list(seasons or []), []),
-                int(bool(include_specials)), action, download_target, _json(list(sites or []), []),
+                int(enabled), monitor_mode, _json(list(seasons or []), []),
+                int(include_specials), action, download_target, _json(list(sites or []), []),
                 interval, stamp, stamp, stamp,
             ),
         )
@@ -126,17 +126,17 @@ def upsert_media_subscription(
 ) -> tuple[int, bool]:
     """原子创建或恢复；冻结快照冲突返回 (0, False)，不改变关联工作。"""
     stamp = now()
-    interval = max(5, min(int(check_interval_minutes or 4320), 10080))
+    interval = max(5, min((check_interval_minutes or 4320), 10080))
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        snapshot = media_subscription_identity_snapshot(conn, str(tmdb_id), str(media_type))
+        snapshot = media_subscription_identity_snapshot(conn, tmdb_id, media_type)
         if expected_snapshot is not None and snapshot != expected_snapshot:
             return 0, False
         if expected_snapshot is not None and provider != "tmdb":
             mapping = conn.execute(
                 "SELECT 1 FROM media_external_ids WHERE provider=? AND external_id=? "
                 "AND media_type=? AND tmdb_id=? AND confirmed=1",
-                (provider, external_id, media_type, str(tmdb_id)),
+                (provider, external_id, media_type, tmdb_id),
             ).fetchone()
             if mapping is None:
                 return 0, False
@@ -149,8 +149,8 @@ def upsert_media_subscription(
                 ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     provider, external_id, tmdb_id, media_type, title, original_title, year, poster_key,
-                    int(bool(enabled)), monitor_mode, _json(list(seasons or []), []),
-                    int(bool(include_specials)), action, download_target, _json(list(sites or []), []),
+                    int(enabled), monitor_mode, _json(list(seasons or []), []),
+                    int(include_specials), action, download_target, _json(list(sites or []), []),
                     interval, stamp, "new" if enabled else "paused", 1, stamp, stamp,
                 ),
             )
@@ -164,8 +164,8 @@ def upsert_media_subscription(
             "download_target=?,sites_json=?,check_interval_minutes=?,next_check_at=?,status=?,"
             "last_error='',revision=?,deleted_at=NULL,updated_at=? WHERE id=?",
             (
-                provider, external_id, title, original_title, year, poster_key, int(bool(enabled)),
-                monitor_mode, _json(list(seasons or []), []), int(bool(include_specials)), action,
+                provider, external_id, title, original_title, year, poster_key, int(enabled),
+                monitor_mode, _json(list(seasons or []), []), int(include_specials), action,
                 download_target, _json(list(sites or []), []), interval, stamp,
                 "new" if enabled else "paused", revision, stamp, subscription_id,
             ),
@@ -193,7 +193,7 @@ def get_media_subscription(subscription_id: int, *, include_deleted: bool = Fals
     with get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_subscriptions WHERE id=?" + deleted_clause,
-            (int(subscription_id),),
+            (subscription_id,),
         ).fetchone()
 
 
@@ -201,7 +201,7 @@ def get_media_subscription_by_identity(tmdb_id: str, media_type: str) -> sqlite3
     with get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_subscriptions WHERE tmdb_id=? AND media_type=? AND deleted_at IS NULL",
-            (str(tmdb_id), str(media_type)),
+            (tmdb_id, media_type),
         ).fetchone()
 
 
@@ -212,12 +212,12 @@ def list_media_subscriptions(
     params: list[Any] = []
     if status:
         clauses.append("status=?")
-        params.append(str(status))
+        params.append(status)
     if enabled is not None:
         clauses.append("enabled=?")
-        params.append(int(bool(enabled)))
+        params.append(int(enabled))
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.extend((max(1, min(int(limit or 200), 500)), max(0, int(offset or 0))))
+    params.extend((max(1, min((limit or 200), 500)), max(0, (offset or 0))))
     with get_conn() as conn:
         return conn.execute(
             f"SELECT * FROM media_subscriptions{where} ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?",
@@ -225,15 +225,26 @@ def list_media_subscriptions(
         ).fetchall()
 
 
+class _SubscriptionWorkflow(TypedDict):
+    available_candidate_count: int
+    submitted_candidate_count: int
+    max_relevance_score: int | None
+    submitted_count: int
+    downloading_count: int
+    processing_count: int
+    manual_review_count: int
+    failed_count: int
+
+
 def list_media_subscription_workflows(
     subscription_ids: Iterable[int],
-) -> dict[int, dict[str, int | None]]:
+) -> dict[int, _SubscriptionWorkflow]:
     """批量汇总候选与最新下载准入，供订阅列表展示真实工作流阶段。"""
-    ids = sorted({int(value) for value in subscription_ids if int(value) > 0})
+    ids = sorted({value for value in subscription_ids if value > 0})
     if not ids:
         return {}
     placeholders = ",".join("?" for _ in ids)
-    result: dict[int, dict[str, int | None]] = {
+    result: dict[int, _SubscriptionWorkflow] = {
         subscription_id: {
             "available_candidate_count": 0,
             "submitted_candidate_count": 0,
@@ -323,10 +334,10 @@ def count_media_subscriptions(*, status: str = "", enabled: bool | None = None) 
     params: list[Any] = []
     if status:
         clauses.append("status=?")
-        params.append(str(status))
+        params.append(status)
     if enabled is not None:
         clauses.append("enabled=?")
-        params.append(int(bool(enabled)))
+        params.append(int(enabled))
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     with get_conn() as conn:
         row = conn.execute(f"SELECT COUNT(*) AS total FROM media_subscriptions{where}", params).fetchone()
@@ -376,7 +387,7 @@ def update_media_subscription(subscription_id: int, **fields: Any) -> bool:
     if not assignments:
         return False
     assignments.append("updated_at=?")
-    params.extend((now(), int(subscription_id)))
+    params.extend((now(), subscription_id))
     with get_conn() as conn:
         cur = conn.execute(
             f"UPDATE media_subscriptions SET {','.join(assignments)} WHERE id=? AND deleted_at IS NULL", params
@@ -401,7 +412,7 @@ def update_media_subscription_config(subscription_id: int, **fields: Any) -> boo
         return False
     stamp = now()
     assignments.extend(("revision=revision+1", "updated_at=?"))
-    params.extend((stamp, int(subscription_id)))
+    params.extend((stamp, subscription_id))
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
@@ -415,17 +426,17 @@ def update_media_subscription_config(subscription_id: int, **fields: Any) -> boo
         conn.execute(
             "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
             "WHERE subscription_id=? AND status='available'",
-            (stamp, int(subscription_id)),
+            (stamp, subscription_id),
         )
         conn.execute(
             "UPDATE media_download_admissions SET status='cancelled',error=?,completed_at=?,updated_at=? "
             "WHERE subscription_id=? AND status='claimed'",
-            ("订阅配置已变更", stamp, stamp, int(subscription_id)),
+            ("订阅配置已变更", stamp, stamp, subscription_id),
         )
         conn.execute(
             "UPDATE media_subscription_runs SET status='cancelled',summary=?,error=?,finished_at=? "
             "WHERE subscription_id=? AND status='running'",
-            ("订阅配置已变更，旧检查已取消", "订阅配置已变更", stamp, int(subscription_id)),
+            ("订阅配置已变更，旧检查已取消", "订阅配置已变更", stamp, subscription_id),
         )
         return True
 
@@ -478,7 +489,7 @@ def delete_media_subscription(
         cur = conn.execute(
             "UPDATE media_subscriptions SET enabled=0,status='paused',deleted_at=?,revision=revision+1,"
             "updated_at=? WHERE id=? AND deleted_at IS NULL",
-            (stamp, stamp, int(subscription_id)),
+            (stamp, stamp, subscription_id),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -486,17 +497,17 @@ def delete_media_subscription(
         conn.execute(
             "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
             "WHERE subscription_id=? AND status='available'",
-            (stamp, int(subscription_id)),
+            (stamp, subscription_id),
         )
         conn.execute(
             "UPDATE media_download_admissions SET status='cancelled',error=?,completed_at=?,updated_at=? "
             "WHERE subscription_id=? AND status='claimed'",
-            ("订阅已删除", stamp, stamp, int(subscription_id)),
+            ("订阅已删除", stamp, stamp, subscription_id),
         )
         conn.execute(
             "UPDATE media_subscription_runs SET status='cancelled',summary=?,error=?,finished_at=? "
             "WHERE subscription_id=? AND status='running'",
-            ("订阅已删除，检查已取消", "订阅已删除", stamp, int(subscription_id)),
+            ("订阅已删除，检查已取消", "订阅已删除", stamp, subscription_id),
         )
         return bool(cur.rowcount)
 
@@ -508,7 +519,7 @@ def list_due_media_subscriptions(limit: int = 20) -> list[sqlite3.Row]:
             "AND status!='checking' AND (next_check_at IS NULL OR next_check_at='' "
             "OR datetime(next_check_at)<=datetime('now','localtime')) "
             "ORDER BY COALESCE(next_check_at,created_at),id LIMIT ?",
-            (max(1, min(int(limit or 20), 100)),),
+            (max(1, min((limit or 20), 100)),),
         ).fetchall()
 
 
@@ -516,7 +527,7 @@ def claim_media_subscription_check_run(
     subscription_id: int, trigger_type: str = "manual"
 ) -> int | None:
     """原子认领一次检查并创建运行记录，避免 checking 无运行记录。"""
-    trigger = str(trigger_type or "manual").strip().lower()
+    trigger = (trigger_type or "manual").strip().lower()
     if trigger not in {"manual", "scheduler", "watchlist", "retry"}:
         trigger = "manual"
     stamp = now()
@@ -525,7 +536,7 @@ def claim_media_subscription_check_run(
         subscription = conn.execute(
             "SELECT revision FROM media_subscriptions WHERE id=? AND deleted_at IS NULL "
             "AND enabled=1 AND status!='checking'",
-            (int(subscription_id),),
+            (subscription_id,),
         ).fetchone()
         if subscription is None:
             conn.rollback()
@@ -534,7 +545,7 @@ def claim_media_subscription_check_run(
         cur = conn.execute(
             "UPDATE media_subscriptions SET status='checking',updated_at=? "
             "WHERE id=? AND deleted_at IS NULL AND enabled=1 AND status!='checking' AND revision=?",
-            (stamp, int(subscription_id), revision),
+            (stamp, subscription_id, revision),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -543,7 +554,7 @@ def claim_media_subscription_check_run(
             "INSERT INTO media_subscription_runs("
             "subscription_id,trigger_type,subscription_revision,status,started_at"
             ") VALUES(?,?,?,'running',?)",
-            (int(subscription_id), trigger, revision, stamp),
+            (subscription_id, trigger, revision, stamp),
         )
         return int(run.lastrowid)
 
@@ -556,10 +567,10 @@ def media_subscription_check_is_active(
 ) -> bool:
     """确认检查租约仍归当前 run，并顺带刷新 stale recovery 心跳。"""
     clauses = "id=? AND deleted_at IS NULL AND enabled=1 AND status='checking'"
-    params: list[Any] = [now(), int(subscription_id)]
+    params: list[Any] = [now(), subscription_id]
     if subscription_revision is not None:
         clauses += " AND revision=?"
-        params.append(int(subscription_revision))
+        params.append(subscription_revision)
     if run_id is not None:
         clauses += (
             " AND EXISTS (SELECT 1 FROM media_subscription_runs r "
@@ -567,7 +578,7 @@ def media_subscription_check_is_active(
             "AND r.subscription_revision=media_subscriptions.revision "
             "AND r.status='running')"
         )
-        params.append(int(run_id))
+        params.append(run_id)
     with get_conn() as conn:
         cur = conn.execute(
             f"UPDATE media_subscriptions SET updated_at=? WHERE {clauses}",
@@ -578,7 +589,7 @@ def media_subscription_check_is_active(
 
 def recover_stale_media_subscription_checks(*, stale_minutes: int = 30) -> int:
     """恢复因进程退出而遗留的 checking 状态，避免订阅永久停摆。"""
-    minutes = max(5, min(int(stale_minutes or 30), 1440))
+    minutes = max(5, min((stale_minutes or 30), 1440))
     stamp = now()
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -619,7 +630,7 @@ def add_media_subscription_run(subscription_id: int, trigger_type: str = "manual
     with get_conn() as conn:
         subscription = conn.execute(
             "SELECT revision FROM media_subscriptions WHERE id=? AND deleted_at IS NULL",
-            (int(subscription_id),),
+            (subscription_id,),
         ).fetchone()
         if subscription is None:
             raise ValueError("媒体订阅不存在")
@@ -628,8 +639,8 @@ def add_media_subscription_run(subscription_id: int, trigger_type: str = "manual
             "subscription_id,trigger_type,subscription_revision,status,started_at"
             ") VALUES(?,?,?,'running',?)",
             (
-                int(subscription_id),
-                str(trigger_type),
+                subscription_id,
+                trigger_type,
                 int(subscription["revision"] or 1),
                 now(),
             ),
@@ -644,7 +655,7 @@ def finish_media_subscription_run(
         cur = conn.execute(
             "UPDATE media_subscription_runs SET status=?,summary=?,payload_json=?,error=?,finished_at=? "
             "WHERE id=? AND status='running'",
-            (str(status), str(summary), _json(payload, {}), str(error), now(), int(run_id)),
+            (status, summary, _json(payload, {}), error, now(), run_id),
         )
         return cur.rowcount == 1
 
@@ -664,17 +675,17 @@ def _enqueue_run_notification(
         "satisfied": "notify_on_satisfied",
         "error": "notify_on_error",
         "inconclusive": "notify_on_error",
-    }.get(str(event_type))
+    }.get(event_type)
     if flag is None:
         return False
     rule = conn.execute(
         f"SELECT enabled,{flag} AS event_enabled "
         "FROM media_subscription_notification_rules WHERE subscription_id=?",
-        (int(subscription_id),),
+        (subscription_id,),
     ).fetchone()
     if rule is None or not int(rule["enabled"] or 0) or not int(rule["event_enabled"] or 0):
         return False
-    event_key = f"media-subscription-run:{int(run_id)}:{event_type}"
+    event_key = f"media-subscription-run:{run_id}:{event_type}"
     encoded = _json(payload, {})
     cur = conn.execute(
         "INSERT INTO media_subscription_notification_outbox("
@@ -683,8 +694,8 @@ def _enqueue_run_notification(
         "VALUES(?,?,?,?,?,?,'pending',0,0,?,?,?) "
         "ON CONFLICT(event_key) DO NOTHING",
         (
-            event_key, int(subscription_id), int(subscription_revision), int(run_id),
-            str(event_type), encoded, stamp, stamp, stamp,
+            event_key, subscription_id, subscription_revision, run_id,
+            event_type, encoded, stamp, stamp, stamp,
         ),
     )
     return cur.rowcount == 1
@@ -720,24 +731,24 @@ def finalize_media_subscription_check(
             "AND r.subscription_id=media_subscriptions.id "
             "AND r.subscription_revision=media_subscriptions.revision AND r.status='running')",
             (
-                str(status), int(expected_count), int(local_count), int(missing_count),
-                str(missing_json), str(result_json), stamp, next_check, stamp,
-                int(subscription_id), int(subscription_revision), int(run_id),
+                status, expected_count, local_count, missing_count,
+                missing_json, result_json, stamp, next_check, stamp,
+                subscription_id, subscription_revision, run_id,
             ),
         )
         committed = cur.rowcount == 1
-        final_status = str(run_status) if committed else "cancelled"
-        final_summary = str(summary) if committed else "订阅在检查期间被暂停或配置已变更"
+        final_status = run_status if committed else "cancelled"
+        final_summary = summary if committed else "订阅在检查期间被暂停或配置已变更"
         final_error = "" if committed else final_summary
         conn.execute(
             "UPDATE media_subscription_runs SET status=?,summary=?,payload_json=?,error=?,finished_at=? "
             "WHERE id=? AND status='running'",
-            (final_status, final_summary, _json(payload, {}), final_error, stamp, int(run_id)),
+            (final_status, final_summary, _json(payload, {}), final_error, stamp, run_id),
         )
         if committed and final_status in {"missing", "satisfied", "inconclusive"}:
             subscription = conn.execute(
                 "SELECT title,action FROM media_subscriptions WHERE id=?",
-                (int(subscription_id),),
+                (subscription_id,),
             ).fetchone()
             result_payload = payload if isinstance(payload, dict) else {}
             _enqueue_run_notification(
@@ -747,13 +758,13 @@ def finalize_media_subscription_check(
                 subscription_revision=subscription_revision,
                 event_type=final_status,
                 payload={
-                    "subscription_number": int(subscription_id),
+                    "subscription_number": subscription_id,
                     "title": str(subscription["title"] or "") if subscription else "",
                     "status": final_status,
-                    "expected_count": int(expected_count),
-                    "local_count": int(local_count),
-                    "missing_count": int(missing_count),
-                    "summary": str(summary or "")[:300],
+                    "expected_count": expected_count,
+                    "local_count": local_count,
+                    "missing_count": missing_count,
+                    "summary": (summary or "")[:300],
                     "action": str(
                         result_payload.get("action")
                         or (subscription["action"] if subscription else "notify")
@@ -778,7 +789,7 @@ def fail_media_subscription_check(
     """结束失败检查，但不覆盖用户在检查期间设置的 paused 状态。"""
     stamp = now()
     next_check = _next_check(interval_minutes, base=stamp)
-    message = str(error or "媒体订阅巡检失败")[:500]
+    message = (error or "媒体订阅巡检失败")[:500]
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
@@ -789,8 +800,8 @@ def fail_media_subscription_check(
             "AND r.subscription_id=media_subscriptions.id "
             "AND r.subscription_revision=media_subscriptions.revision AND r.status='running')",
             (
-                message, stamp, next_check, stamp, int(subscription_id),
-                int(subscription_revision), int(run_id),
+                message, stamp, next_check, stamp, subscription_id,
+                subscription_revision, run_id,
             ),
         )
         committed = cur.rowcount == 1
@@ -799,12 +810,12 @@ def fail_media_subscription_check(
         conn.execute(
             "UPDATE media_subscription_runs SET status=?,summary=?,error=?,finished_at=? "
             "WHERE id=? AND status='running'",
-            (run_status, run_message, run_message, stamp, int(run_id)),
+            (run_status, run_message, run_message, stamp, run_id),
         )
         if committed:
             subscription = conn.execute(
                 "SELECT title FROM media_subscriptions WHERE id=?",
-                (int(subscription_id),),
+                (subscription_id,),
             ).fetchone()
             _enqueue_run_notification(
                 conn,
@@ -813,7 +824,7 @@ def fail_media_subscription_check(
                 subscription_revision=subscription_revision,
                 event_type="error",
                 payload={
-                    "subscription_number": int(subscription_id),
+                    "subscription_number": subscription_id,
                     "title": str(subscription["title"] or "") if subscription else "",
                     "status": "error",
                 },
@@ -830,7 +841,7 @@ def cancel_media_subscription_run(
     reason: str,
 ) -> bool:
     """原子取消当前检查，并释放仍归该 run 持有的 checking 租约。"""
-    message = str(reason or "订阅检查已取消")[:500]
+    message = (reason or "订阅检查已取消")[:500]
     stamp = now()
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -844,9 +855,9 @@ def cancel_media_subscription_run(
             (
                 stamp,
                 stamp,
-                int(subscription_id),
-                int(subscription_revision),
-                int(run_id),
+                subscription_id,
+                subscription_revision,
+                run_id,
             ),
         )
         cur = conn.execute(
@@ -856,9 +867,9 @@ def cancel_media_subscription_run(
                 message,
                 message,
                 stamp,
-                int(run_id),
-                int(subscription_id),
-                int(subscription_revision),
+                run_id,
+                subscription_id,
+                subscription_revision,
             ),
         )
         return cur.rowcount == 1
@@ -868,8 +879,8 @@ def list_media_subscription_runs(
     *, subscription_id: int | None = None, limit: int = 100, offset: int = 0
 ) -> list[sqlite3.Row]:
     where = " WHERE r.subscription_id=?" if subscription_id else ""
-    params: list[Any] = [int(subscription_id)] if subscription_id else []
-    params.extend((max(1, min(int(limit or 100), 300)), max(0, int(offset or 0))))
+    params: list[Any] = [subscription_id] if subscription_id else []
+    params.extend((max(1, min((limit or 100), 300)), max(0, (offset or 0))))
     with get_conn() as conn:
         return conn.execute(
             "SELECT r.*,s.title,s.media_type,s.tmdb_id FROM media_subscription_runs r "
@@ -890,16 +901,16 @@ def _expire_media_subscription_candidates_conn(
     clause = ""
     if subscription_id is not None:
         clause += " AND subscription_id=?"
-        params.append(int(subscription_id))
+        params.append(subscription_id)
     if candidate_id is not None:
         clause += " AND id=?"
-        params.append(int(candidate_id))
+        params.append(candidate_id)
     cur = conn.execute(
         "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
         "WHERE status='available' AND datetime(expires_at)<=datetime('now','localtime')" + clause,
         params,
     )
-    return int(cur.rowcount or 0)
+    return (cur.rowcount or 0)
 
 
 def expire_media_subscription_candidates(subscription_id: int | None = None) -> int:
@@ -923,7 +934,7 @@ def replace_media_subscription_candidates(
         conn.execute(
             "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
             "WHERE subscription_id=? AND media_key=? AND status='available'",
-            (stamp, int(subscription_id), str(media_key)),
+            (stamp, subscription_id, media_key),
         )
         for item in candidates:
             result_id = str(item.get("result_id") or "")
@@ -943,7 +954,7 @@ def replace_media_subscription_candidates(
                 "THEN media_subscription_candidates.status ELSE 'available' END,"
                 "expires_at=excluded.expires_at,updated_at=excluded.updated_at",
                 (
-                    int(subscription_id), str(media_key), season, episode,
+                    subscription_id, media_key, season, episode,
                     result_id, str(item.get("site_id") or ""),
                     str(item.get("site_name") or ""), str(item.get("title") or ""),
                     str(item.get("size_text") or ""), item.get("size_bytes"), item.get("seeders"),
@@ -955,7 +966,7 @@ def replace_media_subscription_candidates(
             row = conn.execute(
                 "SELECT id FROM media_subscription_candidates "
                 "WHERE subscription_id=? AND media_key=? AND result_id=?",
-                (int(subscription_id), str(media_key), result_id),
+                (subscription_id, media_key, result_id),
             ).fetchone()
             if row is not None:
                 ids.append(int(row["id"]))
@@ -967,7 +978,7 @@ def list_media_subscription_candidates_by_ids(
 ) -> list[sqlite3.Row]:
     """批量读取候选当前状态，保持自动选择与刷新结果的身份对应。"""
     normalized = list(dict.fromkeys(
-        int(candidate_id) for candidate_id in candidate_ids if int(candidate_id) > 0
+        candidate_id for candidate_id in candidate_ids if candidate_id > 0
     ))[:200]
     if not normalized:
         return []
@@ -984,7 +995,7 @@ def get_media_subscription_candidate(candidate_id: int) -> sqlite3.Row | None:
     with get_conn() as conn:
         _expire_media_subscription_candidates_conn(conn, candidate_id=candidate_id)
         return conn.execute(
-            "SELECT * FROM media_subscription_candidates WHERE id=?", (int(candidate_id),)
+            "SELECT * FROM media_subscription_candidates WHERE id=?", (candidate_id,)
         ).fetchone()
 
 
@@ -993,7 +1004,7 @@ def list_media_subscription_candidates(
 ) -> list[sqlite3.Row]:
     """先按状态筛选再排序限量；空状态集合仅用于显式历史查询。"""
     clause = f" AND c.status IN ({','.join('?' for _ in statuses)})" if statuses else ""
-    params: list[Any] = [int(subscription_id), *statuses, max(1, min(int(limit or 200), 500))]
+    params: list[Any] = [subscription_id, *statuses, max(1, min((limit or 200), 500))]
     with get_conn() as conn:
         _expire_media_subscription_candidates_conn(conn, subscription_id=subscription_id)
         return conn.execute(
@@ -1025,7 +1036,7 @@ def update_media_subscription_candidate(candidate_id: int, **fields: Any) -> boo
     if not assignments:
         return False
     assignments.append("updated_at=?")
-    params.extend((now(), int(candidate_id)))
+    params.extend((now(), candidate_id))
     with get_conn() as conn:
         cur = conn.execute(
             f"UPDATE media_subscription_candidates SET {','.join(assignments)} WHERE id=?", params
@@ -1045,7 +1056,7 @@ def _transfer_failed_media_download_admissions_conn(
 
     if not conn.in_transaction:
         raise DownloadRequestRetryFenceError("媒体下载准入接管事务已失效")
-    source_ids = tuple(dict.fromkeys(int(value) for value in source_request_ids))
+    source_ids = tuple(dict.fromkeys(value for value in source_request_ids))
     if not source_ids:
         return 0
     placeholders = ",".join("?" for _ in source_ids)
@@ -1073,7 +1084,7 @@ def _transfer_failed_media_download_admissions_conn(
                 "WHERE id=? AND subscription_id=? AND media_key=? "
                 "AND (request_id IS NULL OR request_id=?)",
                 (
-                    int(successor_request_id), timestamp, int(candidate_id),
+                    successor_request_id, timestamp, int(candidate_id),
                     int(row["subscription_id"]), str(row["media_key"]),
                     int(row["request_id"]),
                 ),
@@ -1088,7 +1099,7 @@ def _transfer_failed_media_download_admissions_conn(
                 "error='',completed_at=NULL,updated_at=? "
                 "WHERE id=? AND request_id=? AND status='failed'",
                 (
-                    int(successor_request_id), timestamp, int(row["id"]),
+                    successor_request_id, timestamp, int(row["id"]),
                     int(row["request_id"]),
                 ),
             )
@@ -1108,7 +1119,7 @@ def list_active_media_download_admissions(subscription_id: int | None = None) ->
     clause = ""
     if subscription_id is not None:
         clause = " AND subscription_id=?"
-        params.append(int(subscription_id))
+        params.append(subscription_id)
     with get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_download_admissions WHERE status IN "
@@ -1172,7 +1183,7 @@ def _sync_media_download_admissions_conn(
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
     scope = " AND a.request_id=?" if request_id is not None else ""
-    params = (int(request_id),) if request_id is not None else ()
+    params = (request_id,) if request_id is not None else ()
     try:
         rows = conn.execute(
             "SELECT a.id,r.status,r.error,r.organize_started,r.organize_status,r.organize_error,"
@@ -1199,7 +1210,7 @@ def _sync_media_download_admissions_conn(
         "WHERE id=? AND status IN ('claimed','dispatching','submitted','downloading','processing')",
         updates,
     )
-    return int(cur.rowcount or 0)
+    return (cur.rowcount or 0)
 
 
 def sync_media_download_admission_for_request(request_id: int) -> int:
@@ -1208,7 +1219,7 @@ def sync_media_download_admission_for_request(request_id: int) -> int:
     stamp = database.now()
     with database.get_conn() as conn:
         return _sync_media_download_admissions_conn(
-            conn, int(request_id), stamp
+            conn, request_id, stamp
         )
 
 
@@ -1256,7 +1267,7 @@ def reconcile_media_download_admissions(
     expected_revision: int | None = None,
 ) -> int:
     """单连接批量读取并以状态/revision 守卫同步下载准入状态。"""
-    keys = {str(value) for value in local_keys if str(value)}
+    keys = {value for value in local_keys if value}
     database = _database()
     stamp = database.now()
     updated = 0
@@ -1265,10 +1276,10 @@ def reconcile_media_download_admissions(
         # 读取请求快照到准入发布必须共享同一个 SQLite writer 顺序。
         conn.execute("BEGIN IMMEDIATE")
         revision_clause = ""
-        query_params: list[Any] = [int(subscription_id)]
+        query_params: list[Any] = [subscription_id]
         if expected_revision is not None:
             revision_clause = " AND s.revision=?"
-            query_params.append(int(expected_revision))
+            query_params.append(expected_revision)
         rows = conn.execute(
             "SELECT a.id,a.media_key,a.request_id,a.status AS admission_status,"
             "r.id AS request_exists,r.status,r.error,"
@@ -1313,9 +1324,9 @@ def reconcile_media_download_admissions(
                 stamp,
                 admission_id,
                 str(row["admission_status"] or ""),
-                int(subscription_id),
-                int(expected_revision) if expected_revision is not None else None,
-                int(expected_revision) if expected_revision is not None else None,
+                subscription_id,
+                expected_revision if expected_revision is not None else None,
+                expected_revision if expected_revision is not None else None,
             ))
         if updates:
             before = conn.total_changes
@@ -1351,7 +1362,7 @@ def claim_media_download_admission(
         conn.execute("BEGIN IMMEDIATE")
         status_clause = ""
         active_params: list[Any] = [
-            int(subscription_id), int(subscription_revision), int(candidate_id)
+            subscription_id, subscription_revision, candidate_id
         ]
         if require_active_check:
             status_clause = " AND s.status='checking'"
@@ -1361,7 +1372,7 @@ def claim_media_download_admission(
                     "AND r.subscription_id=s.id AND r.subscription_revision=s.revision "
                     "AND r.status='running')"
                 )
-                active_params.append(int(check_run_id))
+                active_params.append(check_run_id)
         active = conn.execute(
             "SELECT 1 FROM media_subscriptions s JOIN media_subscription_candidates c "
             "ON c.subscription_id=s.id WHERE s.id=? AND s.deleted_at IS NULL AND s.enabled=1 "
@@ -1374,7 +1385,7 @@ def claim_media_download_admission(
         duplicate = conn.execute(
             "SELECT 1 FROM media_download_admissions WHERE media_key=? AND status IN "
             "('claimed','dispatching','submitted','downloading','processing')",
-            (str(media_key),),
+            (media_key,),
         ).fetchone()
         if duplicate is not None:
             conn.rollback()
@@ -1384,8 +1395,8 @@ def claim_media_download_admission(
             "media_key,tmdb_id,media_type,season,episode,subscription_id,subscription_revision,"
             "candidate_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'claimed',?,?)",
             (
-                str(media_key), str(tmdb_id), str(media_type), season, episode,
-                int(subscription_id), int(subscription_revision), int(candidate_id), stamp, stamp,
+                media_key, tmdb_id, media_type, season, episode,
+                subscription_id, subscription_revision, candidate_id, stamp, stamp,
             ),
         )
         return int(cur.lastrowid)
@@ -1404,7 +1415,7 @@ def begin_media_download_dispatch(
     stamp = now()
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        active_params: list[Any] = [int(subscription_id), int(subscription_revision)]
+        active_params: list[Any] = [subscription_id, subscription_revision]
         if require_active_check:
             status_clause = " AND status='checking'"
             if check_run_id is not None:
@@ -1414,7 +1425,7 @@ def begin_media_download_dispatch(
                     "AND r.subscription_revision=media_subscriptions.revision "
                     "AND r.status='running')"
                 )
-                active_params.append(int(check_run_id))
+                active_params.append(check_run_id)
         active = conn.execute(
             "SELECT 1 FROM media_subscriptions WHERE id=? AND deleted_at IS NULL AND enabled=1 "
             "AND revision=?" + status_clause,
@@ -1424,13 +1435,13 @@ def begin_media_download_dispatch(
             conn.execute(
                 "UPDATE media_download_admissions SET status='cancelled',error=?,completed_at=?,updated_at=? "
                 "WHERE id=? AND status='claimed'",
-                ("订阅已暂停、删除或配置已变更", stamp, stamp, int(admission_id)),
+                ("订阅已暂停、删除或配置已变更", stamp, stamp, admission_id),
             )
             return False
         cur = conn.execute(
             "UPDATE media_download_admissions SET status='dispatching',updated_at=? "
             "WHERE id=? AND subscription_id=? AND subscription_revision=? AND status='claimed'",
-            (stamp, int(admission_id), int(subscription_id), int(subscription_revision)),
+            (stamp, admission_id, subscription_id, subscription_revision),
         )
         return cur.rowcount == 1
 
@@ -1454,10 +1465,10 @@ def update_media_download_admission(
     assignments.append("updated_at=?")
     params.append(now())
     where = "id=?"
-    params.append(int(admission_id))
+    params.append(admission_id)
     normalized_statuses = tuple(dict.fromkeys(
-        str(value or "").strip() for value in (expected_statuses or ())
-        if str(value or "").strip()
+        (value or "").strip() for value in (expected_statuses or ())
+        if (value or "").strip()
     ))
     if normalized_statuses:
         placeholders = ",".join("?" for _ in normalized_statuses)
@@ -1479,13 +1490,13 @@ def fail_unbound_media_download_admission(admission_id: int, error: str) -> bool
             "UPDATE media_download_admissions SET status='failed',error=?,"
             "completed_at=?,updated_at=? WHERE id=? AND request_id IS NULL "
             "AND status IN ('claimed','dispatching')",
-            (str(error or "")[:500], stamp, stamp, int(admission_id)),
+            ((error or "")[:500], stamp, stamp, admission_id),
         )
         return bool(cur.rowcount)
 
 
 def complete_media_download_admissions(media_keys: Iterable[str]) -> int:
-    keys = [str(value) for value in dict.fromkeys(media_keys) if str(value)]
+    keys = [value for value in dict.fromkeys(media_keys) if value]
     if not keys:
         return 0
     placeholders = ",".join("?" for _ in keys)

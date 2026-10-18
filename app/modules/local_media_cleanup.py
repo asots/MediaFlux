@@ -56,8 +56,8 @@ def is_probable_sample_video(
     sample_max_bytes: int = 300 * 1024 * 1024,
 ) -> bool:
     """判断文件是否为需保留、但不应自动拆成独立任务的 sample/proof。"""
-    return bool(
-        int(size or 0) <= max(1, int(sample_max_bytes))
+    return (
+        (size or 0) <= max(1, sample_max_bytes)
         and is_sample_media_path(path)
     )
 
@@ -179,10 +179,10 @@ def delete_cleanup_items(
                 source_parent_fd = open_source_parent(relative_path.parent)
                 info = os.stat(path.name, dir_fd=source_parent_fd, follow_symlinks=False)
                 source_identity = (
-                    int(info.st_size),
-                    int(info.st_mtime_ns),
-                    int(info.st_dev),
-                    int(info.st_ino),
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_dev,
+                    info.st_ino,
                 ) if stat_module.S_ISREG(info.st_mode) else None
                 if source_identity != candidate.snapshot.identity:
                     raise RuntimeError("垃圾文件在删除前被替换，已保留并停止清理")
@@ -196,10 +196,10 @@ def delete_cleanup_items(
                 moved = True
                 info = os.stat(quarantine_name, dir_fd=run_fd, follow_symlinks=False)
                 moved_identity = (
-                    int(info.st_size),
-                    int(info.st_mtime_ns),
-                    int(info.st_dev),
-                    int(info.st_ino),
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_dev,
+                    info.st_ino,
                 ) if stat_module.S_ISREG(info.st_mode) else None
                 if moved_identity != candidate.snapshot.identity:
                     move_entry_no_replace_at(
@@ -347,8 +347,8 @@ def discover_cleanup_candidates(
         paths = []
         base_depth = len(selected.parts)
         visited = 0
-        max_depth = max(1, int(depth_limit))
-        max_items = max(1, int(item_limit))
+        max_depth = max(1, depth_limit)
+        max_items = max(1, item_limit)
         for current_root, dirs, files in os.walk(selected, followlinks=False):
             current = Path(current_root)
             depth = len(current.parts) - base_depth

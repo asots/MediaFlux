@@ -121,7 +121,7 @@ sys.addaudithook(audit)
                 (line for line in result.stdout.splitlines() if line.startswith(self.RESULT_PREFIX)),
                 None,
             )
-            self.assertIsNotNone(line, result.stdout + result.stderr)
+            assert (line) is not None, result.stdout + result.stderr
             return json.loads(line.removeprefix(self.RESULT_PREFIX))
 
 

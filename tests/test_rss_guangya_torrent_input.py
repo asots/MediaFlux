@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import json
 import unittest
 from dataclasses import replace
@@ -27,7 +30,7 @@ TREE = {
 }
 
 
-class RssGuangyaTorrentInputTests(unittest.TestCase):
+class RssTorrentFixture(unittest.TestCase):
     def setUp(self):
         self.enterContext(isolated_test_database())
         self.rules = offline.OfflineRules(
@@ -55,6 +58,8 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
         client.close = Mock()
         return client
 
+
+class RssGuangyaTorrentInputTests(RssTorrentFixture):
     def test_uploaded_torrent_retries_empty_manifest_then_submits_once(self):
         client = self.client()
         client.resolve_torrent = Mock(side_effect=[{}, TREE])
@@ -63,7 +68,7 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
             offline, "get", return_value="0"
         ), patch.object(offline.time, "sleep"):
             result = offline.submit_offline(
-                TORRENT_URL, client=client, torrent_data=TORRENT
+                TORRENT_URL, client=cast(GuangYaClient, client), torrent_data=TORRENT
             )
 
         self.assertTrue(result["ok"], result)
@@ -82,7 +87,7 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
             offline, "get", return_value="0"
         ), patch.object(offline.time, "sleep"):
             result = offline.submit_offline(
-                TORRENT_URL, client=client, torrent_data=TORRENT,
+                TORRENT_URL, client=cast(GuangYaClient, client), torrent_data=TORRENT,
                 isolate_task=True,
             )
 
@@ -102,7 +107,7 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
             offline, "get", return_value="0"
         ), patch.object(offline.time, "sleep"):
             result = offline.submit_offline(
-                TORRENT_URL, client=client, torrent_data=TORRENT,
+                TORRENT_URL, client=cast(GuangYaClient, client), torrent_data=TORRENT,
                 isolate_task=True,
             )
 
@@ -115,7 +120,7 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
 
     def test_http_disabled_does_not_block_bt_torrent_link(self):
         client = self.client()
-        result = offline.submit_offline(TORRENT_URL, client=client)
+        result = offline.submit_offline(TORRENT_URL, client=cast(GuangYaClient, client))
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["decision"]["protocol"], "magnet")
         self.assertEqual(client.torrent_resolve_calls, [TORRENT])
@@ -150,6 +155,7 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
             result = RSSEngine().download(entry)
         self.assertTrue(result["ok"], result)
         row = db.get_download_request(result["request_id"])
+        assert row is not None
         self.assertEqual(row["kind"], "http")
         self.assertEqual(row["source_value"], TORRENT_URL)
         self.assertEqual(row["gy_status"], "submitted")
@@ -168,13 +174,13 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
                 client = self.client()
                 if mode == "preview":
                     result = offline.preview_offline_selection(
-                        TORRENT_URL, client=client, rules=self.rules
+                        TORRENT_URL, client=cast(GuangYaClient, client), rules=self.rules
                     )
                     self.assertEqual(result["default_selected_indexes"], [0])
                     self.assertEqual(client.selection_calls, [])
                 else:
                     result = offline.submit_offline_selection(
-                        TORRENT_URL, [0], client=client, rules=self.rules
+                        TORRENT_URL, [0], client=cast(GuangYaClient, client), rules=self.rules
                     )
                     self.assertEqual(client.selection_calls[0]["file_indexes"], [0])
                     self.assertTrue(
@@ -202,15 +208,15 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
                     ):
                         if mode == "automatic":
                             result = offline.submit_offline(
-                                TORRENT_URL, client=client, isolate_task=True
+                                TORRENT_URL, client=cast(GuangYaClient, client), isolate_task=True
                             )
                         elif mode == "preview":
                             result = offline.preview_offline_selection(
-                                TORRENT_URL, client=client, rules=rules
+                                TORRENT_URL, client=cast(GuangYaClient, client), rules=rules
                             )
                         else:
                             result = offline.submit_offline_selection(
-                                TORRENT_URL, [0], client=client, rules=rules
+                                TORRENT_URL, [0], client=cast(GuangYaClient, client), rules=rules
                             )
                     self.assertFalse(result["ok"])
                     self.assertEqual(client.legacy_calls, [])
@@ -223,7 +229,7 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
         rules = replace(self.rules, http_enabled=True, magnet_enabled=False)
         client = self.client()
         with patch.object(offline.OfflineRules, "from_config", return_value=rules):
-            result = offline.submit_offline(TORRENT_URL, client=client)
+            result = offline.submit_offline(TORRENT_URL, client=cast(GuangYaClient, client))
         self.assertFalse(result["ok"])
         self.assertEqual(result["decision"]["protocol"], "magnet")
         self.fetch.assert_not_called()
@@ -234,7 +240,7 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
         rules = replace(self.rules, http_enabled=True)
         with patch.object(offline.OfflineRules, "from_config", return_value=rules):
             result = offline.submit_offline(
-                "https://feed.invalid/Movie.mkv", client=client
+                "https://feed.invalid/Movie.mkv", client=cast(GuangYaClient, client)
             )
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["decision"]["protocol"], "http")
@@ -254,7 +260,7 @@ class RssGuangyaTorrentInputTests(unittest.TestCase):
             with self.subTest(url_shape=url.split("?", 1)[0]):
                 client = self.client()
                 result = offline.submit_offline(
-                    url, client=client, torrent_data=TORRENT
+                    url, client=cast(GuangYaClient, client), torrent_data=TORRENT
                 )
                 self.assertTrue(result["ok"], result)
                 self.fetch.assert_not_called()

@@ -98,7 +98,7 @@ def _ordered_rows() -> list[Any]:
 
 def _resolve_ordinal(instance_number: int, *, rows: list[Any] | None = None) -> Any:
     candidates = rows if rows is not None else _ordered_rows()
-    index = int(instance_number) - 1
+    index = instance_number - 1
     if index < 0 or index >= len(candidates):
         raise AgentToolError("指定的媒体反代实例不存在", code="precondition_failed")
     return candidates[index]
@@ -180,7 +180,7 @@ def summarize_media_proxy_status(_arguments: dict[str, Any]) -> ToolResult:
 
 
 def test_media_proxy_instance(arguments: dict[str, int]) -> ToolResult:
-    instance_number = int(arguments["instance_number"])
+    instance_number = (arguments["instance_number"])
     row = _resolve_ordinal(instance_number)
     internal_id = int(_row_value(row, "id", 0) or 0)
     server_type = _server_type(row)
@@ -192,8 +192,8 @@ def test_media_proxy_instance(arguments: dict[str, int]) -> ToolResult:
         probe = run_awaitable_sync(
             probe_media_proxy_instance(internal_id, timeout_seconds=8.0)
         )
-        status_code = int(probe.get("status_code") or 0)
-        latency_ms = int(probe.get("latency_ms") or 0)
+        status_code = (probe.get("status_code") or 0)
+        latency_ms = (probe.get("latency_ms") or 0)
         if 200 <= status_code < 300:
             result_status = "reachable"
             ok = True
@@ -275,7 +275,7 @@ def _digest(value: Any) -> str:
 
 def _snapshot(row: Any, *, instance_number: int) -> dict[str, Any]:
     return {
-        "instance_number": int(instance_number),
+        "instance_number": instance_number,
         "internal_id": int(_row_value(row, "id", 0) or 0),
         "server_type": _server_type(row),
         "enabled": bool(int(_row_value(row, "enabled", 0) or 0)),
@@ -360,7 +360,7 @@ def set_media_proxy_instance_enabled_confirmed(
                 error="确认快照已失效。",
             )
         state = _snapshot(row, instance_number=instance_number)
-        if not secrets.compare_digest(_fingerprint(state), str(expected_context or "")):
+        if not secrets.compare_digest(_fingerprint(state), (expected_context or "")):
             return ToolResult(
                 ok=False,
                 status="conflict",
@@ -384,7 +384,7 @@ def set_media_proxy_instance_enabled_confirmed(
 
     clear_signed_url_cache(internal_id)
     try:
-        runtime_refreshed = bool(get_media_proxy_manager().request_reconcile())
+        runtime_refreshed = (get_media_proxy_manager().request_reconcile())
     except Exception as exc:
         logger.warning("媒体反代配置已保存但热重载排队失败 type=%s", type(exc).__name__)
         runtime_refreshed = False
@@ -483,7 +483,7 @@ def restart_media_proxy_instance_confirmed(
             "实例列表已变化，请重新预检", code="confirmation_stale"
         ) from None
     state = _snapshot(row, instance_number=instance_number)
-    if not secrets.compare_digest(_fingerprint(state), str(expected_context or "")):
+    if not secrets.compare_digest(_fingerprint(state), (expected_context or "")):
         raise AgentToolError("实例配置已变化，请重新预检", code="confirmation_stale")
     if not bool(state["enabled"]):
         raise AgentToolError("实例已停用，请重新预检", code="confirmation_stale")
@@ -533,7 +533,7 @@ def restart_media_proxy_instance_confirmed(
         "operation": "restart",
         "instance_number": instance_number,
         "accepted": accepted,
-        "cache_entries_cleared": int(cleared),
+        "cache_entries_cleared": cleared,
     }
     if isinstance(restarted, bool):
         data["restarted"] = restarted

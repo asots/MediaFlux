@@ -421,7 +421,7 @@ def _run_owned_media_source_job(
 
 def _fetch_recent_media(*, limit: int = 72) -> list[dict]:
     """并发聚合所有已配置媒体服务器的最近入库内容。"""
-    normalized_limit = max(1, min(int(limit or 72), 200))
+    normalized_limit = max(1, min((limit or 72), 200))
     jobs: list[Callable[[], dict]] = []
     for server_type, server_name, web_url, client in _configured_media_sources():
         jobs.append(
@@ -467,7 +467,7 @@ def _merge_recent_media(sources: list[dict] | None, previous: list[dict]) -> tup
 
 
 def build_recent_media(*, limit: int = 72) -> list[dict]:
-    normalized_limit = max(1, min(int(limit or 72), 200))
+    normalized_limit = max(1, min((limit or 72), 200))
     return _recent_media_cache.load(
         (*_dashboard_config_key(), str(normalized_limit)),
         lambda: _fetch_recent_media(limit=normalized_limit), _merge_recent_media,
@@ -476,7 +476,7 @@ def build_recent_media(*, limit: int = 72) -> list[dict]:
 
 def get_cached_recent_media_or_stubs(*, limit: int = 72) -> tuple[list[dict], bool]:
     """与看板使用相同的限龄快照，未加载时只返回服务器标识。"""
-    normalized_limit = max(1, min(int(limit or 72), 200))
+    normalized_limit = max(1, min((limit or 72), 200))
     cached = _recent_media_cache.peek((*_dashboard_config_key(), str(normalized_limit)), stale=True)
     if cached:
         expired = cached.expires_at <= time.monotonic()
@@ -514,7 +514,7 @@ def search_media_servers(
     search_by: str = "title", media_type: str = "all", count_only: bool = False,
 ) -> list[dict]:
     """并发搜索，offset/limit 按服务器应用；总数是记录数，不跨服务器去重。"""
-    normalized_limit = max(1, min(int(limit or 8), 50))
+    normalized_limit = max(1, min((limit or 8), 50))
     options = {
         "limit": normalized_limit, "offset": offset, "search_by": search_by,
         "media_type": media_type, "count_only": count_only,
@@ -545,7 +545,7 @@ def _media_identity_source_payload(
             "server_type": server_type,
             "server_name": server_name,
             "status": "ready",
-            "present": bool(client.has_tmdb_media(tmdb_id, media_type)),
+            "present": client.has_tmdb_media(tmdb_id, media_type),
             "error": "",
         }
     except Exception as exc:
@@ -588,7 +588,7 @@ def _media_identity_inventory_source_payload(
                 "total": inventory.total, "truncated": inventory.truncated, "unmapped": inventory.unmapped,
                 "exact_ids": frozenset(item.tmdb_id for item in inventory.candidates if item.tmdb_id),
                 "unmapped_titles": frozenset(
-                    (_normalize_series_identity_title(item.name), str(item.year or "").strip())
+                    (_normalize_series_identity_title(item.name), (item.year or "").strip())
                     for item in inventory.candidates if not item.tmdb_id and _normalize_series_identity_title(item.name)),
             }
         return {"server_type": server_type, "server_name": server_name, "status": "ready",
@@ -654,7 +654,7 @@ def _resolve_series_library_scope(
     library_name: str,
 ) -> tuple[str, str, str]:
     """将用户可见媒体库名称解析为内部 ParentId；绝不向调用方泄露内部 ID。"""
-    requested = str(library_name or "").strip()
+    requested = (library_name or "").strip()
     if not requested:
         return "", "", ""
     target = _normalize_library_scope(requested)
@@ -696,7 +696,7 @@ def _series_inventory_source_result(
 ) -> dict:
     episode_union: set[tuple[int, int]] = set()
     local_total = 0
-    truncated = bool(search_truncated)
+    truncated = search_truncated
     ignored_specials = 0
     ignored_unknown = 0
     for item in selected_items:
@@ -705,10 +705,10 @@ def _series_inventory_source_result(
             include_specials=include_specials,
         )
         episode_union.update(inventory.episodes)
-        local_total += int(inventory.total or 0)
-        truncated = truncated or bool(inventory.truncated)
-        ignored_specials += int(inventory.ignored_specials or 0)
-        ignored_unknown += int(inventory.ignored_unknown or 0)
+        local_total += (inventory.total or 0)
+        truncated = truncated or inventory.truncated
+        ignored_specials += (inventory.ignored_specials or 0)
+        ignored_unknown += (inventory.ignored_unknown or 0)
     selected = selected_items[0]
     return {
         "server_type": server_type,
@@ -753,7 +753,7 @@ def _empty_series_source_result(
         "mapping": {"status": status, "tmdb_id": ""},
         "episodes": [],
         "local_total": 0,
-        "truncated": bool(truncated),
+        "truncated": truncated,
         "ignored_specials": 0,
         "ignored_unknown": 0,
         "error": "",
@@ -801,7 +801,7 @@ def _series_source_payload(
                 )
             provider_matches = [
                 item for item in provider_search.candidates
-                if str(item.tmdb_id or "") == explicit_tmdb_id
+                if (item.tmdb_id or "") == explicit_tmdb_id
             ]
             if provider_matches:
                 return _series_inventory_source_result(
@@ -815,19 +815,19 @@ def _series_source_payload(
                     max_episodes=max_episodes,
                     include_specials=include_specials,
                     library_name=resolved_library_name,
-                    search_truncated=bool(provider_search.truncated),
+                    search_truncated=provider_search.truncated,
                 )
 
         candidates = _public_series_candidates(title_search, provider_search)
         selected_items = _complete_series_matches(title_search, query)
         if not selected_items:
-            if int(title_search.total or 0) == 0 or not title_search.candidates:
+            if (title_search.total or 0) == 0 or not title_search.candidates:
                 return _empty_series_source_result(
                     server_type=server_type,
                     server_name=server_name,
                     status="not_found",
                     candidates=candidates,
-                    truncated=bool(title_search.truncated),
+                    truncated=title_search.truncated,
                     library_name=resolved_library_name,
                 )
             return _empty_series_source_result(
@@ -835,7 +835,7 @@ def _series_source_payload(
                 server_name=server_name,
                 status="ambiguous",
                 candidates=candidates,
-                truncated=bool(title_search.truncated),
+                truncated=title_search.truncated,
                 library_name=resolved_library_name,
             )
 
@@ -846,7 +846,7 @@ def _series_source_payload(
                 server_name=server_name,
                 status="conflict",
                 candidates=candidates,
-                truncated=bool(title_search.truncated),
+                truncated=title_search.truncated,
                 library_name=resolved_library_name,
             )
         status = "ready" if mapped_ids else "unmapped"
@@ -862,7 +862,7 @@ def _series_source_payload(
             max_episodes=max_episodes,
             include_specials=include_specials,
             library_name=resolved_library_name,
-            search_truncated=bool(title_search.truncated),
+            search_truncated=title_search.truncated,
         )
     except Exception as exc:
         logger.warning(
@@ -875,7 +875,7 @@ def _series_source_payload(
             server_name=server_name,
             status="unavailable",
             candidates=[],
-            library_name=str(library_name or "").strip(),
+            library_name=(library_name or "").strip(),
         )
         result["error"] = "媒体服务器暂时不可用"
         return result
@@ -889,9 +889,9 @@ def inspect_library_series_sources(
     scan_all: bool = False,
 ) -> list[dict]:
     """枚举各媒体服务器的剧集与本地集号；返回前移除内部 ID 和连接信息。"""
-    normalized_series = max(1, min(int(max_series or 50), 100))
-    normalized_episodes = max(1, min(int(max_episodes or 2000), 2000))
-    cursor = int(after_tmdb_id or 0) if str(after_tmdb_id or "").isdigit() else 0
+    normalized_series = max(1, min((max_series or 50), 100))
+    normalized_episodes = max(1, min((max_episodes or 2000), 2000))
+    cursor = int(after_tmdb_id or 0) if (after_tmdb_id or "").isdigit() else 0
     catalog_cap = 5000 if scan_all else normalized_series
     results: list[dict] = []
 
@@ -926,35 +926,35 @@ def inspect_library_series_sources(
                     page_size=100,
                     deadline_at=deadline_at,
                 )
-                source["series_total"] = int(search.total or 0)
+                source["series_total"] = (search.total or 0)
                 source["series_enumerated"] = len(search.candidates)
-                source["catalog_truncated"] = bool(search.truncated)
-                source["truncated"] = bool(search.truncated)
+                source["catalog_truncated"] = search.truncated
+                source["truncated"] = search.truncated
                 candidates = list(search.candidates)
                 if scan_all:
                     mapped = [
                         candidate for candidate in candidates
-                        if str(candidate.tmdb_id or "").isdigit()
-                        and int(str(candidate.tmdb_id)) > cursor
+                        if (candidate.tmdb_id or "").isdigit()
+                        and int(candidate.tmdb_id) > cursor
                     ]
-                    mapped.sort(key=lambda candidate: int(str(candidate.tmdb_id)))
+                    mapped.sort(key=lambda candidate: int(candidate.tmdb_id))
                     # 巡检游标按 TMDB 媒体组推进，而不是按媒体服务器条目推进。
                     # 同一剧集可能在多个媒体库或多个版本中重复出现；若按候选条目
                     # 切批，重复 ID 恰好跨越边界时会让 next_tmdb_id 等于当前组，
                     # 审计层因此无法处理该组并最终把它误判为停滞后跳过。
                     mapped_tmdb_ids = list(dict.fromkeys(
-                        str(candidate.tmdb_id) for candidate in mapped
+                        candidate.tmdb_id for candidate in mapped
                     ))
                     selected_tmdb_ids = set(mapped_tmdb_ids[:normalized_series])
                     source["batch_remaining"] = len(mapped_tmdb_ids) > normalized_series
                     selected = [
                         candidate for candidate in mapped
-                        if str(candidate.tmdb_id) in selected_tmdb_ids
+                        if candidate.tmdb_id in selected_tmdb_ids
                     ]
                     if source["batch_remaining"]:
                         source["next_tmdb_id"] = mapped_tmdb_ids[normalized_series]
                     source["unmapped_count"] = sum(
-                        not str(candidate.tmdb_id or "").isdigit()
+                        not (candidate.tmdb_id or "").isdigit()
                         for candidate in candidates
                     )
                 else:
@@ -965,7 +965,7 @@ def inspect_library_series_sources(
                             status="incomplete",
                             truncated=True,
                             batch_remaining=True,
-                            next_tmdb_id=str(candidate.tmdb_id or ""),
+                            next_tmdb_id=(candidate.tmdb_id or ""),
                             deadline_exhausted=True,
                         )
                         break
@@ -999,7 +999,7 @@ def inspect_library_series_sources(
                                 or index + 1 < len(selected)
                                 or bool(candidate.tmdb_id)
                             ),
-                            next_tmdb_id=str(candidate.tmdb_id or ""),
+                            next_tmdb_id=(candidate.tmdb_id or ""),
                             deadline_exhausted=deadline_hit,
                         )
                         break
@@ -1008,10 +1008,10 @@ def inspect_library_series_sources(
                         "year": candidate.year,
                         "tmdb_id": candidate.tmdb_id,
                         "episodes": list(inventory.episodes),
-                        "local_total": int(inventory.total or 0),
-                        "truncated": bool(inventory.truncated),
-                        "ignored_specials": int(inventory.ignored_specials or 0),
-                        "ignored_unknown": int(inventory.ignored_unknown or 0),
+                        "local_total": (inventory.total or 0),
+                        "truncated": inventory.truncated,
+                        "ignored_specials": (inventory.ignored_specials or 0),
+                        "ignored_unknown": (inventory.ignored_unknown or 0),
                     })
                     if inventory.truncated:
                         source["truncated"] = True
@@ -1052,14 +1052,14 @@ def _strict_series_inventory_source_payload(
         if not selected:
             return _empty_series_source_result(
                 server_type=server_type, server_name=server_name, status="not_found",
-                candidates=[], truncated=bool(search.truncated),
+                candidates=[], truncated=search.truncated,
             )
         return _series_inventory_source_result(
             server_type=server_type, server_name=server_name, client=client,
             selected_items=selected, candidates=_public_series_candidates(search),
             status="ready", mapping_status="provider_id",
             max_episodes=max_episodes, include_specials=include_specials,
-            search_truncated=bool(search.truncated),
+            search_truncated=search.truncated,
         )
     except Exception:
         result = _empty_series_source_result(
@@ -1162,7 +1162,7 @@ def inspect_media_identity_batch(
             if source["status"] == "ready" and inventory is not None:
                 if identity["tmdb_id"] in inventory["exact_ids"]:
                     status, match = "present", "provider_id"
-                elif (_normalize_series_identity_title(identity.get("title")), str(identity.get("year") or "").strip()) in inventory["unmapped_titles"]:
+                elif (_normalize_series_identity_title(identity.get("title")), (identity.get("year") or "").strip()) in inventory["unmapped_titles"]:
                     status, match = "possible", "title_year"
                 elif not inventory["truncated"]:
                     status = "missing"
@@ -1295,7 +1295,7 @@ def collect_discovery_recommendations(
                 duplicates += 1
                 continue
             seen.add(key)
-            year = str(card.year or "").strip()
+            year = (card.year or "").strip()
             if (year_from or year_to) and (not re.fullmatch(r"(?:19|20)[0-9]{2}", year)
                     or (year_from and year < year_from) or (year_to and year > year_to)):
                 continue
@@ -1303,7 +1303,7 @@ def collect_discovery_recommendations(
         stop_reason = interrupted()
         if exclude_library:
             identities = [{"tmdb_id": card.tmdb_id, "media_type": card.media_type,
-                           "title": card.title, "year": str(card.year or "").strip()}
+                           "title": card.title, "year": (card.year or "").strip()}
                           for card in cards if re.fullmatch(r"[1-9][0-9]{0,9}", card.tmdb_id)]
             if identities and snapshot is None and not stop_reason:
                 try:

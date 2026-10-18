@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from app.modules.process_lock import CrossProcessLock
+from typing import cast
+
 import threading
 import unittest
 from unittest.mock import patch
@@ -28,7 +31,7 @@ class STRMKernelHistoryAuditTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.enterContext(isolated_test_database())
         self.scheduler = STRMScheduler()
-        self.scheduler._run_lock = threading.Lock()
+        self.scheduler._run_lock = cast(CrossProcessLock, threading.Lock())
         self.enterContext(
             patch("app.modules.scheduler.get_scheduler", return_value=self.scheduler)
         )
@@ -88,7 +91,7 @@ class STRMKernelHistoryAuditTests(unittest.IsolatedAsyncioTestCase):
             report_progress=ignore,
         )
         result = await pipeline.execute("strm.run_once", arguments, context=context)
-        self.assertIsNotNone(result.effect_plan)
+        assert (result.effect_plan) is not None
         return context, result.effect_plan.plan_id
 
     def audit(self):

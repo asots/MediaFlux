@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from sqlite3 import Row
 from typing import Any, Mapping
 
 from app import config
-
 
 _PROFILE_KEYS = {
     "configured:jellyfin": (
@@ -63,10 +63,10 @@ def _profile(source: str) -> MediaServerProfile:
         source=source,
         server_type=server_type,
         label=label,
-        url=str(values[url_key] or "").strip(),
-        credential=str(values[credential_key] or "").strip(),
-        enabled=str(values[enabled_key] or "").strip().lower() in {"1", "true", "yes", "on", "y"},
-        user_id=str(values[user_key] or "").strip(),
+        url=(values[url_key] or "").strip(),
+        credential=(values[credential_key] or "").strip(),
+        enabled=(values[enabled_key] or "").strip().lower() in {"1", "true", "yes", "on", "y"},
+        user_id=(values[user_key] or "").strip(),
     )
 
 
@@ -75,14 +75,14 @@ def list_configured_profiles() -> list[MediaServerProfile]:
     return [_profile(source) for source in _PROFILE_KEYS]
 
 
-def _row_value(row: Mapping[str, Any], key: str, default: Any = "") -> Any:
+def _row_value(row: Mapping[str, Any] | Row, key: str, default: Any = "") -> Any:
     try:
         return row[key]
     except (KeyError, IndexError, TypeError):
         return default
 
 
-def resolve_proxy_instance(row: Mapping[str, Any]) -> dict[str, Any]:
+def resolve_proxy_instance(row: Mapping[str, Any] | Row) -> dict[str, Any]:
     """解析当前上游；配置凭据仅供管理探测，不替代下游用户令牌。"""
     resolved = dict(row)
     source = str(_row_value(row, "config_source", "custom") or "custom").strip()

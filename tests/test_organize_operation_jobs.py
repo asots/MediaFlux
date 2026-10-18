@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from app.modules.process_lock import CrossProcessLock
+from typing import cast
+
 import json
 import threading
 import time
@@ -59,7 +62,9 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
         }
         for source in ("live", "history"):
             with self.subTest(source=source):
-                result = manager.task_result("normal-organize")["result"]
+                task_result_result = manager.task_result("normal-organize")
+                assert task_result_result is not None
+                result = task_result_result["result"]
                 self.assertEqual(result["schema_version"], 1)
                 self.assertEqual(result["counters"]["total"], 3)
                 self.assertEqual(result["counters"]["moved"], 3)
@@ -76,7 +81,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
                     "warnings": ["联动通知延迟"],
                 }
                 manager = OrganizeTaskManager()
-                manager._lock = threading.Lock()
+                manager._lock = cast(CrossProcessLock, threading.Lock())
                 manager._lock.acquire()
                 manager._task = {"id": "batch", "operation": "批量纠正", "status": "running"}
                 with patch.object(manager, "_wake_download_tracker"):
@@ -85,6 +90,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
                 for source in ("current", "history"):
                     with self.subTest(source=source):
                         result = manager.task_result("batch")
+                        assert result is not None
                         self.assertEqual(result["status"], expected)
                         self.assertEqual(result["result"], receipt)
                         manager._task = {"id": "next", "status": "running"}
@@ -139,13 +145,14 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
 
         self.assertIsNone(claim_organize_operation_job(str(second["job_id"])))
         claimed_first = claim_organize_operation_job(str(first["job_id"]))
+        assert claimed_first is not None
         self.assertEqual(claimed_first["job_id"], first["job_id"])
 
     def test_stopped_durable_result_is_persisted_as_partial(self) -> None:
         created, _ = self._enqueue(dedupe="owner:stopped")
         claimed = claim_organize_operation_job(str(created["job_id"]))
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         self.assertTrue(manager._lock.acquire(blocking=False))
         manager._task = {"id": str(created["job_id"]), "status": "running"}
 
@@ -154,11 +161,14 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
             "_execute_durable_operation",
             return_value={"stats": {"moved": 1, "stopped": 1}},
         ):
+            assert claimed is not None
             manager._run_durable_operation(dict(claimed))
 
         terminal = get_organize_operation_job(str(created["job_id"]))
+        assert terminal is not None
         self.assertEqual(terminal["status"], "partial")
-        self.assertFalse(manager._lock.locked())
+        self.assertTrue(manager._lock.acquire(blocking=False))
+        manager._lock.release()
 
     def test_owner_scoped_cancel_terminalizes_pending_and_scrubs_payload(self) -> None:
         created, _ = self._enqueue(dedupe="owner:pending-cancel")
@@ -169,6 +179,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
                 job_id, owner="owner-durable-test", expected_lease_generation=0
             )
         self.assertEqual(outcome, "cancelled")
+        assert cancelled is not None
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertEqual(cancelled["payload_json"], "{}")
         self.assertEqual(cancelled["reference"], "")
@@ -189,12 +200,14 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
         created, _ = self._enqueue(dedupe="owner:running-cancel")
         job_id = str(created["job_id"])
         claimed = claim_organize_operation_job(job_id)
+        assert claimed is not None
         generation = int(claimed["lease_generation"])
 
         requested, outcome = request_cancel_organize_operation_job(
             job_id, owner="owner-durable-test", expected_lease_generation=generation
         )
         self.assertEqual(outcome, "requested")
+        assert requested is not None
         self.assertEqual(requested["status"], "running")
         self.assertEqual(requested["cancel_requested"], 1)
         self.assertTrue(is_organize_operation_cancel_requested(
@@ -204,17 +217,20 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
             job_id, owner="owner-durable-test", expected_lease_generation=generation
         )
         self.assertEqual(repeated_outcome, "requested")
+        assert repeated is not None
         self.assertEqual(repeated["status"], "running")
 
     def test_cancel_rejects_stale_generation_and_preserves_accepted_cloud_copy(self) -> None:
         created, _ = self._enqueue(dedupe="owner:stale-cancel")
         job_id = str(created["job_id"])
         claimed = claim_organize_operation_job(job_id)
+        assert claimed is not None
         generation = int(claimed["lease_generation"])
         stale, outcome = request_cancel_organize_operation_job(
             job_id, owner="owner-durable-test", expected_lease_generation=generation + 1
         )
         self.assertEqual(outcome, "stale")
+        assert stale is not None
         self.assertEqual(stale["cancel_requested"], 0)
 
         with db.get_conn() as conn:
@@ -226,13 +242,14 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
             job_id, owner="owner-durable-test", expected_lease_generation=generation
         )
         self.assertEqual(outcome, "uncancellable")
+        assert uncancellable is not None
         self.assertEqual(uncancellable["status"], "running")
         self.assertEqual(uncancellable["cancel_requested"], 0)
 
     def test_claim_and_finish_are_generation_fenced(self) -> None:
         created, _ = self._enqueue()
         claimed = claim_organize_operation_job(str(created["job_id"]))
-        self.assertIsNotNone(claimed)
+        assert (claimed) is not None
         generation = int(claimed["lease_generation"])
 
         self.assertFalse(finish_organize_operation_job(
@@ -248,16 +265,19 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
             result={"stats": {"moved": 1}},
         ))
         terminal = get_organize_operation_job(str(created["job_id"]))
+        assert terminal is not None
         self.assertEqual(terminal["status"], "completed")
 
     def test_init_db_does_not_reclassify_a_live_running_operation(self) -> None:
         created, _ = self._enqueue(dedupe="owner:live")
         claimed = claim_organize_operation_job(str(created["job_id"]))
+        assert claimed is not None
         self.assertEqual(claimed["status"], "running")
 
         db.init_db()
 
         current = get_organize_operation_job(str(created["job_id"]))
+        assert current is not None
         self.assertEqual(current["status"], "running")
         self.assertEqual(current["lease_generation"], claimed["lease_generation"])
 
@@ -276,9 +296,9 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
         self.assertNotEqual(first["owner_digest"], second["owner_digest"])
         manager = OrganizeTaskManager()
         public_ref = organize_operation_public_ref(str(first["job_id"]))
-        self.assertIsNotNone(manager.task_result(
+        assert (manager.task_result(
             public_ref, owner="owner-durable-test"
-        ))
+        )) is not None
         self.assertIsNone(manager.task_result(
             public_ref, owner="different-owner"
         ))
@@ -291,12 +311,14 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
         tampered["payload_json"] = '{"version":2}'
         self.assertFalse(verify_organize_operation_payload(tampered))
         claimed = claim_organize_operation_job(str(created["job_id"]))
+        assert claimed is not None
         self.assertTrue(finish_organize_operation_job(
             str(created["job_id"]),
             expected_lease_generation=int(claimed["lease_generation"]),
             status="completed",
         ))
         terminal = get_organize_operation_job(str(created["job_id"]))
+        assert terminal is not None
         self.assertEqual(terminal["payload_json"], "{}")
         self.assertEqual(terminal["payload_auth"], "")
         self.assertEqual(terminal["reference"], "")
@@ -322,6 +344,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
 
         created, _ = self._enqueue(dedupe="owner:scope-stats")
         claimed = claim_organize_operation_job(str(created["job_id"]))
+        assert claimed is not None
         self.assertTrue(finish_organize_operation_job(
             str(created["job_id"]),
             expected_lease_generation=int(claimed["lease_generation"]),
@@ -329,11 +352,13 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
             result=result,
         ))
         terminal = get_organize_operation_job(str(created["job_id"]))
+        assert terminal is not None
         self.assertEqual(json.loads(terminal["result_json"]), expected)
         public_ref = organize_operation_public_ref(str(created["job_id"]))
         queried = OrganizeTaskManager().task_result(
             public_ref, owner="owner-durable-test"
         )
+        assert queried is not None
         self.assertEqual(queried["result"], expected)
         self.assertEqual(set(queried["result"]), {"stats"})
 
@@ -433,6 +458,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
 
         created, _ = self._enqueue(dedupe="owner:operation-items")
         claimed = claim_organize_operation_job(str(created["job_id"]))
+        assert claimed is not None
         self.assertTrue(
             finish_organize_operation_job(
                 str(created["job_id"]),
@@ -442,6 +468,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
             )
         )
         terminal = get_organize_operation_job(str(created["job_id"]))
+        assert terminal is not None
         self.assertEqual(json.loads(terminal["result_json"]), expected)
         owner_row = get_organize_operation_job_for_owner(
             str(created["job_id"]), "owner-durable-test"
@@ -449,12 +476,13 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
         other_owner_row = get_organize_operation_job_for_owner(
             str(created["job_id"]), "someone-else"
         )
-        self.assertIsNotNone(owner_row)
+        assert (owner_row) is not None
         self.assertIsNone(other_owner_row)
 
         public_ref = organize_operation_public_ref(str(created["job_id"]))
         manager = OrganizeTaskManager()
         queried = manager.task_result(public_ref, owner="owner-durable-test")
+        assert queried is not None
         self.assertEqual(queried["result"], expected)
         self.assertIsNone(manager.task_result(public_ref, owner="someone-else"))
 
@@ -516,11 +544,13 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
                 self.assertLess(len(serialized), 131_072)
                 created, _ = self._enqueue(dedupe=f"label-budget:{kind}")
                 claimed = claim_organize_operation_job(str(created["job_id"]))
+                assert claimed is not None
                 self.assertTrue(finish_organize_operation_job(
                     str(created["job_id"]), expected_lease_generation=int(claimed["lease_generation"]),
                     status="partial", result=worst_case,
                 ))
                 persisted = get_organize_operation_job(str(created["job_id"]))
+                assert persisted is not None
                 self.assertEqual(json.loads(persisted["result_json"]), worst_case)
 
     def test_old_manual_review_history_is_pruned_on_next_enqueue(self) -> None:
@@ -636,6 +666,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         created, _payload = self._enqueue_fs_change(dedupe="provider-copy-delay")
         job_id = str(created["job_id"])
         claimed = claim_organize_operation_job(job_id)
+        assert claimed is not None
         generation = int(claimed["lease_generation"])
         before = get_organize_operation_job(job_id)
         result = {
@@ -654,6 +685,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
                 result=result,
             ))
 
+        assert before is not None
         can_resume.assert_called_once_with(
             json.loads(before["payload_json"]),
             job_id=job_id,
@@ -661,6 +693,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             lease_generation=generation,
         )
         deferred = get_organize_operation_job(job_id)
+        assert deferred is not None
         self.assertEqual(deferred["status"], "pending")
         self.assertEqual(deferred["lease_generation"], generation)
         self.assertEqual(deferred["error_code"], CLOUD_COPY_PENDING_CODE)
@@ -673,6 +706,8 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             {"stats": {"copied": 2, "failed": 1}},
         )
         for field in ("job_id", "payload_json", "payload_auth", "reference", "expires_at"):
+            assert before is not None
+            assert deferred is not None
             self.assertEqual(deferred[field], before[field], field)
 
         self.assertIsNone(claim_organize_operation_job(job_id))
@@ -687,7 +722,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             result={"stats": {"copied": 99}},
         ))
         unchanged = get_organize_operation_job(job_id)
+        assert unchanged is not None
         self.assertEqual(unchanged["status"], "pending")
+        assert deferred is not None
         self.assertEqual(unchanged["result_json"], deferred["result_json"])
         self.assertEqual(unchanged["updated_at"], deferred_at)
 
@@ -705,6 +742,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         ready = list_pending_organize_operation_jobs(ready_only=True)
         self.assertEqual([str(row["job_id"]) for row in ready], [job_id])
         reclaimed = claim_organize_operation_job(job_id)
+        assert reclaimed is not None
         self.assertEqual(reclaimed["job_id"], job_id)
         self.assertEqual(reclaimed["lease_generation"], generation + 1)
 
@@ -723,6 +761,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             create=True,
             return_value={'resumable': True, 'copy_in_flight': True},
         ):
+            assert claimed_waiting is not None
             self.assertTrue(defer_organize_operation_job(
                 waiting_id,
                 expected_lease_generation=int(claimed_waiting["lease_generation"]),
@@ -739,8 +778,10 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             [first_id, second_id],
         )
         first_claim = claim_organize_operation_job()
+        assert first_claim is not None
         self.assertEqual(first_claim["job_id"], first_id)
         second_claim = claim_organize_operation_job(second_id)
+        assert second_claim is not None
         self.assertEqual(second_claim["job_id"], second_id)
         self.assertIsNone(claim_organize_operation_job(waiting_id))
 
@@ -780,7 +821,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
                 return_value={'resumable': True, 'copy_in_flight': True},
             ) as can_resume:
                 row = cases[key]
-                generation = int(claims[key]["lease_generation"])
+                claim = claims[key]
+                assert claim is not None
+                generation = int(claim["lease_generation"])
                 before = get_organize_operation_job(str(row["job_id"]))
                 self.assertFalse(defer_organize_operation_job(
                     str(row["job_id"]),
@@ -790,11 +833,14 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
                 ))
                 after = get_organize_operation_job(str(row["job_id"]))
                 for field in ("status", "lease_generation", "result_json", "updated_at"):
+                    assert after is not None
+                    assert before is not None
                     self.assertEqual(after[field], before[field], field)
                 if key in {"wrong-lease", "cancelled", "purged", "expired", "tampered"}:
                     can_resume.assert_not_called()
 
         checkpoint = cases["checkpoint"]
+        assert claims['checkpoint'] is not None
         generation = int(claims["checkpoint"]["lease_generation"])
         before = get_organize_operation_job(str(checkpoint["job_id"]))
         with patch(
@@ -807,8 +853,10 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             ))
         can_resume.assert_called_once()
         after = get_organize_operation_job(str(checkpoint["job_id"]))
+        assert after is not None
         self.assertEqual(after["status"], "running")
         self.assertEqual(after["lease_generation"], generation)
+        assert before is not None
         self.assertEqual(after["updated_at"], before["updated_at"])
 
         legacy, _ = self._enqueue(dedupe="defer-legacy-pending")
@@ -819,6 +867,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
                 (str(legacy["job_id"]),),
             )
         legacy_claim = claim_organize_operation_job(str(legacy["job_id"]))
+        assert legacy_claim is not None
         self.assertEqual(legacy_claim["status"], "running")
 
         wrong_kind, _ = self._enqueue(dedupe="defer-wrong-kind")
@@ -828,13 +877,16 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             create=True,
             return_value={'resumable': True, 'copy_in_flight': True},
         ) as can_resume:
+            assert wrong_kind_claim is not None
             self.assertFalse(defer_organize_operation_job(
                 str(wrong_kind["job_id"]),
                 expected_lease_generation=int(wrong_kind_claim["lease_generation"]),
             ))
         can_resume.assert_not_called()
+        get_organize_operation_job_result = get_organize_operation_job(str(wrong_kind["job_id"]))
+        assert get_organize_operation_job_result is not None
         self.assertEqual(
-            get_organize_operation_job(str(wrong_kind["job_id"]))["status"],
+            get_organize_operation_job_result["status"],
             "running",
         )
 
@@ -847,6 +899,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             create=True,
             return_value={'resumable': True, 'copy_in_flight': True},
         ):
+            assert claimed is not None
             self.assertTrue(defer_organize_operation_job(
                 job_id,
                 expected_lease_generation=int(claimed["lease_generation"]),
@@ -863,6 +916,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         finalize.assert_called_once()
         self.assertEqual(finalize.call_args.kwargs["queue_status"], "manual_review")
         expired = get_organize_operation_job(job_id)
+        assert expired is not None
         self.assertEqual(expired["status"], "manual_review")
         self.assertEqual(expired["error_code"], "ProviderCopyOutcomeUnknown")
         self.assertIn("云端处理结果未知", expired["error"])
@@ -879,6 +933,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
     def test_orphan_fs_change_requeues_only_when_plan_is_resumable(self) -> None:
         created, _payload = self._enqueue_fs_change(dedupe="eligible")
         claimed = claim_organize_operation_job(str(created["job_id"]))
+        assert claimed is not None
         self.assertEqual(claimed["status"], "running")
         old_generation = int(claimed["lease_generation"])
         with db.get_conn() as conn:
@@ -900,6 +955,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         ):
             self.assertEqual(recover_orphaned_organize_operation_jobs(), 1)
 
+        assert before is not None
         can_resume.assert_called_once_with(
             json.loads(before["payload_json"]),
             job_id=str(created["job_id"]),
@@ -908,6 +964,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         )
         finalize.assert_not_called()
         resumed = get_organize_operation_job(str(created["job_id"]))
+        assert resumed is not None
         self.assertEqual(resumed["status"], "pending")
         self.assertEqual(resumed["lease_generation"], old_generation + 1)
         self.assertEqual(resumed["error_code"], "WorkerInterruptedResume")
@@ -916,9 +973,12 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             "payload_json", "payload_auth", "reference", "dedupe_digest",
             "expires_at", "result_json",
         ):
+            assert before is not None
+            assert resumed is not None
             self.assertEqual(resumed[field], before[field], field)
 
         next_claim = claim_organize_operation_job(str(created["job_id"]))
+        assert next_claim is not None
         self.assertEqual(next_claim["status"], "running")
         self.assertEqual(next_claim["lease_generation"], old_generation + 2)
         self.assertFalse(
@@ -954,7 +1014,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         )
         # Make every row running before applying the recovery exclusions.
         for _ in range(len(cases) + 1):
-            self.assertIsNotNone(claim_organize_operation_job())
+            assert (claim_organize_operation_job()) is not None
         with db.get_conn() as conn:
             tampered_id = str(cases["tampered"]["job_id"])
             conn.execute(
@@ -1019,22 +1079,26 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             {str(call.args[0].get("case")) for call in can_resume.call_args_list},
             {"false", "raises"},
         )
+        get_organize_operation_job_result_2 = get_organize_operation_job(str(cases["cancelled"]["job_id"]))
+        assert get_organize_operation_job_result_2 is not None
         self.assertEqual(
-            get_organize_operation_job(str(cases["cancelled"]["job_id"]))["status"],
+            get_organize_operation_job_result_2["status"],
             "cancelled",
         )
         self.assertIsNone(get_organize_operation_job(str(cases["purged"]["job_id"])))
         for case in ("false", "raises", "tampered", "legacy", "expired"):
             row = get_organize_operation_job(str(cases[case]["job_id"]))
+            assert row is not None
             self.assertEqual(row["status"], "manual_review", case)
             self.assertEqual(row["error_code"], "WorkerExitedUnknownOutcome", case)
         other = get_organize_operation_job(str(other_kind["job_id"]))
+        assert other is not None
         self.assertEqual(other["status"], "manual_review")
         self.assertEqual(other["error_code"], "WorkerExitedUnknownOutcome")
 
     def test_pending_operation_survives_shutdown_and_runs_after_resume(self) -> None:
         first = OrganizeTaskManager()
-        first._lock = threading.Lock()
+        first._lock = cast(CrossProcessLock, threading.Lock())
         first._lock.acquire()
         queued = first.start_durable_operation(
             "目录刮削",
@@ -1049,10 +1113,11 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         first.begin_shutdown()
         first._lock.release()
         persisted = get_organize_operation_job(queued["task_id"])
+        assert persisted is not None
         self.assertEqual(persisted["status"], "pending")
 
         second = OrganizeTaskManager()
-        second._lock = threading.Lock()
+        second._lock = cast(CrossProcessLock, threading.Lock())
         with patch.object(
             OrganizeTaskManager,
             "_execute_durable_operation",
@@ -1071,7 +1136,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
 
     def test_durable_queue_is_aggregate_only_in_global_status(self) -> None:
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
         try:
             queued = manager.start_durable_operation(
@@ -1097,6 +1162,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             reference="安全引用", payload=self._payload(), dedupe_key="history-query",
         )
         claimed = claim_organize_operation_job(str(created["job_id"]))
+        assert claimed is not None
         finish_organize_operation_job(
             str(created["job_id"]),
             expected_lease_generation=int(claimed["lease_generation"]),
@@ -1112,7 +1178,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             })
             manager._task = {"id": "different-task", "status": "running"}
         public_ref = organize_operation_public_ref(str(created["job_id"]))
-        self.assertEqual(manager.task_result(public_ref, owner=owner)["status"], "completed")
+        task_result_result_2 = manager.task_result(public_ref, owner=owner)
+        assert task_result_result_2 is not None
+        self.assertEqual(task_result_result_2["status"], "completed")
         self.assertIsNone(manager.task_result(public_ref, owner="other-owner"))
 
     def test_live_worker_recovers_orphaned_running_job_when_process_lock_is_free(self) -> None:
@@ -1125,10 +1193,11 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             dedupe_key="durable:orphaned",
         )
         claimed = claim_organize_operation_job(str(created["job_id"]))
+        assert claimed is not None
         self.assertEqual(claimed["status"], "running")
 
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager.resume()
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
@@ -1159,7 +1228,9 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
             manager.resume()
             time.sleep(0.15)
             current = get_organize_operation_job(str(created["job_id"]))
+            assert current is not None
             self.assertEqual(current["status"], "running")
+            assert claimed is not None
             self.assertEqual(current["lease_generation"], claimed["lease_generation"])
         finally:
             holder._lock.release()
@@ -1186,6 +1257,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         claimed = claim_organize_operation_job(str(created["job_id"]))
         deleted = db.purge_agent_subject_data(owner=owner)
         self.assertEqual(deleted["organize_operation_jobs"], 1)
+        assert claimed is not None
         self.assertTrue(is_organize_operation_cancel_requested(
             str(created["job_id"]),
             expected_lease_generation=int(claimed["lease_generation"]),
@@ -1198,6 +1270,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         self.assertEqual(scrubbed["payload_json"], "{}")
         self.assertEqual(scrubbed["reference"], "")
         self.assertEqual(scrubbed["cancel_requested"], 1)
+        assert claimed is not None
         self.assertTrue(finish_organize_operation_job(
             str(created["job_id"]),
             expected_lease_generation=int(claimed["lease_generation"]),
@@ -1207,7 +1280,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
 
     def test_worker_start_and_terminal_write_failures_still_release_lock(self) -> None:
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         with patch(
             "app.modules.organize_tasks.threading.Thread.start",
             side_effect=RuntimeError("thread unavailable"),
@@ -1228,7 +1301,7 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
 
     def test_durable_dispatcher_start_failure_is_persisted_and_retryable(self) -> None:
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
         try:
             with patch.object(

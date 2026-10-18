@@ -85,8 +85,8 @@ def media_subscription_policy_update_arguments(
             raise AgentToolError("check_interval_minutes 必须是 5 到 10080 的整数")
         normalized["check_interval_minutes"] = interval
     mode = normalized.get("monitor_mode")
-    seasons = normalized.get("seasons")
-    if mode == "selected" and seasons == []:
+    selected_seasons = normalized.get("seasons")
+    if mode == "selected" and selected_seasons == []:
         raise AgentToolError("selected 模式至少需要一个季度")
     return normalized
 
@@ -94,7 +94,7 @@ def media_subscription_policy_update_arguments(
 def _json_int_list(value: Any) -> list[int]:
     try:
         raw = json.loads(str(value or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return []
     if not isinstance(raw, list):
         return []
@@ -127,11 +127,11 @@ def _policy_projection(row: Any) -> dict[str, Any]:
 def _json_string_list(value: Any) -> list[str]:
     try:
         raw = json.loads(str(value or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return []
     if not isinstance(raw, list):
         return []
-    return [str(item)[:32] for item in raw[:16] if isinstance(item, str) and item]
+    return [item[:32] for item in raw[:16] if isinstance(item, str) and item]
 
 
 def get_media_subscription_policy(arguments: dict[str, int]) -> ToolResult:
@@ -324,7 +324,7 @@ def set_media_subscription_policy_confirmed(
         conn.execute("BEGIN IMMEDIATE")
         snapshot = _policy_confirmation_snapshot(conn, subscription_id)
         if not snapshot.get("exists") or not secrets.compare_digest(
-            common._fingerprint(snapshot), str(expected_context or "")
+            common._fingerprint(snapshot), (expected_context or "")
         ):
             return ToolResult(
                 False,
@@ -336,7 +336,7 @@ def set_media_subscription_policy_confirmed(
             effective = _validate_effective_subscription_policy(snapshot, normalized)
         except AgentToolError as exc:
             return ToolResult(
-                False, "conflict", exc.public_message, error=exc.public_message
+                False, "conflict", str(exc), error=str(exc)
             )
         dispatching = int(
             snapshot.get("_active_admissions", {}).get("dispatching") or 0
@@ -394,7 +394,7 @@ def set_media_subscription_policy_confirmed(
         data={
             "subscription_number": subscription_id,
             "updated_fields": sorted(normalized),
-            "expired_candidates": max(0, int(expired or 0)),
+            "expired_candidates": max(0, (expired or 0)),
             "in_flight_dispatches": dispatching,
             "effective_action": effective["action"],
             "runtime_refreshed": refreshed,

@@ -1,9 +1,14 @@
 """Task 12：字幕归一化与回收站删除审计回归测试。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import json
 from pathlib import Path
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 from app import database as db
@@ -221,7 +226,7 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
                 remote.pop(file_ids[0])
                 return True
 
-        service = OrganizeCorrectionService(client=Client(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, Client()), scraper=cast(TMDBScraper, object()))
         version = service.detail(log_id)["version"]
         with patch.object(Organizer, "_post_organize_link") as post_action:
             result = service.delete_group(log_id, "manual-token", version, "DELETE")
@@ -268,7 +273,7 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
                 remote.pop(file_ids[0], None)
                 return True
 
-        service = OrganizeCorrectionService(client=Client(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, Client()), scraper=cast(TMDBScraper, object()))
         entries = [
             {"log_id": first_log, "expected_version": service.detail(first_log)["version"],
              "operation_token": "batch-one"},
@@ -280,8 +285,12 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(delete_calls, [])
-        self.assertEqual(db.get_organize_log(first_log)["status"], "success")
-        self.assertEqual(db.get_organize_log(second_log)["status"], "success")
+        get_organize_log_result = db.get_organize_log(first_log)
+        assert get_organize_log_result is not None
+        self.assertEqual(get_organize_log_result["status"], "success")
+        get_organize_log_result_2 = db.get_organize_log(second_log)
+        assert get_organize_log_result_2 is not None
+        self.assertEqual(get_organize_log_result_2["status"], "success")
 
     def test_batch_delete_version_drift_blocks_before_any_provider_call(self):
         log_ids = []
@@ -317,7 +326,7 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
                 delete_calls.append(list(file_ids))
                 return True
 
-        service = OrganizeCorrectionService(client=Client(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, Client()), scraper=cast(TMDBScraper, object()))
         entries = [
             {"log_id": log_ids[0], "expected_version": service.detail(log_ids[0])["version"],
              "operation_token": "claim-one"},
@@ -329,8 +338,12 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(delete_calls, [])
-        self.assertEqual([db.get_organize_log(log_id)["status"] for log_id in log_ids],
-                         ["success", "success"])
+        statuses = []
+        for log_id in log_ids:
+            log = db.get_organize_log(log_id)
+            assert log is not None
+            statuses.append(log["status"])
+        self.assertEqual(statuses, ["success", "success"])
 
     def test_manual_delete_gcid_size_ambiguity_blocks_before_first_provider_call(self):
         log_id = self._log()
@@ -341,7 +354,7 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
         client = unittest.mock.Mock()
         client.file_info.side_effect = lambda file_id: {"video": video, "sub": sub}.get(file_id)
         client.list_dir.return_value = [video, sub, duplicate]
-        service = OrganizeCorrectionService(client=client, scraper=object())
+        service = OrganizeCorrectionService(client=client, scraper=cast(TMDBScraper, object()))
         version = service.detail(log_id)["version"]
 
         with self.assertRaisesRegex(RuntimeError, "GCID/size 歧义"):
@@ -351,7 +364,9 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
         audits = db.list_organize_delete_audits(log_id)
         self.assertEqual({row["status"] for row in audits}, {"blocked"})
         self.assertTrue(all("GCID/size 歧义" in row["reason"] for row in audits))
-        self.assertEqual(db.get_organize_log(log_id)["status"], "success")
+        get_organize_log_result_3 = db.get_organize_log(log_id)
+        assert get_organize_log_result_3 is not None
+        self.assertEqual(get_organize_log_result_3["status"], "success")
 
 
 class AutomaticReplacementDeleteTests(IsolatedDatabaseTestCase):
@@ -362,6 +377,7 @@ class AutomaticReplacementDeleteTests(IsolatedDatabaseTestCase):
             candidate=DeleteCandidate("old", "Movie.mkv", "target"),
         )
         row = db.get_organize_delete_audit(audit_id)
+        assert row is not None
         self.assertNotIn("secret", row["reason"])
         self.assertNotIn("signature=token", row["reason"])
         self.assertLessEqual(len(row["reason"]), 500)
@@ -388,7 +404,7 @@ class AutomaticReplacementDeleteTests(IsolatedDatabaseTestCase):
         with patch("app.modules.organize.add_organize_log", return_value=99), patch(
             "app.modules.organize.add_organize_log_items"
         ):
-            _plans, stats = Organizer(client=client, scraper=_VariantScraper()).organize(
+            _plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper())).organize(
                 "source", self._rules(enabled), dry_run=False, post_actions=False
             )
         return client, stats
@@ -436,7 +452,7 @@ class AutomaticReplacementDeleteTests(IsolatedDatabaseTestCase):
         client.file_info.side_effect = lambda file_id: {
             "old": old, "new": new,
         }.get(file_id)
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, object()))
 
         with patch("app.modules.organize.time.sleep") as sleep:
             files, old_detail, new_detail = organizer._replacement_verification_snapshot(
@@ -444,7 +460,9 @@ class AutomaticReplacementDeleteTests(IsolatedDatabaseTestCase):
             )
 
         self.assertEqual({item.file_id for item in files}, {"old", "new"})
+        assert old_detail is not None
         self.assertEqual(old_detail.file_id, "old")
+        assert new_detail is not None
         self.assertEqual(new_detail.file_id, "new")
         self.assertEqual(client.list_dir.call_count, 2)
         sleep.assert_called_once()
@@ -464,9 +482,13 @@ class AutomaticReplacementDeleteTests(IsolatedDatabaseTestCase):
         ]
         for kwargs, expected in cases:
             with self.subTest(expected=expected):
-                params = {"expected_old": old, "expected_new": new, "move_succeeded": True}
-                params.update(kwargs)
-                reason = replacement_delete_block_reason(**params)
+                reason = replacement_delete_block_reason(
+                    expected_old=old, expected_new=new,
+                    old_detail=kwargs["old_detail"], new_detail=kwargs["new_detail"],
+                    target_files=cast(list[GuangYaFile], kwargs["target_files"]),
+                    scan_errors=cast(list[str], kwargs["scan_errors"]),
+                    move_succeeded=cast(bool, kwargs.get("move_succeeded", True)),
+                )
                 self.assertIn(expected, reason)
 
 
@@ -480,6 +502,7 @@ class DeleteAuditPersistenceTests(IsolatedDatabaseTestCase):
         )
 
         row = db.get_organize_delete_audit(audit_id)
+        assert row is not None
         self.assertEqual(row["status"], "blocked")
         self.assertEqual(row["reason"], "自动回收站开关已关闭")
         self.assertEqual(row["replacement_file_id"], "new")
@@ -495,6 +518,7 @@ class DeleteAuditPersistenceTests(IsolatedDatabaseTestCase):
         db.init_db()
 
         row = db.get_organize_delete_audit(audit_id)
+        assert row is not None
         self.assertEqual(row["status"], "interrupted")
         self.assertIn("人工核验", row["provider_result"])
         self.assertIn("人工核验", row["error"])
@@ -515,6 +539,7 @@ class DeleteAuditPersistenceTests(IsolatedDatabaseTestCase):
         )
 
         row = db.get_organize_delete_audit(result["audit_id"])
+        assert row is not None
         self.assertEqual(row["status"], "success")
         self.assertEqual(row["provider"], "guangya")
         self.assertIn("回收站", row["provider_result"])
@@ -628,7 +653,7 @@ class DirectoryScrapeOrganizerSecretPersistenceTests(IsolatedDatabaseTestCase):
         client = unittest.mock.Mock()
         client.list_dir.return_value = []
         client.move.side_effect = RuntimeError(self.SECRET)
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, object()))
         stats = self._stats()
 
         with patch.object(organizer, "_ensure_dir_chain", return_value="target"), \
@@ -648,7 +673,7 @@ class DirectoryScrapeOrganizerSecretPersistenceTests(IsolatedDatabaseTestCase):
         client = unittest.mock.Mock()
         client.list_dir.return_value = []
         client.move.side_effect = RuntimeError(self.SECRET)
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, object()))
         stats = self._stats()
         first = self._plan("group-a-1")
         second = self._plan("group-a-2")
@@ -681,7 +706,7 @@ class DirectoryScrapeOrganizerSecretPersistenceTests(IsolatedDatabaseTestCase):
         client.list_dir.return_value = []
         client.move.side_effect = [True, RuntimeError(self.SECRET)]
         client.rename.side_effect = RuntimeError(self.SECRET)
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, object()))
         stats = self._stats()
 
         with patch.object(organizer, "_ensure_dir_chain", return_value="target"), \
@@ -707,7 +732,7 @@ class DirectoryScrapeOrganizerSecretPersistenceTests(IsolatedDatabaseTestCase):
                 else:
                     client.list_dir.return_value = []
                     client.create_dir.side_effect = RuntimeError(self.SECRET)
-                organizer = Organizer(client=client, scraper=object())
+                organizer = Organizer(client=client, scraper=cast(TMDBScraper, object()))
                 stats = self._stats()
                 with self.assertLogs("app.modules.organize", level="WARNING") as captured:
                     execute_organize_plans(organizer,
@@ -747,7 +772,7 @@ class DirectoryScrapeOrganizerSecretPersistenceTests(IsolatedDatabaseTestCase):
         client.list_dir.side_effect = [[existing], [old_backup, new_remote]]
         client.file_info.side_effect = current_file
         client.delete.side_effect = RuntimeError(self.SECRET)
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, object()))
         stats = self._stats()
 
         with patch.object(organizer, "_ensure_dir_chain", return_value="target"), patch.object(
@@ -795,7 +820,7 @@ class OrganizerSubtitleExecutionTests(unittest.TestCase):
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
         ) as add_items:
-            _plans, stats = Organizer(client=client, scraper=_VariantScraper()).organize(
+            _plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper())).organize(
                 "source", rules, dry_run=False, post_actions=False
             )
 
@@ -824,7 +849,7 @@ class OrganizerSubtitleExecutionTests(unittest.TestCase):
         with patch("app.modules.organize.add_organize_log", return_value=77) as add_log, patch(
             "app.modules.organize.add_organize_log_items", side_effect=RuntimeError("db detail failed")
         ), patch("app.modules.organize.db.update_organize_log", return_value=True) as update_log:
-            _plans, stats = Organizer(client=client, scraper=_VariantScraper()).organize(
+            _plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper())).organize(
                 "source", rules, dry_run=False, post_actions=False
             )
 

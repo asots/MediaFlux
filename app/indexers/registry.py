@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from app.clients.http import BrowserImpersonatingHttpClient, FixedHostHttpClient
@@ -48,7 +48,7 @@ class IndexerRegistry:
     async def aclose(self) -> None:
         seen: set[int] = set()
         for adapter in self._adapters.values():
-            iterator = getattr(adapter, "iter_http_clients", None)
+            iterator: Callable[[], Iterable[object]] | None = getattr(adapter, "iter_http_clients", None)
             clients = iterator() if callable(iterator) else (getattr(adapter, "http", None),)
             for client in clients:
                 if client is None or id(client) in seen:
@@ -72,38 +72,38 @@ def build_default_registry(
     supplied = dict(http_clients or {})
     # 主站可能按来源IP限流，同引擎镜像用于主站失败时回落。
     nyaa_http = supplied.get("nyaa") or FixedHostHttpClient(
-        allowed_hosts={urlsplit(NYAA_URL).hostname, urlsplit(NYAA_MIRROR_URL).hostname}, user_agent=user_agent,
+        allowed_hosts={(urlsplit(NYAA_URL).hostname or ""), (urlsplit(NYAA_MIRROR_URL).hostname or "")}, user_agent=user_agent,
         pin_resolved_address=True,
     )
     sukebei_http = supplied.get("sukebei") or FixedHostHttpClient(
-        allowed_hosts={urlsplit(SUKEBEI_URL).hostname},
+        allowed_hosts={(urlsplit(SUKEBEI_URL).hostname or "")},
         user_agent=user_agent,
         pin_resolved_address=True,
     )
     mikan_http = supplied.get("mikan") or FixedHostHttpClient(
-        allowed_hosts={urlsplit(MIKAN_URL).hostname, urlsplit(MIKAN_MIRROR_URL).hostname},
+        allowed_hosts={(urlsplit(MIKAN_URL).hostname or ""), (urlsplit(MIKAN_MIRROR_URL).hostname or "")},
         user_agent=user_agent,
         pin_resolved_address=True,
         # Mikan 搜索页内嵌全部剧集条目，热门作品实测 4MiB+，默认 2MiB 会截断。
         max_response_bytes=8 * 1024 * 1024,
     )
     btbtla_http = supplied.get("btbtla") or BrowserImpersonatingHttpClient(
-        allowed_hosts={urlsplit(BTBTLA_URL).hostname, urlsplit(BTBTLA_MIRROR_URL).hostname},
-        sni_host=urlsplit(BTBTLA_MIRROR_URL).hostname,
+        allowed_hosts={(urlsplit(BTBTLA_URL).hostname or ""), (urlsplit(BTBTLA_MIRROR_URL).hostname or "")},
+        sni_host=(urlsplit(BTBTLA_MIRROR_URL).hostname or ""),
     )
     tpb_http = supplied.get("tpb") or FixedHostHttpClient(
-        allowed_hosts={urlsplit(TPB_API_URL).hostname},
+        allowed_hosts={(urlsplit(TPB_API_URL).hostname or "")},
         user_agent=user_agent,
         pin_resolved_address=True,
     )
     aipan_http = supplied.get("aipan") or FixedHostHttpClient(
-        allowed_hosts={urlsplit(AIPAN_URL).hostname}, user_agent=user_agent, pin_resolved_address=True,
+        allowed_hosts={(urlsplit(AIPAN_URL).hostname or "")}, user_agent=user_agent, pin_resolved_address=True,
     )
     dygang_http = supplied.get("dygang") or FixedHostHttpClient(
-        allowed_hosts={urlsplit(DYGANG_URL).hostname}, user_agent=user_agent, pin_resolved_address=True,
+        allowed_hosts={(urlsplit(DYGANG_URL).hostname or "")}, user_agent=user_agent, pin_resolved_address=True,
     )
     ys5266_http = supplied.get("ys5266") or FixedHostHttpClient(
-        allowed_hosts={urlsplit(YS5266_URL).hostname}, user_agent=user_agent, pin_resolved_address=True,
+        allowed_hosts={(urlsplit(YS5266_URL).hostname or "")}, user_agent=user_agent, pin_resolved_address=True,
     )
     kpkuang_http = supplied.get("kpkuang") or FixedHostHttpClient(
         allowed_hosts=KPKUANG_HOST_CONFIG["allowed_hosts"],

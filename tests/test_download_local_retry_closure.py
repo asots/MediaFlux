@@ -5,9 +5,11 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
+from starlette.requests import Request
 
 from app import database as db
 from app.modules.download_tracker import DownloadTracker
@@ -41,10 +43,12 @@ def test_retry_rebinds_original_request_and_projects_completion(retry_case):
     with patch.object(downloads_api, 'require_api_login'), patch('app.modules.download_tracker.get_download_tracker') as wake:
         response = downloads_api.retry_local_import_issue(rid, Mock())
     assert response.status_code == 200
-    assert json.loads(response.body)['local_import_status'] == 'pending'
+    assert json.loads(bytes(response.body))['local_import_status'] == 'pending'
     wake.return_value.reload.assert_called_once()
     row = db.get_download_request(rid)
+    assert row is not None
     assert row['local_import_attempts'] == 0 and not row['local_import_error']
+    assert row is not None
     assert row['notification_delivery_status'] == 'pending'
     assert rid in [r['id'] for r in db.list_active_download_requests(include_local_import=True)]
     scheduler = Mock()
@@ -57,11 +61,14 @@ def test_retry_rebinds_original_request_and_projects_completion(retry_case):
         # qB已自动删种也能使用持久的已完成路径，不调用下载提交。
         tracker._update_request(row, [], [], qb_available=False, gy_available=False)
     rebound = db.get_download_request(rid)
+    assert rebound is not None
     task_id = int(rebound['local_import_target'].split(':')[1])
     db.add_local_media_task_item(task_id, str(path), str(path.parent / 'Library.mkv'), role='video')
     db.update_local_media_task(task_id, status='completed', completed_at=db.now())
     final = db.get_download_request(rid)
+    assert final is not None
     assert final['local_import_status'] == 'completed' and final['qb_status'] == 'completed'
+    assert final is not None
     assert not final['local_import_error']
     assert db.count_download_requests_requiring_attention(rid) == 0
     with db.get_conn() as conn:
@@ -76,10 +83,14 @@ def test_retry_rebinds_original_request_and_projects_completion(retry_case):
 def test_retry_refuses_active_historical_or_bound_requests(retry_case, fields):
     rid, _path = retry_case
     db.update_download_request(rid, **fields)
-    before = dict(db.get_download_request(rid))
+    before_row = db.get_download_request(rid)
+    assert before_row is not None
+    before = dict(before_row)
     assert not can_retry_download_local_import(before)
     assert not retry_download_local_import(rid)
-    assert dict(db.get_download_request(rid)) == before
+    after_row = db.get_download_request(rid)
+    assert after_row is not None
+    assert dict(after_row) == before
 
 
 def test_retry_is_atomic_and_preserves_peer_backend(retry_case):
@@ -89,6 +100,7 @@ def test_retry_is_atomic_and_preserves_peer_backend(retry_case):
         results = list(pool.map(retry_download_local_import, [rid, rid]))
     assert sorted(results) == [False, True]
     row = db.get_download_request(rid)
+    assert row is not None
     assert (row['status'],row['gy_status'],row['gy_task_id']) == ('downloading','downloading','remote-task')
 
 
@@ -96,11 +108,13 @@ def test_api_requires_auth_and_enabled_source(retry_case):
     from fastapi import HTTPException
     rid, _path = retry_case
     with pytest.raises(HTTPException):
-        downloads_api.retry_local_import_issue(rid, SimpleNamespace(session={}))
+        downloads_api.retry_local_import_issue(rid, cast(Request, SimpleNamespace(session={})))
     with patch.object(downloads_api, 'require_api_login'):
         assert downloads_api.retry_local_import_issue(rid, Mock()).status_code == 400
         assert downloads_api.retry_local_import_issue(999999, Mock()).status_code == 404
-    assert db.get_download_request(rid)['local_import_status'] == 'failed'
+    get_download_request_result = db.get_download_request(rid)
+    assert get_download_request_result is not None
+    assert get_download_request_result['local_import_status'] == 'failed'
 
 
 def test_attention_ui_exposes_only_local_retry_capability(retry_case):
@@ -154,7 +168,9 @@ def test_retry_http_endpoint_retains_login_and_csrf_boundaries():
             endpoint = '/api/downloads/issues/123/retry-local-import'
             assert client.post(endpoint).status_code == 401
             login = client.get('/login')
-            token = re.search(r'name="csrf_token" value="([^"]+)"', login.text).group(1)
+            search_result = re.search(r'name="csrf_token" value="([^"]+)"', login.text)
+            assert search_result is not None
+            token = search_result.group(1)
             from app.config import web_credentials
             username, password = web_credentials()
             response = client.post('/login', data={'username':username,'password':password,'csrf_token':token}, follow_redirects=False)

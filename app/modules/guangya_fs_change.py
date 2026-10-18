@@ -11,18 +11,24 @@ import re
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Generator, Callable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected, guangya_provider_task_state, verify_guangya_write
+from app.clients.guangya import (
+    GuangYaClient,
+    GuangYaFile,
+    GuangYaWriteRejected,
+    guangya_provider_task_state,
+    verify_guangya_write,
+)
 from app.config import PATHS
 from app.modules.guangya_journal import append_guangya_journal
 from app.modules.guangya_workspace import (
-    capture_observation_source,
     GuangYaWorkspaceStale,
+    capture_observation_source,
     observation_entry_map,
     observation_ref,
     resolve_workspace_path,
@@ -33,10 +39,13 @@ from app.modules.organize_delete_audit import (
     execute_recycle_bin_delete,
 )
 from app.modules.process_lock import CrossProcessLock
-from app.modules.web_secret import get_web_secret
 from app.modules.strm import cloud_change_sources, trigger_cloud_changes
+from app.modules.web_secret import get_web_secret
 from app.private_files import protect_private_file
-from app.repositories.organize_operation_jobs import organize_operation_owner_digest, sanitize_organize_operation_result
+from app.repositories.organize_operation_jobs import (
+    organize_operation_owner_digest,
+    sanitize_organize_operation_result,
+)
 
 _PLAN_VERSION = 1
 _PLAN_TTL_SECONDS = 10 * 60
@@ -67,6 +76,8 @@ logger = logging.getLogger(__name__)
 class GuangYaFSChangeError(RuntimeError):
     """可安全映射给 Agent 的通用光鸭变更错误。"""
 
+    operation_result: dict[str, Any]
+
 
 class GuangYaFSCheckpointError(GuangYaFSChangeError):
     """阶段事实无法可靠落盘，必须停止追加写入。"""
@@ -93,7 +104,7 @@ def _directory() -> Path:
 
 
 @contextmanager
-def _plan_state_lock() -> Iterator[None]:
+def _plan_state_lock() -> Generator[None, None, None]:
     """串行化计划文件的状态转换与清理。
 
     计划文件本身通过 ``os.replace`` 保证单次写入原子，但读取后再写回仍需
@@ -121,13 +132,13 @@ def _ensure_private_directory(path: Path) -> None:
 
 
 def _plan_path(plan_id: str) -> Path:
-    if not _SAFE_PLAN_ID.fullmatch(str(plan_id or "")):
+    if not _SAFE_PLAN_ID.fullmatch(plan_id or ""):
         raise GuangYaFSChangeError("光鸭变更计划编号无效")
     return _directory() / f"{plan_id}.json"
 
 
 def _journal_path(plan_id: str) -> Path:
-    if not _SAFE_PLAN_ID.fullmatch(str(plan_id or "")):
+    if not _SAFE_PLAN_ID.fullmatch(plan_id or ""):
         raise GuangYaFSChangeError("光鸭变更计划编号无效")
     return _directory() / f"{plan_id}.journal.jsonl"
 
@@ -142,7 +153,7 @@ def _canonical(payload: dict[str, Any]) -> bytes:
 
 
 def _secret() -> bytes:
-    secret = str(get_web_secret() or "").encode("utf-8")
+    secret = (get_web_secret() or "").encode("utf-8")
     if not secret:
         raise GuangYaFSChangeError("光鸭变更签名密钥不可用")
     return secret
@@ -244,7 +255,7 @@ def inspect_fs_change_plan_recovery(
             return unknown
         if plan.get("status") == "queued":
             return {"resumable": True, "copy_in_flight": False}
-        execution = plan.get("execution") or {}
+        execution: dict[str, Any] = plan.get("execution") or {}
         if plan.get("status") == "running" and execution.get("checkpoint_version") == 2:
             execution = _read_fs_checkpoints(plan)
         resumable = bool(
@@ -275,7 +286,7 @@ def _append_journal(plan_id: str, event: dict[str, Any]) -> None:
 
 
 def _owner_digest(owner: str) -> str:
-    owner_key = str(owner or "").strip()
+    owner_key = (owner or "").strip()
     if not owner_key:
         raise GuangYaFSChangeError("光鸭变更计划缺少会话身份")
     return organize_operation_owner_digest(owner_key)
@@ -289,14 +300,14 @@ def _validate_plan_identity(
     expected_fingerprint: str = "",
 ) -> None:
     expected_owner = (
-        _owner_digest(owner) if owner is not None else str(owner_digest or "")
+        _owner_digest(owner) if owner is not None else (owner_digest or "")
     )
     if expected_owner and not hmac.compare_digest(
         str(payload.get("owner_digest") or ""), expected_owner
     ):
         raise GuangYaFSChangeError("光鸭变更计划不属于当前会话")
     if expected_fingerprint and not hmac.compare_digest(
-        str(payload.get("fingerprint") or ""), str(expected_fingerprint or "")
+        str(payload.get("fingerprint") or ""), (expected_fingerprint or "")
     ):
         raise GuangYaFSChangeStale("光鸭变更计划已变化，请重新预览")
 
@@ -376,7 +387,7 @@ def bind_fs_change_plan_job(
     此函数由队列仓储在 SQLite 写事务提交前调用。其他进程在事务提交前看不
     到任务，因此不会出现任务先领取、计划仍停留在 ``confirmed`` 的窗口。
     """
-    safe_job_id = str(job_id or "").strip().casefold()
+    safe_job_id = (job_id or "").strip().casefold()
     if not _SAFE_JOB_ID.fullmatch(safe_job_id):
         raise GuangYaFSChangeError("光鸭变更任务编号无效")
     safe_queue_until = float(queue_until_epoch or 0)
@@ -419,8 +430,8 @@ def finalize_fs_change_plan_job(
     error_code: str = "",
 ) -> dict[str, Any]:
     """把持久队列终态投影回冻结计划，避免遗留永久 queued/running。"""
-    safe_job_id = str(job_id or "").strip().casefold()
-    safe_queue_status = str(queue_status or "").strip().casefold()
+    safe_job_id = (job_id or "").strip().casefold()
+    safe_queue_status = (queue_status or "").strip().casefold()
     if not _SAFE_JOB_ID.fullmatch(safe_job_id):
         raise GuangYaFSChangeError("光鸭变更任务编号无效")
     if safe_queue_status not in _TERMINAL_PLAN_STATUSES:
@@ -441,7 +452,7 @@ def finalize_fs_change_plan_job(
         if (
             current_status == "running"
             or safe_queue_status in {"completed", "partial", "manual_review"}
-            or max(0, int(audit_failures or 0)) > 0
+            or max(0, (audit_failures or 0)) > 0
         ):
             plan_status = "manual_review"
         else:
@@ -454,7 +465,7 @@ def finalize_fs_change_plan_job(
         execution.update(
             {
                 "queue_status": safe_queue_status,
-                "queue_error_code": str(error_code or "")[:80],
+                "queue_error_code": (error_code or "")[:80],
                 "finished_at": str(execution.get("finished_at") or _now_iso()),
             }
         )
@@ -527,7 +538,7 @@ def _maintain_fs_change_plans_unlocked(*, preserve_plan_id: str = "") -> dict[st
             "owner_remaining": 0,
             "capacity_exceeded": 0,
         }
-    preserved = str(preserve_plan_id or "").strip().casefold()
+    preserved = (preserve_plan_id or "").strip().casefold()
     current = time.time()
     rows: list[dict[str, Any]] = []
     removed = 0
@@ -650,13 +661,13 @@ def _validate_name(value: object) -> str:
 
 def _snapshot(item: GuangYaFile) -> dict[str, Any]:
     return {
-        "file_id": str(item.file_id),
-        "parent_id": str(item.parent_id),
-        "name": str(item.name),
-        "is_dir": bool(item.is_dir),
-        "size": max(0, int(item.size or 0)),
-        "etag": str(item.etag or ""),
-        "updated_at": max(0, int(item.updated_at or 0)),
+        "file_id": item.file_id,
+        "parent_id": item.parent_id,
+        "name": item.name,
+        "is_dir": item.is_dir,
+        "size": max(0, (item.size or 0)),
+        "etag": (item.etag or ""),
+        "updated_at": max(0, (item.updated_at or 0)),
     }
 
 
@@ -664,21 +675,21 @@ def _snapshot_matches(item: GuangYaFile | None, snapshot: dict[str, Any], *, exa
     if item is None:
         return False
     if not (
-        str(item.file_id) == str(snapshot.get("file_id") or "")
-        and str(item.parent_id) == str(snapshot.get("parent_id") or "0")
-        and str(item.name) == str(snapshot.get("name") or "")
-        and bool(item.is_dir) == bool(snapshot.get("is_dir"))
-        and max(0, int(item.size or 0)) == max(0, int(snapshot.get("size") or 0))
-        and str(item.etag or "") == str(snapshot.get("etag") or "")
+        item.file_id == str(snapshot.get("file_id") or "")
+        and item.parent_id == str(snapshot.get("parent_id") or "0")
+        and item.name == str(snapshot.get("name") or "")
+        and item.is_dir == bool(snapshot.get("is_dir"))
+        and max(0, (item.size or 0)) == max(0, int(snapshot.get("size") or 0))
+        and (item.etag or "") == str(snapshot.get("etag") or "")
     ):
         return False
     expected_updated = max(0, int(snapshot.get("updated_at") or 0))
     if exact_updated_at:
-        return max(0, int(item.updated_at or 0)) == expected_updated
+        return max(0, (item.updated_at or 0)) == expected_updated
     return (
         bool(item.etag)
         or not expected_updated
-        or max(0, int(item.updated_at or 0)) == expected_updated
+        or max(0, (item.updated_at or 0)) == expected_updated
     )
 
 
@@ -705,7 +716,7 @@ def _resolve_directory(
         observed = next(iter(identified or matches), None)
     if observed is not None and not _snapshot_matches(target, observed):
         raise GuangYaFSChangeStale("目标目录与已观察对象不一致，请重新读取后再生成计划")
-    return str(target.file_id), _snapshot(target)
+    return target.file_id, _snapshot(target)
 
 
 def _list_map(
@@ -715,7 +726,7 @@ def _list_map(
 ) -> dict[str, GuangYaFile]:
     if parent_id not in cache:
         cache[parent_id] = {
-            str(item.file_id): item for item in client.list_dir(parent_id)
+            item.file_id: item for item in client.list_dir(parent_id)
         }
     return cache[parent_id]
 
@@ -725,7 +736,7 @@ def _name_conflict(
 ) -> bool:
     folded = name.casefold()
     return any(
-        item.name.casefold() == folded and str(item.file_id) != str(exclude_id or "")
+        item.name.casefold() == folded and item.file_id != (exclude_id or "")
         for item in items.values()
     )
 
@@ -743,7 +754,7 @@ def _validate_observation(
         raise GuangYaWorkspaceStale("光鸭目录观察已过期，请重新读取")
     raw_generation = observation.get("credential_generation")
     expected_generation = int(raw_generation) if raw_generation is not None else -1
-    if expected_generation != int(client.credential_generation):
+    if expected_generation != client.credential_generation:
         raise GuangYaWorkspaceStale("光鸭登录凭据已变化，请重新读取目录")
 
 
@@ -982,13 +993,13 @@ def build_fs_change_plan(
             raise GuangYaWorkspaceStale("光鸭对象已变化，请重新读取后再生成计划")
         if current is None:
             raise GuangYaWorkspaceStale("光鸭对象已变化，请重新读取后再生成计划")
-        base = {
+        base: dict[str, Any] = {
             "op": op,
             "object_ref": handle,
             "source": _snapshot(current),
             "source_parent_path": str(observed.get("parent_path") or "/"),
             "source_path": _full_path(
-                str(observed.get("parent_path") or "/"), str(current.name)
+                str(observed.get("parent_path") or "/"), current.name
             ),
         }
         if op in {"rename", "relocate"} or op == "copy" and "new_name" in raw:
@@ -1146,7 +1157,7 @@ def build_fs_change_plan(
         "version": _PLAN_VERSION,
         "plan_id": uuid.uuid4().hex,
         "owner_digest": _owner_digest(owner),
-        "credential_generation": int(client.credential_generation),
+        "credential_generation": client.credential_generation,
         "observation_ref": observation_ref(str(observation.get("plan_id") or "")),
         "observation_source": capture_observation_source(observation, [
             item["object_ref"] for item in frozen if item.get("object_ref")
@@ -1154,7 +1165,7 @@ def build_fs_change_plan(
         "created_at": _now_iso(),
         "created_at_epoch": current,
         "expires_at_epoch": current + _PLAN_TTL_SECONDS,
-        "trigger_strm": bool(trigger_strm),
+        "trigger_strm": trigger_strm,
         "status": "previewed",
         "operations": frozen,
         "stats": stats,
@@ -1165,17 +1176,17 @@ def build_fs_change_plan(
     with _plan_state_lock():
         _atomic_write(plan)
         maintained = _maintain_fs_change_plans_unlocked(
-            preserve_plan_id=str(plan["plan_id"])
+            preserve_plan_id=plan["plan_id"]
         )
-        if int(maintained.get("capacity_exceeded") or 0) > 0:
-            _discard_fs_change_plan_unlocked(str(plan["plan_id"]))
+        if (maintained.get("capacity_exceeded") or 0) > 0:
+            _discard_fs_change_plan_unlocked(plan["plan_id"])
             raise GuangYaFSChangeError("光鸭变更计划容量已满，请稍后重试")
     return plan
 
 
 def _copy_tree_snapshot(client, root_id, cancel_check=None):
     """完整遍历形成有界摘要：源身份/版本与复制内容分开，不把目录外壳当成功。"""
-    pending = [(str(root_id), ())]
+    pending: list[tuple[str, tuple[str, ...]]] = [(str(root_id), ())]
     seen, paths, rows, directories = {str(root_id)}, set(), [], 0
     while pending:
         directory_id, path = pending.pop()
@@ -1211,7 +1222,7 @@ def _find_current(client: GuangYaClient, snapshot: dict[str, Any]) -> GuangYaFil
         pass  # 只有详情读取失败才使用父目录列表回退。
     try:
         return {
-            str(item.file_id): item
+            item.file_id: item
             for item in client.list_dir(str(snapshot.get("parent_id") or "0"))
         }.get(str(snapshot.get("file_id") or ""))
     except Exception:  # noqa: BLE001 - 只读回退失败按对象不存在处理
@@ -1231,9 +1242,9 @@ def _verify_directory_snapshot(
     return bool(
         current
         and current.is_dir
-        and str(current.file_id) == str(snapshot.get("file_id") or "")
-        and str(current.parent_id) == str(snapshot.get("parent_id") or "0")
-        and str(current.name) == str(snapshot.get("name") or "")
+        and current.file_id == str(snapshot.get("file_id") or "")
+        and current.parent_id == str(snapshot.get("parent_id") or "0")
+        and current.name == str(snapshot.get("name") or "")
     )
 
 
@@ -1293,7 +1304,7 @@ def _preflight_operation(
             client, parent_id, item.get("parent_snapshot")
         ):
             raise GuangYaFSChangeStale("新建目录的父目录已变化，请重新预览")
-        siblings = {str(row.file_id): row for row in client.list_dir(parent_id)}
+        siblings = {row.file_id: row for row in client.list_dir(parent_id)}
         if _name_conflict(siblings, str(item.get("name") or "")):
             raise GuangYaFSChangeStale("新建目录名称已被占用，请重新预览")
         return
@@ -1312,6 +1323,7 @@ def _preflight_operation(
             exact_updated_at=source_snapshot is not None)
     if not source_matches:
         raise GuangYaFSChangeStale("光鸭对象已变化，请重新预览")
+    assert isinstance(source, dict)
     if op == "copy" and source_snapshot is not None:
         if _verified_copy(client, item, created_targets, "", cancel_check,
                           name=source_snapshot["name"], copied_id=source_snapshot["file_id"]) is None:
@@ -1326,7 +1338,7 @@ def _preflight_operation(
             raise GuangYaFSChangeStale("目录仍包含内容，未执行空目录清理")
     if op in {"rename", "relocate"} and not item.get("move_first"):
         siblings = {
-            str(row.file_id): row
+            row.file_id: row
             for row in client.list_dir(str(source.get("parent_id") or "0"))
         }
         if _name_conflict(
@@ -1347,7 +1359,7 @@ def _preflight_operation(
             client, target_id, item.get("target_snapshot")
         ):
             raise GuangYaFSChangeStale("目标目录已变化，请重新预览")
-        siblings = {str(row.file_id): row for row in client.list_dir(target_id)}
+        siblings = {row.file_id: row for row in client.list_dir(target_id)}
         target_name = str(item.get("new_name") or source.get("name") or "")
         exclude_id = str(source.get("file_id") or "") if op != "copy" or source_snapshot else ""
         if _name_conflict(siblings, target_name, exclude_id=exclude_id) or (
@@ -1363,7 +1375,7 @@ def _written_source(client, item, created_targets, directory_cache=None):
     parent_id = str(source.get("parent_id") or "0") if rename else _directory_id(item, created_targets)
     name = str(item["new_name"] if item["op"] in {"rename", "relocate"} else source.get("name") or "")
     return next((row for row in _list_map(client, parent_id, directory_cache if directory_cache is not None else {}).values()
-                 if str(row.file_id) == str(source.get("file_id") or "") and row.name == name), None)
+                 if row.file_id == str(source.get("file_id") or "") and row.name == name), None)
 
 
 def _verify_after(
@@ -1387,13 +1399,13 @@ def _verify_after(
             if row.is_dir and row.name == str(item.get("name") or "")
         ]
         return len(matches) == 1 and (
-            not created_id or str(matches[0].file_id) == str(created_id)
+            not created_id or matches[0].file_id == created_id
         )
     source = item.get("source") if isinstance(item.get("source"), dict) else {}
     file_id = str(source.get("file_id") or "")
     if op == "trash":
         return all(
-            str(row.file_id) != file_id
+            row.file_id != file_id
             for row in _list_map(client, str(source.get("parent_id") or "0"), directory_cache).values()
         )
     if op in {"rename", "move", "relocate"}:
@@ -1457,7 +1469,7 @@ def update_fs_change_plan_execution(
     expected_lease_generation: int | None = None,
 ) -> dict[str, Any]:
     """在跨进程锁内执行带前置状态/job_id/执行代数的文件级 CAS。"""
-    safe_status = str(status or "").strip().casefold()
+    safe_status = (status or "").strip().casefold()
     if safe_status not in {
         "confirmed",
         "queued",
@@ -1470,7 +1482,7 @@ def update_fs_change_plan_execution(
         current_status = str(payload.get("status") or "")
         if expected_statuses is not None and current_status not in expected_statuses:
             raise GuangYaFSChangeStale("光鸭变更计划状态已变化，请勿重复执行")
-        safe_job_id = str(expected_job_id or "").strip().casefold()
+        safe_job_id = (expected_job_id or "").strip().casefold()
         if safe_job_id and (
             not _SAFE_JOB_ID.fullmatch(safe_job_id)
             or not hmac.compare_digest(str(payload.get("job_id") or ""), safe_job_id)
@@ -1600,8 +1612,8 @@ def _apply_fs_operation(
                     if current is None:
                         raise GuangYaFSChangeStale("待清理目录已变化，请重新核对")
                     delete_operation = lambda: client.delete_empty_directory(
-                        str(source["file_id"]), expected_etag=str(current.etag or ""),
-                        expected_updated_at=max(0, int(current.updated_at or 0)),
+                        str(source["file_id"]), expected_etag=(current.etag or ""),
+                        expected_updated_at=max(0, (current.updated_at or 0)),
                     )
                 execute_recycle_bin_delete(
                     client, trigger="agent_guangya_fs_change", reason="Agent 已确认的光鸭文件变更计划",
@@ -1626,7 +1638,7 @@ def _apply_fs_operation(
             checkpoint()
     except Exception as exc:
         # 保留已经取得的创建身份，避免回读失败后按同名目录误判结果。
-        exc.fs_created_id = created_id
+        setattr(exc, "fs_created_id", created_id)
         raise
     return created_id
 
@@ -1740,7 +1752,7 @@ def _reset_fs_checkpoint_cursor(plan_id, execution):
 def _read_fs_checkpoints(plan):
     """只重放签名的事实增量，不重放操作。历史普通审计行保持原格式。"""
     base = plan["execution"]
-    execution = {**base, "operation_items": [dict(row) for row in base["operation_items"]],
+    execution: dict[str, Any] = {**base, "operation_items": [dict(row) for row in base["operation_items"]],
                  "stats": dict(base["stats"]), "created_targets": dict(base.get("created_targets") or {}),
                  "stage_sources": dict(base.get("stage_sources") or {}),
                  "copy_tasks": dict(base.get("copy_tasks") or {})}
@@ -1804,6 +1816,7 @@ def _write_fs_checkpoint(plan_id, job_id, execution, *, item=None, outcome=None,
         source_snapshot = (execution.get("stage_sources") or {}).get(str(outcome["position"]))
         if source_snapshot is not None:
             delta["stage_source"] = source_snapshot
+        assert item is not None
         path = str(item.get("created_path") or "")
         if path in execution["created_targets"]:
             delta["created_target"] = {"path": path, **execution["created_targets"][path]}
@@ -1983,7 +1996,7 @@ def execute_fs_change_plan(
     stage_sources = dict(previous.get("stage_sources") or {}) if recovering else {}
     copy_tasks = dict(previous.get("copy_tasks") or {}) if recovering else {}
 
-    execution = {"checkpoint_version": 2, "lease_generation": lease_generation,
+    execution: dict[str, Any] = {"checkpoint_version": 2, "lease_generation": lease_generation,
                  "started_at": started_at, "stats": stats, "operation_items": outcomes,
                  "created_targets": created_targets, "stage_sources": stage_sources, "copy_tasks": copy_tasks,
                  "strm_scope": strm_scope, "finalizing": finalizing}
@@ -2003,7 +2016,7 @@ def execute_fs_change_plan(
             return result
         if (
             not client.logged_in
-            or int(client.credential_generation) != expected_generation
+            or client.credential_generation != expected_generation
         ):
             raise GuangYaFSChangeStale("光鸭登录凭据已变化，请重新预览")
         if not operations:
@@ -2099,7 +2112,7 @@ def execute_fs_change_plan(
             except GuangYaWriteRejected as exc:
                 outcome.update(status="partial" if outcome["completed_actions"] else "failed", reason="write_rejected")
                 error_type = type(exc).__name__
-                provider_code = str(exc.code or "")
+                provider_code = (exc.code or "")
                 stats["failed"] += 1
                 status = "failed"
             except Exception as exc:  # noqa: BLE001 - 单项失败需收束为可审计部分完成
@@ -2190,7 +2203,7 @@ def execute_fs_change_plan(
             try:
                 cancel_check()
             except Exception as cancelled:
-                cancelled.operation_result = result
+                setattr(cancelled, "operation_result", result)
                 raise
         try:
             _write_fs_checkpoint(plan_id, job_id, execution,
@@ -2200,7 +2213,7 @@ def execute_fs_change_plan(
             result.update(partial=True, requires_manual=True)
             failed.operation_result = result
             raise
-        exc.operation_result = result
+        setattr(exc, "operation_result", result)
         raise
     except Exception as exc:
         # 协作取消/写前拒绝仍沿用异常契约，但不能丢掉本次已完成与待核验事实。
@@ -2210,7 +2223,7 @@ def execute_fs_change_plan(
             for row in outcomes:
                 if row["status"] in {"partial", "not_started"}:
                     row["reason"] = "cancelled"
-        exc.operation_result = result
+        setattr(exc, "operation_result", result)
         raise
     finally:
         try:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.support import assert_present
+
 import unittest
 from app import database as db
 from tests.support import isolated_test_database
@@ -38,12 +40,13 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
             for backend in ("submitted", "downloading", "completed", "failed")
         }
         before = {
-            key: dict(db.get_download_request(rid)) for key, rid in requests.items()
+            key: dict(assert_present(db.get_download_request(rid))) for key, rid in requests.items()
         }
         db.init_db()
         for backend, rid in requests.items():
             with self.subTest(backend=backend):
                 row = db.get_download_request(rid)
+                assert row is not None
                 self.assertEqual(row["status"], "manual_review")
                 for field in (
                     "gy_status",
@@ -51,6 +54,7 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
                     "gy_task_ids",
                     "gy_target_dir",
                 ):
+                    assert row is not None
                     self.assertEqual(row[field], before[backend][field], field)
                 self.assertIn("保留的诊断", row["error"])
 
@@ -65,12 +69,16 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
             self.share(f"terminal-{status}", status=status, backend="completed")
             for status in ("completed", "failed", "cancelled", "resubmitted")
         ]
-        before = {rid: dict(db.get_download_request(rid)) for rid in controls}
+        before = {rid: dict(assert_present(db.get_download_request(rid))) for rid in controls}
         self.assertEqual(db.recover_stale_submitting_download_requests(), len(expected))
         for rid in expected:
-            self.assertEqual(db.get_download_request(rid)["status"], "manual_review")
+            get_download_request_result = db.get_download_request(rid)
+            assert get_download_request_result is not None
+            self.assertEqual(get_download_request_result["status"], "manual_review")
         for rid in controls:
-            self.assertEqual(dict(db.get_download_request(rid)), before[rid])
+            get_download_request_result_5 = db.get_download_request(rid)
+            assert get_download_request_result_5 is not None
+            self.assertEqual(dict(get_download_request_result_5), before[rid])
         self.assertEqual(db.recover_stale_submitting_download_requests(), 0)
 
     def regular(self, key="regular"):
@@ -113,15 +121,17 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
                     )
                 snapshots.append(
                     [
-                        tuple(db.get_download_request(rid)[key] for key in fields)
+                        tuple(assert_present(db.get_download_request(rid))[key] for key in fields)
                         for rid in ids
                     ]
                 )
                 self.assertEqual(
                     db.count_download_requests_requiring_attention(), len(ids)
                 )
-                self.assertEqual(db.get_download_request(ordinary)["status"], "pending")
-                before = [dict(db.get_download_request(rid)) for rid in ids]
+                get_download_request_result_2 = db.get_download_request(ordinary)
+                assert get_download_request_result_2 is not None
+                self.assertEqual(get_download_request_result_2["status"], "pending")
+                before = [dict(assert_present(db.get_download_request(rid))) for rid in ids]
                 for rid in ids:
                     self.assertIsNone(
                         db.finalize_download_request_submission(
@@ -132,11 +142,11 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
                         )
                     )
                 self.assertEqual(
-                    [dict(db.get_download_request(rid)) for rid in ids], before
+                    [dict(assert_present(db.get_download_request(rid))) for rid in ids], before
                 )
                 db.init_db()
                 self.assertEqual(
-                    [dict(db.get_download_request(rid)) for rid in ids], before
+                    [dict(assert_present(db.get_download_request(rid))) for rid in ids], before
                 )
                 self.assertEqual(db.recover_stale_submitting_download_requests(), 0)
         self.assertEqual(snapshots[0], snapshots[1])
@@ -145,30 +155,36 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
         from typing import Any, cast
 
         rid = self.share("recent-default-timeout", stale=False)
-        before = dict(db.get_download_request(rid))
+        get_download_request_result_6 = db.get_download_request(rid)
+        assert get_download_request_result_6 is not None
+        before = dict(get_download_request_result_6)
         for value in (None, 0, 15):
             with self.subTest(value=value):
                 self.assertEqual(
                     db.recover_stale_submitting_download_requests(cast(Any, value)), 0
                 )
-                self.assertEqual(dict(db.get_download_request(rid)), before)
+                get_download_request_result_7 = db.get_download_request(rid)
+                assert get_download_request_result_7 is not None
+                self.assertEqual(dict(get_download_request_result_7), before)
 
     def test_second_family_sql_failure_rolls_back_all_request_facts(self):
         import sqlite3
 
         ids = [self.regular(), self.share("share-fault", backend="completed")]
-        before = [dict(db.get_download_request(rid)) for rid in ids]
+        before = [dict(assert_present(db.get_download_request(rid))) for rid in ids]
         with db.get_conn() as conn:
             conn.execute(
                 f"CREATE TRIGGER fail_share_recovery BEFORE UPDATE ON download_requests WHEN NEW.id={ids[-1]} AND NEW.status='manual_review' BEGIN SELECT RAISE(ABORT,'recovery-write-fault'); END"
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "recovery-write-fault"):
             db.recover_stale_submitting_download_requests()
-        self.assertEqual([dict(db.get_download_request(rid)) for rid in ids], before)
+        self.assertEqual([dict(assert_present(db.get_download_request(rid))) for rid in ids], before)
         with db.get_conn() as conn:
             conn.execute("DROP TRIGGER fail_share_recovery")
         self.assertEqual(db.recover_stale_submitting_download_requests(), 2)
-        self.assertEqual(db.get_download_request(ids[-1])["gy_status"], "completed")
+        get_download_request_result_3 = db.get_download_request(ids[-1])
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["gy_status"], "completed")
         self.assertEqual(db.recover_stale_submitting_download_requests(), 0)
 
     def test_real_exit_mid_recovery_and_zip_restore_preserve_backend_facts(self):
@@ -178,7 +194,7 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
         from tests.test_ten_pass_process_restore_audit import runtime_paths
 
         ids = [self.regular(), self.share("share-process", backend="completed")]
-        before = [dict(db.get_download_request(rid)) for rid in ids]
+        before = [dict(assert_present(db.get_download_request(rid))) for rid in ids]
         script = r"""
 import tests
 import os, sys, socket
@@ -210,7 +226,7 @@ raise AssertionError("recovery window not reached")
             timeout=30,
         )
         self.assertEqual(child.returncode, 47, child.stderr)
-        self.assertEqual([dict(db.get_download_request(rid)) for rid in ids], before)
+        self.assertEqual([dict(assert_present(db.get_download_request(rid))) for rid in ids], before)
         paths = runtime_paths(self.path)
         archive = backup.create_backup(paths, reason="interrupted-recovery")
         backup.verify_backup(archive)
@@ -225,13 +241,15 @@ raise AssertionError("recovery window not reached")
         )
         db.init_db()
         expected = [
-            tuple(db.get_download_request(rid)[key] for key in fields) for rid in ids
+            tuple(assert_present(db.get_download_request(rid))[key] for key in fields) for rid in ids
         ]
-        self.assertEqual(db.get_download_request(ids[-1])["gy_status"], "completed")
+        get_download_request_result_4 = db.get_download_request(ids[-1])
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["gy_status"], "completed")
         backup.restore_backup(paths, archive)
         db.init_db()
         self.assertEqual(
-            [tuple(db.get_download_request(rid)[key] for key in fields) for rid in ids],
+            [tuple(assert_present(db.get_download_request(rid))[key] for key in fields) for rid in ids],
             expected,
         )
         self.assertEqual(db.recover_stale_submitting_download_requests(), 0)

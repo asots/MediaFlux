@@ -235,6 +235,7 @@ class MixedMetadataTests(unittest.TestCase):
     def test_cache_cannot_replace_schedule_fields(self):
         self.mapper.enrich((entry(),))
         previous = self.cache.get(self.mapper.key(entry())).payload
+        assert previous is not None
         previous.update(free_progress="伪造进度", events=[], year="1900", source_id="42", url="http://bad.invalid")
         self.cache.set_success(self.mapper.key(entry()), "calendar-tmdb", previous, ttl_seconds=10, stale_seconds=10)
         card = self.mapper.enrich((entry(),))[0]

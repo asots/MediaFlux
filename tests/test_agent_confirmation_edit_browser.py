@@ -2,6 +2,10 @@
 import json
 import time
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser
 
 from tests import test_agent_kernel_browser as support
 
@@ -37,8 +41,18 @@ ACTION_FETCH = """config => {
 
 @unittest.skipIf(support.sync_playwright is None, "需要 Playwright")
 class ConfirmationEditBrowserTests(unittest.TestCase):
-    setUpClass = classmethod(support.AgentKernelBrowserTests.setUpClass.__func__)
-    tearDownClass = classmethod(support.AgentKernelBrowserTests.tearDownClass.__func__)
+    browser: Browser
+    source: str
+    styles: str
+
+    @classmethod
+    def setUpClass(cls):
+        support.AgentKernelBrowserTests.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        support.AgentKernelBrowserTests.tearDownClass.__func__(cls)
+
     make_page = support.AgentKernelBrowserTests.make_page
 
     def page(self, *, width=390, extra=None, action=None):
@@ -126,7 +140,9 @@ class ConfirmationEditBrowserTests(unittest.TestCase):
         page.locator('[data-effect-cancel]').click()
         page.locator('.agent-cancelled').wait_for()
         self.assertTrue(bar.is_visible())
-        self.assertGreaterEqual(bar.locator('button').bounding_box()['height'], 44)
+        bounding_box_result = bar.locator('button').bounding_box()
+        assert bounding_box_result is not None
+        self.assertGreaterEqual(bounding_box_result['height'], 44)
         bar.locator('button').click()
         page.wait_for_function("() => ![...document.querySelectorAll('.agent-scoped-trust-bar')].some(n => !n.hidden)")
         page.close()

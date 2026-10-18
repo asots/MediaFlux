@@ -241,12 +241,13 @@ def _library_section(query: str) -> tuple[dict[str, Any], bool]:
 def _database_section(
     name: str,
     query: str,
-    reader: Callable[..., dict[str, object]],
+    reader: Callable[..., dict[str, Any]],
     projector: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> dict[str, Any]:
     try:
         raw = reader(query, limit=_RESULT_LIMIT)
         raw_items = raw.get("items") if isinstance(raw, dict) else []
+        assert raw_items is not None
         items = [projector(item) for item in raw_items if isinstance(item, dict)]
         return {
             "source": name,

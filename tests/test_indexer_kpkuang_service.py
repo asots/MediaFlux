@@ -132,7 +132,9 @@ class KPkuangServiceTests(unittest.IsolatedAsyncioTestCase):
                 second = await service.search_media(request, scope="agent")
                 self.assertEqual([error.code for error in second.errors], [code])
                 self.assertEqual(service._breaker_states["kpkuang"].failures, 2)
-                self.assertGreater(service._breaker_states["kpkuang"].open_until, self.now)
+                open_until = service._breaker_states["kpkuang"].open_until
+                assert open_until is not None
+                self.assertGreater(open_until, self.now)
                 blocked = await service.search_media(request, scope="agent")
                 self.assertEqual([error.code for error in blocked.errors], ["unavailable"])
                 self.assertEqual(blocked.site_attempt_counts, {"kpkuang": 0})
@@ -250,6 +252,7 @@ class KPkuangServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result.complete)
                 self.assertFalse(result.cached)
                 self.assertEqual(result.items[0].result_id, frames[-1].items[0].result_id)
+                assert result.items[0].result_id is not None
                 self.assertEqual(magnet_infohash(self.store.get(result.items[0].result_id).magnet), infohash)
                 self.assertEqual(queries, ["Example Show", "Alternate Show"])
                 self.assertNotIn(detail_url(402), http.calls)

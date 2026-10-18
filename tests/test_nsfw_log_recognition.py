@@ -149,7 +149,9 @@ def test_execution_uses_same_effective_rules_and_persists_nsfw(log_case):
         result = service._execute_reorganize(log_id, 'nsfw-log-reorganize', preview['version'], preview)
     assert result['success'] is True
     assert remote['video'].parent_id == 'media'
-    saved = dict(db.get_organize_log(log_id))
+    get_organize_log_result = db.get_organize_log(log_id)
+    assert get_organize_log_result is not None
+    saved = dict(get_organize_log_result)
     assert (saved['provider'], saved['external_id']) == ('clean_title', 'SODAH-003')
     assert service.detail(log_id)['recognition']['nsfw_only'] is True
 

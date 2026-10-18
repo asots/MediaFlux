@@ -57,6 +57,7 @@ class WindowViewportInsetContractTests(unittest.TestCase):
             self.skipTest("未找到可用的本机 Chrome/Chromium")
 
         script = VIEWPORT_SCRIPT.read_text(encoding="utf-8")
+        assert sync_playwright is not None
         playwright = sync_playwright().start()
         browser = None
         try:
@@ -182,6 +183,7 @@ class WindowViewportInsetContractTests(unittest.TestCase):
             </html>
         """
 
+        assert sync_playwright is not None
         playwright = sync_playwright().start()
         browser = None
         try:
@@ -276,6 +278,7 @@ class WindowViewportInsetContractTests(unittest.TestCase):
             </html>
         """
 
+        assert sync_playwright is not None
         playwright = sync_playwright().start()
         browser = None
         try:

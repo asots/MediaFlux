@@ -48,7 +48,7 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
         first = db.add_rss_entry_with_media(sid, "first", "same-guid")["id"]
         second = db.add_rss_entry_with_media(sid, "second", "same-guid")["id"]
 
-        self.assertIsInstance(first, int)
+        assert isinstance(first, int)
         self.assertIsNone(second)
         with db.get_conn() as conn:
             count = conn.execute(
@@ -166,8 +166,12 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
         self.assertEqual(by_id[gy_entry]["gy_target_dir"], "target-gy")
         self.assertEqual(by_id[gy_entry]["gy_target_dir_name"], "动漫")
         self.assertEqual(len(db.claim_retryable_failed_rss_entries(snapshot)), 2)
-        self.assertEqual(db.get_rss_entry(qb_entry)["retry_count"], 1)
-        self.assertEqual(db.get_rss_entry(gy_entry)["retry_count"], 1)
+        get_rss_entry_result = db.get_rss_entry(qb_entry)
+        assert get_rss_entry_result is not None
+        self.assertEqual(get_rss_entry_result["retry_count"], 1)
+        get_rss_entry_result_2 = db.get_rss_entry(gy_entry)
+        assert get_rss_entry_result_2 is not None
+        self.assertEqual(get_rss_entry_result_2["retry_count"], 1)
 
     def test_manual_failed_claim_obeys_backend_attempts_and_rate_cooldown(self) -> None:
         gy_sub = db.add_rss_subscription(
@@ -206,7 +210,9 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
                 (cooling,),
             )
         self.assertTrue(db.claim_rss_entry(cooling))
-        self.assertEqual(db.get_rss_entry(cooling)["retry_count"], 1)
+        get_rss_entry_result_3 = db.get_rss_entry(cooling)
+        assert get_rss_entry_result_3 is not None
+        self.assertEqual(get_rss_entry_result_3["retry_count"], 1)
 
     def test_rss_stats_counts_global_active_and_pending_entries(self) -> None:
         self._seed()
@@ -245,7 +251,9 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
                         })
                         self.assertEqual(created.status_code, 200, created.text)
                         sid = created.json()["id"]
-                        self.assertEqual(db.get_rss_subscription(sid)["refresh_interval_minutes"], initial)
+                        get_rss_subscription_result = db.get_rss_subscription(sid)
+                        assert get_rss_subscription_result is not None
+                        self.assertEqual(get_rss_subscription_result["refresh_interval_minutes"], initial)
                         changed = client.put(f"/api/rss/subscriptions/{sid}", headers=headers,
                                              json={"refresh_interval_minutes": updated})
                         self.assertEqual(changed.status_code, 200, changed.text)
@@ -279,7 +287,9 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
                     headers=headers,
                 )
                 self.assertEqual(paused.status_code, 200, paused.text)
-                self.assertEqual(int(db.get_rss_subscription(subscription_id)["enabled"]), 0)
+                get_rss_subscription_result_2 = db.get_rss_subscription(subscription_id)
+                assert get_rss_subscription_result_2 is not None
+                self.assertEqual(int(get_rss_subscription_result_2["enabled"]), 0)
                 self.assertNotIn(
                     subscription_id,
                     [int(row["id"]) for row in db.list_due_rss_subscriptions("2099-01-01 00:00:00")],
@@ -291,7 +301,9 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
                     headers=headers,
                 )
                 self.assertEqual(resumed.status_code, 200, resumed.text)
-                self.assertEqual(int(db.get_rss_subscription(subscription_id)["enabled"]), 1)
+                get_rss_subscription_result_3 = db.get_rss_subscription(subscription_id)
+                assert get_rss_subscription_result_3 is not None
+                self.assertEqual(int(get_rss_subscription_result_3["enabled"]), 1)
                 self.assertIn(
                     subscription_id,
                     [int(row["id"]) for row in db.list_due_rss_subscriptions("2099-01-01 00:00:00")],
@@ -322,7 +334,8 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
                     timestamp,
                 ),
             )
-            legacy_id = int(cursor.lastrowid)
+            assert cursor.lastrowid is not None
+            legacy_id = cursor.lastrowid
 
         with TestClient(create_app(start_background=False)) as client:
             login_page = client.get("/login")
@@ -386,8 +399,12 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
                 self.assertEqual(empty_create.status_code, 200, empty_create.text)
                 interval_id = int(empty_create.json()["id"])
 
-        self.assertEqual(db.get_rss_subscription(legacy_id)["name"], "legacy-renamed")
-        self.assertEqual(db.get_rss_subscription(legacy_id)["refresh_cron"], "0 4 * * *")
+        get_rss_subscription_result_4 = db.get_rss_subscription(legacy_id)
+        assert get_rss_subscription_result_4 is not None
+        self.assertEqual(get_rss_subscription_result_4["name"], "legacy-renamed")
+        get_rss_subscription_result_5 = db.get_rss_subscription(legacy_id)
+        assert get_rss_subscription_result_5 is not None
+        self.assertEqual(get_rss_subscription_result_5["refresh_cron"], "0 4 * * *")
         self.assertIn(
             interval_id,
             [int(row["id"]) for row in db.list_due_rss_subscriptions("2099-01-01 00:00:00")],

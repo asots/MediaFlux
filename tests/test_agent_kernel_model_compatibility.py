@@ -1,4 +1,7 @@
 """Independent positive compatibility assertions; no production edits."""
+from typing import Any
+from app.agent.kernel.session_state import SessionState
+from typing import cast
 from collections import UserDict
 from types import MappingProxyType
 
@@ -15,6 +18,7 @@ def test_legacy_message_success_domain(value):
         raw['arguments']=value
     message=ModelMessage.from_dict({'role':'assistant','tool_calls':[raw]})
     expected={'query':'example'} if value == [['query','example']] else {}
+    assert message.tool_calls[0].arguments is not None
     assert dict(message.tool_calls[0].arguments)==expected
     assert message.to_dict()['tool_calls'][0]['arguments']==expected
 
@@ -24,6 +28,7 @@ class DictChild(dict):
 def test_mapping_root_contract(factory):
     source=factory({'query':'example'})
     call=ModelToolCall('same','lookup',source)
+    assert call.arguments is not None
     assert dict(call.arguments)=={'query':'example'}
     result=ModelMessage.from_dict({'role':'assistant','tool_calls':[{'call_id':'same','name':'lookup','arguments':source}]})
     assert result.to_dict()['tool_calls'][0]['arguments']=={'query':'example'}
@@ -32,6 +37,7 @@ def test_legacy_from_dict_takes_snapshot():
     source={'query':'before'}
     result=ModelMessage.from_dict({'role':'assistant','tool_calls':[{'call_id':'same','name':'lookup','arguments':source}]})
     source['query']='after'
+    assert result.tool_calls[0].arguments is not None
     assert dict(result.tool_calls[0].arguments)=={'query':'before'}
 
 
@@ -57,7 +63,7 @@ def test_error_state_roundtrip_does_not_normalize_raw_or_none():
 
 @pytest.mark.parametrize('field', ['call_id', 'name'])
 def test_serialized_error_identity_is_not_coerced(field):
-    raw = {'call_id':'native', 'name':'lookup', 'arguments':None,
+    raw: dict[str, Any] = {'call_id':'native', 'name':'lookup', 'arguments':None,
            'argument_error':'invalid_json', 'raw_arguments':'{broken'}
     raw[field] = 123
     with pytest.raises(ValueError):
@@ -70,6 +76,7 @@ def test_legacy_snapshot_is_shallow():
     restored = ModelMessage.from_dict({'role':'assistant', 'tool_calls':[
         {'call_id':'native', 'name':'lookup', 'arguments':source}]})
     assert restored.tool_calls[0].arguments is not source
+    assert restored.tool_calls[0].arguments is not None
     assert restored.tool_calls[0].arguments['nested'] is nested
 
 from types import SimpleNamespace
@@ -79,7 +86,8 @@ def test_legacy_restore_keeps_empty_args_native_group():
     state=SimpleNamespace(conversation=[
         {'role':'assistant','tool_calls':[{'call_id':'legacy','name':'lookup'}]},
         {'role':'tool','tool_call_id':'legacy','tool_name':'lookup','content':'{"ok":true}'}])
-    result=restore_messages(state)
+    result=restore_messages(cast(SessionState, state))
     assert [m.role for m in result]==['assistant','tool']
+    assert result[0].tool_calls[0].arguments is not None
     assert dict(result[0].tool_calls[0].arguments)=={}
     assert result[0].tool_calls[0].call_id==result[1].tool_call_id

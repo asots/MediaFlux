@@ -32,7 +32,7 @@ class ExplicitRepairModel:
             yield event
 
 
-def repair_entries(value):
+def repair_entries(value: object) -> list[dict[str, object]]:
     """Extract real tool feedback across the three native request encodings."""
     if isinstance(value, str):
         try:

@@ -1,6 +1,7 @@
 """Media Agent 媒体服务器版本与兼容槽位诊断。"""
 
 from __future__ import annotations
+from typing import Any
 
 import json
 import unittest
@@ -24,7 +25,7 @@ def _probe(
     product_detected: bool = True,
 ) -> ToolResult:
     ok = status == "success"
-    data = {"server_type": slot, "connection_status": status}
+    data: dict[str, Any] = {"server_type": slot, "connection_status": status}
     if ok:
         data.update(
             {

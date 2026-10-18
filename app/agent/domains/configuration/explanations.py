@@ -185,7 +185,7 @@ def _effective_value() -> Callable[[str], str]:
     }
     keys.update(key for fields in _COMPONENT_CONTROL_FIELDS.values() for key in fields)
     values = config.get_many(tuple(keys))
-    return lambda key: str(values.get(key) or "").strip()
+    return lambda key: (values.get(key) or "").strip()
 
 
 def _field_present(value: Callable[[str], str], field: str) -> bool:

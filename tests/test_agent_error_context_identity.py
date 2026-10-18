@@ -108,7 +108,7 @@ async def observe(store, steps, *, protocol="chat_completions", schema=False, en
         elif name != DISCOVERY_TOOL:
             assert result["data"]["items"][0]["title"] == outcome
 
-    replayed = [AgentEvent(**{**row, "type": AgentEventType(row["type"])}) for row in journal]
+    replayed = [AgentEvent(type=AgentEventType(row["type"]), sequence=row["sequence"], request_id=row["request_id"], session_id=row["session_id"], turn_id=row["turn_id"], occurred_at=row["occurred_at"], event_id=row["event_id"], payload=row["payload"]) for row in journal]
     builder = TurnViewBuilder()
     for event in replayed:
         builder.apply(event)

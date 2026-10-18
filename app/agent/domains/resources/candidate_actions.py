@@ -155,7 +155,7 @@ class IndexerCandidateActions:
         *,
         require_search_id: bool = False,
     ) -> dict[str, Any]:
-        owner = str(context.owner or "").strip()
+        owner = (context.owner or "").strip()
         if not owner:
             raise AgentToolError("请先登录后搜索资源", code="precondition_failed")
 

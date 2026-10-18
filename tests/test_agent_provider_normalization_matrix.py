@@ -1,6 +1,7 @@
 """Preserve each wire's public semantics; private replay consumes the same text."""
 
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 import copy
@@ -16,9 +17,9 @@ from tests import test_agent_provider_state as fixtures
 from tests.test_agent_provider_text_authority import native_reply
 
 
-def anthropic_frames(reply, delta_width):
+def anthropic_frames(reply, delta_width) -> list[dict[str, Any]]:
     """Full lifecycle; vary text-delta boundaries independently of wire bytes."""
-    frames = [
+    frames: list[dict[str, Any]] = [
         {
             "type": "message_start",
             "message": {
@@ -294,7 +295,7 @@ def test_invalid_private_fields_stay_provider_errors_without_tools(
                 # Malformed delta fields must retain the existing early error path.
                 block = payload[1]["content_block"]
                 block.pop(field, None)
-                delta = {"type": field + "_delta"}
+                delta: dict[str, Any] = {"type": field + "_delta"}
                 if invalid != "missing":
                     delta[field] = invalid
                 payload.insert(

@@ -1,8 +1,8 @@
 """媒体探索领域模型与结构化错误。"""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import re
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 _ALLOWED_MEDIA_TYPES = {"movie", "tv", "all"}
@@ -16,8 +16,19 @@ _CREDENTIAL_RE = re.compile(
 
 
 def redact_provider_message(message: str) -> str:
-    value = _BEARER_RE.sub(r"\1********", str(message or ""))
+    value = _BEARER_RE.sub(r"\1********", message or "")
     return _CREDENTIAL_RE.sub(r"\1********", value)[:500]
+
+
+def _retry_after_seconds(value: float | str | None) -> int:
+    return max(0, int(value or 0))
+
+
+def _calendar_weekday(value: float | str) -> int:
+    weekday = int(value)
+    if weekday < 1 or weekday > 7:
+        raise ValueError("weekday must be between 1 and 7")
+    return weekday
 
 
 class ProviderError(RuntimeError):
@@ -29,8 +40,8 @@ class ProviderError(RuntimeError):
     def __init__(self, message: str, *, retry_after: int = 0, detail: str = ""):
         super().__init__(detail or message)
         self.safe_message = redact_provider_message(message)
-        self.detail = str(detail or message or "")
-        self.retry_after = max(0, int(retry_after or 0))
+        self.detail = detail or message or ""
+        self.retry_after = _retry_after_seconds(retry_after)
 
 
 class ProviderNotConfigured(ProviderError):
@@ -59,6 +70,7 @@ class ProviderTimeout(ProviderError):
 
 
 class ProviderInvalidResponse(ProviderError):
+    request_attempted: bool = True
     code = "invalid_response"
     status_code = 502
 
@@ -73,7 +85,7 @@ class ProviderHealth:
     def __post_init__(self) -> None:
         if self.status not in _ALLOWED_HEALTH:
             raise ValueError(f"unsupported provider status: {self.status}")
-        object.__setattr__(self, "retry_after", max(0, int(self.retry_after or 0)))
+        object.__setattr__(self, "retry_after", _retry_after_seconds(self.retry_after))
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -104,9 +116,9 @@ class MediaCard:
     seasons: tuple[dict[str, Any], ...] | None = None
 
     def __post_init__(self) -> None:
-        provider = str(self.provider or "").strip().lower()
-        external_id = str(self.external_id or "").strip()
-        media_type = str(self.media_type or "").strip().lower()
+        provider = (self.provider or "").strip().lower()
+        external_id = (self.external_id or "").strip()
+        media_type = (self.media_type or "").strip().lower()
         if not provider:
             raise ValueError("provider is required")
         if not external_id:
@@ -116,15 +128,12 @@ class MediaCard:
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "external_id", external_id)
         object.__setattr__(self, "media_type", media_type)
-        object.__setattr__(self, "title", str(self.title or "").strip())
-        object.__setattr__(self, "tmdb_id", str(self.tmdb_id or "").strip())
-        object.__setattr__(self, "douban_id", str(self.douban_id or "").strip())
-        object.__setattr__(self, "bangumi_id", str(self.bangumi_id or "").strip())
+        object.__setattr__(self, "title", (self.title or "").strip())
+        object.__setattr__(self, "tmdb_id", (self.tmdb_id or "").strip())
+        object.__setattr__(self, "douban_id", (self.douban_id or "").strip())
+        object.__setattr__(self, "bangumi_id", (self.bangumi_id or "").strip())
         if self.weekday is not None:
-            value = int(self.weekday)
-            if value < 1 or value > 7:
-                raise ValueError("weekday must be between 1 and 7")
-            object.__setattr__(self, "weekday", value)
+            object.__setattr__(self, "weekday", _calendar_weekday(self.weekday))
         if self.rating is not None:
             object.__setattr__(self, "rating", float(self.rating))
         if self.seasons is not None:
@@ -145,8 +154,11 @@ class MediaCard:
     def from_dict(cls, data: dict[str, Any]) -> "MediaCard":
         values = dict(data)
         values.pop("stable_id", None)
+        for key in ("provider", "external_id", "media_type", "title", "tmdb_id", "douban_id", "bangumi_id"):
+            if key in values:
+                values[key] = str(values[key] or "")
         allowed = cls.__dataclass_fields__.keys()
-        return cls(**{key: values.get(key) for key in allowed if key in values})
+        return cls(**{key: values[key] for key in allowed if key in values})
 
 
 @dataclass(frozen=True)
@@ -159,18 +171,17 @@ class DiscoveryPage:
     provider: ProviderHealth = field(default_factory=lambda: ProviderHealth(name="unknown"))
 
     def __post_init__(self) -> None:
-        if int(self.page) < 1:
+        if self.page < 1:
             raise ValueError("page must be positive")
-        object.__setattr__(self, "page", int(self.page))
         object.__setattr__(self, "items", tuple(self.items or ()))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "items": [item.to_dict() for item in self.items],
             "page": self.page,
-            "has_more": bool(self.has_more),
-            "cached": bool(self.cached),
-            "stale": bool(self.stale),
+            "has_more": self.has_more,
+            "cached": self.cached,
+            "stale": self.stale,
             "provider": self.provider.to_dict(),
         }
 
@@ -178,7 +189,7 @@ class DiscoveryPage:
     def from_dict(cls, data: dict[str, Any]) -> "DiscoveryPage":
         provider = data.get("provider") or {}
         return cls(
-            items=[MediaCard.from_dict(item) for item in data.get("items") or []],
+            items=tuple(MediaCard.from_dict(item) for item in data.get("items") or []),
             page=int(data.get("page") or 1),
             has_more=bool(data.get("has_more")),
             cached=bool(data.get("cached")),

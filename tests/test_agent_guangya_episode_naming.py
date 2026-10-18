@@ -1,6 +1,8 @@
 """光鸭声明式剧集分季命名与统一确认链路测试。"""
 
 from __future__ import annotations
+from app.clients.guangya import GuangYaClient
+from typing import cast
 
 import tempfile
 import unittest
@@ -314,7 +316,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(len(list(self.plan_dir.glob("*.json"))), 1)
 
         flow = self._domain_actions.fs_change._flow("owner")
-        self.assertIsNotNone(flow)
+        assert (flow) is not None
         plan = guangya_fs_change.load_fs_change_plan(
             flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint
         )
@@ -345,7 +347,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(len(list(self.plan_dir.glob("*.json"))), 1)
 
         flow = self._domain_actions.fs_change._flow("owner")
-        self.assertIsNotNone(flow)
+        assert (flow) is not None
         plan = guangya_fs_change.load_fs_change_plan(
             flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint
         )
@@ -358,7 +360,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
     def test_more_than_two_hundred_media_files_requires_complete_season_split(self):
         client = EpisodeNamingClient(episodes_per_group=101)
         payload = guangya_workspace.create_directory_observation(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             path="/狐妖小红娘",
             recursive=True,
@@ -442,8 +444,9 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
                          "groups": [{"source_group": 2, "source_season": 2, "source_episode_start": 1,
                                      "source_episode_end": 1, "target_season": 2, "expected_count": 1}]}
             prepared = await pipeline.execute("guangya.episode_naming.plan", arguments, context=context)
-            self.assertIsNotNone(prepared.effect_plan)
+            assert (prepared.effect_plan) is not None
             flow = self._domain_actions.fs_change._flow("owner")
+            assert flow is not None
             plan = guangya_fs_change.load_fs_change_plan(flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint)
             self.assertEqual({op["source"]["file_id"] for op in plan["operations"]}, {"b-1"})
             for foreign in (replace(context, owner="other"), replace(context, session_id="other")):
@@ -461,7 +464,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
     def test_compiler_uses_exact_observed_release_path(self):
         client = EpisodeNamingClient(episodes_per_group=3)
         payload = guangya_workspace.create_directory_observation(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             path="/狐妖小红娘",
             recursive=True,
@@ -892,6 +895,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(mapping["included_extra_count"], 0)
         self.assertEqual(mapping["groups"][0]["excluded_extra_count"], 1)
         flow = self._domain_actions.fs_change._flow("owner")
+        assert flow is not None
         plan = guangya_fs_change.load_fs_change_plan(flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint)
         self.assertEqual({op["source"]["file_id"] for op in plan["operations"]}, {f"{prefix}-{i}" for prefix in ("a", "b") for i in range(1, 4)})
         self.assertFalse(plan["trigger_strm"])

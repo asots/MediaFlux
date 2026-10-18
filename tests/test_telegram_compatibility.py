@@ -93,12 +93,17 @@ class TelegramCompatibilityTests(IsolatedDatabaseTestCase):
         self.assertEqual(followup["message_thread_id"], 7)
 
     def test_legacy_signatures_select_legacy_keywords_before_any_request(self):
-        class LegacyBot(_Bot):
+        class LegacyBot:
+            def __init__(self):
+                self.recorder = _Bot()
+                self.sent = self.recorder.sent
+                self.edits = self.recorder.edits
+
             def send_message(
                 self, chat_id, text, *, parse_mode, disable_web_page_preview,
                 reply_to_message_id=None, message_thread_id=None,
             ):
-                return super().send_message(
+                return self.recorder.send_message(
                     chat_id, text, disable_web_page_preview=disable_web_page_preview,
                     reply_to_message_id=reply_to_message_id,
                     message_thread_id=message_thread_id,
@@ -107,7 +112,7 @@ class TelegramCompatibilityTests(IsolatedDatabaseTestCase):
             def edit_message_text(
                 self, text, chat_id, message_id, *, parse_mode, disable_web_page_preview,
             ):
-                return super().edit_message_text(
+                return self.recorder.edit_message_text(
                     text, chat_id, message_id,
                     disable_web_page_preview=disable_web_page_preview,
                 )
@@ -524,11 +529,11 @@ class TelegramCompatibilityTests(IsolatedDatabaseTestCase):
         class PropertyBot(_Bot):
             broken = False
 
-            @property
-            def edit_message_text(self):
+            def editing_property(self):
                 if self.broken:
                     raise RuntimeError("PRIVATE_PROPERTY https://private.invalid/")
                 return super().edit_message_text
+        setattr(PropertyBot, "edit_message_text", property(PropertyBot.editing_property))
         bot = PropertyBot()
         progress = self.progress(bot)
         bot.broken = True

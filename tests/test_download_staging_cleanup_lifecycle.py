@@ -45,7 +45,7 @@ class _CloudTree:
         # 模拟回收站详情仍然可读：不能靠file_info存在就重删同一ID。
         return self.nodes.get(id_)
 
-    def delete_empty_directory(self, id_, **kwargs):
+    def delete_empty_directory(self, id_, **kwargs) -> bool:
         if self.on_delete:
             self.on_delete(id_)
         if self.children.get(id_):
@@ -93,7 +93,9 @@ class DownloadStagingCleanupLifecycleTests(IsolatedDatabaseTestCase):
         report = self.clean()
         self.assertEqual(report['cleaned'], 1)
         self.assertEqual(self.cloud.deleted, ['stage'])
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'completed')
+        get_download_request_result = db.get_download_request(self.request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result['gy_staging_cleanup_status'], 'completed')
         self.assertEqual(self.clean()['cleaned'], 0)
         self.assertEqual(self.cloud.deleted, ['stage'])
 
@@ -111,7 +113,9 @@ class DownloadStagingCleanupLifecycleTests(IsolatedDatabaseTestCase):
         report = self.clean()
         self.assertGreater(report['not_empty'], 0)
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_2 = db.get_download_request(self.request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2['gy_staging_cleanup_status'], 'retained')
 
     def test_pending_confirmation_blocks_even_when_cloud_is_empty(self):
         self.add_confirmation()
@@ -162,7 +166,9 @@ class DownloadStagingCleanupLifecycleTests(IsolatedDatabaseTestCase):
         report = self.clean()
         self.assertEqual(report['cleaned'], 0)
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'failed')
+        get_download_request_result_3 = db.get_download_request(self.request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3['gy_staging_cleanup_status'], 'failed')
         self.cloud.on_delete = lambda _id: self.fail('failed write must not be retried')
         self.assertEqual(self.clean()['cleaned'], 0)
 
@@ -175,7 +181,9 @@ class DownloadStagingCleanupLifecycleTests(IsolatedDatabaseTestCase):
         report = self.clean()
         self.assertEqual(report['cleaned'], 0)
         self.assertGreater(report['delete_failures'], 0)
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'failed')
+        get_download_request_result_4 = db.get_download_request(self.request_id)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4['gy_staging_cleanup_status'], 'failed')
         self.assertEqual(self.clean()['cleaned'], 0)
         self.assertEqual(self.cloud.deleted, ['stage'])
 
@@ -193,8 +201,12 @@ class DownloadStagingCleanupLifecycleTests(IsolatedDatabaseTestCase):
         self.cloud.list_dir = rebound
         self.assertEqual(self.clean()['cleaned'], 0)
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_download_request(self.request_id)['gy_target_dir'], 'new-stage')
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_5 = db.get_download_request(self.request_id)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5['gy_target_dir'], 'new-stage')
+        get_download_request_result_6 = db.get_download_request(self.request_id)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6['gy_staging_cleanup_status'], 'retained')
 
     def test_disabled_auto_cleanup_does_not_read_or_change_cloud(self):
         self.assertEqual(self.clean(enabled=False)['cleaned'], 0)
@@ -239,7 +251,9 @@ class DownloadStagingCleanupLifecycleTests(IsolatedDatabaseTestCase):
         report = self.clean()
         self.assertEqual(report['cleaned'], 0)
         self.assertEqual(report['delete_failures'], 1)
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'failed')
+        get_download_request_result_7 = db.get_download_request(self.request_id)
+        assert get_download_request_result_7 is not None
+        self.assertEqual(get_download_request_result_7['gy_staging_cleanup_status'], 'failed')
         self.assertEqual(self.clean()['cleaned'], 0)
 
     def test_malformed_directory_flag_must_not_authorize_deletion(self):
@@ -331,6 +345,7 @@ class DownloadStagingCleanupLifecycleTests(IsolatedDatabaseTestCase):
                                            gy_staging_cleanup_error=error)
                 self.clean(enabled=False)
                 row = db.get_download_request(self.request_id)
+                assert row is not None
                 self.assertEqual(row['gy_staging_cleanup_status'], 'retained')
                 self.assertEqual(row['gy_staging_cleanup_error'], error)
                 self.assertEqual(self.cloud.reads, [])
@@ -348,7 +363,9 @@ class DownloadStagingCleanupLifecycleTests(IsolatedDatabaseTestCase):
             report = self.clean()
         self.assertEqual(self.cloud.deleted, ['child'])
         self.assertTrue(report['_retryable'])
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_8 = db.get_download_request(self.request_id)
+        assert get_download_request_result_8 is not None
+        self.assertEqual(get_download_request_result_8['gy_staging_cleanup_status'], 'retained')
         with db.get_conn() as conn:
             self.assertEqual([tuple(row) for row in conn.execute('SELECT file_id,status FROM organize_delete_audit')],
                              [('child', 'success')])

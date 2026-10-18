@@ -1,6 +1,9 @@
 """Agent 短期会话上下文持久化回归测试。"""
 
 from __future__ import annotations
+from app.agent.session_context import AgentContextWriteGuard
+from app.agent.session_context import AgentSessionContextRepository
+from typing import cast
 
 import json
 import threading
@@ -166,11 +169,11 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             expires_at=1100.0,
             guard=guard,
         )
-        self.assertIsNotNone(stored)
+        assert (stored) is not None
         loaded = self.repository.get_latest(
             owner=owner, context_type="guangya_fs_change", now=1000.0
         )
-        self.assertIsNotNone(loaded)
+        assert (loaded) is not None
         self.assertEqual(loaded.payload["plan_id"], "a" * 32)
         self.assertTrue(
             self.repository.consume_latest_guarded(
@@ -229,7 +232,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
         remaining = self.repository.get_latest(
             owner="session-b", context_type="patrol", now=1000.0
         )
-        self.assertIsNotNone(remaining)
+        assert (remaining) is not None
         self.assertEqual(remaining.payload, {"safe": "b"})
 
     def test_guarded_context_is_latest_wins_single_use_and_reset_safe(self):
@@ -244,7 +247,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             expires_at=1100.0,
             guard=first,
         )
-        self.assertIsNotNone(stored)
+        assert (stored) is not None
         self.assertGreater(stored.revision, 0)
         self.assertEqual(stored.generation, first.generation)
         second = self.repository.begin_context(
@@ -257,7 +260,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
                 context_type="discovery_mapping",
                 payload={"safe": "late-first"},
                 expires_at=1100.0,
-                guard=stored,
+                guard=cast(AgentContextWriteGuard, stored),
             )
         )
         current = self.repository.replace_latest_guarded(
@@ -267,15 +270,15 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             expires_at=1100.0,
             guard=second,
         )
-        self.assertIsNotNone(current)
+        assert (current) is not None
         self.assertTrue(
             self.repository.consume_latest_guarded(
-                owner=owner, context_type="discovery_mapping", guard=current
+                owner=owner, context_type="discovery_mapping", guard=cast(AgentContextWriteGuard, current)
             )
         )
         self.assertFalse(
             self.repository.consume_latest_guarded(
-                owner=owner, context_type="discovery_mapping", guard=current
+                owner=owner, context_type="discovery_mapping", guard=cast(AgentContextWriteGuard, current)
             )
         )
         scrape = self.repository.begin_context(
@@ -288,7 +291,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             expires_at=1100.0,
             guard=scrape,
         )
-        self.assertIsNotNone(scrape_stored)
+        assert (scrape_stored) is not None
         self.assertEqual(self.repository.invalidate_owner(owner=owner), 1)
         self.assertIsNone(
             self.repository.get_latest(
@@ -301,7 +304,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
                 context_type="directory_scrape",
                 payload={"safe": "late-scrape"},
                 expires_at=1100.0,
-                guard=scrape_stored,
+                guard=cast(AgentContextWriteGuard, scrape_stored),
             )
         )
 
@@ -350,14 +353,14 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
         first_snapshot, first_guard = self.repository.begin_context_update(
             owner=owner, context_type="local_media_tasks"
         )
-        self.assertIsNotNone(first_snapshot)
+        assert (first_snapshot) is not None
         self.assertEqual(first_snapshot.payload, {"safe": "seed"})
         self.assertEqual(first_snapshot.generation, first_guard.generation)
         self.assertEqual(first_snapshot.revision, first_guard.revision)
         second_snapshot, second_guard = self.repository.begin_context_update(
             owner=owner, context_type="local_media_tasks"
         )
-        self.assertIsNotNone(second_snapshot)
+        assert (second_snapshot) is not None
         self.assertEqual(second_snapshot.payload, {"safe": "seed"})
         self.assertNotEqual(second_guard.generation, first_guard.generation)
         self.assertIsNone(
@@ -376,7 +379,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             expires_at=1100.0,
             guard=second_guard,
         )
-        self.assertIsNotNone(stored)
+        assert (stored) is not None
         self.assertEqual(stored.payload, {"safe": "second"})
 
     def test_single_context_invalidation_blocks_guard_without_deleting_others(self):
@@ -408,7 +411,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
         remaining = self.repository.get_latest(
             owner=owner, context_type="patrol", now=1000.0
         )
-        self.assertIsNotNone(remaining)
+        assert (remaining) is not None
         self.assertEqual(remaining.payload, {"safe": "patrol"})
 
     def test_pruned_epoch_never_reuses_an_old_guard_after_reset(self):
@@ -431,15 +434,13 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
                 guard=stale,
             )
         )
-        self.assertIsNotNone(
-            self.repository.replace_latest_guarded(
+        assert (self.repository.replace_latest_guarded(
                 owner=owner,
                 context_type="discovery_mapping",
                 payload={"safe": "current"},
                 expires_at=self.wall[0] + 100.0,
                 guard=current,
-            )
-        )
+            )) is not None
 
     def test_context_capacity_never_evicts_another_owner_active_flow(self):
         repository = SQLiteAgentSessionContextRepository(
@@ -458,7 +459,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             expires_at=1100.0,
             guard=guard,
         )
-        self.assertIsNotNone(protected)
+        assert (protected) is not None
         for index in range(127):
             repository.replace_latest(
                 owner=f"capacity-owner-{index}",
@@ -476,7 +477,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
         restored = repository.get_latest(
             owner=protected_owner, context_type="discovery_mapping", now=self.wall[0]
         )
-        self.assertIsNotNone(restored)
+        assert (restored) is not None
         self.assertEqual(restored.payload, {"safe": "protected"})
 
     def test_epoch_capacity_reclaims_only_inactive_rows(self):
@@ -489,15 +490,13 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
         active_guard = repository.begin_context(
             owner=active_owner, context_type="directory_scrape"
         )
-        self.assertIsNotNone(
-            repository.replace_latest_guarded(
+        assert (repository.replace_latest_guarded(
                 owner=active_owner,
                 context_type="directory_scrape",
                 payload={"safe": "active"},
                 expires_at=1100.0,
                 guard=active_guard,
-            )
-        )
+            )) is not None
         for index in range(128):
             repository.begin_context(
                 owner=f"epoch-inactive-owner-{index}", context_type="discovery_mapping"
@@ -509,11 +508,9 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
                 ).fetchone()[0]
             )
         self.assertEqual(epoch_count, 128)
-        self.assertIsNotNone(
-            repository.get_latest(
+        assert (repository.get_latest(
                 owner=active_owner, context_type="directory_scrape", now=self.wall[0]
-            )
-        )
+            )) is not None
 
     def test_expired_malformed_and_oversized_contexts_fail_closed(self):
         owner = "session-a"
@@ -568,10 +565,12 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
         changed_secret = SQLiteAgentSessionContextRepository(
             secret_provider=lambda: "different-test-secret", clock=lambda: self.wall[0]
         )
-        self.assertEqual(
-            same_secret.get_latest(
+        get_latest_result = same_secret.get_latest(
                 owner="session-a", context_type="patrol", now=self.wall[0]
-            ).payload,
+            )
+        assert get_latest_result is not None
+        self.assertEqual(
+            get_latest_result.payload,
             {"safe": True},
         )
         self.assertIsNone(
@@ -672,8 +671,10 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             clock=lambda: monotonic[0],
             wall_clock=lambda: self.wall[0],
         ).get(owner="session-a")
+        assert restored_patrol is not None
         self.assertEqual(restored_patrol["options"][0]["episode_sample"], [3, 4])
         self.assertEqual(restored_downloads[0].request_id, 77)
+        assert restored_downloads[0].verification is not None
         self.assertEqual(restored_downloads[0].verification.title, "The Show")
         self.assertEqual(restored_downloads[0].verification.tmdb_id, "12345")
         self.assertEqual(
@@ -714,6 +715,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             clock=lambda: monotonic[0],
             wall_clock=lambda: self.wall[0],
         ).get(owner="session-generic")
+        assert restored is not None
         self.assertEqual(restored["candidates"][0]["download_kinds"], ["magnet"])
         self.assertEqual(restored["candidates"][0]["media_title"], "Example")
         self.assertNotIn("magnet:?", repr(restored))
@@ -735,8 +737,10 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             search_ids.append(store.capture(owner="session-bounded", result=result))
         self.assertIsNone(store.get(owner="session-bounded", search_id=search_ids[0]))
         self.assertIsNone(store.get(owner="session-bounded", search_id=search_ids[1]))
+        get_result = store.get(owner="session-bounded", search_id=search_ids[-1])
+        assert get_result is not None
         self.assertEqual(
-            store.get(owner="session-bounded", search_id=search_ids[-1])["candidates"][
+            get_result["candidates"][
                 0
             ]["result_id"],
             "resource-result-4",
@@ -886,7 +890,7 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
                 return None
 
         repository = BlockingRepository()
-        store = RecentPatrolStore(repository=repository)
+        store = RecentPatrolStore(repository=cast(AgentSessionContextRepository | None, repository))
         earlier = _patrol_result()
         earlier.data["findings"][0]["title"] = "较早巡检"
         later = _patrol_result()
@@ -905,9 +909,12 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
         second.join(timeout=2)
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
+        get_result_2 = store.get(owner="session-a")
+        assert get_result_2 is not None
         self.assertEqual(
-            store.get(owner="session-a")["options"][0]["title"], "较新巡检"
+            get_result_2["options"][0]["title"], "较新巡检"
         )
+        assert repository.latest is not None
         self.assertEqual(repository.latest["options"][0]["title"], "较新巡检")
 
     def test_repository_failure_keeps_existing_in_memory_behavior(self):
@@ -919,7 +926,9 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
             def get_latest(self, **_kwargs):
                 raise RuntimeError("unavailable")
 
-        store = RecentPatrolStore(repository=BrokenRepository())
+        store = RecentPatrolStore(repository=cast(AgentSessionContextRepository | None, BrokenRepository()))
         with self.assertLogs("app.agent.domains.library.recent_patrol", level="WARNING"):
             store.capture(owner="session-a", result=_patrol_result())
-        self.assertEqual(store.get(owner="session-a")["options"][0]["tmdb_id"], "12345")
+        get_result_3 = store.get(owner="session-a")
+        assert get_result_3 is not None
+        self.assertEqual(get_result_3["options"][0]["tmdb_id"], "12345")

@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import inspect
+import json
 import re
 import threading
 import time
@@ -14,7 +14,10 @@ from app import config
 from app.agent.async_bridge import ensure_sync_bridge_available
 from app.concurrency import KeyedSingleFlight
 from app.modules.episode_research import (
-    POLICY_VERSION, EpisodeEvidenceReader, EpisodeResearchError, normalize_case,
+    POLICY_VERSION,
+    EpisodeEvidenceReader,
+    EpisodeResearchError,
+    normalize_case,
 )
 
 _TOTAL_TIMEOUT_SECONDS = 95.0
@@ -50,8 +53,8 @@ def episode_research_enabled() -> bool:
         and config.get_bool("AGENT_RECOGNITION_REVIEW_ENABLED", False)
         and config.get_bool("AGENT_ENABLED", False)
         and config.get_bool("AGENT_LLM_ENABLED", False)
-        and str(config.get("AGENT_LLM_API_URL", "") or "").strip()
-        and str(config.get("AGENT_LLM_MODEL", "") or "").strip()
+        and (config.get("AGENT_LLM_API_URL", "") or "").strip()
+        and (config.get("AGENT_LLM_MODEL", "") or "").strip()
     )
 
 
@@ -63,7 +66,7 @@ def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
-def proposal_receipt(proposal: dict) -> dict:
+def proposal_receipt(proposal: object) -> dict:
     if not isinstance(proposal, dict) or type(proposal.get("version")) is not int or proposal.get("version") != POLICY_VERSION or proposal.get("status") != "verified":
         raise EpisodeResearchError("invalid_research_proposal")
     result = {"version": POLICY_VERSION, "cache_key": proposal.get("case_key"),
@@ -102,7 +105,10 @@ def revalidate_episode_research_receipt(
     reader_factory=None, deadline_at: float | None = None,
 ) -> dict:
     """receipt不是授权：重新核验缓存、原始文件、所选身份和当前TMDB证据。"""
-    from app.repositories.episode_research import get_episode_research_cache, invalidate_episode_research_cache
+    from app.repositories.episode_research import (
+        get_episode_research_cache,
+        invalidate_episode_research_cache,
+    )
     deadline_at = time.monotonic() + _TOTAL_TIMEOUT_SECONDS if deadline_at is None else deadline_at
     _remaining(deadline_at)
     _check_scope(payload)
@@ -136,7 +142,10 @@ def revalidate_episode_research_receipt(
 
 
 def _cached_outcome(payload: dict, case: dict, *, reader_factory=None, deadline_at: float) -> dict | None:
-    from app.repositories.episode_research import get_episode_research_cache, invalidate_episode_research_cache
+    from app.repositories.episode_research import (
+        get_episode_research_cache,
+        invalidate_episode_research_cache,
+    )
     stored = get_episode_research_cache(case["case_key"], policy_version=POLICY_VERSION)
     if stored is None:
         return None
@@ -203,7 +212,9 @@ def research_confirmation_episodes(payload: dict, *, runner=None, reader_factory
             if not db.reserve_agent_web_search_credits(provider="episode_research", usage_date=db.current_agent_web_search_usage_date(), cost=1, daily_limit=limit):
                 return _outcome("research_daily_budget")
             if runner is None:
-                from app.modules.agent_episode_research import research_episode_case_async
+                from app.modules.agent_episode_research import (
+                    research_episode_case_async,
+                )
                 runner = research_episode_case_async
             reader = _reader_with_deadline(case, reader_factory, deadline_at)
             handed_off = False
@@ -244,7 +255,7 @@ def research_confirmation_episodes(payload: dict, *, runner=None, reader_factory
         if lease.owner:
             _cache_failed_attempt(case["case_key"], exc.code)
         return _outcome(exc.code)
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         if lease.owner:
             _cache_failed_attempt(case["case_key"], "research_timeout")
         return _outcome("research_timeout", status="failed")

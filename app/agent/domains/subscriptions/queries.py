@@ -100,9 +100,9 @@ def list_media_subscription_summaries(_arguments: dict[str, Any]) -> ToolResult:
         status=status,
         summary=summary,
         data={
-            "total": max(0, int(total or 0)),
+            "total": max(0, (total or 0)),
             "returned": returned,
-            "truncated": int(total or 0) > returned,
+            "truncated": (total or 0) > returned,
             "items": items,
         },
         evidence=[
@@ -169,7 +169,7 @@ async def _preview_media_subscription_rows(rows: list[Any]) -> list[dict[str, An
             except MediaSubscriptionError as exc:
                 return _preview_failure(
                     row,
-                    status=str(exc.code or "unavailable")[:40],
+                    status=(exc.code or "unavailable")[:40],
                     summary=str(exc)[:160],
                 )
             except Exception as exc:  # noqa: BLE001 - 单项检查失败不丢弃其他订阅结果
@@ -235,9 +235,9 @@ def inspect_media_subscription_updates(_arguments: dict[str, Any]) -> ToolResult
             status="unavailable",
             summary="媒体订阅实时核对当前不可用",
             data={
-                "total": max(0, int(total or 0)),
+                "total": max(0, (total or 0)),
                 "returned": 0,
-                "truncated": int(total or 0) > len(rows),
+                "truncated": (total or 0) > len(rows),
                 "subscriptions": [],
                 "items": [],
             },
@@ -335,9 +335,9 @@ def inspect_media_subscription_updates(_arguments: dict[str, Any]) -> ToolResult
         status=status,
         summary=summary,
         data={
-            "total": max(0, int(total or 0)),
+            "total": max(0, (total or 0)),
             "returned": len(subscriptions),
-            "truncated": int(total or 0) > len(subscriptions),
+            "truncated": (total or 0) > len(subscriptions),
             "updates_available_count": updates,
             "up_to_date_count": current,
             "paused_count": paused,

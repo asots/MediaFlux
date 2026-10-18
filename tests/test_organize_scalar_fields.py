@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from app.modules.scraper import MatchResult, TMDBScraper
+
 import json
 import sqlite3
 import unittest
@@ -23,7 +26,7 @@ class _ListPositionScraper:
     def parse_media(_name: str, parent_path: str = "", match=None):
         return SimpleNamespace(
             title="Example", year="", media_type="tv", tmdb_id="",
-            effective_season=[3, 4], effective_episode=[7],
+            effective_season=cast(int, [3, 4]), effective_episode=cast(int, [7]),
         )
 
 
@@ -53,7 +56,7 @@ class _ExistingPositionScraper(_ListPositionScraper):
 
 class OrganizeScalarFieldTests(unittest.TestCase):
     def test_parser_list_positions_are_normalized_before_logging(self):
-        organizer = Organizer(client=MagicMock(), scraper=_ListPositionScraper())
+        organizer = Organizer(client=MagicMock(), scraper=cast(TMDBScraper, _ListPositionScraper()))
 
         parsed = organizer._parse_media_fields("Example Season 3.mkv")
 
@@ -62,9 +65,21 @@ class OrganizeScalarFieldTests(unittest.TestCase):
         self.assertEqual(parsed["title"], "Example")
 
     def test_parser_failure_does_not_fall_back_to_parallel_filename_rules(self):
-        organizer = Organizer(client=MagicMock(), scraper=_FailingPositionScraper())
+        organizer = Organizer(client=MagicMock(), scraper=cast(TMDBScraper, _FailingPositionScraper()))
 
         self.assertEqual(organizer._parse_media_fields("Show.S01E02.mkv"), {})
+
+    def test_disabled_recognition_keeps_execution_parsing_and_metadata_optional(self):
+        organizer = Organizer(local_only=True, recognition_enabled=False)
+        match = MatchResult(tmdb_id="100", media_type="tv")
+
+        self.assertEqual(organizer._parse_media_fields("Show.S01E02.mkv"), {})
+        self.assertEqual(organizer._parse_existing_media_fields("Show.S01E02.mkv"), {})
+        self.assertEqual(organizer._detail_for_match(match), {})
+        self.assertEqual(organizer._tv_season_detail_for_match(match, 1), {})
+        self.assertFalse(organizer._uses_fixed_match_identity())
+        self.assertEqual(organizer._read_performance_snapshot(), {})
+        self.assertTrue(organizer.close())
 
     def test_final_plan_position_overrides_raw_filename_for_logs_and_notifications(self):
         plan = OrganizePlan(
@@ -93,7 +108,7 @@ class OrganizeScalarFieldTests(unittest.TestCase):
 
 
     def test_season_inventory_uses_cached_target_files_without_counting_metadata(self):
-        organizer = Organizer(client=MagicMock(), scraper=_ExistingPositionScraper())
+        organizer = Organizer(client=MagicMock(), scraper=cast(TMDBScraper, _ExistingPositionScraper()))
         files = [
             GuangYaFile("1", "Show.2026.S02E01.mkv", False, 100, "", "season"),
             GuangYaFile("2", "Show.2026.S02E03.mp4", False, 100, "", "season"),
@@ -154,8 +169,8 @@ class OrganizeScalarFieldTests(unittest.TestCase):
                     "skipped",
                     original_parent_id="source",
                     original_name="Example.mkv",
-                    season=[3, 4],
-                    episode=[7],
+                    season=cast(int, [3, 4]),
+                    episode=cast(int, [7]),
                     error="待确认",
                     release_parse={
                         "source_position": {"season": 3, "episode": 7},

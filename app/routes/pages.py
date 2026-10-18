@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -95,9 +96,9 @@ def media_recent(request: Request):
     redirect = require_page_login(request)
     if redirect:
         return redirect
-    selected_server = str(request.query_params.get("server", "all") or "all").strip().lower()
-    selected_type = str(request.query_params.get("type", "all") or "all").strip().lower()
-    raw_query = str(request.query_params.get("q", "") or "")
+    selected_server = (request.query_params.get("server", "all") or "all").strip().lower()
+    selected_type = (request.query_params.get("type", "all") or "all").strip().lower()
+    raw_query = (request.query_params.get("q", "") or "")
     if selected_server not in {"all", "jellyfin", "emby"}:
         raise HTTPException(status_code=400, detail="媒体服务器筛选无效")
     if selected_type not in {"all", "movie", "series", "episode"}:
@@ -170,11 +171,11 @@ def guangya(request: Request):
     return _page(request, "guangya.html", "guangya")
 
 
-def _offline_transfer_defaults() -> dict[str, object]:
+def _offline_transfer_defaults() -> dict[str, Any]:
     """返回离线转存页首帧配置，避免异步回填时控件和标签横向跳动。"""
 
     def split_tags(key: str) -> list[str]:
-        raw = str(config.get(key, "") or "")
+        raw = (config.get(key, "") or "")
         return [item.strip() for item in re.split(r"[,，\r\n]+", raw) if item.strip()]
 
     return {
@@ -182,17 +183,11 @@ def _offline_transfer_defaults() -> dict[str, object]:
             "magnet_enabled": config.get_bool("OFFLINE_MAGNET_ENABLED", True),
             "ed2k_enabled": config.get_bool("OFFLINE_ED2K_ENABLED", True),
             "http_enabled": config.get_bool("OFFLINE_HTTP_ENABLED", False),
-            "target_dir": str(config.get("OFFLINE_TARGET_DIR", "") or "").strip(),
-            "target_dir_name": str(
-                config.get("OFFLINE_TARGET_DIR_NAME", "") or ""
-            ).strip(),
+            "target_dir": (config.get("OFFLINE_TARGET_DIR", "") or "").strip(),
+            "target_dir_name": (config.get("OFFLINE_TARGET_DIR_NAME", "") or "").strip(),
             "secondary_enabled": config.get_bool("OFFLINE_SECONDARY_ENABLED", False),
-            "secondary_dir": str(
-                config.get("OFFLINE_SECONDARY_DIR", "") or ""
-            ).strip(),
-            "secondary_dir_name": str(
-                config.get("OFFLINE_SECONDARY_DIR_NAME", "") or ""
-            ).strip(),
+            "secondary_dir": (config.get("OFFLINE_SECONDARY_DIR", "") or "").strip(),
+            "secondary_dir_name": (config.get("OFFLINE_SECONDARY_DIR_NAME", "") or "").strip(),
             "secondary_keywords": split_tags("OFFLINE_SECONDARY_KEYWORDS"),
             "exclude_keywords": split_tags("OFFLINE_EXCLUDE_KEYWORDS"),
             "min_file_mb": max(0, config.get_int("OFFLINE_MIN_FILE_MB", 0)),
@@ -221,9 +216,9 @@ def media_proxy(request: Request):
     return _page(request, "media_proxy.html", "media_proxy")
 
 
-def _organize_execute_defaults() -> dict[str, object]:
+def _organize_execute_defaults() -> dict[str, Any]:
     """返回整理执行页首帧所需目录，避免异步配置加载前闪出错误空态。"""
-    raw_sources = str(config.get("GY_ORGANIZE_SOURCE_DIRS", "") or "").strip()
+    raw_sources = (config.get("GY_ORGANIZE_SOURCE_DIRS", "") or "").strip()
     try:
         decoded = json.loads(raw_sources) if raw_sources else []
     except (TypeError, ValueError):
@@ -252,23 +247,19 @@ def _organize_execute_defaults() -> dict[str, object]:
 
     return {
         "organize_initial_sources": sources,
-        "organize_initial_target_id": str(
-            config.get("GY_ORGANIZE_TARGET_DIR", "") or ""
-        ).strip(),
-        "organize_initial_target_name": str(
-            config.get("GY_ORGANIZE_TARGET_DIR_NAME", "") or ""
-        ).strip(),
+        "organize_initial_target_id": (config.get("GY_ORGANIZE_TARGET_DIR", "") or "").strip(),
+        "organize_initial_target_name": (config.get("GY_ORGANIZE_TARGET_DIR_NAME", "") or "").strip(),
     }
 
 
-def _organize_extension_defaults() -> dict[str, list[str]]:
+def _organize_extension_defaults() -> dict[str, Any]:
     from app.modules.organize import (
         DEFAULT_ORGANIZE_METADATA_EXTS,
         DEFAULT_ORGANIZE_VIDEO_EXTS,
     )
 
     def current_extensions(key: str, defaults: tuple[str, ...]) -> list[str]:
-        raw = str(config.get(key, "") or "").strip()
+        raw = (config.get(key, "") or "").strip()
         if not raw:
             return list(defaults)
         values: list[str] = []

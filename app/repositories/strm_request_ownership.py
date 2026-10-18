@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterable
 from typing import Any
 
 from app.logger import redact_sensitive_text
@@ -32,7 +33,7 @@ def _snapshot(row) -> dict[str, Any]:
 
 
 def _begin_request_owners(
-    conn: sqlite3.Connection, request_ids: object, stamp: str
+    conn: sqlite3.Connection, request_ids: Iterable[int | str] | None, stamp: str
 ) -> list[dict[str, Any]]:
     owners = []
     for request_id in dict.fromkeys(
@@ -82,7 +83,7 @@ def _current_owner_row(conn: sqlite3.Connection, owner: dict[str, Any]):
 
 
 def _attach_request_work(
-    conn: sqlite3.Connection, owners: object, kind: str, work_key: str
+    conn: sqlite3.Connection, owners: Iterable[dict[str, Any]] | None, kind: str, work_key: str
 ) -> None:
     for owner in owners or ():
         if _current_owner_row(conn, owner) is None:
@@ -95,18 +96,18 @@ def _attach_request_work(
                 int(owner["generation"]),
                 str(owner["organize_task_id"]),
                 kind,
-                str(work_key),
+                work_key,
             ),
         )
 
 
 def refresh_work_key(path: str, allow_emby: bool) -> str:
     return hashlib.sha256(
-        json.dumps([path, bool(allow_emby)], ensure_ascii=False).encode()
+        json.dumps([path, allow_emby], ensure_ascii=False).encode()
     ).hexdigest()
 
 
-def current_strm_request_owners(request_ids: object) -> list[dict[str, Any]]:
+def current_strm_request_owners(request_ids: Iterable[int | str] | None) -> list[dict[str, Any]]:
     ids = list(
         dict.fromkeys(int(value) for value in (request_ids or ()) if int(value) > 0)
     )
@@ -123,7 +124,7 @@ def current_strm_request_owners(request_ids: object) -> list[dict[str, Any]]:
 
 
 def _claimed_change_leases(
-    conn: sqlite3.Connection, claimed_targets: object, *, include_dirty: bool = False
+    conn: sqlite3.Connection, claimed_targets: Iterable[dict[str, Any]] | None, *, include_dirty: bool = False
 ) -> dict[str, int]:
     """只认可调用者提交的、仍持有 owner/代次的领取快照。"""
     leases = {}
@@ -147,9 +148,9 @@ def _claimed_change_leases(
 
 def request_owners_for_work(
     kind: str,
-    work_keys: object,
+    work_keys: Iterable[object] | None,
     *,
-    claimed_targets: object = None,
+    claimed_targets: Iterable[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     keys = list(dict.fromkeys(str(key) for key in (work_keys or ())))
     if not keys:
@@ -224,7 +225,7 @@ def request_owners_for_work(
     return owners
 
 
-def has_pending_strm_request_refresh(owners: object) -> bool:
+def has_pending_strm_request_refresh(owners: Iterable[dict[str, Any]] | None) -> bool:
     if not owners:
         return False
     with _db().get_conn() as conn:
@@ -246,7 +247,7 @@ def _update_strm_owner_state(
     stamp: str,
     *,
     resume_failure: bool = False,
-    claimed_targets: object = None,
+    claimed_targets: Iterable[dict[str, Any]] | None = None,
     interruption_proof: bool = False,
 ) -> bool:
     row = _current_owner_row(conn, owner)
@@ -378,7 +379,7 @@ def _update_strm_owner_state(
 
 
 def update_strm_request_state(
-    owner: dict[str, Any], *, claimed_targets: object = None, **fields: Any
+    owner: dict[str, Any], *, claimed_targets: Iterable[dict[str, Any]] | None = None, **fields: Any
 ) -> bool:
     with _db().get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -395,12 +396,12 @@ def _complete_request_work(
         for row in conn.execute(
             "SELECT request_id,generation,organize_task_id,failed_lease_generation "
             "FROM strm_request_work WHERE kind=? AND work_key=?",
-            (kind, str(work_key)),
+            (kind, work_key),
         ).fetchall()
     ]
     conn.execute(
         "DELETE FROM strm_request_work WHERE kind=? AND work_key=?",
-        (kind, str(work_key)),
+        (kind, work_key),
     )
     for owner in owners:
         _update_strm_owner_state(

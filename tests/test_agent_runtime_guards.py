@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import cast
 
 import asyncio
 import json
@@ -165,6 +166,16 @@ class AsyncBridgeTests(unittest.TestCase):
 
         self.assertEqual(run_awaitable_sync(value()), 42)
 
+    def test_runs_generic_awaitable_from_sync_context(self):
+        class Value:
+            def __await__(self):
+                async def resolve():
+                    return 42
+
+                return resolve().__await__()
+
+        self.assertEqual(run_awaitable_sync(Value()), 42)
+
     def test_fails_fast_inside_running_event_loop(self):
         async def scenario():
             started = time.perf_counter()
@@ -186,7 +197,7 @@ class AgentRuntimeGenerationTests(unittest.TestCase):
 
     def test_runtime_generation_comparison_rejects_coercible_values(self):
         current = current_agent_runtime_generation()
-        self.assertFalse(agent_runtime_generation_is_current(str(current)))
+        self.assertFalse(agent_runtime_generation_is_current(cast(int, str(current))))
         self.assertFalse(agent_runtime_generation_is_current(True))
         self.assertFalse(agent_runtime_generation_is_current(False))
 

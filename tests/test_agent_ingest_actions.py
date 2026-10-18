@@ -418,7 +418,9 @@ class AgentIngestActionTests(unittest.TestCase):
             [(3, "Third"), (1, "First")],
         )
         self.assertNotIn("Newer", repr(result.to_dict()))
-        self.assertEqual(self.resources.get(owner="owner-a")["search_id"], latest_id)
+        get_result = self.resources.get(owner="owner-a")
+        assert get_result is not None
+        self.assertEqual(get_result["search_id"], latest_id)
 
     def test_resource_inspection_does_not_fill_missing_bound_position_from_latest(self):
         snapshot = safe_resource_snapshot(
@@ -505,8 +507,8 @@ class AgentIngestActionTests(unittest.TestCase):
             source_type="direct_url",
             conversation_session_id="session-b",
         )
-        self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
+        assert (first) is not None
+        assert (second) is not None
         self.assertNotEqual(first.session_id, second.session_id)
 
     @patch(
@@ -705,6 +707,7 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertEqual(result.data["items"][0]["position"], 1)
         self.assertEqual(result.data["items"][0]["size_bytes"], 0)
         snapshot = self.store.get(owner="owner-a", source_type="guangya_share")
+        assert snapshot is not None
         self.assertEqual(snapshot.private["file_ids"], ["file-secret-2"])
 
     @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
@@ -1020,6 +1023,7 @@ def test_direct_submission_receipt_matches_real_dispatch(
         qb.assert_called_once()
         gy.assert_called_once()
         row = db.get_download_request(request_number)
+        assert row is not None
         assert row["qb_status"] == ("submitted" if qb_ok else "failed")
         assert row["gy_status"] == ("submitted" if gy_ok else "failed")
         with db.get_conn() as conn:

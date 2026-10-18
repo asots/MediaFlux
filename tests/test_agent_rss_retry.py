@@ -1,6 +1,9 @@
 """Media Agent RSS 失败分类与安全重试回归。"""
 
 from __future__ import annotations
+from typing import cast
+from urllib3.connection import HTTPConnection
+from urllib3.connectionpool import ConnectionPool
 
 import json
 from unittest.mock import MagicMock, patch
@@ -101,8 +104,8 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
             (_Response(429), "qb_rate_limited", True),
             (_Response(503), "qb_outcome_unknown", False),
             (requests.ConnectionError("private host"), "qb_outcome_unknown", False),
-            (requests.ConnectionError(MaxRetryError(None, "/add", NewConnectionError(None, "refused"))), "qb_unavailable", True),
-            (requests.ConnectionError(MaxRetryError(None, "/add", ProtocolError("connection lost"))), "qb_outcome_unknown", False),
+            (requests.ConnectionError(MaxRetryError(cast(ConnectionPool, None), "/add", NewConnectionError(cast(HTTPConnection, None), "refused"))), "qb_unavailable", True),
+            (requests.ConnectionError(MaxRetryError(cast(ConnectionPool, None), "/add", ProtocolError("connection lost"))), "qb_outcome_unknown", False),
             (requests.ConnectTimeout("private host"), "qb_unavailable", True),
             (requests.ReadTimeout("outcome unknown"), "qb_outcome_unknown", False),
             (requests.Timeout("outcome unknown"), "qb_outcome_unknown", False),
@@ -193,8 +196,12 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
                 (first,),
             )
         self.assertEqual(db.claim_retryable_failed_rss_entries(expected), [])
-        self.assertEqual(db.get_rss_entry(first)["status"], "failed")
-        self.assertEqual(db.get_rss_entry(second)["status"], "failed")
+        get_rss_entry_result = db.get_rss_entry(first)
+        assert get_rss_entry_result is not None
+        self.assertEqual(get_rss_entry_result["status"], "failed")
+        get_rss_entry_result_2 = db.get_rss_entry(second)
+        assert get_rss_entry_result_2 is not None
+        self.assertEqual(get_rss_entry_result_2["status"], "failed")
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE rss_entries SET failure_code='qb_unavailable' WHERE id=?",
@@ -208,6 +215,7 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(claimed), 2)
         for entry_id in (first, second):
             row = db.get_rss_entry(entry_id)
+            assert row is not None
             self.assertEqual(row["status"], "submitting")
             self.assertEqual(row["retry_count"], 1)
             self.assertEqual(row["failure_code"], "")
@@ -255,6 +263,7 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(result.status, "review_required")
         self.assertEqual(result.data["outcome_unknown"], 1)
         self.assertIn("待核对 1", result.summary)
+        assert result.error is not None
         self.assertIn("勿直接重试", result.error)
 
     def test_mixed_unknown_retry_reports_all_three_outcomes(self):
@@ -346,6 +355,7 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["failed"], 1)
         self.assertEqual(result["outcome_unknown"], 1)
         row = db.get_rss_entry(entry_id)
+        assert row is not None
         self.assertEqual(row["failure_code"], "qb_outcome_unknown")
         self.assertEqual(row["failure_retryable"], 0)
 
@@ -378,11 +388,14 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
             },
         )
         retried_failure = db.get_rss_entry(failed_id)
+        assert retried_failure is not None
         self.assertEqual(retried_failure["status"], "failed")
         self.assertEqual(retried_failure["failure_code"], "qb_rate_limited")
         self.assertEqual(retried_failure["failure_retryable"], 1)
         self.assertEqual(retried_failure["retry_count"], 1)
-        self.assertEqual(db.get_rss_entry(success_id)["status"], "downloaded")
+        get_rss_entry_result_3 = db.get_rss_entry(success_id)
+        assert get_rss_entry_result_3 is not None
+        self.assertEqual(get_rss_entry_result_3["status"], "downloaded")
 
     def test_cloud_retry_needs_no_qb_and_rejects_duplicate_confirmation(self):
         from app.agent.errors import AgentToolError
@@ -405,8 +418,12 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
                 with self.assertRaises(AgentToolError):
                     retry_failed_rss_confirmed({"limit": 10}, fingerprint)
                 self.assertEqual(gy.call_count, 1)
-        self.assertEqual(db.get_rss_entry(entry)["status"], "downloaded")
-        self.assertEqual(db.get_rss_entry(entry)["retry_count"], 1)
+        get_rss_entry_result_4 = db.get_rss_entry(entry)
+        assert get_rss_entry_result_4 is not None
+        self.assertEqual(get_rss_entry_result_4["status"], "downloaded")
+        get_rss_entry_result_5 = db.get_rss_entry(entry)
+        assert get_rss_entry_result_5 is not None
+        self.assertEqual(get_rss_entry_result_5["retry_count"], 1)
 
     def test_mixed_retry_keeps_each_backend_and_does_not_leak_snapshot(self):
         from app.modules import download_dispatcher as dispatcher
@@ -423,7 +440,10 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
         gy.assert_called_once()
         qb.assert_called_once()
         self.assertEqual(result.data["submitted"], 2)
-        self.assertTrue(all(db.get_rss_entry(e)["status"] == "downloaded" for e in (first, second)))
+        for entry_id in (first, second):
+            entry = db.get_rss_entry(entry_id)
+            assert entry is not None
+            self.assertEqual(entry["status"], "downloaded")
         serialized = json.dumps(result.to_dict(), ensure_ascii=False)
         for private in ("PRIVATESECRET", "private/subscription", "cloud_rules", "QB_SECRET", "torrent_url"):
             self.assertNotIn(private, serialized)
@@ -448,7 +468,9 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
                 with self.assertRaises(AgentToolError):
                     retry_failed_rss_confirmed({"limit": 10}, fingerprint)
             submit.assert_not_called()
-        self.assertEqual(db.get_rss_entry(entry)["status"], "failed")
+        get_rss_entry_result_6 = db.get_rss_entry(entry)
+        assert get_rss_entry_result_6 is not None
+        self.assertEqual(get_rss_entry_result_6["status"], "failed")
 
     def test_cloud_unknown_receipt_overrides_even_retryable_failure_marker(self):
         for receipt in ({"task_ids": ["accepted"]}, {"partial_success": True}, {"outcome_unknown": True}):
@@ -473,8 +495,12 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
         submit.assert_called_once()
         self.assertEqual(result["success_count"], 1)
         self.assertEqual(result["failure_count"], 1)
-        self.assertEqual(db.get_rss_entry(unknown)["failure_code"], "guangya_outcome_unknown")
-        self.assertEqual(db.get_rss_entry(safe)["status"], "downloaded")
+        get_rss_entry_result_7 = db.get_rss_entry(unknown)
+        assert get_rss_entry_result_7 is not None
+        self.assertEqual(get_rss_entry_result_7["failure_code"], "guangya_outcome_unknown")
+        get_rss_entry_result_8 = db.get_rss_entry(safe)
+        assert get_rss_entry_result_8 is not None
+        self.assertEqual(get_rss_entry_result_8["status"], "downloaded")
 
     def test_cloud_manual_and_agent_retry_share_cooldown_and_attempt_cap(self):
         from app.modules import download_dispatcher as dispatcher

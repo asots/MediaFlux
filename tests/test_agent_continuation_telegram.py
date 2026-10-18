@@ -1,5 +1,8 @@
 """后台续行 Telegram 边缘：原生事件/按钮 + 隔离 outbox，无真实发信。"""
 from __future__ import annotations
+from starlette.requests import Request
+from app.agent.kernel.session import AgentSession
+from typing import cast
 
 import asyncio
 import json
@@ -66,6 +69,7 @@ class NativeBotFixture(FakeBot):
 
 
 class NativeEventSessionFixture:
+    cancel_effect: AsyncMock
     """只替代模型/核心驱动，入口仍用真实 TelegramKernelTransport/consume_events。"""
 
     def __init__(self):
@@ -109,7 +113,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         self.session = NativeEventSessionFixture()
         self.runtime = types.SimpleNamespace(
             session=self.session,
-            telegram=TelegramKernelTransport(self.session),
+            telegram=TelegramKernelTransport(cast(AgentSession, self.session)),
             store=types.SimpleNamespace(load=AsyncMock(return_value=types.SimpleNamespace(pending_effect_plan_id=PLAN))),
         )
         self.values = {"TG_CHAT_ID": "-100", "TG_AGENT_ALLOWED_USER_IDS": "7", "TG_AGENT_ENABLED": "1"}
@@ -119,7 +123,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         self.enterContext(patch.object(center, "is_agent_enabled", return_value=True))
         self.enterContext(patch.object(center, "allows_notification", return_value=False))
         self.enterContext(patch.object(center, "wake_telegram_notification_dispatcher", return_value=False))
-        self.enterContext(patch.object(center, "notification_target_chat_id", side_effect=lambda chat_id="": str(chat_id)))
+        self.enterContext(patch.object(center, "notification_target_chat_id", side_effect=lambda chat_id="": chat_id))
         self.enterContext(patch("app.notifier.get_bot", return_value=self.bot))
         self.enterContext(patch.object(adapter, "get_agent_kernel_runtime", return_value=self.runtime))
         self.enterContext(patch.object(adapter.agent_rate_limiter, "allow", return_value=True))
@@ -165,6 +169,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         message.reply_to_message = Message("模型引用", chat_id=-999, user_id=0)
         message.reply_to_message.message_thread_id = 999
         adapter._execute_query(self.bot, TELEBOT, message, chat_id="-100", user_id="7", text=message.text)
+        assert self.session.last_input is not None
         self.assertEqual(self.session.last_input.delivery_route, ROUTE)
         self.assertNotIn("delivery_route", self.session.last_input.reply_context)
 
@@ -173,6 +178,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         message.message_thread_id = 42
         token = create_session_callback_route(OWNER, SESSION, 42)
         adapter.handle_agent_callback(self.bot, Call(f"agk:c:{token}:{PLAN}", message), TELEBOT)
+        assert self.session.last_confirmation is not None
         self.assertEqual(self.session.last_confirmation["delivery_route"], ROUTE)
         self.assertEqual(self.session.last_confirmation["session_id"], SESSION)
 
@@ -196,6 +202,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
                 self.bot, Call(f"agk:s:{handle}:p", message), TELEBOT,
                 owner=OWNER, session_id=SESSION, message_thread_id=42,
             )
+        assert self.session.last_input is not None
         self.assertEqual(self.session.last_input.delivery_route, ROUTE)
         self.assertEqual(self.session.last_input.metadata["selection"]["positions"], [1])
         self.assertTrue(any("候选已预检" in text for text, *_ in self.bot.edits))
@@ -224,10 +231,12 @@ class AgentContinuationTelegramTests(unittest.TestCase):
                 QueryEnvelope(OWNER, SESSION, "任务", channel=channel, delivery_route=ROUTE).to_agent_input()
 
     def test_web_transport_never_forwards_delivery_route(self):
-        web = WebKernelTransport(self.session)
+        web = WebKernelTransport(cast(AgentSession, self.session))
         asyncio.run(web.query_view(QueryEnvelope(OWNER, SESSION, "任务", channel="telegram", delivery_route=ROUTE)))
+        assert self.session.last_input is not None
         self.assertEqual(self.session.last_input.delivery_route, {})
         asyncio.run(web.confirm_view(EffectEnvelope(OWNER, SESSION, PLAN, channel="telegram", delivery_route=ROUTE)))
+        assert self.session.last_confirmation is not None
         self.assertEqual(self.session.last_confirmation["delivery_route"], {})
         self.assertEqual(self.session.last_confirmation["channel"], "web")
 
@@ -239,7 +248,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
             (agent_api.confirm_action, {"plan_id": PLAN, "session_id": SESSION}),
         ):
             with self.subTest(endpoint=endpoint.__name__), patch.object(agent_api, "require_api_login"), patch.object(agent_api, "get_agent_kernel_runtime") as runtime:
-                response = asyncio.run(endpoint(None, {**payload, "delivery_route": ROUTE}))
+                response = asyncio.run(endpoint(cast(Request, None), {**payload, "delivery_route": ROUTE}))
                 self.assertEqual(response.status_code, 400)
                 runtime.assert_not_called()
 
@@ -284,6 +293,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         self.assertEqual([button.text for button in buttons], ["确认执行", "取消", "只解释影响"])
         for button in buttons:
             match = adapter._CALLBACK_RE.fullmatch(button.callback_data)
+            assert match is not None
             self.assertEqual(match.group("plan"), PLAN)
             self.assertEqual(resolve_session_callback_route(OWNER, match.group("route"), 42), SESSION)
             self.assertEqual(resolve_session_callback_route(OWNER, match.group("route"), 43), "")
@@ -301,6 +311,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         self.assertNotIn("message_thread_id", kwargs)
         button = kwargs["reply_markup"].keyboard[0][0]
         match = adapter._CALLBACK_RE.fullmatch(button.callback_data)
+        assert match is not None
         self.assertEqual(resolve_session_callback_route(OWNER, match.group("route"), None), SESSION)
 
     def test_next_private_approval_keeps_explicit_session_and_can_be_cancelled(self):
@@ -321,10 +332,12 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         route = create_session_callback_route(OWNER, SESSION, None)
         message = Message("第一张确认卡", user_id=0)
         adapter.handle_agent_callback(self.bot, Call(f"agk:c:{route}:{PLAN}", message), TELEBOT)
+        assert self.session.last_confirmation is not None
         self.assertEqual(self.session.last_confirmation["session_id"], SESSION)
         markup = self.bot.edits[-1][3]["reply_markup"]
         cancel = next(b for b in markup.buttons if b.callback_data.startswith("agk:x:"))
         match = adapter._CALLBACK_RE.fullmatch(cancel.callback_data)
+        assert match is not None
         self.assertTrue(match.group("route"), "后续确认卡丢失了显式会话路由")
         self.assertEqual(resolve_session_callback_route(OWNER, match.group("route"), None), SESSION)
         self.runtime.store.load.return_value.pending_effect_plan_id = next_plan
@@ -379,7 +392,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
         self.publish(approval_payload)
         center.drain_telegram_notifications(limit=100)
         self.assertIsNone(self.bot.sent[0][2]["reply_markup"])
-        self.assertIsNotNone(self.bot.sent[-1][2]["reply_markup"])
+        assert (self.bot.sent[-1][2]["reply_markup"]) is not None
 
     def test_partial_persist_failure_retains_pending_and_retry_fills_missing_parts(self):
         payload = self.prepare(answer="长结果。" * 2000)
@@ -469,7 +482,7 @@ class AgentContinuationTelegramTests(unittest.TestCase):
                         self.assertEqual(len(self.bot.sent), start + 3)
                         self.assertEqual(self.bot.sent[-2][1], first_body)
                         self.assertIsNone(self.bot.sent[-2][2]["reply_markup"])
-                        self.assertIsNotNone(self.bot.sent[-1][2]["reply_markup"])
+                        assert (self.bot.sent[-1][2]["reply_markup"]) is not None
 
     def test_existing_part_keys_are_claimed_in_numeric_order_across_workers(self):
         from concurrent.futures import ThreadPoolExecutor

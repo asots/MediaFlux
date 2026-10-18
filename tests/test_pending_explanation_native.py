@@ -1,3 +1,7 @@
+
+from typing import cast
+from collections.abc import Callable
+from app.clients.http import FixedHostHttpClient
 import json
 from contextlib import asynccontextmanager
 
@@ -131,7 +135,7 @@ async def lifecycle(mode):
                         model="fixture",
                         protocol="chat_completions",
                     ),
-                    client_factory=lambda **_: Client(),
+                    client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: Client()),
                 ),
                 catalog=catalog,
                 retriever=CapabilityRetriever(),

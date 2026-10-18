@@ -139,7 +139,7 @@ def _selected_strm_sources(
         matches = [
             source
             for source in configured
-            if unicodedata.normalize("NFKC", str(source.get("name") or "")).casefold()
+            if unicodedata.normalize("NFKC", (source.get("name") or "")).casefold()
             == unicodedata.normalize("NFKC", requested_name).casefold()
         ]
         if not matches:
@@ -169,18 +169,18 @@ def _capture_strm_run(arguments: dict[str, Any]) -> dict[str, Any]:
 
     selected_sources, selection_error = _selected_strm_sources(arguments)
     scheduler = get_scheduler()
-    validation_error = str(scheduler.validate_config(auto_only=False) or "")
+    validation_error = (scheduler.validate_config(auto_only=False) or "")
     raw_status = scheduler.status()
     running = isinstance(raw_status, dict) and raw_status.get("running") is True
     last_run = raw_status.get("last_run") if isinstance(raw_status, dict) else {}
     last_run_id = (
         _bounded_int(last_run.get("id")) if isinstance(last_run, dict) else 0
     )
-    payload = {key: config.get(key, "") for key in _STRM_CONFIRMATION_KEYS}
+    payload: dict[str, Any] = {key: config.get(key, "") for key in _STRM_CONFIRMATION_KEYS}
     payload.update(
         {
             "selected_source_ids": [
-                str(item.get("id") or "") for item in selected_sources
+                (item.get("id") or "") for item in selected_sources
             ],
             "selection_error": selection_error,
             "validation_error": validation_error,
@@ -371,7 +371,7 @@ def run_strm_once_confirmed(
 ) -> ToolResult:
     state = _capture_strm_run(arguments)
     if not secrets.compare_digest(
-        str(state["fingerprint"]), str(expected_context or "")
+        str(state["fingerprint"]), (expected_context or "")
     ):
         raise AgentToolError(
             "STRM 配置已变化（来源或运行状态可能已更新），请重新预检",
@@ -392,9 +392,9 @@ def strm_runtime_status(_arguments: dict[str, Any]) -> ToolResult:
     available_source_names = (
         list(
             dict.fromkeys(
-                str(item.get("name") or "").strip()
+                (item.get("name") or "").strip()
                 for item in configured_sources
-                if str(item.get("name") or "").strip()
+                if (item.get("name") or "").strip()
             )
         )
         if not source_error

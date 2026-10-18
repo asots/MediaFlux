@@ -28,7 +28,7 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _bounded_int(value: object, *, maximum: int = 1 << 63) -> int:
+def _bounded_int(value: Any, *, maximum: int = 1 << 63) -> int:
     if isinstance(value, bool):
         return 0
     try:
@@ -39,12 +39,12 @@ def _bounded_int(value: object, *, maximum: int = 1 << 63) -> int:
 
 def _snapshot(item: GuangYaFile) -> dict[str, Any]:
     return {
-        "file_id": str(item.file_id),
-        "name": str(item.name),
-        "is_dir": bool(item.is_dir),
+        "file_id": (item.file_id),
+        "name": (item.name),
+        "is_dir": (item.is_dir),
         "size": _bounded_int(item.size),
-        "etag": str(item.etag or ""),
-        "parent_id": str(item.parent_id or "0"),
+        "etag": (item.etag or ""),
+        "parent_id": (item.parent_id or "0"),
         "updated_at": _bounded_int(item.updated_at),
     }
 
@@ -53,14 +53,14 @@ def _matches(current: GuangYaFile | None, expected: dict[str, Any]) -> bool:
     if current is None:
         return False
     if (
-        str(current.file_id) != str(expected.get("file_id") or "")
-        or str(current.name) != str(expected.get("name") or "")
-        or bool(current.is_dir) != bool(expected.get("is_dir"))
+        (current.file_id) != str(expected.get("file_id") or "")
+        or (current.name) != str(expected.get("name") or "")
+        or (current.is_dir) != bool(expected.get("is_dir"))
         or _bounded_int(current.size) != _bounded_int(expected.get("size"))
     ):
         return False
     expected_etag = str(expected.get("etag") or "")
-    return not expected_etag or str(current.etag or "") in {"", expected_etag}
+    return not expected_etag or (current.etag or "") in {"", expected_etag}
 
 
 def _open_client() -> GuangYaClient:
@@ -106,7 +106,7 @@ def list_guangya_recycle(
     try:
         client = _open_client()
         items = client.list_recycle(max_items=_MAX_RECYCLE_ITEMS)
-        generation = int(client.credential_generation)
+        generation = (client.credential_generation)
     except Exception as exc:
         raise _public_error(exc, fallback="光鸭回收站当前不可用") from exc
     finally:
@@ -222,7 +222,7 @@ def _restore_snapshot(
     client: GuangYaClient | None = None
     try:
         client = _open_client()
-        if int(client.credential_generation) != _bounded_int(
+        if (client.credential_generation) != _bounded_int(
             collection.get("credential_generation")
         ):
             raise AgentToolError(
@@ -231,7 +231,7 @@ def _restore_snapshot(
             )
         if verify_live:
             current = {
-                str(item.file_id): item
+                (item.file_id): item
                 for item in client.list_recycle(max_items=_MAX_RECYCLE_ITEMS)
             }
             if any(
@@ -299,7 +299,7 @@ def execute_restore_guangya_recycle(
 ) -> ToolResult:
     try:
         safe, fingerprint = _restore_snapshot(arguments, verify_live=True)
-        if fingerprint != str(expected_context or ""):
+        if fingerprint != (expected_context or ""):
             raise AgentToolError(
                 "回收站恢复计划已变化，请重新预检",
                 code="confirmation_stale",
@@ -307,7 +307,7 @@ def execute_restore_guangya_recycle(
         collection, selected = _selected_recycle_snapshots(arguments)
         client = _open_client()
         try:
-            if int(client.credential_generation) != _bounded_int(
+            if (client.credential_generation) != _bounded_int(
                 collection.get("credential_generation")
             ):
                 raise AgentToolError(
@@ -361,7 +361,7 @@ def _clear_snapshot(*, verify_nonempty: bool = True) -> tuple[dict[str, Any], st
     try:
         client = _open_client()
         items = client.list_recycle(max_items=_MAX_RECYCLE_ITEMS)
-        generation = int(client.credential_generation)
+        generation = (client.credential_generation)
     finally:
         if client is not None:
             close_guangya_client(client)
@@ -369,7 +369,7 @@ def _clear_snapshot(*, verify_nonempty: bool = True) -> tuple[dict[str, Any], st
         raise AgentToolError("光鸭回收站已经为空", code="precondition_failed")
     # Provider 未承诺回收站列表顺序稳定。冻结“集合”而不是当前返回顺序，
     # 避免仅因分页/排序变化让同一批对象的确认票据无故失效。
-    ordered = sorted(items, key=lambda item: str(item.file_id))
+    ordered = sorted(items, key=lambda item: (item.file_id))
     snapshots = [_snapshot(item) for item in ordered]
     safe = {
         "count": len(ordered),
@@ -424,14 +424,14 @@ def execute_clear_guangya_recycle(
 ) -> ToolResult:
     try:
         safe, fingerprint = _clear_snapshot()
-        if fingerprint != str(expected_context or ""):
+        if fingerprint != (expected_context or ""):
             raise AgentToolError(
                 "光鸭回收站内容已变化，请重新预检",
                 code="confirmation_stale",
             )
         client = _open_client()
         try:
-            if int(client.credential_generation) != safe["credential_generation"]:
+            if (client.credential_generation) != safe["credential_generation"]:
                 raise AgentToolError(
                     "光鸭登录凭据已变化，请重新查询回收站",
                     code="confirmation_stale",

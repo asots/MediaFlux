@@ -1,4 +1,5 @@
 """ID08: real ingress, provider wire, reader and reopened SQLite."""
+from typing import Any
 import asyncio
 import json
 import re
@@ -51,12 +52,13 @@ class Wire:
         handles = re.findall(r'ref_[A-Za-z0-9_-]+', serialized)
         if handles and not self.reading:
             self.reading = True
-            message = {'content': None, 'tool_calls': [{'id': 'read-tail-' + str(len(self.requests)), 'type': 'function', 'function': {
+            message: dict[str, Any] = {'content': None, 'tool_calls': [{'id': 'read-tail-' + str(len(self.requests)), 'type': 'function', 'function': {
                 'name': 'agent.read_result', 'arguments': json.dumps({'handle': handles[-1], 'path': '/text', 'offset': self.offset, 'limit': 1000})}}]}
             finish = 'tool_calls'
         else:
             self.reading = False
-            message, finish = {'content': '已核对引用。'}, 'stop'
+            message = {'content': '已核对引用。'}
+            finish = 'stop'
         if self.protocol == 'responses':
             output = [{'type': 'function_call', 'call_id': call['id'], **call['function']} for call in message.get('tool_calls', [])]
             if not output:
@@ -242,13 +244,13 @@ def test_reference_capacity_is_explicit_and_rolls_back_before_wire(store, pressu
     assert original_conversation[0]['history_id']
     if pressure == 'receipt_merge':
         class ReceiptStore(SQLiteKernelStore):
-            async def commit(self, lease, *, conversation=None, updates=()):
+            async def commit(self, lease, *, conversation=None, updates=(), task_patch=None):
                 if conversation and any(row.get('reply_context') for row in conversation):
                     await self.update_effect_state(owner=owner, session_id=sid, change=lambda state: state.metadata.update(effect_waits={
                         'legal-plan': {'state': 'terminal', 'delivered': False, 'receipt_message': {
                             'role': 'assistant', 'content': '合法完成回执', 'tool_name': 'old.inspect',
                             'effect_plan_id': 'legal-plan', 'completion_receipt_id': 'legal-plan'}}}))
-                return await super().commit(lease, conversation=conversation, updates=updates)
+                return await super().commit(lease, conversation=conversation, updates=updates, task_patch=task_patch)
         store = ReceiptStore(secret_provider=lambda: 'id08-offline-key')
     body = 'A' * (162500 if pressure == 'state' else 170000 if pressure != 'fits' else 4096)
     result, wire, _, _ = ingress(store, body=body)

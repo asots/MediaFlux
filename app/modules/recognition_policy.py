@@ -41,7 +41,7 @@ def automatic_match_threshold(value: object | None = None) -> float:
 
 def automatic_match_confirmation_message(value: object | None = None) -> str:
     policy = automatic_match_policy(value)
-    percentage = int(round(policy.threshold * 100))
+    percentage = round(policy.threshold * 100)
     return (
         f"自动整理采用{policy.label}安全预设，要求严格匹配达到 "
         f"{percentage}%，已转人工确认"

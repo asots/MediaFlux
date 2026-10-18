@@ -1,6 +1,12 @@
 """effect READ quota anchor：原生 pipeline 拒限，离线、无模型、无云盘。"""
 from __future__ import annotations
 
+from typing import cast
+
+import operator
+
+from typing import Any
+
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict
@@ -45,7 +51,7 @@ def effect_case():
         origin_generation=1, expected_task=None, admission_fence=asdict(binding.fence),
         effective_digest=binding.effective_digest, model_policy={}, channel="web",
         model_limit=8, tool_limit=8)
-    row = {"expires_at": NOW + 300}
+    row: dict[str, Any] = {"expires_at": NOW + 300}
     register_effect(row, SimpleNamespace(origin=origin, plan_id=lease.continuation_id,
         lease=lease), NOW)
     state.metadata["effect_waits"] = {lease.continuation_id: row}
@@ -93,10 +99,11 @@ def native_denial(*, effect=ToolEffect.READ, name=READ, reason="quota",
         async def progress(_value):
             pass
 
-        handlers = ({"read": handler} if effect is ToolEffect.READ else
-            {"prepare": handler, "execute_confirmed": handler})
         tool = KernelToolSpec(name=name, domain="library", description="离线读取测试",
-            input_schema={"type": "object", "properties": {}}, effect=effect, **handlers)
+            input_schema={"type": "object", "properties": {}}, effect=effect,
+            read=handler if effect is ToolEffect.READ else None,
+            prepare=handler if effect is not ToolEffect.READ else None,
+            execute_confirmed=handler if effect is not ToolEffect.READ else None)
         store = InMemorySessionStateStore(clock=lambda: NOW)
         lease, _ = await store.begin_turn(owner="anchor-owner", session_id="anchor-session",
             request_id="native-denial")
@@ -141,9 +148,9 @@ def test_read_permit_has_stable_kernel_type_and_preserves_denial():
     assert str(permit) == str(permit.__cause__)
     assert permit.tool_name == READ
     with pytest.raises(TypeError):
-        permit.rate_limit["remaining"] = 1
+        operator.setitem(cast(dict[str, object], permit.rate_limit), "remaining", 1)
     with pytest.raises(AttributeError):
-        permit.rate_limit = {}
+        setattr(permit, "rate_limit", {})
 
 
 def test_native_quota_park_restores_original_arguments(effect_case):

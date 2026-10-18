@@ -1,6 +1,8 @@
 """本地媒体待确认队列与终态历史的安全 Agent 摘要。"""
 
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
 import json
 from unittest.mock import patch
@@ -82,7 +84,7 @@ class LocalMediaSummaryUnitTests(IsolatedDatabaseTestCase):
             with self.assertRaises(AgentToolError):
                 validator({"path": "/private"})
             with self.assertRaises(AgentToolError):
-                validator([])
+                validator(cast(dict[str, Any], []))
 
     def test_review_queue_summary_is_owner_scoped_and_bucketed(self):
         self._task(

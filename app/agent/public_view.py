@@ -592,7 +592,8 @@ def format_partial_progress(
             if not title:
                 continue
             year = _safe(item.get("year"), limit=8)
-            media_type = {"movie": "电影", "Movie": "电影", "tv": "剧集", "Series": "剧集", "Episode": "单集"}.get(item.get("media_type") or item.get("type"), "")
+            media_types: dict[object, str] = {"movie": "电影", "Movie": "电影", "tv": "剧集", "Series": "剧集", "Episode": "单集"}
+            media_type = media_types.get(item.get("media_type") or item.get("type"), "")
             if media_type == "单集":
                 season, episode = _int_value(item.get("season_number")), _int_value(item.get("episode_number"))
                 position = ((f"S{season:02}" if season is not None and season >= 0 else "") + f"E{episode:02}"
@@ -690,7 +691,7 @@ def public_conversation_messages(
     folded_result_index = -1
     last_result = candidate_view.get("last_result") if candidate_view else None
     last_text = last_result.get("text") if isinstance(last_result, Mapping) else None
-    if isinstance(last_text, str) and last_text.strip():
+    if candidate_view is not None and isinstance(last_text, str) and last_text.strip():
         for index in range(len(conversation) - 1, -1, -1):
             item = conversation[index]
             if (
@@ -705,11 +706,15 @@ def public_conversation_messages(
     candidate_followup = ""
     if folded_result_index >= 0:
         row = conversation[folded_result_index]
+        assert isinstance(row, Mapping)
+        assert isinstance(last_text, str)
         final_index = final_effects.get(str(row.get("effect_plan_id") or ""), -1)
         if final_index < 0:
             final_index = next((i for i, (receipt_index, _) in legacy_finals.items() if receipt_index == folded_result_index), -1)
         if final_index >= 0:
-            content = str(conversation[final_index].get("content") or "").strip()
+            final_row = conversation[final_index]
+            assert isinstance(final_row, Mapping)
+            content = str(final_row.get("content") or "").strip()
             if final_index in legacy_finals:
                 content = sanitize_confirmed_answer(content, legacy_finals[final_index][1])
             receipt = last_text.strip()

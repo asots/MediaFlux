@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
+from typing import Iterable
 
 from app.logger import get_logger
 
@@ -22,7 +23,7 @@ MAX_REFRESH_TARGETS = 200
 
 
 def _batch_size(value: int) -> int:
-    return max(1, int(value or MAX_REFRESH_TARGETS))
+    return max(1, (value or MAX_REFRESH_TARGETS))
 
 
 def _normalize(path: object) -> str:
@@ -64,9 +65,9 @@ class RefreshPlan:
     def to_dict(self) -> dict[str, object]:
         return {
             "targets": list(self.targets),
-            "omitted": int(self.omitted),
+            "omitted": self.omitted,
             "reason": self.reason,
-            "batch_size": int(self.batch_size),
+            "batch_size": self.batch_size,
         }
 
 
@@ -85,10 +86,10 @@ class _Boundary:
 
 
 def plan_refresh_targets(
-    changed_paths: object = (),
-    changed_dirs: object = (),
+    changed_paths: Iterable[object] | None = (),
+    changed_dirs: Iterable[object] | None = (),
     *,
-    media_roots: object = (),
+    media_roots: Iterable[object] | None = (),
     max_targets: int = MAX_REFRESH_TARGETS,
 ) -> RefreshPlan:
     """把变化文件与目录收敛成最小刷新目标集合。"""

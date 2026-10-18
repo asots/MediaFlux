@@ -177,8 +177,9 @@ def test_conditional_read_retry_uses_schema_while_writes_keep_locks(correction, 
             return PreparedEffect(preview={"summary": "preview"}, snapshot_fingerprint="fingerprint")
         tool = KernelToolSpec(name="lookup", domain="library", description="composition contract",
             input_schema=schema, effect=effect, validator=dict,
-            **({"read": read} if effect is ToolEffect.READ else
-               {"prepare": prepare, "execute_confirmed": lambda plan, ctx: {"ok": True}}))
+            read=read if effect is ToolEffect.READ else None,
+            prepare=None if effect is ToolEffect.READ else prepare,
+            execute_confirmed=None if effect is ToolEffect.READ else lambda plan, ctx: {"ok": True})
         store = InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner="owner", session_id="not-repair", request_id="r")
         async def progress(payload): pass

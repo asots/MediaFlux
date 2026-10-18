@@ -142,7 +142,7 @@ def _enabled_sites() -> tuple[str, ...]:
     except ValueError:
         requested = {
             part.strip().lower()
-            for part in str(configured or "").split(",")
+            for part in (configured or "").split(",")
             if part.strip().lower() in _INDEXER_SITE_IDS
         }
     if config.get_bool("INDEXER_SUKEBEI_ENABLED", False):
@@ -160,7 +160,7 @@ def summarize_feature_states(_arguments: dict[str, Any]) -> ToolResult:
         _FEATURES["indexer_search"].default,
     )
     has_indexer_sites = bool(_enabled_sites())
-    tavily_configured = bool(str(config.get("TAVILY_API_KEY", "") or "").strip())
+    tavily_configured = bool((config.get("TAVILY_API_KEY", "") or "").strip())
     features: list[dict[str, Any]] = []
 
     for feature, definition in _FEATURES.items():
@@ -259,7 +259,7 @@ def _capture(arguments: dict[str, Any]) -> dict[str, Any]:
         "enabled_site_count": len(sites),
         "discovery_enabled": config.get_bool("DISCOVERY_ENABLED"),
         "indexer_enabled": config.get_bool("INDEXER_SEARCH_ENABLED"),
-        "tavily_configured": bool(str(config.get("TAVILY_API_KEY", "") or "").strip()),
+        "tavily_configured": bool((config.get("TAVILY_API_KEY", "") or "").strip()),
     }
 
 
@@ -436,7 +436,7 @@ def set_feature_state_confirmed(
     """只按已确认的快照指纹执行一次白名单配置写入。"""
     state = _capture(arguments)
     if not secrets.compare_digest(
-        _fingerprint_payload(state), str(expected_context or "")
+        _fingerprint_payload(state), (expected_context or "")
     ):
         raise AgentToolError(
             "配置已变化，请重新预检",

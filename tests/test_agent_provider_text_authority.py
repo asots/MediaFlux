@@ -1,6 +1,10 @@
 """Trusted receipts, not private layout copies, own ordinary assistant text."""
 
 from __future__ import annotations
+from typing import Callable
+from app.clients.http import FixedHostHttpClient
+from typing import cast
+from typing import Any
 
 import json
 
@@ -59,7 +63,7 @@ def test_completion_receipt_is_input_not_an_assistant_prefill(protocol):
     assert unmarked[-1]["role"] == "assistant"
 
 
-def native_reply(protocol, text="", *, call_name="", private=True, state_tag=""):
+def native_reply(protocol, text="", *, call_name="", private=True, state_tag="") -> dict[str, Any]:
     if protocol == "anthropic_messages":
         blocks = (
             [
@@ -174,7 +178,7 @@ def test_confirmed_receipt_is_authoritative_after_sqlite_restore(protocol):
                             model="model-one",
                             protocol=protocol,
                         ),
-                        client_factory=lambda **_: wire,
+                        client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: wire),
                     ),
                     catalog=catalog,
                     retriever=CapabilityRetriever(),

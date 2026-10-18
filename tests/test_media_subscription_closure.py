@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from app import database as db
 from app.clients.guangya import GuangYaClient
+from app.indexers.downloads import _persist_and_dispatch
 from app.modules import download_dispatcher
 from app.modules.download_dispatcher import DownloadInput, request_key
 from app.modules.download_tracker import DownloadTracker
-from app.indexers.downloads import _persist_and_dispatch
 from app.modules.media_subscriptions import MediaSubscriptionService
 from tests.support import IsolatedDatabaseTestCase
 
@@ -47,13 +47,13 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             episode=1,
             subscription_revision=1,
         )
-        self.assertIsInstance(admission_id, int)
+        assert isinstance(admission_id, int)
         self.assertTrue(db.begin_media_download_dispatch(
-            int(admission_id),
+            admission_id,
             subscription_id=subscription_id,
             subscription_revision=1,
         ))
-        return int(admission_id)
+        return admission_id
 
     def _seed_failed_subscription_request(self, suffix: int = 86034):
         tmdb_id = str(suffix)
@@ -78,7 +78,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(admission_id)
         self.assertTrue(db.begin_media_download_dispatch(
-            int(admission_id), subscription_id=subscription_id,
+            admission_id, subscription_id=subscription_id,
             subscription_revision=1,
         ))
         item = DownloadInput(
@@ -118,9 +118,10 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(new_admission)
         self.assertTrue(db.begin_media_download_dispatch(
-            int(new_admission), subscription_id=subscription, subscription_revision=1,
+            new_admission, subscription_id=subscription, subscription_revision=1,
         ))
         source = db.get_download_request(old_request)
+        assert source is not None
         item = DownloadInput(
             kind="magnet", title=str(source["title"]),
             source_value=str(source["source_value"]),
@@ -128,7 +129,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
 
         created = download_dispatcher.create_request(
             item, "", "subscription:new-candidate", origin="indexer:test",
-            admission_id=int(new_admission),
+            admission_id=new_admission,
         )
 
         self.assertTrue(created["created"])
@@ -142,7 +143,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             [(int(row["id"]), int(row["request_id"]), row["status"]) for row in rows],
             [
                 (old_admission, old_request, "failed"),
-                (int(new_admission), successor_id, "dispatching"),
+                (new_admission, successor_id, "dispatching"),
             ],
         )
 
@@ -157,6 +158,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
                 (admission_id,),
             )
         source = db.get_download_request(source_id)
+        assert source is not None
         item = DownloadInput(
             kind="magnet", title=str(source["title"]),
             source_value=str(source["source_value"]),
@@ -206,10 +208,11 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             subscription_revision=1,
         )
 
+        assert admission_id is not None
         with self.assertRaises(RuntimeError):
             db.create_download_request(
                 "admission-rollback", "magnet", title="闭环资源",
-                admission_id=int(admission_id),
+                admission_id=admission_id,
             )
 
         self.assertIsNone(db.get_download_request_by_request_key("admission-rollback"))
@@ -235,6 +238,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
                 conn.execute("DROP TRIGGER IF EXISTS reject_admission_failure")
 
         request = db.get_download_request(request_id)
+        assert request is not None
         self.assertEqual(request["status"], "pending")
         with db.get_conn() as conn:
             admission = conn.execute(
@@ -304,8 +308,9 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             subscription_id=subscription_id, candidate_id=candidate_id,
             season=1, episode=1, subscription_revision=1,
         )
+        assert retry_admission is not None
         self.assertTrue(db.begin_media_download_dispatch(
-            int(retry_admission), subscription_id=subscription_id,
+            retry_admission, subscription_id=subscription_id,
             subscription_revision=1,
         ))
         dispatched = {
@@ -316,9 +321,10 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         with patch(
             "app.indexers.downloads.dispatch_request", return_value=dispatched
         ) as dispatch_mock:
+            assert retry_admission is not None
             reused, reused_id, result = _persist_and_dispatch(
                 item, "subscription:test", "qb",
-                admission_id=int(retry_admission),
+                admission_id=retry_admission,
             )
 
         self.assertFalse(reused["created"])
@@ -374,6 +380,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["status"], "manual_review")
         self.assertEqual(result["request_id"], request_id)
         request = db.get_download_request(request_id)
+        assert request is not None
         self.assertEqual(request["status"], "manual_review")
         self.assertEqual(request["qb_status"], "manual_review")
         with db.get_conn() as conn:
@@ -413,6 +420,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["status"], "manual_review")
         self.assertEqual(result["request_id"], request_id)
         request = db.get_download_request(request_id)
+        assert request is not None
         self.assertEqual(request["status"], "manual_review")
         self.assertEqual(request["qb_status"], "manual_review")
         with db.get_conn() as conn:
@@ -478,6 +486,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         db.update_media_subscription_candidate(
             candidate_id, status="submitted", request_id=request_id
         )
+        assert admission_id is not None
         db.update_media_download_admission(
             admission_id, status="submitted", request_id=request_id
         )
@@ -494,6 +503,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(refreshed_id, candidate_id)
         candidate = db.get_media_subscription_candidate(candidate_id)
+        assert candidate is not None
         self.assertEqual(candidate["status"], "submitted")
         self.assertEqual(int(candidate["request_id"]), request_id)
         self.assertEqual(candidate["title"], "闭环资源（刷新）")
@@ -524,6 +534,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             subscription_id=subscription_id, candidate_id=candidate_id, season=1, episode=1,
             subscription_revision=1,
         )
+        assert admission_id is not None
         db.update_media_download_admission(admission_id, status="submitted", request_id=request_id)
         db.update_download_request(
             request_id, targets="guangya", status="submitted", gy_status="submitted",
@@ -535,6 +546,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         with patch.object(tracker, "_update_backend_log"), patch.object(tracker, "_notify_completion"):
             tracker._update_request(row, [], [task], qb_available=False, gy_available=True)
         updated = db.get_download_request(request_id)
+        assert updated is not None
         self.assertEqual(updated["gy_task_id"], "gy-1")
         self.assertEqual(updated["gy_task_ids"], '["gy-1"]')
         self.assertEqual(int(updated["gy_batch_count"]), 1)
@@ -559,6 +571,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         ):
             result = asyncio.run(MediaSubscriptionService().download_candidate(candidate_id, "both"))
         self.assertEqual(result["request_id"], request_id)
+        assert downloader.await_args is not None
         self.assertEqual(downloader.await_args.args[2], "both")
         service = MediaSubscriptionService()
         rows = service.list_candidates(subscription_id)
@@ -597,6 +610,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             subscription_id=subscription_id, candidate_id=candidate_id,
             season=1, episode=1, subscription_revision=1,
         )
+        assert admission_id is not None
         db.update_media_download_admission(
             admission_id, status="submitted", request_id=request_id
         )
@@ -651,6 +665,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(result["status"], "manual_review")
         candidate = db.get_media_subscription_candidate(candidate_id)
+        assert candidate is not None
         self.assertEqual(candidate["status"], "submitted")
         self.assertEqual(int(candidate["request_id"]), request_id)
         with db.get_conn() as conn:
@@ -702,7 +717,9 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         self.assertEqual(observed_before_submit, [(
             successor_id, "dispatching", successor_id, successor_id,
         )])
-        self.assertEqual(db.get_download_request(successor_id)["status"], "submitted")
+        get_download_request_result = db.get_download_request(successor_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["status"], "submitted")
 
         second_candidate_id = db.replace_media_subscription_candidates(
             subscription_id, media_key, season=1, episode=1,
@@ -752,8 +769,11 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
                     backend_result.get("failure_code") == "qb_outcome_unknown",
                 )
                 successor_id = int(result["request_id"])
-                self.assertEqual(db.get_download_request(successor_id)["status"], request_status)
+                get_download_request_result_2 = db.get_download_request(successor_id)
+                assert get_download_request_result_2 is not None
+                self.assertEqual(get_download_request_result_2["status"], request_status)
                 candidate = db.get_media_subscription_candidate(candidate_id)
+                assert candidate is not None
                 self.assertEqual(int(candidate["request_id"]), successor_id)
                 with db.get_conn() as conn:
                     admission = conn.execute(
@@ -778,7 +798,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
                 if admission_status in {"submitted", "processing"}:
                     self.assertIsNone(next_admission)
                 else:
-                    self.assertIsInstance(next_admission, int)
+                    assert isinstance(next_admission, int)
 
     def test_manual_review_source_transfers_its_failed_admission(self):
         _subscription, candidate_id, admission_id, source_id, _media_key = (
@@ -821,7 +841,9 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["ok"], result)
         successor_id = int(result["request_id"])
         self.assertEqual(observed, [(successor_id, "dispatching", successor_id, successor_id)])
-        self.assertEqual(db.get_download_request(source_id)["status"], "resubmitted")
+        get_download_request_result_3 = db.get_download_request(source_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["status"], "resubmitted")
 
     def test_original_source_retry_moves_admission_from_each_archived_failed_successor(self):
         _subscription_id, candidate_id, admission_id, source_id, _media_key = (
@@ -870,8 +892,12 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             first = download_dispatcher.resubmit_download_request(source_id, "qb")
             first_successor = int(first["request_id"])
             self.assertFalse(first["ok"])
-            self.assertEqual(db.get_download_request(source_id)["status"], "failed")
-            self.assertEqual(db.get_download_request(first_successor)["status"], "failed")
+            get_download_request_result_4 = db.get_download_request(source_id)
+            assert get_download_request_result_4 is not None
+            self.assertEqual(get_download_request_result_4["status"], "failed")
+            get_download_request_result_5 = db.get_download_request(first_successor)
+            assert get_download_request_result_5 is not None
+            self.assertEqual(get_download_request_result_5["status"], "failed")
             with db.get_conn() as conn:
                 admission = conn.execute(
                     "SELECT request_id,status FROM media_download_admissions WHERE id=?",
@@ -883,8 +909,12 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             second = download_dispatcher.resubmit_download_request(source_id, "guangya")
             second_successor = int(second["request_id"])
             self.assertFalse(second["ok"])
-            self.assertEqual(db.get_download_request(source_id)["status"], "failed")
-            self.assertEqual(db.get_download_request(second_successor)["status"], "failed")
+            get_download_request_result_6 = db.get_download_request(source_id)
+            assert get_download_request_result_6 is not None
+            self.assertEqual(get_download_request_result_6["status"], "failed")
+            get_download_request_result_7 = db.get_download_request(second_successor)
+            assert get_download_request_result_7 is not None
+            self.assertEqual(get_download_request_result_7["status"], "failed")
             with db.get_conn() as conn:
                 admission = conn.execute(
                     "SELECT request_id,status FROM media_download_admissions WHERE id=?",
@@ -898,7 +928,9 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         third_successor = int(third["request_id"])
         self.assertTrue(third["ok"])
         self.assertNotIn(third_successor, {source_id, first_successor, second_successor})
-        self.assertEqual(db.get_download_request(source_id)["status"], "resubmitted")
+        get_download_request_result_8 = db.get_download_request(source_id)
+        assert get_download_request_result_8 is not None
+        self.assertEqual(get_download_request_result_8["status"], "resubmitted")
         self.assertEqual(
             [entry[0] for entry in observed], ["qb", "guangya", "qb"],
         )
@@ -920,8 +952,10 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             ).fetchone()[0], 4)
         self.assertEqual((int(admission["request_id"]), admission["status"]),
                          (third_successor, "submitted"))
+        get_media_subscription_candidate_result = db.get_media_subscription_candidate(candidate_id)
+        assert get_media_subscription_candidate_result is not None
         self.assertEqual(
-            int(db.get_media_subscription_candidate(candidate_id)["request_id"]),
+            int(get_media_subscription_candidate_result["request_id"]),
             third_successor,
         )
 
@@ -948,7 +982,9 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
                 self.assertTrue(result["retry_blocked"])
                 self.assertTrue(result["source_attention_preserved"])
                 submit.assert_not_called()
-                self.assertEqual(db.get_download_request(source_id)["status"], "failed")
+                get_download_request_result_9 = db.get_download_request(source_id)
+                assert get_download_request_result_9 is not None
+                self.assertEqual(get_download_request_result_9["status"], "failed")
                 with db.get_conn() as conn:
                     self.assertEqual(conn.execute(
                         "SELECT COUNT(*) FROM download_requests"
@@ -959,7 +995,9 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
                     ).fetchone()
                 self.assertEqual((int(row["request_id"]), row["status"]),
                                  (source_id, "failed"))
-                self.assertEqual(int(db.get_media_subscription_candidate(candidate)["request_id"]),
+                get_media_subscription_candidate_result_2 = db.get_media_subscription_candidate(candidate)
+                assert get_media_subscription_candidate_result_2 is not None
+                self.assertEqual(int(get_media_subscription_candidate_result_2["request_id"]),
                                  source_id)
 
     def test_stale_cancelled_source_retry_is_fenced_in_creation_transaction(self):
@@ -982,7 +1020,9 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             result = download_dispatcher.resubmit_download_request(source_id, "qb")
         self.assertTrue(result["retry_blocked"])
         submit.assert_not_called()
-        self.assertEqual(db.get_download_request(source_id)["status"], "cancelled")
+        get_download_request_result_10 = db.get_download_request(source_id)
+        assert get_download_request_result_10 is not None
+        self.assertEqual(get_download_request_result_10["status"], "cancelled")
         with db.get_conn() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM download_requests").fetchone()[0], 1)
 
@@ -1015,7 +1055,9 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
             ).fetchone()
         self.assertEqual((int(admission["request_id"]), admission["status"]),
                          (successor, "submitted"))
-        self.assertEqual(int(db.get_media_subscription_candidate(candidate)["request_id"]), successor)
+        get_media_subscription_candidate_result_3 = db.get_media_subscription_candidate(candidate)
+        assert get_media_subscription_candidate_result_3 is not None
+        self.assertEqual(int(get_media_subscription_candidate_result_3["request_id"]), successor)
 
     def test_candidate_count_matches_visible_rows_after_retrying_same_episode(self):
         subscription_id, first_candidate_id = self._seed()
@@ -1030,6 +1072,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         db.update_media_subscription_candidate(
             first_candidate_id, status="submitted", request_id=first_request_id
         )
+        assert first_admission_id is not None
         db.update_media_download_admission(
             first_admission_id, status="failed", request_id=first_request_id, error="下载失败"
         )
@@ -1052,6 +1095,7 @@ class MediaSubscriptionClosureTests(IsolatedDatabaseTestCase):
         db.update_media_subscription_candidate(
             second_candidate_id, status="submitted", request_id=second_request_id
         )
+        assert second_admission_id is not None
         db.update_media_download_admission(
             second_admission_id, status="submitted", request_id=second_request_id
         )

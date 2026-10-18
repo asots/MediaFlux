@@ -19,7 +19,7 @@ class RecognitionPreprocessSchemaTests(IsolatedDatabaseTestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='recognition_preprocess_rules'"
             ).fetchone()
-        self.assertIsNotNone(table)
+        assert (table) is not None
         items = rules.list_rules()
         self.assertEqual(len([item for item in items if item["builtin"]]), 21)
         self.assertEqual(len([item for item in items if item["builtin"] and not item["disabled"]]), 14)
@@ -256,24 +256,24 @@ class RecognitionPreprocessApiTests(IsolatedDatabaseTestCase):
 
         payload = RecognitionPreprocessPersistenceTests.payload()
         with patch.object(tools_api, "require_api_login", return_value=None):
-            listed = json.loads(tools_api.list_recognition_preprocess_rules_api(Mock()).body)
+            listed = json.loads(bytes(tools_api.list_recognition_preprocess_rules_api(Mock()).body))
             self.assertEqual(listed["summary"]["builtin"], 21)
             created_response = tools_api.create_recognition_preprocess_rule_api(Mock(), payload)
-            created = json.loads(created_response.body)
+            created = json.loads(bytes(created_response.body))
             preview_response = tools_api.preview_recognition_preprocess_rules_api(Mock(), {
                 "rule": payload, "filename": "OldTitle.S01E01.mkv", "season": 1, "episode": 1,
             })
-            preview = json.loads(preview_response.body)
+            preview = json.loads(bytes(preview_response.body))
             self.assertEqual(preview["filename_after"], "NewTitle.S01E01.mkv")
-            updated = json.loads(tools_api.update_recognition_preprocess_rule_api(
+            updated = json.loads(bytes(tools_api.update_recognition_preprocess_rule_api(
                 Mock(), created["id"], {**payload, "name": "已更新"},
-            ).body)
+            ).body))
             self.assertEqual(updated["name"], "已更新")
-            deleted = json.loads(tools_api.delete_recognition_preprocess_rule_api(
+            deleted = json.loads(bytes(tools_api.delete_recognition_preprocess_rule_api(
                 Mock(), created["id"],
-            ).body)
+            ).body))
             self.assertTrue(deleted["success"])
-            restored = json.loads(tools_api.restore_recognition_preprocess_rules_api(Mock()).body)
+            restored = json.loads(bytes(tools_api.restore_recognition_preprocess_rules_api(Mock()).body))
             self.assertEqual(restored["restored"], 21)
 
 

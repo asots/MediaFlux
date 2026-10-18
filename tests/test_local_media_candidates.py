@@ -238,10 +238,10 @@ class LocalMediaCandidateTests(unittest.TestCase):
             candidate.write_bytes(b"old")
             info = candidate.lstat()
             identity = {
-                "size": int(info.st_size),
-                "mtime_ns": int(info.st_mtime_ns),
-                "device": int(info.st_dev),
-                "inode": int(info.st_ino),
+                "size": info.st_size,
+                "mtime_ns": info.st_mtime_ns,
+                "device": info.st_dev,
+                "inode": info.st_ino,
             }
             original_replace = os.replace
             moved_once = False
@@ -277,10 +277,10 @@ class LocalMediaCandidateTests(unittest.TestCase):
             (candidate / "Movie.mkv").write_bytes(b"movie")
             info = candidate.lstat()
             identity = {
-                "size": int(info.st_size),
-                "mtime_ns": int(info.st_mtime_ns),
-                "device": int(info.st_dev),
-                "inode": int(info.st_ino),
+                "size": info.st_size,
+                "mtime_ns": info.st_mtime_ns,
+                "device": info.st_dev,
+                "inode": info.st_ino,
             }
             trash = root / ".mediaflux-trash"
             trash.mkdir()

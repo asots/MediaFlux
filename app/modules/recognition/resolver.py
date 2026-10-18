@@ -23,7 +23,7 @@ _EXPLICIT_TMDB_BARE_RE = re.compile(
 
 def _explicit_tmdb_marker_ids_from_segment(value: str) -> list[str]:
     """提取单个路径段里的有效显式 TMDB 标记，保留冲突检测信息。"""
-    segment = str(value or "").strip()
+    segment = (value or "").strip()
     # 只剥离真实媒体/伴随文件扩展名；目录名中的版本点号（例如
     # ``Show.2026 {tmdb-123}``）不是扩展名，必须完整保留供标记解析。
     stem = strip_media_file_suffix(segment)
@@ -50,7 +50,7 @@ def _strip_explicit_tmdb_markers(value: str) -> str:
     ``Title - 153 tmdb123.mkv`` 继续按剧集而不是电影读取 TMDB 详情。
     非法嵌入普通单词的片段保持原样，避免清洗规则比识别规则更宽松。
     """
-    text = str(value or "")
+    text = (value or "")
     spans: list[tuple[int, int]] = []
     for pattern in (_EXPLICIT_TMDB_WRAPPED_RE, _EXPLICIT_TMDB_BARE_RE):
         for match in pattern.finditer(text):
@@ -72,7 +72,7 @@ def _strip_explicit_tmdb_markers_from_path(value: str) -> str:
         part
         if re.fullmatch(r"[/\\]+", part)
         else _strip_explicit_tmdb_markers(part)
-        for part in re.split(r"([/\\]+)", str(value or ""))
+        for part in re.split(r"([/\\]+)", (value or ""))
     )
 
 def _has_explicit_tmdb_marker(value: str) -> bool:
@@ -83,7 +83,7 @@ def _has_explicit_tmdb_marker(value: str) -> bool:
     """
     return any(
         _explicit_tmdb_marker_ids_from_segment(segment)
-        for segment in re.split(r"[/\\]+", str(value or ""))
+        for segment in re.split(r"[/\\]+", (value or ""))
         if str(segment or "").strip()
     )
 
@@ -97,7 +97,7 @@ def _resolve_explicit_tmdb_marker(
     """
     segments = [
         item.strip()
-        for item in re.split(r"[/\\]+", str(value or ""))
+        for item in re.split(r"[/\\]+", (value or ""))
         if item.strip()
     ]
     if nearest_first:
@@ -242,7 +242,7 @@ def _source_year_matches_tmdb(
     季集映射对应的季集清单时，允许用该集的确切 ``air_date`` 年份补充判断，
     但绝不用模糊年份覆盖已经成立的硬冲突。
     """
-    expected = str(source_year or "").strip()
+    expected = (source_year or "").strip()
     if not expected:
         return True, "not_provided"
     detail_date = str(

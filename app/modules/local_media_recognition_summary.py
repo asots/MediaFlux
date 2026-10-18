@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from app.modules.recognition.resolver import _resolve_explicit_tmdb_marker
+
+if TYPE_CHECKING:
+    from app.modules.scraper import TMDBScraper
+
 
 SUMMARY_SCHEMA_VERSION = 1
 _VALID_MEDIA_TYPES = {"movie", "tv"}
@@ -15,7 +19,7 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
-def _optional_int(value: object, *, minimum: int = 0) -> int | None:
+def _optional_int(value: Any, *, minimum: int = 0) -> int | None:
     if value is None or value == "" or isinstance(value, bool):
         return None
     try:
@@ -209,7 +213,7 @@ def summary_from_task(task: object) -> dict[str, Any]:
 
 
 def infer_recognition_summary(
-    rows: Iterable[Mapping[str, Any]], *, scraper: object,
+    rows: Iterable[Mapping[str, Any]], *, scraper: TMDBScraper,
 ) -> dict[str, Any]:
     """仅凭带显式 TMDB 标记的历史目标路径做 fail-closed 推断。"""
     inferred: list[dict[str, Any]] = []

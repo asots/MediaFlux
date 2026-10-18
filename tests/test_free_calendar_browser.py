@@ -192,7 +192,8 @@ def official_payload():
 def render_template(template='free_calendar.html', *, resource_results_enabled=False):
     env = Environment(loader=FileSystemLoader(ROOT / 'app/templates'),
                       autoescape=select_autoescape(['html']))
-    env.globals.update(
+    template_globals: dict = env.globals
+    template_globals.update(
         static_url=lambda path: '/static/' + path,
         csrf_token=lambda: 'fixture-csrf-token',
         url_for=lambda endpoint, **kwargs: {
@@ -347,8 +348,9 @@ class FixtureNetwork:
 class FreeCalendarBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
-        options = {'headless': True, 'args': ['--no-sandbox', '--disable-dev-shm-usage']}
+        options: dict = {'headless': True, 'args': ['--no-sandbox', '--disable-dev-shm-usage']}
         executable = _chromium_executable(cls.playwright)
         if executable:
             options['executable_path'] = executable
@@ -419,7 +421,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         card=page.locator('.wc-grid:visible .wc-card').filter(has_text='师兄啊师兄')
         self.assertIn('会员排期',card.inner_text())
         self.assertEqual(card.locator('.wc-update-time').inner_text(),'10:00')
-        self.assertIn('SVIP',card.locator('.wc-caption').text_content())
+        text_content = card.locator('.wc-caption').text_content()
+        assert text_content is not None
+        self.assertIn('SVIP',text_content)
         self.assertEqual(page.locator('#calendar-source-panel:visible').count(),0)
         self.assertEqual(page.locator('#calendar-pending,.fc-sources,.fc-notice,.fc-week-grid').count(),0)
         self.assertEqual(page.locator('.wc-card .discovery-poster img[src]').count(),0)
@@ -461,7 +465,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         page,network=self.make_page(data)
         self.assertEqual(page.locator('.wc-card').count(),42)
         self.assertEqual(page.locator('#calendar-count').inner_text(),'6 部')
-        self.assertNotIn('脏数据',page.locator('[data-weekly-calendar]').text_content())
+        text_content = page.locator('[data-weekly-calendar]').text_content()
+        assert text_content is not None
+        self.assertNotIn('脏数据',text_content)
         self.assertEqual(set(page.locator('.wc-card .discovery-card-source > span:first-child').all_text_contents()),{'动漫 · 2026'})
         page.evaluate('''(id)=>{
           const cards=[...document.querySelectorAll('.wc-card')];
@@ -479,7 +485,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator('#calendar-count').inner_text(),'5 部')
         self.assertTrue(page.evaluate('rejectedCards.length===7 && rejectedCards.every(card=>!card.isConnected)'))
         self.assertTrue(page.evaluate('retainedCards.every((card,index)=>card.isConnected && card.querySelector("img")===retainedImages[index])'))
-        self.assertNotIn('脏数据',page.locator('[data-weekly-calendar]').text_content())
+        text_content = page.locator('[data-weekly-calendar]').text_content()
+        assert text_content is not None
+        self.assertNotIn('脏数据',text_content)
         network.data=blank_payload()
         for day in network.data['days']:
             day['items']=copy.deepcopy(rejected)
@@ -489,7 +497,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator('#calendar-count').inner_text(),'0 部')
         self.assertIn('当前平台下暂无明确动漫排期',page.locator('.wc-empty:visible').inner_text())
         self.assertNotIn('类型筛选',page.locator('.wc-empty:visible').inner_text())
-        self.assertNotIn('脏数据',page.locator('[data-weekly-calendar]').text_content())
+        text_content = page.locator('[data-weekly-calendar]').text_content()
+        assert text_content is not None
+        self.assertNotIn('脏数据',text_content)
         self.assertTrue(all(int(path.rsplit('-',1)[-1])<100 for path in network.poster_calls))
         self.assertEqual(network.watch_calls,[])
 
@@ -505,8 +515,12 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         first=page.locator('.wc-card').first
         self.assertEqual(first.locator('.wc-update-time').inner_text(),'20:00')
         self.assertEqual(first.locator('.wc-audience').inner_text(),'免费排期')
-        self.assertIn('20:00非会员更新1集',first.locator('.wc-caption').text_content())
-        self.assertIn('10:00 · 会员排期',first.locator('.wc-description').text_content())
+        text_content = first.locator('.wc-caption').text_content()
+        assert text_content is not None
+        self.assertIn('20:00非会员更新1集',text_content)
+        text_content = first.locator('.wc-description').text_content()
+        assert text_content is not None
+        self.assertIn('10:00 · 会员排期',text_content)
         self.assertEqual(page.locator('.wc-card').nth(1).locator('.wc-update-time').inner_text(),'12:00 / 18:00')
         self.assertEqual(page.locator('.wc-card').count(),2)
         self.assertNotIn('无排期库存',page.locator('[data-weekly-calendar]').inner_text())
@@ -521,20 +535,26 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         self.assertEqual(card.locator('.wc-audience').inner_text(),'平台排期')
         self.assertEqual(card.locator('.wc-update-time').inner_text(),'时间未注明')
         self.assertNotIn('免费',card.inner_text())
-        self.assertNotIn('18集',card.text_content())
+        text_content = card.text_content()
+        assert text_content is not None
+        self.assertNotIn('18集',text_content)
 
     def test_loading_then_cards_reuse_tabs_and_controls(self):
         page,network=self.make_page(hold=True)
         page.wait_for_function('document.querySelectorAll(".wc-weekday").length === 7')
         page.evaluate('window.savedTab=document.querySelector(".wc-weekday")')
         before=page.locator('#calendar-refresh').bounding_box()
-        top=page.locator('#calendar-stage').bounding_box()['y']
+        bounding_box_result = page.locator('#calendar-stage').bounding_box()
+        assert bounding_box_result is not None
+        top=bounding_box_result['y']
         self.assertEqual(page.locator('.wc-grid:visible').count(),1)
         self.assertIn('正在读取',page.locator('.wc-grid:visible').inner_text())
         network.release()
         page.locator('.wc-card:visible').first.wait_for()
         self.assertEqual(page.locator('#calendar-refresh').bounding_box(),before)
-        self.assertEqual(page.locator('#calendar-stage').bounding_box()['y'],top)
+        bounding_box_result_2 = page.locator('#calendar-stage').bounding_box()
+        assert bounding_box_result_2 is not None
+        self.assertEqual(bounding_box_result_2['y'],top)
         self.assertTrue(page.evaluate('savedTab===document.querySelector(".wc-weekday")'))
         self.assertEqual(page.locator('.discovery-skeleton').count(),0)
 
@@ -544,7 +564,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 page,network=self.make_page(width=width)
                 self.assert_no_overflow(page)
                 self.assertEqual(page.locator('.wc-grid:visible').count(),1)
-                self.assertLess(page.locator('.wc-card:visible').first.bounding_box()['y'],480)
+                bounding_box_result_3 = page.locator('.wc-card:visible').first.bounding_box()
+                assert bounding_box_result_3 is not None
+                self.assertLess(bounding_box_result_3['y'],480)
                 if width < 500:
                     widths=page.locator('.wc-card:visible').evaluate_all('(cards)=>cards.slice(0,2).map(c=>c.getBoundingClientRect().x)')
                     self.assertLess(widths[0],widths[1])
@@ -582,7 +604,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 self.assertEqual(status.inner_text(), '同步中 · 已保留当前内容')
                 page.evaluate('window.sourceNodes=[...document.querySelectorAll(".wc-card, .wc-card img, .wc-weekday, .wc-empty, #calendar-status")]')
                 heading = page.locator('.wc-results-heading').bounding_box()
-                stage_y = page.locator('#calendar-stage').bounding_box()['y']
+                bounding_box_result_4 = page.locator('#calendar-stage').bounding_box()
+                assert bounding_box_result_4 is not None
+                stage_y = bounding_box_result_4['y']
                 button = page.locator('#calendar-refresh').bounding_box()
                 # 服务已 settled；通过既有详情关闭 GET 同步，不等待真实定时器。
                 network.data['refreshing'] = False
@@ -595,10 +619,16 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 self.assertEqual(status.get_attribute('data-tone'), 'warning')
                 self.assertEqual(page.locator('.wc-card:visible').count(), 4)
                 self.assertEqual(heading, page.locator('.wc-results-heading').bounding_box())
-                self.assertEqual(stage_y, page.locator('#calendar-stage').bounding_box()['y'])
+                bounding_box_result_5 = page.locator('#calendar-stage').bounding_box()
+                assert bounding_box_result_5 is not None
+                self.assertEqual(stage_y, bounding_box_result_5['y'])
                 self.assertEqual(button, page.locator('#calendar-refresh').bounding_box())
-                self.assertIn('腾讯视频部分数据', page.locator('#calendar-source-toggle').get_attribute('aria-label'))
-                self.assertIn('爱奇艺旧缓存', page.locator('#calendar-source-toggle').get_attribute('aria-label'))
+                text_content = page.locator('#calendar-source-toggle').get_attribute('aria-label')
+                assert text_content is not None
+                self.assertIn('腾讯视频部分数据', text_content)
+                text_content = page.locator('#calendar-source-toggle').get_attribute('aria-label')
+                assert text_content is not None
+                self.assertIn('爱奇艺旧缓存', text_content)
                 calls = len(network.api_calls())
                 page.locator('#calendar-platform').select_option('youku')
                 empty = page.locator('.wc-empty:visible')
@@ -656,7 +686,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 page,_=self.make_page(data,width=width)
                 geometry=page.locator('.wc-grid:visible').bounding_box()
                 button=page.locator('#calendar-source-toggle')
-                self.assertIn('腾讯视频旧缓存',button.get_attribute('aria-label'))
+                text_content = button.get_attribute('aria-label')
+                assert text_content is not None
+                self.assertIn('腾讯视频旧缓存',text_content)
                 button.click()
                 self.assertEqual(button.get_attribute('aria-expanded'),'true')
                 self.assertEqual(page.locator('#calendar-source-panel:visible').count(),1)
@@ -684,7 +716,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 network.release()
                 page.wait_for_function('document.querySelector("#calendar-refresh").getAttribute("aria-busy") === "false"')
                 self.assertEqual(page.locator('.wc-cache:visible').count(),6)
-                self.assertIn('上次核验',page.locator('.wc-card:visible .wc-description').first.text_content())
+                text_content = page.locator('.wc-card:visible .wc-description').first.text_content()
+                assert text_content is not None
+                self.assertIn('上次核验',text_content)
                 self.assertTrue(page.evaluate('oldCards.every((c,i)=>c===document.querySelectorAll(".wc-card")[i] && oldImages[i]===c.querySelector("img"))'))
                 self.assertEqual(scroll,page.evaluate('scrollY'))
                 self.assertEqual(sizes,page.locator('.wc-card:visible').evaluate_all('(cards)=>cards.map(c=>[c.offsetWidth,c.offsetHeight])'))
@@ -915,7 +949,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                             self.assertIn('Demo.Show.S01E01.1080p.WEB-DL', row.inner_text())
                             self.assertIn(title, page.locator('#discovery-detail-title').inner_text())
                             self.assertEqual(page.locator('[data-discovery-resource-panel]').count(), 1)
-                            self.assertIn('检索成功', page.locator('[data-resource-site-filter="nyaa"]').get_attribute('aria-label'))
+                            text_content = page.locator('[data-resource-site-filter="nyaa"]').get_attribute('aria-label')
+                            assert text_content is not None
+                            self.assertIn('检索成功', text_content)
                             self.assertEqual(page.locator('.discovery-detail-layout').count(), 0)
                             call = network.indexer_calls[-1]
                             self.assertEqual((call['method'], call['path']), ('POST', '/api/indexers/search'))
@@ -991,9 +1027,13 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 self.assertEqual(links.locator('span').all_text_contents(), [
                     'TMDB 匹配中', 'TMDB 未匹配', 'TMDB 未配置', 'TMDB 未匹配', 'TMDB 已映射', 'TMDB 已映射',
                 ])
-                self.assertIn('已匹配豆瓣资料', links.nth(3).get_attribute('title'))
+                text_content = links.nth(3).get_attribute('title')
+                assert text_content is not None
+                self.assertIn('已匹配豆瓣资料', text_content)
                 for index in range(6):
-                    self.assertIn(links.nth(index).inner_text(), links.nth(index).get_attribute('aria-label'))
+                    text_content = links.nth(index).get_attribute('aria-label')
+                    assert text_content is not None
+                    self.assertIn(links.nth(index).inner_text(), text_content)
                     self.assertEqual(links.nth(index).get_attribute('href') is not None, index >= 4)
                 page.evaluate('window.mappingNodes=[...document.querySelectorAll(".wc-card, .wc-card img, .wc-tmdb-link, .wc-tmdb-link span, .discovery-watchlist-action")]')
                 measure = '(cards)=>cards.map(c=>[c.offsetWidth,c.offsetHeight,c.querySelector(".discovery-card-footer").offsetHeight])'
@@ -1042,9 +1082,15 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 notes = cards.locator('.wc-poster-note')
                 self.assertEqual(notes.all_text_contents(), ['暂未匹配海报', '暂无海报', '封面加载失败', '暂无海报', '暂无海报'])
                 self.assertEqual(page.locator('.wc-poster-note:visible').count(), 5)
-                self.assertIn('尚未匹配 TMDB 或豆瓣', notes.nth(0).get_attribute('title'))
-                self.assertIn('尚无可用海报地址', notes.nth(1).get_attribute('title'))
-                self.assertIn('刷新日历重试', notes.nth(2).get_attribute('title'))
+                text_content = notes.nth(0).get_attribute('title')
+                assert text_content is not None
+                self.assertIn('尚未匹配 TMDB 或豆瓣', text_content)
+                text_content = notes.nth(1).get_attribute('title')
+                assert text_content is not None
+                self.assertIn('尚无可用海报地址', text_content)
+                text_content = notes.nth(2).get_attribute('title')
+                assert text_content is not None
+                self.assertIn('刷新日历重试', text_content)
                 self.assertEqual(network.poster_calls, [primary, fallback])
                 self.assertEqual(cards.nth(0).locator('img[src]').count(), 0)
                 self.assertEqual(cards.nth(4).locator('.wc-tmdb-link').inner_text(), 'TMDB 已映射')
@@ -1084,13 +1130,17 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         page,network=self.make_page(data,poster_failures=[primary])
         page.wait_for_function('document.querySelector(".wc-card img").naturalWidth>0')
         image=page.locator('.wc-card img'); before=image.bounding_box()
-        self.assertTrue(image.get_attribute('src').endswith(fallback))
+        get_attribute_result = image.get_attribute('src')
+        assert get_attribute_result is not None
+        self.assertTrue(get_attribute_result.endswith(fallback))
         self.assertEqual(network.poster_calls,[primary,fallback])
         page.evaluate('window.fallbackImage=document.querySelector(".wc-card img")')
         page.locator('#calendar-refresh').click()
         page.wait_for_function('document.querySelector("#calendar-refresh").getAttribute("aria-busy") === "false"')
         self.assertTrue(page.evaluate('fallbackImage===document.querySelector(".wc-card img")'))
-        self.assertTrue(image.get_attribute('src').endswith(fallback))
+        get_attribute_result_2 = image.get_attribute('src')
+        assert get_attribute_result_2 is not None
+        self.assertTrue(get_attribute_result_2.endswith(fallback))
         self.assertEqual(network.poster_calls,[primary,fallback])
         self.assertEqual(image.bounding_box(),before)
         # 全部失败不会无限循环；明确手工刷新允许一次有限重试。
@@ -1419,7 +1469,9 @@ class FreeCalendarBrowserTests(unittest.TestCase):
         for index, (_, url) in enumerate(safe):
             link = cards.nth(index).locator('.discovery-card-open')
             self.assertEqual(link.get_attribute('href'), url)
-            self.assertIn('原页（新窗口）', link.get_attribute('aria-label'))
+            text_content = link.get_attribute('aria-label')
+            assert text_content is not None
+            self.assertIn('原页（新窗口）', text_content)
             self.assertIsNone(link.get_attribute('data-media-profile-link'))
             with page.expect_popup() as popup_event:
                 link.evaluate('(a)=>a.click()')
@@ -1452,7 +1504,7 @@ class FreeCalendarBrowserTests(unittest.TestCase):
             card = page.locator('.wc-card').nth(index)
             link = card.locator('.discovery-card-open')
             self.assertEqual(link.get_attribute('href'), f'/discovery?detail_provider={provider}&detail_type=tv&detail_id={identity}')
-            self.assertIsNotNone(link.get_attribute('data-media-profile-link'))
+            assert (link.get_attribute('data-media-profile-link')) is not None
             self.assertIsNone(link.get_attribute('target'))
             card.locator('.discovery-watchlist-action').evaluate('(b)=>b.click()')
             page.wait_for_function('''() => [...document.querySelectorAll('.wc-card .discovery-watchlist-action')].every(b =>
@@ -1510,7 +1562,7 @@ class FreeCalendarBrowserTests(unittest.TestCase):
                 self.assertEqual(card.locator('img').get_attribute('title'), '')
                 self.assertIsNone(card.locator('.discovery-card-open').get_attribute('target'))
                 self.assertIsNone(card.locator('.discovery-card-open').get_attribute('rel'))
-                self.assertIsNotNone(card.locator('.discovery-card-open').get_attribute('data-media-profile-link'))
+                assert (card.locator('.discovery-card-open').get_attribute('data-media-profile-link')) is not None
                 self.assertEqual(card.locator('.discovery-watchlist-action').get_attribute('data-watchlist-key'), 'douban:tv:1292052')
                 self.assertFalse(card.locator('.discovery-watchlist-action').is_disabled())
                 self.assert_poster_layout(page, geometry)

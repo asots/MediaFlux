@@ -489,6 +489,7 @@ def test_invalid_selection_never_calls_model_provider_or_consumes_pending(store,
             events = await _events(session.run(AgentInput(message="选择并预览", owner=owner, session_id=session_id, metadata={"selection": value})))
         assert len(events) == 1 and events[0].type is AgentEventType.TURN_FAILED
         assert events[0].payload["code"] == "selection_invalid"
+        assert isinstance(session.model, SelectionModel)
         assert session.model.requests == []
         cancel.assert_not_called()
         execute.assert_not_called()
@@ -534,6 +535,7 @@ def test_selection_click_only_previews_and_explicit_confirmation_has_one_effect(
             assert len(approvals) == 1, [(event.type, event.payload) for event in events]
             prepare.assert_called_once()
             execute.assert_not_called()
+            assert isinstance(session.model, ScriptedModel)
             assert session.model.requests == []
             assert prepare.call_args.args[0]["target"] == "guangya"
             state = await states.load(owner=OWNER, session_id=SESSION)
@@ -646,6 +648,7 @@ def test_empty_or_failed_same_turn_search_invalidates_old_candidate(store, faile
         events = await _events(session.run(AgentInput(message="选择并预览", owner=OWNER, session_id=SESSION,
                                                      metadata={"selection": _selection(view)})))
         assert events[0].payload["code"] == "selection_invalid"
+        assert isinstance(session.model, SelectionModel)
         assert session.model.requests == []
     asyncio.run(exercise())
 
@@ -735,6 +738,7 @@ def test_pre_read_rejection_keeps_current_card_and_emits_no_invalidation(store, 
     async def exercise():
         _, pipeline, states = _runtime(store)
         view, context = await _publish_candidates(pipeline, states)
+        assert isinstance(context.report_progress, AsyncMock)
         context.report_progress.reset_mock()
         await states.commit(context.lease, updates=(StateUpdate("pending_effect_plan_id", "keep-pending"),))
         before = await states.load(owner=OWNER, session_id=SESSION)
@@ -884,6 +888,7 @@ def test_general_search_does_not_recommend_old_episodes_or_suggest_ingest(store)
         state = await states.load(owner=OWNER, session_id=SESSION)
         state.metadata[CANDIDATE_VIEW_KEY]["recommended_positions"] = [1]
         restored = await current_candidate_view(state=state, store=store)
+        assert restored is not None
         assert restored["recommended_positions"] == []
         selection = await validate_selection(_selection(restored), state=state, store=store)
         assert selection.arguments["positions"] == [1]
@@ -980,7 +985,9 @@ def test_mixed_episode_candidates_keep_verified_global_positions(store):
         assert view["recommended_positions"] == [2]
         assert [item["position"] for item in view["items"]] == [2]
         state = await states.load(owner=OWNER, session_id=SESSION)
-        assert (await current_candidate_view(state=state, store=store))["recommended_positions"] == [2]
+        current_candidate_view_result = await current_candidate_view(state=state, store=store)
+        assert current_candidate_view_result is not None
+        assert (current_candidate_view_result)["recommended_positions"] == [2]
         result = await validate_selection(_selection(view, [2]), state=state, store=store)
         assert result.arguments["positions"] == [2]
     asyncio.run(exercise())
@@ -1028,7 +1035,9 @@ def test_explicit_presentation_preserves_positions_and_can_clear_the_view(store)
         assert view["explicit_selection"] is True
         assert view["recommended_positions"] == []
         state = await states.load(owner=OWNER, session_id=SESSION)
-        assert (await current_candidate_view(state=state, store=store))["items"] == view["items"]
+        current_candidate_view_result_2 = await current_candidate_view(state=state, store=store)
+        assert current_candidate_view_result_2 is not None
+        assert (current_candidate_view_result_2)["items"] == view["items"]
         assert (await validate_selection(_selection(view, [2]), state=state, store=store)).arguments["positions"] == [2]
         with pytest.raises(SelectionInvalidError):
             await validate_selection(_selection(view, [1]), state=state, store=store)
@@ -1063,7 +1072,9 @@ def test_candidate_refinement_filters_model_card_and_selection_from_one_result(s
         assert [item["position"] for item in model["candidate_numbers"]] == [2]
         assert [item["position"] for item in view["items"]] == [2]
         state = await states.load(owner=OWNER, session_id=SESSION)
-        assert (await current_candidate_view(state=state, store=store))["items"] == view["items"]
+        current_candidate_view_result_3 = await current_candidate_view(state=state, store=store)
+        assert current_candidate_view_result_3 is not None
+        assert (current_candidate_view_result_3)["items"] == view["items"]
         assert (await validate_selection(_selection(view, [2]), state=state, store=store)).arguments["positions"] == [2]
         with pytest.raises(SelectionInvalidError):
             await validate_selection(_selection(view, [1]), state=state, store=store)
@@ -1218,6 +1229,7 @@ def test_general_resource_search_can_explicitly_present_a_relevant_subset(store)
         result = builder.build()
         assert result.status == "success"
         assert result.approval is None
+        assert result.candidate_view is not None
         assert result.candidate_view["explicit_selection"] is True
         assert [item["position"] for item in result.candidate_view["items"]] == [2]
         state = await states.load(owner=OWNER, session_id=SESSION)

@@ -26,7 +26,7 @@ def get_tmdb_lock(
         row = conn.execute(
             "SELECT * FROM tmdb_lock WHERE raw_name=? AND parent_path=? "
             "AND media_type=? AND season=? AND key_version=1 AND lock_source='manual'",
-            (str(raw_name), str(parent_path), str(media_type), int(season)),
+            (raw_name, parent_path, media_type, season),
         ).fetchone()
     if row is None:
         return None
@@ -64,8 +64,8 @@ def upsert_tmdb_lock(
             "key_version=excluded.key_version,lock_source=excluded.lock_source,"
             "locked_at=excluded.locked_at",
             (
-                str(raw_name), str(parent_path), str(tmdb_id), str(title), str(year),
-                str(media_type), int(season), 1, str(lock_source), database.now(),
+                raw_name, parent_path, tmdb_id, title, year,
+                media_type, season, 1, lock_source, database.now(),
             ),
         )
 
@@ -81,12 +81,12 @@ def list_tmdb_locks(keyword: str = "", limit: int = 200) -> list[sqlite3.Row]:
         value = f"%{keyword}%"
         params += [value, value, value, value]
     sql += " ORDER BY id DESC LIMIT ?"
-    params.append(int(limit))
+    params.append(limit)
     with _database().get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 
 
 def delete_tmdb_lock(lock_id: int) -> bool:
     with _database().get_conn() as conn:
-        cur = conn.execute("DELETE FROM tmdb_lock WHERE id=?", (int(lock_id),))
+        cur = conn.execute("DELETE FROM tmdb_lock WHERE id=?", (lock_id,))
         return cur.rowcount > 0

@@ -1,4 +1,7 @@
 """Property-count ingress and stale preview exclusion regressions."""
+
+from typing import cast
+from app.agent.kernel.pipeline import AuthorizationPolicy
 import asyncio
 from contextlib import nullcontext
 from unittest.mock import Mock
@@ -86,7 +89,7 @@ def test_old_preview_never_runs_handler_or_writes(kind, held, denied):
                         raise ToolPipelineError("denied", code="forbidden")
 
             pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=store,
-                                    authorization=Authorization())
+                                    authorization=cast(AuthorizationPolicy, Authorization()))
             await store.begin_turn(owner="owner", session_id="preview", request_id="new")
             before = await store.load(owner="owner", session_id="preview")
             error = ToolPipelineError if denied else SessionBusyError if held else StalePublicationError
@@ -94,6 +97,7 @@ def test_old_preview_never_runs_handler_or_writes(kind, held, denied):
             with scope, pytest.raises(error) as caught:
                 await pipeline.execute(tool.name, {}, context=context)
             if denied:
+                assert isinstance(caught.value, ToolPipelineError)
                 assert caught.value.code == "forbidden"
             assert authorized == [(tool.name, {}, "owner", "preview")]
             prepare.assert_not_called()

@@ -14,6 +14,7 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 NUMBERING_MODES = {"auto", "standard", "absolute", "season_continuous"}
 NUMBERING_MODE_LABELS = {
@@ -117,7 +118,7 @@ def normalize_numbering_mode(value: object) -> str:
     return mode if mode in NUMBERING_MODES else "auto"
 
 
-def _positive_int(value: object) -> int | None:
+def _positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     try:
@@ -262,7 +263,7 @@ def infer_merged_season_cour_mapping(
     declared_count = len(aired)
 
     evidence = directory_evidence
-    evidence_valid = bool(
+    evidence_valid = (
         evidence is not None
         and evidence.contiguous
         and evidence.episode_count >= 3
@@ -280,19 +281,19 @@ def infer_merged_season_cour_mapping(
         segment = formal_segments[season - 1]
         range_start, range_end = segment
         segment_length = range_end - range_start + 1
-        expected_year = str(source_year or "").strip()
+        expected_year = (source_year or "").strip()
         ordinal_proven = len(formal_segments) == season
         year_proven = bool(
             re.fullmatch(r"(?:19|20)\d{2}", expected_year)
             and _segment_start_year(aired, segment) == expected_year
         )
-        reset_range_proven = bool(
+        reset_range_proven = (
             evidence_valid
             and evidence is not None
             and evidence.range_start == 1
             and evidence.range_end <= segment_length
         )
-        absolute_range_proven = bool(
+        absolute_range_proven = (
             evidence_valid
             and evidence is not None
             and range_start <= evidence.range_start <= evidence.range_end <= range_end
@@ -337,7 +338,7 @@ def infer_merged_season_cour_mapping(
     if len(segments) != season:
         return identity
     range_start, range_end = segments[season - 1]
-    absolute_segment_proven = bool(
+    absolute_segment_proven = (
         evidence_valid
         and evidence is not None
         and evidence.range_start == range_start
@@ -366,7 +367,7 @@ def infer_merged_season_cour_mapping(
 
 def extract_release_episode_range(text: str) -> tuple[int | None, int | None, int | None]:
     """返回 ``(显式季号, 起始集, 结束集)``；仅接受明确范围语法。"""
-    value = str(text or "")
+    value = (text or "")
     for pattern in _EXPLICIT_RANGE_PATTERNS:
         match = pattern.search(value)
         if not match:
@@ -389,7 +390,7 @@ def extract_release_episode_range(text: str) -> tuple[int | None, int | None, in
 def build_directory_episode_evidence(
     entries: list[tuple[str, str, int | None, int | None]],
     *,
-    minimum_episodes: int = 3,
+    minimum_episodes: int | str | float = 3,
 ) -> dict[str, DirectoryEpisodeEvidence]:
     """按物理目录聚合连续剧集证据。
 
@@ -413,8 +414,8 @@ def build_directory_episode_evidence(
         # 的证据门禁内解释为发布方的绝对集号；S00 仍是 Specials，不能参与。
         if parsed_season is not None and parsed_season <= 0:
             continue
-        grouped.setdefault(str(directory_key), []).append(
-            (str(directory_name or directory_key), parsed_season, parsed_episode)
+        grouped.setdefault(directory_key, []).append(
+            ((directory_name or directory_key), parsed_season, parsed_episode)
         )
     result: dict[str, DirectoryEpisodeEvidence] = {}
     for directory_key, rows in grouped.items():
@@ -441,7 +442,7 @@ def build_directory_episode_evidence(
         declared_season, declared_start, declared_end = extract_release_episode_range(
             directory_name
         )
-        declared_matches = bool(
+        declared_matches = (
             declared_start == episodes[0]
             and declared_end == episodes[-1]
             and declared_season in (None, source_season)
@@ -551,7 +552,7 @@ def _verified_release_special_ids(
     detail: dict | None, season: int, regular_count: int,
 ) -> tuple[int, ...]:
     identity = _strict_tmdb_integer(detail.get("id")) if isinstance(detail, dict) else None
-    return _VERIFIED_RELEASE_SPECIALS.get((identity, season, regular_count), ())
+    return _VERIFIED_RELEASE_SPECIALS.get((identity, season, regular_count), ()) if identity is not None else ()
 
 
 def _verified_special_episode_numbers(
@@ -623,7 +624,7 @@ def infer_overflow_tmdb_special_mapping(
         or evidence.episode_count < 1
         or evidence.range_end - evidence.range_start + 1 != evidence.episode_count
         or not evidence.range_start <= episode <= evidence.range_end
-        or int(directory_member_count or 0) != evidence.episode_count
+        or (directory_member_count or 0) != evidence.episode_count
     ):
         return None
 
@@ -684,12 +685,12 @@ def infer_overflow_tmdb_special_mapping(
 
     overflow_count = len(target_episodes)
     expected_end = regular_count + overflow_count
-    complete_pack = bool(
+    complete_pack = (
         evidence.range_start == 1
         and evidence.range_end == expected_end
         and evidence.episode_count == expected_end
     )
-    complete_tail = bool(
+    complete_tail = (
         evidence.range_start == regular_count + 1
         and evidence.range_end == expected_end
         and evidence.episode_count == overflow_count
@@ -715,7 +716,7 @@ def infer_overflow_tmdb_special_mapping(
 
 
 def _absolute_target(episode: int, counts: dict[int, int]) -> tuple[int, int] | None:
-    remaining = int(episode)
+    remaining = episode
     for season in sorted(counts):
         count = counts[season]
         if remaining <= count:
@@ -792,8 +793,8 @@ def infer_episode_mapping(
         # 明确写在目录/发布名中的连续范围本身就是目录级证据；这保留了
         # 旧调用方的兼容性，同时仍不会改写孤立的普通 SxxExx 文件。
         evidence = DirectoryEpisodeEvidence(
-            directory_key=str(parent_path or "__range__"),
-            directory_name=str(parent_path or ""),
+            directory_key=(parent_path or "__range__"),
+            directory_name=(parent_path or ""),
             source_season=season,
             range_start=range_start,
             range_end=range_end,
@@ -834,15 +835,17 @@ def infer_episode_mapping(
         # 例如四季各 24 集时，S03E49-E72 可唯一换算为 S03E01-E24；
         # 但 S02E01-E26 明确从 E01 重置，E25/E26 只能视为越界异常，
         # 不能因为整包末集超界就错误回卷成 S02E01/E02。
-        full_target_season_covered = bool(
+        full_target_season_covered = (
             evidence_valid
+            and evidence is not None
             and current_count is not None
             and evidence.range_start - previous_total == 1
             and evidence.range_end - previous_total == current_count
             and evidence.episode_count == current_count
         )
-        continued_range_proven = bool(
+        continued_range_proven = (
             evidence_valid
+            and evidence is not None
             and current_count is not None
             and evidence.range_start > previous_total
             # 必须让整个目录都落在同一目标季内，不能只让前几集合法就
@@ -865,8 +868,8 @@ def infer_episode_mapping(
                 mode="season_continuous",
                 reason="continued_numbering_rebased_to_tmdb_season",
                 confidence=1.0 if evidence_valid else 0.95,
-                range_start=evidence.range_start if evidence_valid else range_start,
-                range_end=evidence.range_end if evidence_valid else range_end,
+                range_start=evidence.range_start if evidence_valid and evidence is not None else range_start,
+                range_end=evidence.range_end if evidence_valid and evidence is not None else range_end,
             )
         if manual_mode:
             return EpisodeMappingPlan(
@@ -886,14 +889,14 @@ def infer_episode_mapping(
         # 就把 S03E10 误投到合并季 E10；只有 TMDB 恰为单一正片季，且目录
         # 起点已越过前面每个发布季至少 24 集的保守边界，才接受长篇动画的
         # 绝对集号解释。12/13 集分割放送由带停播日期证据的 cour 映射处理。
-        merged_single_season_absolute = bool(
+        merged_single_season_absolute = (
             current_count is None
             and len(counts) == 1
             and evidence is not None
             and evidence.range_start
             > _AUTO_MERGED_SEASON_SPAN * (season - 1)
         )
-        auto_absolute_allowed = bool(
+        auto_absolute_allowed = (
             evidence_valid
             and source_position_missing
             and (season == 1 or merged_single_season_absolute)
@@ -909,8 +912,8 @@ def infer_episode_mapping(
                 mode="absolute",
                 reason="absolute_numbering_rolled_over_tmdb_seasons",
                 confidence=1.0 if evidence_valid else 0.95,
-                range_start=evidence.range_start if evidence_valid else range_start,
-                range_end=evidence.range_end if evidence_valid else range_end,
+                range_start=evidence.range_start if evidence_valid and evidence is not None else range_start,
+                range_end=evidence.range_end if evidence_valid and evidence is not None else range_end,
             )
 
     if normalized_mode == "auto" and current_count is not None and episode <= current_count:

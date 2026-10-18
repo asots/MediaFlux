@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from starlette.responses import JSONResponse
+
+from typing import cast
+from app.modules.scraper import TMDBScraper
+
 from pathlib import Path
 import tempfile
 import unittest
@@ -70,6 +75,7 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
         task_id = scheduler.enqueue_manual_scan_candidates()["task_ids"][0]
         scheduler.run_once()
         previous = db.get_local_media_task(task_id)
+        assert previous is not None
         self.assertEqual(previous.status, "failed")
         with patch.object(api, "get_local_media_scheduler", return_value=scheduler):
             self.assertEqual(
@@ -78,10 +84,14 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
             )
         waiting = db.get_local_media_task(task_id)
         self.assertTrue(scheduler._is_manual_scan_task(waiting))
+        assert previous is not None
+        assert waiting is not None
         self.assertNotEqual(waiting.operation_token, previous.operation_token)
         scheduler.run_once()
         self.assertEqual(service.calls, 2)
-        self.assertEqual(db.get_local_media_task(task_id).status, "completed")
+        get_local_media_task_result = db.get_local_media_task(task_id)
+        assert get_local_media_task_result is not None
+        self.assertEqual(get_local_media_task_result.status, "completed")
 
     def test_all_retry_entries_keep_supported_prefix_and_do_not_enable_legacy_scan(
         self,
@@ -112,6 +122,7 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
                             task_id,
                         )
                     after = db.get_local_media_task(task_id)
+                    assert after is not None
                     self.assertNotEqual(after.operation_token, old_token)
                     self.assertEqual(after.trigger, "scan")
                     self.assertEqual(
@@ -139,6 +150,7 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
                 db.init_db()
                 db.update_local_media_task(task_id, status=status)
                 before = db.get_local_media_task(task_id)
+                assert before is not None
                 self.assertTrue(db.is_interrupted_local_media_write_error(before.error))
                 with self.assertRaisesRegex(ValueError, "核验"):
                     db.prepare_manual_local_media_task(
@@ -161,7 +173,7 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
 
     def test_inspect_execute_cannot_erase_unconfirmed_retired_target_attempt(self):
         service = LocalMediaService(
-            scraper=FakeScraper(
+            scraper=cast(TMDBScraper, FakeScraper(
                 MatchResult(
                     tmdb_id="1",
                     title="Movie",
@@ -169,7 +181,7 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
                     media_type="movie",
                     confidence=1.0,
                 )
-            )
+            ))
         )
         self.addCleanup(service.close)
         rules = OrganizeRules(
@@ -224,9 +236,12 @@ class LocalRetryAdmissionAuditTests(unittest.TestCase):
         db.init_db()
         recovered = db.get_local_media_task(task_id, owner="admin")
         before_steps = db.list_local_media_operation_steps(task_id, owner="admin")
-        self.assertEqual(api.retry_task(task_id, request(), {}).status_code, 409)
+        retry_response = api.retry_task(task_id, request(), {})
+        assert isinstance(retry_response, JSONResponse)
+        self.assertEqual(retry_response.status_code, 409)
         with patch.object(api, "get_local_media_service", return_value=service):
             fresh = api.inspect_task(task_id, request())
+            assert isinstance(fresh, dict)
             result = api.execute_media(
                 request(),
                 {

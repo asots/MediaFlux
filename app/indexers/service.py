@@ -110,23 +110,23 @@ class IndexerService:
         self.result_store = result_store
         self.site_timeout_seconds = float(site_timeout_seconds)
         self.total_timeout_seconds = float(total_timeout_seconds)
-        self.max_results_per_site = int(max_results_per_site)
-        self.max_concurrency = int(max_concurrency)
-        self.cache_ttl_seconds = int(cache_ttl_seconds)
-        self.max_cache_entries = int(max_cache_entries)
-        self.breaker_failure_threshold = int(breaker_failure_threshold)
-        self.breaker_cooldown_seconds = int(breaker_cooldown_seconds)
+        self.max_results_per_site = max_results_per_site
+        self.max_concurrency = max_concurrency
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.max_cache_entries = max_cache_entries
+        self.breaker_failure_threshold = breaker_failure_threshold
+        self.breaker_cooldown_seconds = breaker_cooldown_seconds
         configured = (
             registry.enabled_ids()
             if enabled_site_ids is None
             else tuple(enabled_site_ids)
         )
         registered = set(registry.ids())
-        configured_ids = {str(site_id).strip().lower() for site_id in configured}
+        configured_ids = {site_id.strip().lower() for site_id in configured}
         self.sukebei_authorized = (
             "sukebei" in configured_ids
             if sukebei_authorized is None
-            else bool(sukebei_authorized)
+            else sukebei_authorized
         )
         manual = {
             site_id
@@ -174,7 +174,7 @@ class IndexerService:
         )
         scope = self._normalize_scope(scope)
         selected = self._select_sites(site_ids, scope=scope)
-        plans = {site_id: (request.query,) for site_id in selected}
+        plans: dict[str, tuple[str, ...]] = {site_id: (request.query,) for site_id in selected}
         cache_key = (
             "query",
             request.query,
@@ -303,6 +303,7 @@ class IndexerService:
         try:
             try:
                 result = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+                assert isinstance(result, AggregatedIndexerResult)
             except asyncio.TimeoutError:
                 with self._runtime_condition:
                     latest = self._progress_last.get(inflight_key)
@@ -412,7 +413,9 @@ class IndexerService:
                 done, _ = await asyncio.wait(pending | {notifier}, timeout=max(0, deadline - loop.time()), return_when=asyncio.FIRST_COMPLETED)
                 if not done:
                     break
-                for task in done & pending:
+                for task in tuple(pending):
+                    if task not in done:
+                        continue
                     outcome = task.result()
                     finish(outcome)
                     pending.remove(task)
@@ -542,11 +545,9 @@ class IndexerService:
             page_has_more = bool(page < 100 and page_result and page_result.has_more)
             has_more = has_more or page_has_more
             site_page_states[site_id] = IndexerSitePageState(
-                pagination_supported=bool(
-                    page_result.pagination_supported
+                pagination_supported=(page_result.pagination_supported
                     if page_result
-                    else adapter_pagination_supported
-                ),
+                    else adapter_pagination_supported),
                 requested_page=page,
                 has_more=page_has_more,
                 next_page=page + 1 if page_has_more else None,
@@ -811,7 +812,7 @@ class IndexerService:
 
     @staticmethod
     def _normalize_scope(scope: str) -> str:
-        normalized = str(scope or "").strip().lower()
+        normalized = (scope or "").strip().lower()
         if normalized not in {"manual", "agent"}:
             raise IndexerValidationError("invalid indexer search scope")
         return normalized
@@ -848,7 +849,7 @@ class IndexerService:
         )
         selected: list[str] = []
         for raw_site_id in requested:
-            site_id = str(raw_site_id or "").strip().lower()
+            site_id = (raw_site_id or "").strip().lower()
             if not site_id or site_id in selected or site_id in RETIRED_INDEXER_SITE_IDS:
                 continue
             if (
@@ -888,9 +889,9 @@ class IndexerService:
         return (
             actionable_rank,
             *(-value for value in match_order(item)),
-            int(item.relevance_score or 0),
+            (item.relevance_score or 0),
             state_rank,
-            int(item.seeders if item.seeders is not None else -1),
+            (item.seeders if item.seeders is not None else -1),
             published_value,
             metadata_count,
             -site_index,
@@ -939,7 +940,7 @@ class IndexerService:
                 attempts=0,
             )
         adapter = self.registry.get(site_id)
-        timeout_overhead = getattr(adapter, "search_timeout_overhead_seconds", None)
+        timeout_overhead: Callable[[], float] | None = getattr(adapter, "search_timeout_overhead_seconds", None)
         overhead_seconds = (
             float(timeout_overhead()) if callable(timeout_overhead) else 0.0
         )
@@ -997,7 +998,7 @@ class IndexerService:
                 self._record_circuit_failure(site_id, code=outcome.error.code)
                 last_error = outcome
                 break
-            if last_error is not None and last_error.error.code == "query_rejected":
+            if last_error is not None and last_error.error is not None and last_error.error.code == "query_rejected":
                 last_error = None
             pause = next((error for error in (outcome.page.errors if outcome.page else ())
                           if error.code in {"rate_limited", "security_error", "challenge_required"}), None)
@@ -1010,10 +1011,8 @@ class IndexerService:
                 continue
             reported_omissions = max(reported_omissions, (outcome.page.total_items or 0) - len(outcome.page.items))
             page_errors.update(((err.code, err.message), err) for err in outcome.page.errors)
-            has_more = has_more or bool(outcome.page.has_more)
-            pagination_supported = pagination_supported or bool(
-                outcome.page.pagination_supported
-            )
+            has_more = has_more or outcome.page.has_more
+            pagination_supported = pagination_supported or outcome.page.pagination_supported
             if outcome.page.items:
                 contributed_query = query
                 plan_items = [
@@ -1163,13 +1162,13 @@ class IndexerService:
         ]
         if media.episode is not None:
             return any(
-                int(item.relevance_score or 0) >= 78
+                (item.relevance_score or 0) >= 78
                 and "episode_exact" in item.match_reasons
                 for item in ranked
             )
-        strong = [item for item in ranked if int(item.relevance_score or 0) >= 78]
+        strong = [item for item in ranked if (item.relevance_score or 0) >= 78]
         return len(strong) >= 3 or any(
-            int(item.relevance_score or 0) >= 80 for item in strong
+            (item.relevance_score or 0) >= 80 for item in strong
         )
 
     def _circuit_error(self, site_id: str) -> IndexerProviderError | None:
@@ -1247,7 +1246,7 @@ class IndexerService:
                     wait_for_slot,
                 )
                 await typed_wait_for_slot(request)
-            timeout_overhead = getattr(adapter, "search_timeout_overhead_seconds", None)
+            timeout_overhead: Callable[[], float] | None = getattr(adapter, "search_timeout_overhead_seconds", None)
             overhead_seconds = (
                 float(timeout_overhead()) if callable(timeout_overhead) else 0.0
             )
@@ -1287,7 +1286,7 @@ class IndexerService:
         overhead_seconds = 0.0
         for site_id in selected:
             adapter = self.registry.get(site_id)
-            timeout_overhead = getattr(adapter, "search_timeout_overhead_seconds", None)
+            timeout_overhead: Callable[[], float] | None = getattr(adapter, "search_timeout_overhead_seconds", None)
             if callable(timeout_overhead):
                 overhead_seconds = max(
                     overhead_seconds, max(0.0, float(timeout_overhead()))

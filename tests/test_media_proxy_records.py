@@ -294,7 +294,9 @@ class PlaybackSessionRegistryTests(unittest.TestCase):
             "scope", 7, item_id="item-1", source_id="source-1", create=True
         )
 
+        assert first_stream is not None
         self.assertEqual(first_stream.token, first.token)
+        assert second_stream is not None
         self.assertEqual(second_stream.token, second.token)
         self.assertNotEqual(first.token, second.token)
 
@@ -310,6 +312,8 @@ class PlaybackSessionRegistryTests(unittest.TestCase):
             "scope", 7, item_id="item-1", source_id="source-1", create=True
         )
 
+        assert first is not None
+        assert second is not None
         self.assertEqual(second.token, first.token)
 
     def test_server_capability_recovers_authenticated_scope_without_raw_token(self):
@@ -599,6 +603,7 @@ class PlaybackSessionRegistryTests(unittest.TestCase):
         self.assertIsNot(second, first)
         self.assertEqual(first.item_id, "item-a")
         self.assertEqual(first.media_name, "A.mkv")
+        assert second is not None
         self.assertEqual(second.item_id, "item-b")
         self.assertNotEqual(
             registry.persistent_key(first), registry.persistent_key(second)
@@ -1244,8 +1249,10 @@ class ProxyRouteRecordIntegrationTests(IsolatedDatabaseTestCase):
         self.assertNotIn("provider-account-secret", serialized)
 
     def test_signed_strm_head_and_get_reuse_guangya_timestamp_url(self):
-        from fastapi import FastAPI
         from urllib.parse import urlsplit
+
+        from fastapi import FastAPI
+
         from app.modules.strm import build_play_url
         from app.routes import proxy
 
@@ -1288,7 +1295,9 @@ def _logged_in_client():
         "ENV_WEB_PASSWORD": "password",
     }, clear=False), TestClient(create_app()) as client:
         page = client.get("/login")
-        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+        search_result = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+        assert search_result is not None
+        token = search_result.group(1)
         response = client.post(
             "/login",
             data={"csrf_token": token, "username": "admin", "password": "password"},
@@ -1297,7 +1306,9 @@ def _logged_in_client():
         if response.status_code != 302:
             raise AssertionError(response.text)
         settings = client.get("/settings")
-        csrf = re.search(r'<meta name="csrf-token" content="([^"]+)"', settings.text).group(1)
+        search_result_2 = re.search(r'<meta name="csrf-token" content="([^"]+)"', settings.text)
+        assert search_result_2 is not None
+        csrf = search_result_2.group(1)
         yield client, csrf
 
 

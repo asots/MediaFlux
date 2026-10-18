@@ -89,9 +89,9 @@ def test_web_test_class_performs_real_installation_and_restores_after_suite():
             roots.append(config.PATHS.data_dir.parent)
             self.assertFalse(database._configured_test_mode)
             with database.get_conn() as conn:
-                self.assertIsNotNone(conn.execute(
+                assert (conn.execute(
                     "SELECT name FROM sqlite_master WHERE name='organize_log'",
-                ).fetchone())
+                ).fetchone()) is not None
                 self.assertEqual(read_runtime_fence(conn).phase, 'stable')
             # 原生Web启动也必须认可该安装；不能只检查fixture自称initialized。
             with TestClient(create_app(start_background=False)) as client:
@@ -164,9 +164,9 @@ def test_isolated_database_class_restores_nested_installation_scope():
             self.assertTrue(database._configured_test_mode)
             self.assertEqual(database.resolve_db_path(), self.test_db_path)
             with database.get_conn() as conn:
-                self.assertIsNotNone(conn.execute(
+                assert (conn.execute(
                     "SELECT name FROM sqlite_master WHERE name='organize_log'",
-                ).fetchone())
+                ).fetchone()) is not None
 
     result = _run_fixture_class(Database)
     assert result.testsRun == 1 and result.wasSuccessful(), result.errors + result.failures

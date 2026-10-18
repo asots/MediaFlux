@@ -1,6 +1,8 @@
 """人工确认与下载隔离目录的真实业务状态衔接（临时DB / fake provider）。"""
 from __future__ import annotations
 
+from typing import Any
+
 import json
 from unittest.mock import patch
 
@@ -27,12 +29,12 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
             organize_status='requires_manual', organize_task_id='task-case',
             gy_task_id='cloud-task', gy_task_ids='["cloud-task"]',
         )
-        self.payload = {
+        self.payload: dict[str, Any] = {
             'source_dir_id': 'stage', 'source_parent_id': 'stage', 'source_name': 'MF-case', 'directory': '/',
             'files': [{'file_id': 'video', 'parent_id': 'stage'}],
         }
         self.rules = OrganizeRules(target_dir_id='target', clean_empty=True, link_strm=False)
-        self.stats = {'moved': 1, 'failed': 0, 'need_confirm': 0}
+        self.stats: dict[str, Any] = {'moved': 1, 'failed': 0, 'need_confirm': 0}
         self.add_confirmation('done', status='completed')
 
     def add_confirmation(self, token, *, status, source_id='stage'):
@@ -52,6 +54,7 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
     def test_completed_legacy_card_closes_original_request_and_cleans_its_exact_root(self):
         self.assertEqual(self.finish(), [self.request_id])
         row = db.get_download_request(self.request_id)
+        assert row is not None
         self.assertEqual(row['organize_status'], 'completed')
         self.assertEqual(row['gy_staging_cleanup_status'], 'completed')
         self.assertEqual(self.cloud.deleted, ['stage'])
@@ -60,11 +63,13 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
     def test_other_pending_card_preserves_root_and_requires_manual_phase(self):
         self.add_confirmation('pending', status='pending')
         self.assertEqual(self.finish(), [self.request_id])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'requires_manual')
+        get_download_request_result = db.get_download_request(self.request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result['organize_status'], 'requires_manual')
         self.assertEqual(self.cloud.deleted, [])
 
     def test_new_payload_checks_business_request_and_task_without_notification_rollup(self):
-        payload = {**self.payload, 'download_request_ids': [self.request_id], 'organize_task_id': 'task-case'}
+        payload: dict[str, Any] = {**self.payload, 'download_request_ids': [self.request_id], 'organize_task_id': 'task-case'}
         self.assertEqual(self.finish(payload), [self.request_id])
         self.assertEqual(self.cloud.deleted, ['stage'])
 
@@ -76,14 +81,16 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.cloud.deleted, [])
 
     def test_same_title_cannot_resolve_a_different_source(self):
-        payload = {**self.payload, 'source_dir_id': 'other', 'source_name': 'MF-case'}
+        payload: dict[str, Any] = {**self.payload, 'source_dir_id': 'other', 'source_name': 'MF-case'}
         self.assertEqual(requests_for_download_confirmation(payload), [])
         self.assertEqual(self.finish(payload), [])
 
     def test_cleanup_toggle_off_still_completes_confirmation_phase_without_cloud_cleanup(self):
         self.rules.clean_empty = False
         self.assertEqual(self.finish(), [self.request_id])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'completed')
+        get_download_request_result_2 = db.get_download_request(self.request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2['organize_status'], 'completed')
         self.assertEqual(self.cloud.deleted, [])
         self.assertEqual(self.cloud.reads, [])
 
@@ -121,8 +128,12 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.cloud.deleted, ['stage'])
         self.assertNotIn('_cleaned_roots', report)
         self.assertEqual(report['sources'][0]['cleaned'], 1)
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'completed')
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'completed')
+        get_download_request_result_3 = db.get_download_request(self.request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3['gy_staging_cleanup_status'], 'completed')
+        get_download_request_result_4 = db.get_download_request(self.request_id)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4['organize_status'], 'completed')
 
     def test_manual_button_repeated_does_not_delete_recycle_entry_again(self):
         self.assertEqual(self.manual_clean()['cleaned'], 1)
@@ -181,15 +192,17 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
         )
         with patch('app.modules.telegram_download_lifecycle.get_notification_thread_event', return_value=None):
             event = build_download_lifecycle_event(db.get_download_request(self.request_id))
-        self.assertNotIn('下载与入库完成', event.title)
+        self.assertNotIn('下载与入库完成', str(event.title))
         self.assertEqual(dict(event.fields)['光鸭整理'], '需要确认')
-        self.assertIn('候选卡', event.footer)
+        self.assertIn('候选卡', str(event.footer))
 
     def test_cancelled_parent_does_not_get_completed_or_trigger_cleanup(self):
         db.update_download_request(self.request_id, status='cancelled')
         self.assertEqual(self.finish(), [])
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'requires_manual')
+        get_download_request_result_5 = db.get_download_request(self.request_id)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5['organize_status'], 'requires_manual')
 
     def test_legacy_failed_then_latest_completed_confirmation_can_close_staging(self):
         self.add_confirmation('old-failed', status='failed')
@@ -209,11 +222,13 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
         self.stats['failed'] = 1
         db.update_organize_confirmation('done', result_json=json.dumps(self.stats))
         self.assertEqual(self.finish(), [self.request_id])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'requires_manual')
+        get_download_request_result_6 = db.get_download_request(self.request_id)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6['organize_status'], 'requires_manual')
         self.assertEqual(self.cloud.deleted, [])
 
     def test_known_legacy_task_mismatch_is_not_downgraded_to_ordinary_organize(self):
-        payload = {**self.payload, 'organize_task_id': 'old-task'}
+        payload: dict[str, Any] = {**self.payload, 'organize_task_id': 'old-task'}
         db.create_organize_confirmation(
             token='legacy-mismatch', fingerprint='legacy-mismatch', chat_id='test',
             source_name='MF-case', directory_path='/', payload=payload, expires_at='2099-01-01 00:00:00',
@@ -235,10 +250,12 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
                       {'replacement_cleanup_failed': 1}, {'empty_dir_cleanup_failed': 1},
                       {'need_confirm': 1}, {'stopped': 1}):
             with self.subTest(extra=extra):
-                self.stats = {'moved': 1, 'failed': 0, 'need_confirm': 0, **extra}
+                self.stats: dict[str, Any] = {'moved': 1, 'failed': 0, 'need_confirm': 0, **extra}
                 db.update_organize_confirmation('done', result_json=json.dumps(self.stats))
                 self.assertEqual(self.finish(), [self.request_id])
-                self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'requires_manual')
+                get_download_request_result_7 = db.get_download_request(self.request_id)
+                assert get_download_request_result_7 is not None
+                self.assertEqual(get_download_request_result_7['organize_status'], 'requires_manual')
                 self.assertEqual(self.cloud.deleted, [])
 
     def _execute_with_probe_context(self, *, payload=None):
@@ -302,7 +319,9 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
         self.assertTrue(context['notify_enabled'])
         self.assertFalse(any(item['topic'] == 'organize' for item in context['notification_threads']))
         self.assertTrue(any(item['topic'] == 'confirmation' for item in context['notification_threads']))
-        persisted = json.loads(db.get_organize_confirmation('done')['result_json'])
+        get_organize_confirmation_result = db.get_organize_confirmation('done')
+        assert get_organize_confirmation_result is not None
+        persisted = json.loads(get_organize_confirmation_result['result_json'])
         self.assertEqual(persisted['download_staging_identity']['gy_task_id'], 'cloud-task')
 
     def test_real_confirmation_probe_context_preserves_existing_rollup_thread_only(self):

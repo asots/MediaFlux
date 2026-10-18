@@ -1,6 +1,8 @@
 """长任务关闭只收尾已接纳批次，不再领取后续持久任务。"""
 from __future__ import annotations
 
+from tests.support import assert_present
+
 import json
 from unittest.mock import Mock, patch
 
@@ -36,7 +38,7 @@ class DurableJobsShutdownTests(IsolatedDatabaseTestCase):
         })
 
     def _statuses(self):
-        return [db.get_agent_job(owner="five-pass", job_id=job_id)["status"] for job_id in self.jobs]
+        return [assert_present(db.get_agent_job(owner="five-pass", job_id=job_id))["status"] for job_id in self.jobs]
 
     def test_stop_during_batch_leaves_next_jobs_pending_and_new_scheduler_resumes(self):
         executor = Mock()
@@ -78,4 +80,4 @@ class DurableJobsShutdownTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 0)
         executor.assert_not_called()
         self.assertEqual(self._statuses(), ["pending"] * 3)
-        self.assertTrue(all(db.get_agent_job(owner="five-pass", job_id=job_id)["attempts"] == 0 for job_id in self.jobs))
+        self.assertTrue(all(assert_present(db.get_agent_job(owner="five-pass", job_id=job_id))["attempts"] == 0 for job_id in self.jobs))

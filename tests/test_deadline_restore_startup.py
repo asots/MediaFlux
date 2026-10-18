@@ -27,9 +27,9 @@ def test_prepared_restore_with_missing_canonical_is_recovered(tmp_path, backgrou
         real_replace = backup.os.replace
         interrupted = False
 
-        def replace_then_interrupt(src, dst):
+        def replace_then_interrupt(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
             nonlocal interrupted
-            result = real_replace(src, dst)
+            result = real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
             if Path(src) == paths.database_path and str(dst).endswith('.bak'):
                 interrupted = True
                 raise KeyboardInterrupt('controlled interruption after DB capture')
@@ -48,16 +48,17 @@ def test_prepared_restore_with_missing_canonical_is_recovered(tmp_path, backgrou
         real_recover = backup.recover_pending_restore
         calls = []
 
-        def checked_recover(selected_paths, *, lifecycle_lock_held=False):
+        def checked_recover(paths, *, lifecycle_lock_held=False):
             assert lifecycle_lock_held
-            assert backup._runtime_lifecycle_key(selected_paths) in backup._RUNTIME_LIFECYCLE_REGISTRY
-            result = real_recover(selected_paths, lifecycle_lock_held=True)
+            assert backup._runtime_lifecycle_key(paths) in backup._RUNTIME_LIFECYCLE_REGISTRY
+            result = real_recover(paths, lifecycle_lock_held=True)
             calls.append(result)
             return result
 
         backup.recover_pending_restore = checked_recover
         try:
             if background_factory:
+                from app import main
                 app = main.create_app(start_background=True)
             else:
                 from app import main

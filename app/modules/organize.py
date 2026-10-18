@@ -16,10 +16,9 @@
 from __future__ import annotations
 
 import copy
-import os
-from decimal import Decimal
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -32,20 +31,19 @@ from concurrent.futures import (
 )
 from contextlib import contextmanager
 from dataclasses import replace
+from decimal import Decimal
 from difflib import SequenceMatcher
-from typing import Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal, overload
 
 from app import database as db
 from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.config import get, get_bool, get_int
 from app.database import add_organize_log, add_organize_log_items, get_media_probe_cache
 from app.logger import get_logger, log_throttled
-from app.modules.guangya_compensation import restore_guangya_file
-from app.modules.media_variant import MediaVariant, classify_variant, variants_can_coexist
-from app.modules.recognition_policy import (
-    automatic_match_confirmation_message,
-    automatic_match_policy,
-    normalize_automatic_match_preset,
+from app.modules.directory_scrape_errors import (
+    DirectoryScrapeConflictError,
+    DirectoryScrapeStateError,
+    safe_organize_failure,
 )
 from app.modules.episode_mapping import (
     DirectoryEpisodeEvidence,
@@ -57,10 +55,11 @@ from app.modules.episode_mapping import (
     match_fractional_tmdb_special,
     season_episode_counts,
 )
-from app.modules.directory_scrape_errors import (
-    DirectoryScrapeConflictError,
-    DirectoryScrapeStateError,
-    safe_organize_failure,
+from app.modules.guangya_compensation import restore_guangya_file
+from app.modules.media_variant import (
+    MediaVariant,
+    classify_variant,
+    variants_can_coexist,
 )
 from app.modules.naming import (
     NSFW_DIR_DEFAULT,
@@ -71,44 +70,11 @@ from app.modules.naming import (
     render_template,
     template_has_media_identity,
 )
-from app.modules.scraper import (
-    MatchResult,
-    TMDBScraper,
-    extract_recognition_context,
-    has_unresolved_candidate_title_remainder,
-    has_unresolved_season_hint,
-    implicit_season_conflicts_with_candidate_title,
-    infer_tmdb_season_from_title_evidence,
-    parse_release_position,
-    target_season_year_evidence_matches_detail,
-    verified_automatic_identity_proof,
+from app.modules.organize_delete_audit import (
+    DeleteCandidate,
+    execute_recycle_bin_delete,
 )
-from app.modules.recognition.resolver import (
-    _has_explicit_tmdb_marker,
-    _resolve_explicit_tmdb_marker,
-)
-from app.modules.subtitle_identity import plan_subtitle_companions
-from app.modules.special_media import (
-    fixed_special_media_position,
-    fractional_episode_position,
-    has_fractional_episode_position,
-    is_special_directory_name,
-    is_special_media_name,
-    is_special_path,
-    special_media_position,
-    title_hint_from_path,
-)
-from app.modules.organize_scan import (
-    DEFAULT_TRAVERSAL_MAX_DEPTH,
-    DEFAULT_TRAVERSAL_MAX_DIRS,
-    DEFAULT_TRAVERSAL_MAX_ENTRIES,
-    OrganizerScanner,
-    OrganizeScanResult,
-    ScanRestriction,
-    ScannedVideo,
-    TraversalBudget,
-    TraversalLimitExceeded,
-)
+from app.modules.organize_execution import execute_organize_plans
 from app.modules.organize_groups import (
     GROUP_ROOT_PATH,
     GROUP_STAGE_CLEANUP,
@@ -127,55 +93,102 @@ from app.modules.organize_groups import (
     is_terminal_group_status,
     merge_group_stats,
 )
-from app.modules.organize_execution import execute_organize_plans
-from app.modules.organize_runtime import OrganizeTaskRuntime
+from app.modules.organize_identity import (  # noqa: F401
+    _DIRECTORY_TITLE_SEGMENT_RE,
+    _GENERIC_FILENAME_IDENTITY_HINTS,
+    _MEDIA_IDENTITY_SEPARATORS_RE,
+    _MEDIA_IDENTITY_TOKEN_RE,
+    _SPECIAL_FILENAME_IDENTITY_MARKER_RE,
+    _directory_episode_identity_hint,
+    _normalize_media_identity,
+    _recognition_identity_year,
+    _special_filename_identity_hint,
+    _usable_filename_identity_hint,
+)
+
+# 各阶段只保留一份实现；此处直接导出，维持现行 Python 调用入口。
+from app.modules.organize_models import (  # noqa: F401
+    OrganizeContext,
+    OrganizePlan,
+    OrganizePlanningResult,
+    OrganizeScanUnsafeError,
+    _OrganizeAuditWriteError,
+    _PreparedOrganizeGroup,
+)
 from app.modules.organize_postprocess import (
     media_role,
     normalize_media_number,
     normalized_stem,
 )
-from app.modules.organize_delete_audit import (
-    DeleteCandidate,
-    execute_recycle_bin_delete,
-)
-
-
-# 各阶段只保留一份实现；此处直接导出，维持现行 Python 调用入口。
-from app.modules.organize_models import (  # noqa: F401
-    OrganizeScanUnsafeError,
-    _OrganizeAuditWriteError,
-    OrganizePlan,
-    OrganizeContext,
-    OrganizePlanningResult,
-    _PreparedOrganizeGroup,
+from app.modules.organize_results import (  # noqa: F401
+    _format_phase_timing,
+    _format_scan_summary,
 )
 from app.modules.organize_rules import (  # noqa: F401
-    DEFAULT_ORGANIZE_VIDEO_EXTS,
-    DEFAULT_ORGANIZE_METADATA_EXTS,
-    automatic_match_requires_confirmation,
-    OrganizeRules,
-    enforce_fixed_organize_rules,
     _ORGANIZE_RULE_SERVER_ONLY_FIELDS,
+    DEFAULT_ORGANIZE_METADATA_EXTS,
+    DEFAULT_ORGANIZE_VIDEO_EXTS,
+    OrganizeRules,
+    automatic_match_requires_confirmation,
+    enforce_fixed_organize_rules,
     organize_rules_snapshot,
-    restore_organize_rules_snapshot,
     organize_rules_snapshot_matches,
+    restore_organize_rules_snapshot,
 )
-from app.modules.organize_identity import (  # noqa: F401
-    _MEDIA_IDENTITY_SEPARATORS_RE,
-    _DIRECTORY_TITLE_SEGMENT_RE,
-    _MEDIA_IDENTITY_TOKEN_RE,
-    _normalize_media_identity,
-    _GENERIC_FILENAME_IDENTITY_HINTS,
-    _SPECIAL_FILENAME_IDENTITY_MARKER_RE,
-    _usable_filename_identity_hint,
-    _special_filename_identity_hint,
-    _recognition_identity_year,
-    _directory_episode_identity_hint,
+from app.modules.organize_runtime import OrganizeTaskRuntime
+from app.modules.organize_scan import (
+    DEFAULT_TRAVERSAL_MAX_DEPTH,
+    DEFAULT_TRAVERSAL_MAX_DIRS,
+    DEFAULT_TRAVERSAL_MAX_ENTRIES,
+    OrganizerScanner,
+    OrganizeScanResult,
+    ScannedVideo,
+    ScanRestriction,
+    TraversalBudget,
+    TraversalLimitExceeded,
 )
-from app.modules.organize_results import (  # noqa: F401
-    _format_scan_summary,
-    _format_phase_timing,
+from app.modules.recognition.resolver import (
+    _has_explicit_tmdb_marker,
+    _resolve_explicit_tmdb_marker,
 )
+from app.modules.recognition_policy import (
+    automatic_match_confirmation_message,
+    automatic_match_policy,
+    normalize_automatic_match_preset,
+)
+from app.modules.scraper import (
+    Candidate,
+    MatchResult,
+    ReleaseParseResult,
+    TMDBScraper,
+    extract_recognition_context,
+    has_unresolved_candidate_title_remainder,
+    has_unresolved_season_hint,
+    implicit_season_conflicts_with_candidate_title,
+    infer_tmdb_season_from_title_evidence,
+    parse_release_position,
+    target_season_year_evidence_matches_detail,
+    verified_automatic_identity_proof,
+)
+from app.modules.special_media import (
+    fixed_special_media_position,
+    fractional_episode_position,
+    has_fractional_episode_position,
+    is_special_directory_name,
+    is_special_media_name,
+    is_special_path,
+    special_media_position,
+    title_hint_from_path,
+)
+from app.modules.subtitle_identity import plan_subtitle_companions
+
+if TYPE_CHECKING:
+    from app.modules.directory_scrape import (
+        FixedMatchScraper,
+        PreviewSnapshotGuangYaClient,
+    )
+    from app.modules.nsfw import NsfwRecognizer
+
 
 logger = get_logger(__name__)
 
@@ -235,7 +248,7 @@ def resolve_organize_workers() -> int:
     生产默认开启三个 Worker；测试默认保持串行，只有显式配置时才进入
     并行路径，避免历史测试桩因线程调度产生无意义的不确定性。
     """
-    configured = str(get("GY_ORGANIZE_WORKERS", "") or "").strip()
+    configured = (get("GY_ORGANIZE_WORKERS", "") or "").strip()
     if configured:
         try:
             value = int(configured)
@@ -314,18 +327,20 @@ class _ConflictIdentityIndex:
 
 class Organizer:
     def __init__(
-        self, client: GuangYaClient = None, scraper: TMDBScraper = None, *,
+        self, client: GuangYaClient | PreviewSnapshotGuangYaClient | None = None, scraper: TMDBScraper | FixedMatchScraper | None = None, *,
+        local_only: bool = False,
+        recognition_enabled: bool = True,
         traversal_limits: tuple[int, int, int] | None = None,
         before_plan_write: Callable[..., None] | None = None,
     ):
         self._before_plan_write = before_plan_write
-        self._owns_client = client is None
-        self._owns_scraper = scraper is None
-        self.client = client if client is not None else GuangYaClient()
-        self.scraper = scraper if scraper is not None else TMDBScraper()
+        self._owns_client = client is None and not local_only
+        self._client = client if client is not None else (None if local_only else GuangYaClient())
+        self._owned_scraper = TMDBScraper() if scraper is None and recognition_enabled else None
+        self._scraper = scraper if scraper is not None else self._owned_scraper
         self._closed = False
         self._closing = False
-        self._owned_scraper_closed = not self._owns_scraper
+        self._owned_scraper_closed = self._owned_scraper is None
         self._owned_client_closed = not self._owns_client
         self._traversal_limits = traversal_limits or (
             max(8, min(get_int("GY_ORGANIZE_MAX_SCAN_DEPTH", DEFAULT_TRAVERSAL_MAX_DEPTH), 512)),
@@ -339,11 +354,31 @@ class Organizer:
         self._media_probe_payload_cache: dict[tuple[str, str, int], str] = {}
         self._media_probe_cache_checked: set[tuple[str, str, int]] = set()
         self._probe_budget = None
-        self._nsfw_recognizers: dict[tuple[str, str, str, int], object] = {}
+        self._nsfw_recognizers: dict[tuple[str, str, str, int], NsfwRecognizer | None] = {}
         self._close_call_lock = threading.Lock()
         self._nsfw_lock = threading.RLock()
         self._nsfw_active_leases: dict[int, int] = {}
         self._retired_nsfw_recognizers: dict[int, object] = {}
+
+    @property
+    def client(self) -> GuangYaClient | PreviewSnapshotGuangYaClient:
+        if self._client is None:
+            raise RuntimeError("本地整理规划没有云盘客户端")
+        return self._client
+
+    @client.setter
+    def client(self, value: GuangYaClient | PreviewSnapshotGuangYaClient) -> None:
+        self._client = value
+
+    @property
+    def scraper(self) -> TMDBScraper | FixedMatchScraper:
+        if self._scraper is None:
+            raise RuntimeError("该整理操作未启用媒体识别")
+        return self._scraper
+
+    @scraper.setter
+    def scraper(self, value: TMDBScraper | FixedMatchScraper) -> None:
+        self._scraper = value
 
     @staticmethod
     def _close_nsfw_recognizer(recognizer: object) -> bool:
@@ -418,9 +453,9 @@ class Organizer:
             if not recognizers_drained:
                 return False
 
-            if self._owns_scraper and not self._owned_scraper_closed:
+            if self._owned_scraper is not None and not self._owned_scraper_closed:
                 try:
-                    self._owned_scraper_closed = self.scraper.close() is True
+                    self._owned_scraper_closed = self._owned_scraper.close() is True
                 except Exception as exc:
                     logger.warning(
                         "关闭 TMDB Scraper 失败 type=%s",
@@ -442,7 +477,7 @@ class Organizer:
     def _parse_exts(raw: str, defaults: set[str]) -> set[str]:
         if not (raw or "").strip():
             return set(defaults)
-        tokens = re.split(r"[,，\s]+", str(raw))
+        tokens = re.split(r"[,，\s]+", raw)
         parsed = {
             item.strip().lower().lstrip(".")
             for item in tokens
@@ -458,7 +493,7 @@ class Organizer:
 
     # ===== 分类与媒体身份 =====
     @staticmethod
-    def _match_provider(match: MatchResult | None) -> str:
+    def _match_provider(match: MatchResult | Candidate | None) -> str:
         if match is None:
             return ""
         provider = str(getattr(match, "provider", "") or "").strip().lower()
@@ -467,7 +502,7 @@ class Organizer:
         return "tmdb" if str(getattr(match, "tmdb_id", "") or "").strip() else ""
 
     @staticmethod
-    def _declared_callable(target: object, name: str):
+    def _declared_callable(target: object, name: str) -> Callable[..., Any] | None:
         """只接受对象真实声明的方法，避免 Mock 动态属性误判能力。"""
         from inspect import getattr_static
 
@@ -483,7 +518,7 @@ class Organizer:
     ) -> bool:
         if self._match_provider(match) != "tmdb":
             return False
-        if isinstance(self.scraper, TMDBScraper):
+        if isinstance(self._scraper, TMDBScraper):
             return True
 
         # 包装器必须显式声明能力。仅凭同名方法不足以判定：
@@ -493,14 +528,14 @@ class Organizer:
 
         try:
             supported = getattr_static(
-                self.scraper, "supports_tmdb_position_validation"
+                self._scraper, "supports_tmdb_position_validation"
             )
         except AttributeError:
             return False
         return bool(
             supported is True
-            and self._declared_callable(self.scraper, "validate_position")
-            and self._declared_callable(self.scraper, "position_validation_error")
+            and self._declared_callable(self._scraper, "validate_position")
+            and self._declared_callable(self._scraper, "position_validation_error")
         )
 
     def _maps_tmdb_source_positions(self, match: MatchResult | None) -> bool:
@@ -521,7 +556,7 @@ class Organizer:
         from inspect import getattr_static
 
         try:
-            fixed_match = getattr_static(self.scraper, "fixed_match")
+            fixed_match = getattr_static(self._scraper, "fixed_match")
         except AttributeError:
             return False
         return isinstance(fixed_match, MatchResult)
@@ -636,17 +671,17 @@ class Organizer:
             )
         ):
             return False
-        if source_position is None or len(source_position) != 2:
+        if source_position is None or len(source_position) != 2 or source_position[1] is None:
             return False
         try:
-            source_season = int(
+            source_season = (
                 directory_evidence.source_season
                 if source_position[0] is None else source_position[0]
             )
-            source_episode = int(source_position[1])
+            source_episode = source_position[1]
         except (TypeError, ValueError):
             return False
-        return bool(
+        return (
             source_season == directory_evidence.source_season
             and directory_evidence.range_start
             <= source_episode
@@ -654,7 +689,7 @@ class Organizer:
         )
 
     @classmethod
-    def _match_external_id(cls, match: MatchResult | None) -> str:
+    def _match_external_id(cls, match: MatchResult | Candidate | None) -> str:
         if match is None:
             return ""
         external = str(getattr(match, "external_id", "") or "").strip()
@@ -683,11 +718,13 @@ class Organizer:
     def _detail(
         self, tmdb_id: str, media_type: str, *, force_refresh: bool = False
     ) -> dict:
+        if self._scraper is None:
+            return {}
         key = (tmdb_id, media_type)
         if force_refresh:
             self._detail_cache.pop(key, None)
         if key not in self._detail_cache:
-            self._detail_cache[key] = self.scraper.get_detail(
+            self._detail_cache[key] = self._scraper.get_detail(
                 tmdb_id, media_type, force_refresh=force_refresh
             )
         return self._detail_cache[key]
@@ -710,14 +747,14 @@ class Organizer:
         if (
             not self._supports_tmdb_position_validation(match)
             or match.media_type != "tv"
-            or not str(match.tmdb_id or "").strip()
+            or not (match.tmdb_id or "").strip()
         ):
             return {}
         loader = self._declared_callable(self.scraper, "get_tv_season_detail")
         if loader is None:
             return {}
         try:
-            loaded = loader(str(match.tmdb_id), int(season_number))
+            loaded = loader(match.tmdb_id, season_number)
         except Exception:
             return {}
         if not isinstance(loaded, dict) or not loaded:
@@ -725,7 +762,7 @@ class Organizer:
         returned_season = loaded.get("season_number")
         if returned_season not in (None, ""):
             try:
-                if int(returned_season) != int(season_number):
+                if int(returned_season) != season_number:
                     return {}
             except (TypeError, ValueError):
                 return {}
@@ -853,7 +890,7 @@ class Organizer:
         merged_target_count = (
             next(iter(merged_counts.values())) if len(merged_counts) == 1 else None
         )
-        merged_cour_directory_evidence = bool(
+        merged_cour_directory_evidence = (
             directory_episode_evidence is not None
             and directory_episode_evidence.contiguous
             and directory_episode_evidence.source_season == source_season
@@ -865,7 +902,7 @@ class Organizer:
                 or directory_episode_evidence.range_end == merged_target_count
             )
         )
-        merged_source_year = str(source_year or "").strip()
+        merged_source_year = (source_year or "").strip()
         merged_year_evidence = bool(
             re.fullmatch(r"(?:19|20)\d{2}", merged_source_year)
         )
@@ -900,7 +937,7 @@ class Organizer:
             ):
                 merged_season = next(iter(counts))
                 season_detail = season_detail_loader(
-                    str(explicit_tmdb_id or match.tmdb_id), merged_season
+                    (explicit_tmdb_id or match.tmdb_id), merged_season
                 )
                 cour_mapping = infer_merged_season_cour_mapping(
                     source_season=source_season,
@@ -916,7 +953,7 @@ class Organizer:
                     cour_mapping.target_season,
                     cour_mapping.target_episode,
                 )
-                position_semantics_proven = bool(
+                position_semantics_proven = (
                     merged_cour_directory_evidence
                     or cour_mapping.reason
                     == "publisher_absolute_season_mapped_to_merged_tmdb_season"
@@ -952,16 +989,16 @@ class Organizer:
 
     def _resolve_nsfw_recognizer_locked(
         self, rules: OrganizeRules,
-    ) -> tuple[object | None, list[object]]:
+    ) -> tuple[NsfwRecognizer | None, list[object]]:
         if self._closed or self._closing:
             return None, []
-        if not rules.nsfw_enabled or not str(rules.nsfw_metatube_endpoint or "").strip():
+        if not rules.nsfw_enabled or not (rules.nsfw_metatube_endpoint or "").strip():
             return None, []
         key = (
-            str(rules.nsfw_metatube_endpoint).strip(),
-            str(rules.nsfw_metatube_token or ""),
-            str(rules.nsfw_strip_domains or ""),
-            int(rules.nsfw_timeout_seconds),
+            rules.nsfw_metatube_endpoint.strip(),
+            (rules.nsfw_metatube_token or ""),
+            (rules.nsfw_strip_domains or ""),
+            rules.nsfw_timeout_seconds,
         )
         if key in self._nsfw_recognizers:
             return self._nsfw_recognizers[key], []
@@ -1121,7 +1158,7 @@ class Organizer:
             ext=ext,
             original_name=file.name,
         )
-        scope = {part.strip() for part in str(rules.naming_scope or "guangya").split(",") if part.strip()}
+        scope = {part.strip() for part in (rules.naming_scope or "guangya").split(",") if part.strip()}
         templates_enabled = "both" in scope or "guangya" in scope
         configured_template = rules.tv_template if is_tv else rules.movie_template
 
@@ -1209,7 +1246,7 @@ class Organizer:
             title=title, year=year, tmdb_id=tmdb,
             identity_id=identity_id, identity_tag=identity_tag,
         )
-        scope = {part.strip() for part in str(rules.naming_scope or "guangya").split(",") if part.strip()}
+        scope = {part.strip() for part in (rules.naming_scope or "guangya").split(",") if part.strip()}
         fallback = f"{title} ({year}) {identity_tag}" if year else f"{title} {identity_tag}"
         if not ({"both", "guangya"} & scope) or not template:
             return fallback.strip()
@@ -1280,7 +1317,7 @@ class Organizer:
             if new_score == ex_score:
                 if new_file.size != existing.size:
                     return new_file.size > existing.size
-                return str(new_file.file_id) < str(existing.file_id)
+                return new_file.file_id < existing.file_id
             return False
         if rules.conflict_strategy == 3:  # 小文件优先
             if new_score > ex_score:
@@ -1288,12 +1325,12 @@ class Organizer:
             if new_score == ex_score:
                 if new_file.size != existing.size:
                     return new_file.size < existing.size
-                return str(new_file.file_id) < str(existing.file_id)
+                return new_file.file_id < existing.file_id
             return False
         return False
 
     def _priority_score(self, name: str, rules: OrganizeRules) -> int:
-        raw = str(name or "").lower()
+        raw = (name or "").lower()
         media_info = self._extract_media_info(name).lower()
         variant = classify_variant(name)
         score = 0
@@ -1316,8 +1353,8 @@ class Organizer:
         Web、TG、定时任务和下载联动在提交及执行前复用该校验，
         避免只依赖前端表单。
         """
-        source_id = str(source_id or "0")
-        current_id = str(target_id or "0")
+        source_id = (source_id or "0")
+        current_id = (target_id or "0")
         visited: set[str] = set()
         for _ in range(64):
             if current_id == source_id:
@@ -1337,7 +1374,7 @@ class Organizer:
         raise DirectoryScrapeStateError("归档目标目录层级异常")
 
     def _read_performance_snapshot(self) -> dict[str, int]:
-        snapshot_reader = getattr(self.scraper, "performance_snapshot", None)
+        snapshot_reader = getattr(self._scraper, "performance_snapshot", None)
         if not callable(snapshot_reader):
             return {}
         snapshot = snapshot_reader()
@@ -1447,7 +1484,7 @@ class Organizer:
         plans: list[OrganizePlan] = []
         source_positions = source_positions_by_file_id or {}
         source_files_by_id = {
-            str(item.file.file_id): item.file for item in scanned_videos
+            item.file.file_id: item.file for item in scanned_videos
         }
         source_probe_cache: dict[tuple[str, str, int], str] = {}
         source_probe_cache_loaded = False
@@ -1460,9 +1497,9 @@ class Organizer:
         ):
             probe_versions = [
                 (
-                    str(item.file.file_id),
-                    str(item.file.etag or ""),
-                    int(item.file.size or 0),
+                    item.file.file_id,
+                    (item.file.etag or ""),
+                    (item.file.size or 0),
                 )
                 for item in scanned_videos
             ]
@@ -1510,7 +1547,7 @@ class Organizer:
                 directory_video_member_counts[physical_directory] = (
                     directory_video_member_counts.get(physical_directory, 0) + 1
                 )
-            file_id = str(item.file.file_id)
+            file_id = item.file.file_id
             position = source_positions.get(file_id)
             if position is None and callable(parse_source_position_impl):
                 try:
@@ -1559,7 +1596,7 @@ class Organizer:
         recognition_work_cache: dict[tuple[str, str, str, bool, str], MatchResult] = {}
         recognition_work_hit_groups: set[tuple[str, str, str, bool, str]] = set()
         directory_identity_attestations: dict[
-            tuple[str, str, str, str], dict[str, object]
+            tuple[str, str, str, str], dict[str, Any]
         ] = {}
         recognition_names: dict[str, str] = {}
         identity_only_recognition_file_ids: set[str] = set()
@@ -1590,7 +1627,7 @@ class Organizer:
             # 第一季长篇仍使用包尾做“总集数足够”的强消歧；所有明确
             # 后续季都先处理范围起点并使用 E01 身份探针。真实源集号会在
             # 取得详情后恢复并逐文件映射、逐文件终检，因此不会弱化位置门禁。
-            uses_safe_identity_probe = bool(
+            uses_safe_identity_probe = (
                 evidence.source_season not in (None, 0, 1)
             )
             representative_episode = (
@@ -1601,10 +1638,10 @@ class Organizer:
             for candidate in group:
                 candidate_position = source_positions.get(candidate.file.file_id)
                 try:
-                    is_representative = bool(
+                    is_representative = (
                         candidate_position is not None
                         and candidate_position[1] is not None
-                        and int(candidate_position[1]) == int(representative_episode)
+                        and candidate_position[1] == representative_episode
                     )
                 except (TypeError, ValueError):
                     is_representative = False
@@ -1616,7 +1653,7 @@ class Organizer:
             position = special_positions.get(item.file.file_id)
             recognition_name = ""
             explicit_file_marker = _has_explicit_tmdb_marker(item.file.name)
-            configured_media_type_hint = str(
+            configured_media_type_hint = (
                 context.media_type_hint or ""
             ).strip().lower()
             if configured_media_type_hint not in {"movie", "tv"}:
@@ -1678,7 +1715,7 @@ class Organizer:
                     # 恢复，并结合完整 TMDB 季数逐文件映射、逐文件终检。
                     source_position = source_positions.get(item.file.file_id)
                     if source_position is not None and source_position[0] not in (None, 0):
-                        identity_season = int(source_position[0])
+                        identity_season = source_position[0]
                     else:
                         identity_season = 1
                     identity_year = _recognition_identity_year(
@@ -1689,7 +1726,7 @@ class Organizer:
                     identity_episode = (
                         1
                         if uses_safe_identity_probe
-                        else int(identity_episode_evidence.range_end)
+                        else identity_episode_evidence.range_end
                     )
                     recognition_name = (
                         f"{title_hint}{year_token}.S{identity_season:02d}"
@@ -1697,7 +1734,7 @@ class Organizer:
                     )
                     if uses_safe_identity_probe:
                         identity_only_recognition_file_ids.add(
-                            str(item.file.file_id)
+                            item.file.file_id
                         )
             recognition_names[item.file.file_id] = recognition_name
             cache_key = self._directory_identity_cache_key(
@@ -1711,6 +1748,7 @@ class Organizer:
                 stats["directory_identity_attestation_hits"] += 1
             if cached_match is not None:
                 stats["directory_identity_cache_hits"] += 1
+                assert cache_key is not None
                 directory_identity_hit_groups.add(cache_key)
             work_cache_key = self._recognition_work_cache_key(
                 recognition_name=recognition_name,
@@ -1756,7 +1794,7 @@ class Organizer:
                 ),
                 recognition_name=recognition_name,
                 recognition_identity_only=(
-                    str(item.file.file_id) in identity_only_recognition_file_ids
+                    item.file.file_id in identity_only_recognition_file_ids
                 ),
                 recognition_media_type_hint=recognition_media_type_hint,
                 match_override=cached_match,
@@ -1769,9 +1807,9 @@ class Organizer:
                 # 统一有界并发执行，避免数十集逐文件串行阻塞。
                 media_probe_cache_only=True,
                 media_probe_cached_payload=source_probe_cache.get((
-                    str(item.file.file_id),
-                    str(item.file.etag or ""),
-                    int(item.file.size or 0),
+                    item.file.file_id,
+                    (item.file.etag or ""),
+                    (item.file.size or 0),
                 ), ""),
                 media_probe_cache_prefetched=source_probe_cache_loaded,
                 automatic=automatic,
@@ -1782,6 +1820,7 @@ class Organizer:
                     plan.match
                 )
                 if accepted_attestation is not None:
+                    assert plan.match is not None
                     directory_identity_attestations[cache_key] = accepted_attestation
                     # 首个文件已经完成“作品身份 + 当前真实位置”的双重验真，
                     # 后续同目录同标题文件可以直接复用去位置化身份，避免再次
@@ -1801,6 +1840,7 @@ class Organizer:
                     self._accepted_directory_package_identity_proof(plan.match)
                 )
                 if directory_package_proof is not None:
+                    assert plan.match is not None
                     directory_identity_cache[cache_key] = (
                         self._identity_only_directory_match(plan.match)
                     )
@@ -1812,15 +1852,16 @@ class Organizer:
                     ).threshold,
                     automatic_preset=rules.automatic_match_preset,
                 ):
+                    assert plan.match is not None
                     directory_identity_cache[cache_key] = copy.deepcopy(plan.match)
-            planned_file_ids.append(str(item.file.file_id))
+            planned_file_ids.append(item.file.file_id)
 
         if planning_videos != scanned_videos:
             plans_by_file_id = {
                 file_id: plan for file_id, plan in zip(planned_file_ids, plans)
             }
             plans = [
-                plans_by_file_id[str(item.file.file_id)] for item in scanned_videos
+                plans_by_file_id[item.file.file_id] for item in scanned_videos
             ]
 
         # 本次源扫描内的普通剧集已经通过严格自动校验时，可为“自身也独立
@@ -1843,6 +1884,7 @@ class Organizer:
                 )
                 if not donor_id:
                     continue
+                assert donor_plan.match is not None
                 donor_scope = self._physical_source_root(donor_item)
                 trusted_by_scope_and_tmdb.setdefault(
                     (donor_scope, donor_id), copy.deepcopy(donor_plan.match)
@@ -1911,9 +1953,9 @@ class Organizer:
                     match_override=identity_match,
                     media_probe_cache_only=True,
                     media_probe_cached_payload=source_probe_cache.get((
-                        str(item.file.file_id),
-                        str(item.file.etag or ""),
-                        int(item.file.size or 0),
+                        item.file.file_id,
+                        (item.file.etag or ""),
+                        (item.file.size or 0),
                     ), ""),
                     media_probe_cache_prefetched=source_probe_cache_loaded,
                     automatic=True,
@@ -1932,10 +1974,10 @@ class Organizer:
         # 目录分组仅用于进度与审计；所有组仍必须先完成全量扫描、识别和
         # 跨组冲突预演，之后才允许首个云盘写入。这样既能逐目录观察进度，
         # 又不会退化成“边扫边移动”而漏掉后续目录中的同版本冲突。
-        source_group_rows: dict[str, dict[str, object]] = {}
+        source_group_rows: dict[str, dict[str, Any]] = {}
         for item, plan in zip(scanned_videos, plans):
-            plan.source_group_id = str(item.source_group_id or source_dir_id)
-            plan.source_group_path = str(item.source_group_path or "__root__")
+            plan.source_group_id = (item.source_group_id or source_dir_id)
+            plan.source_group_path = (item.source_group_path or "__root__")
             group_key = f"{plan.source_group_id}\x1f{plan.source_group_path}"
             row = source_group_rows.setdefault(group_key, {
                 "id": plan.source_group_id,
@@ -1971,7 +2013,7 @@ class Organizer:
             # 提前消耗探测窗口。每个扫描视频仍保留首次和一次瞬态重试额度。
             from app.modules.media_probe import ProbeBudget
             probe_budget_seconds = float(
-                max(10, min(60, int(rules.media_probe_timeout or 30) * 2))
+                max(10, min(60, (rules.media_probe_timeout or 30) * 2))
             )
             self._probe_budget = ProbeBudget(
                 max(24, len(scanned_videos) * 2),
@@ -1999,7 +2041,7 @@ class Organizer:
             for plan in plans:
                 if plan.action != "move" or plan.match is None:
                     continue
-                source_file = source_files_by_id.get(str(plan.file_id or ""))
+                source_file = source_files_by_id.get(plan.file_id or "")
                 if source_file is None:
                     continue
                 try:
@@ -2168,8 +2210,8 @@ class Organizer:
         def load_inventory(
             plan: OrganizePlan,
         ) -> tuple[str | None, list[GuangYaFile], dict[str, str]]:
-            root_id = str(rules.target_dir_id or "")
-            target_path = str(plan.target_path or "").strip("/")
+            root_id = (rules.target_dir_id or "")
+            target_path = (plan.target_path or "").strip("/")
             target_id = runtime.target_id_for_path(root_id, target_path)
             if not target_id:
                 with runtime.inventory_lock:
@@ -2232,7 +2274,7 @@ class Organizer:
             return target_id, snapshot.files, snapshot.evidence_names
 
         def load_identity_history(plan: OrganizePlan) -> set[tuple[str, str]]:
-            key = str(plan.media_root_path or "").strip("/")
+            key = (plan.media_root_path or "").strip("/")
             if not key:
                 return set()
             with runtime.inventory_lock:
@@ -2345,14 +2387,14 @@ class Organizer:
         stats = self._initial_stats()
         stats["total"] = len(scan_result.scanned_videos)
         context = OrganizeContext(
-            source_dir_id=str(source_dir_id or "planning"),
+            source_dir_id=(source_dir_id or "planning"),
             dry_run=True,
             post_actions=False,
-            source_name=str(source_name or scan_result.source_root_name or ""),
+            source_name=(source_name or scan_result.source_root_name or ""),
             media_probe_cache_only=True,
-            automatic=bool(automatic),
+            automatic=automatic,
             group_pipeline=False,
-            media_type_hint=str(media_type_hint or ""),
+            media_type_hint=(media_type_hint or ""),
         )
         performance_before = self._read_performance_snapshot()
         result = self._build_plans(
@@ -2398,7 +2440,7 @@ class Organizer:
         该目录”的严格场景。多层目录、运行时冲突和全部移动场景仍走原有
         带版本校验的安全清理链路。
         """
-        protected = {str(item) for item in protected_sources if str(item)}
+        protected = {item for item in protected_sources if item}
         unique_dirs = {
             str(item[0] or "").strip()
             for item in scanned_dirs
@@ -2410,7 +2452,7 @@ class Organizer:
         candidate_id = next(iter(candidates))
         if not any(
             plan.action != "move"
-            and str(plan.original_parent_id or "").strip() == candidate_id
+            and (plan.original_parent_id or "").strip() == candidate_id
             for plan in plans
         ):
             return None
@@ -2569,7 +2611,9 @@ class Organizer:
                  source_member_ids: frozenset[str] | None = None) -> tuple[list, dict]:
         """兼容入口；内部阶段统一通过 :class:`OrganizeContext` 传参。"""
         from app.modules.organize_probe_notifications import (
-            apply_notification_context, build_notification_context, normalize_notification_context,
+            apply_notification_context,
+            build_notification_context,
+            normalize_notification_context,
         )
 
         # 父身份在执行之前生成；不能等 notify_directory_results() 事后补 ID。
@@ -2578,30 +2622,30 @@ class Organizer:
             frozen_notification = normalize_notification_context(notification_context)
         elif not dry_run:
             frozen_notification = build_notification_context(
-                task_id=str(operation_token or "").strip() or f"directory-{time.time_ns()}",
+                task_id=(operation_token or "").strip() or f"directory-{time.time_ns()}",
                 notify_enabled=rules.notify_enabled,
                 topic_enabled=rules.notify_enabled and rules.library_notify,
             )
         context = OrganizeContext(
-            source_dir_id=str(source_dir_id),
-            dry_run=bool(dry_run),
+            source_dir_id=source_dir_id,
+            dry_run=dry_run,
             # 保留历史兼容语义：负数会在扫描入口立即停止，而不是被解释为“不限”。
-            max_files=int(max_files or 0),
+            max_files=(max_files or 0),
             cancel_event=cancel_event,
-            post_actions=bool(post_actions),
-            source_name=str(source_name or ""),
-            require_complete_scan=bool(require_complete_scan),
+            post_actions=post_actions,
+            source_name=(source_name or ""),
+            require_complete_scan=require_complete_scan,
             media_probe_cache_only=media_probe_cache_only,
             protected_source_ids=frozenset(
-                str(item).strip()
+                item.strip()
                 for item in (protected_source_ids or set())
-                if str(item).strip()
+                if item.strip()
             ),
             protected_staging_ids=frozenset(protected_staging_ids),
-            automatic=bool(automatic),
+            automatic=automatic,
             group_progress=group_progress,
-            group_pipeline=bool(group_pipeline),
-            operation_token=str(operation_token or "").strip(),
+            group_pipeline=group_pipeline,
+            operation_token=(operation_token or "").strip(),
             notification_context=frozen_notification,
             planning_workers=planning_workers,
             media_probe_workers=media_probe_workers,
@@ -2610,7 +2654,7 @@ class Organizer:
             task_runtime=task_runtime,
             source_member_ids=(
                 None if source_member_ids is None
-                else frozenset(str(item) for item in source_member_ids)
+                else frozenset(item for item in source_member_ids)
             ),
         )
         plans, stats = self._organize(context, rules)
@@ -2781,7 +2825,7 @@ class Organizer:
         requested = (
             resolve_organize_workers()
             if context.planning_workers is None
-            else int(context.planning_workers)
+            else context.planning_workers
         )
         if (
             rules.media_info_enabled
@@ -2794,7 +2838,7 @@ class Organizer:
             if context.media_probe_workers is not None:
                 probe_worker_budget = min(
                     probe_worker_budget,
-                    max(1, int(context.media_probe_workers)),
+                    max(1, context.media_probe_workers),
                 )
             requested = min(requested, probe_worker_budget)
         return max(1, min(requested, _MAX_ORGANIZE_WORKERS, task_count))
@@ -2867,7 +2911,7 @@ class Organizer:
         rules: OrganizeRules,
         *,
         tasks: list[OrganizeGroupTask],
-        rows: dict[str, dict[str, object]],
+        rows: dict[str, dict[str, Any]],
         stats: dict,
         progress: GroupProgress,
         total_started: float,
@@ -2894,7 +2938,7 @@ class Organizer:
         if context.media_probe_workers is not None:
             probe_worker_budget = min(
                 global_probe_worker_budget,
-                max(1, int(context.media_probe_workers)),
+                max(1, context.media_probe_workers),
             )
         # 所有 planner 都可见完整探测预算；media_probe 的进程级槽位门负责
         # 全局限流。这样短组结束后，其空闲槽位能立即被大组复用，不再按
@@ -3133,7 +3177,7 @@ class Organizer:
                     for item in rows.values()
                     if is_terminal_group_status(str(item.get("status") or ""))
                 )
-                progress.completed = int(stats["source_groups_completed"])
+                progress.completed = stats["source_groups_completed"]
                 _stage(GROUP_STAGE_DONE)
                 logger.info(
                     "媒体组完成 source=%s group=%s(%s/%s) status=%s moved=%s failed=%s %.3fs",
@@ -3178,7 +3222,7 @@ class Organizer:
             if is_terminal_group_status(str(item.get("status") or ""))
         )
         stats["current_source_group"] = ""
-        progress.completed = int(stats["source_groups_completed"])
+        progress.completed = stats["source_groups_completed"]
         progress.current_group = ""
         progress.current_stage = GROUP_STAGE_DONE
         self._publish_group_progress(context, stats, progress)
@@ -3243,7 +3287,7 @@ class Organizer:
             )
 
         tasks = enumeration.tasks
-        rows: dict[str, dict[str, object]] = {
+        rows: dict[str, dict[str, Any]] = {
             task.key: {
                 "id": task.group_id,
                 "path": task.group_path,
@@ -3384,7 +3428,7 @@ class Organizer:
                 1 for item in rows.values()
                 if is_terminal_group_status(str(item.get("status") or ""))
             )
-            progress.completed = int(stats["source_groups_completed"])
+            progress.completed = stats["source_groups_completed"]
             _stage(GROUP_STAGE_DONE)
             logger.info(
                 "媒体组完成 source=%s group=%s(%s/%s) status=%s moved=%s failed=%s %.3fs",
@@ -3399,7 +3443,7 @@ class Organizer:
             if is_terminal_group_status(str(item.get("status") or ""))
         )
         stats["current_source_group"] = ""
-        progress.completed = int(stats["source_groups_completed"])
+        progress.completed = stats["source_groups_completed"]
         progress.current_group = ""
         progress.current_stage = GROUP_STAGE_DONE
         self._publish_group_progress(context, stats, progress)
@@ -3424,7 +3468,7 @@ class Organizer:
         download_request_ids: list[int] | None = None,
         *, notify_result: bool = True,
         strm_debounce_seconds: float | None = None,
-        notification_threads: list[dict[str, object]] | None = None,
+        notification_threads: list[dict[str, Any]] | None = None,
     ) -> None:
         """多源任务聚合完成后只执行一次 STRM 联动和总结通知。"""
         unsafe_partial = bool(
@@ -3485,15 +3529,17 @@ class Organizer:
         chat_id: str = "",
         force_incremental: bool = False,
         debounce_seconds: float = 0.0,
-        notification_threads: list[dict[str, object]] | None = None,
+        notification_threads: list[dict[str, Any]] | None = None,
     ) -> None:
         """整理后联动：触发 STRM；媒体库刷新由 STRM 完成后统一处理。"""
         base_url = get("GY_STRM_BASE_URL", "")
         strm_root = get("STRM_ROOT", "")
         if base_url and strm_root:
             try:
+                from app.modules.organize_probe_notifications import (
+                    normalize_notification_context,
+                )
                 from app.modules.scheduler import get_scheduler
-                from app.modules.organize_probe_notifications import normalize_notification_context
 
                 context = normalize_notification_context(stats.get("notification_context"))
                 probe_completion = bool(stats.get("probe_completion"))
@@ -3507,8 +3553,8 @@ class Organizer:
                         "topic": "organize",
                         "thread_key": f"organize:{str(stats.get('task_id') or '')}",
                         "task_id": str(stats.get("task_id") or ""),
-                        "chat_id": str(chat_id or ""),
-                        "topic_enabled": bool(rules.notify_enabled and rules.library_notify),
+                        "chat_id": (chat_id or ""),
+                        "topic_enabled": (rules.notify_enabled and rules.library_notify),
                     }] if str(stats.get("task_id") or "").strip() and not download_request_ids else [])
                 )
                 trigger_options = {
@@ -3563,7 +3609,7 @@ class Organizer:
                 plan.multipart_token = multipart.token
                 plan.multipart_ambiguous = multipart.ambiguous
             grouped.setdefault(
-                (str(plan.original_path or "/"), identifier.code), []
+                ((plan.original_path or "/"), identifier.code), []
             ).append((plan, multipart))
 
         for members in grouped.values():
@@ -3619,16 +3665,16 @@ class Organizer:
                 if identifier is not None:
                     identity = identifier.code
             if not identity:
-                identity = str(match.title or plan.original_path or plan.original_name).strip()
-            identity_key = _normalize_media_identity(identity) or str(plan.file_id)
-            key = (str(plan.original_path or "/"), identity_key)
+                identity = (match.title or plan.original_path or plan.original_name).strip()
+            identity_key = _normalize_media_identity(identity) or plan.file_id
+            key = ((plan.original_path or "/"), identity_key)
             group = groups.setdefault(key, {
-                "source_dir_id": str(source_dir_id),
-                "source_name": str(source_name or ""),
-                "directory": str(plan.original_path or "/"),
-                "source_parent_id": str(plan.original_parent_id or "0"),
+                "source_dir_id": source_dir_id,
+                "source_name": (source_name or ""),
+                "directory": (plan.original_path or "/"),
+                "source_parent_id": (plan.original_parent_id or "0"),
                 "identity": identity,
-                "reason": str(match.error or "识别结果需人工确认"),
+                "reason": (match.error or "识别结果需人工确认"),
                 "rules": organize_rules_snapshot(rules) if rules is not None else None,
                 "files": [],
                 "companions": [],
@@ -3645,7 +3691,7 @@ class Organizer:
             parse_source_position = getattr(self.scraper, "parse_source_position", None)
             if callable(parse_source_position):
                 try:
-                    season, episode = parse_source_position(
+                    season, episode = self.scraper.parse_source_position(
                         plan.original_name, plan.original_path
                     )
                 except Exception:
@@ -3655,11 +3701,11 @@ class Organizer:
             if episode is None:
                 episode = getattr(context, "episode", None)
             group["files"].append({
-                "file_id": str(plan.file_id),
-                "name": str(plan.original_name),
-                "parent_id": str(plan.original_parent_id or "0"),
-                "size": int(plan.size or 0),
-                "etag": str(plan.etag or ""),
+                "file_id": plan.file_id,
+                "name": plan.original_name,
+                "parent_id": (plan.original_parent_id or "0"),
+                "size": (plan.size or 0),
+                "etag": (plan.etag or ""),
                 "season": season,
                 "episode": episode,
                 "multipart_index": plan.multipart_index,
@@ -3669,30 +3715,30 @@ class Organizer:
             for companion in self._companions_for_plan(
                 plan, companion_files.get(plan.original_path, [])
             ):
-                if str(companion.file_id) in existing_companions:
+                if companion.file_id in existing_companions:
                     continue
                 group["companions"].append({
-                    "file_id": str(companion.file_id),
-                    "name": str(companion.name),
-                    "parent_id": str(companion.parent_id or plan.original_parent_id or "0"),
-                    "size": int(companion.size or 0),
-                    "etag": str(companion.etag or ""),
+                    "file_id": companion.file_id,
+                    "name": companion.name,
+                    "parent_id": (companion.parent_id or plan.original_parent_id or "0"),
+                    "size": (companion.size or 0),
+                    "etag": (companion.etag or ""),
                 })
-                existing_companions.add(str(companion.file_id))
+                existing_companions.add(companion.file_id)
 
-            candidates = list(match.candidates or [])
+            match_candidates: list[MatchResult | Candidate] = [item for item in (match.candidates or [])]
             match_provider = self._match_provider(match)
             match_external_id = self._match_external_id(match)
             if match_external_id and not any(
                 self._match_provider(item) == match_provider
                 and self._match_external_id(item) == match_external_id
                 and str(getattr(item, "media_type", "") or match.media_type or "")
-                == str(match.media_type or "")
-                for item in candidates
+                == (match.media_type or "")
+                for item in match_candidates
             ):
-                candidates.insert(0, match)
+                match_candidates.insert(0, match)
             candidate_map = group["_candidate_map"]
-            for candidate in candidates[:5]:
+            for candidate in match_candidates[:5]:
                 tmdb_id = str(getattr(candidate, "tmdb_id", "") or "").strip()
                 provider = str(getattr(candidate, "provider", "") or "").strip().lower()
                 external_id = str(
@@ -3813,7 +3859,9 @@ class Organizer:
     def notify_directory_results(stats: dict, rules: OrganizeRules,
                                  source_name: str = "", chat_id: str = "") -> None:
         """目录刮削只发一条汇总；人工候选继续使用独立可更新按钮卡。"""
-        from app.modules.organize_probe_notifications import normalize_notification_context
+        from app.modules.organize_probe_notifications import (
+            normalize_notification_context,
+        )
 
         context = normalize_notification_context(stats.get("notification_context"))
         if context:
@@ -3915,7 +3963,7 @@ class Organizer:
                     if summary_sent else None
                 ),
             )
-            return bool(summary_sent and confirmations_sent)
+            return (summary_sent and confirmations_sent)
         except Exception as exc:
             logger.warning("整理任务汇总通知失败 type=%s", type(exc).__name__)
             return False
@@ -4032,7 +4080,8 @@ class Organizer:
         if not groups:
             return True
         from app.modules.organize_confirmations import (
-            confirmation_event, publish_confirmation_event,
+            confirmation_event,
+            publish_confirmation_event,
         )
 
         confirmation_failures = 0
@@ -4046,7 +4095,7 @@ class Organizer:
             try:
                 confirmation_group = dict(group)
                 if organize_task_id:
-                    confirmation_group["organize_task_id"] = str(organize_task_id)
+                    confirmation_group["organize_task_id"] = organize_task_id
                 if isinstance(organize_rollup, dict):
                     confirmation_group["organize_rollup"] = dict(organize_rollup)
                 if download_request_ids:
@@ -4110,7 +4159,9 @@ class Organizer:
     def _publish_or_update_task_summary(stats: dict, rules: OrganizeRules,
                        source_name: str = "", chat_id: str = "") -> None:
         """发布或原位更新整理汇总；候选卡由独立通知步骤负责。"""
-        from app.modules.organize_probe_notifications import normalize_notification_context
+        from app.modules.organize_probe_notifications import (
+            normalize_notification_context,
+        )
 
         context = normalize_notification_context(stats.get("notification_context"))
         if context:
@@ -4359,7 +4410,7 @@ class Organizer:
 
     @staticmethod
     def _confirmation_summary(match: MatchResult) -> str:
-        reason = str(match.error or "TMDB 匹配结果需人工确认").strip()
+        reason = (match.error or "TMDB 匹配结果需人工确认").strip()
         if match.tmdb_id and match.title:
             year = f" ({match.year})" if match.year else ""
             return (
@@ -4504,7 +4555,7 @@ class Organizer:
         tmdb_id = str(getattr(match, "tmdb_id", "") or "").strip()
         external_id = str(getattr(match, "external_id", "") or "").strip()
         if not tmdb_id:
-            return bool(
+            return (
                 allow_path_no_result
                 and not external_id
                 and not list(getattr(match, "candidates", None) or [])
@@ -4544,7 +4595,7 @@ class Organizer:
         """返回 source 下用于隔离作品身份的第一层物理目录。"""
         relative_parts = [
             part.strip()
-            for part in re.split(r"[\\/]+", str(item.relative_dir or ""))
+            for part in re.split(r"[\\/]+", (item.relative_dir or ""))
             if part.strip()
         ]
         if relative_parts and not is_special_directory_name(relative_parts[0]):
@@ -4622,13 +4673,13 @@ class Organizer:
         """
         cloned = cls._identity_neutral_work_match(match)
         if hasattr(cloned, "context"):
-            cloned.context = None
+            setattr(cloned, "context", None)
         return cloned
 
     @staticmethod
     def _accepted_directory_identity_attestation(
         match: MatchResult | None,
-    ) -> dict[str, object] | None:
+    ) -> dict[str, Any] | None:
         """从已逐文件验真的自动证明中提取仅限本次目录的作品身份。"""
         if match is None:
             return None
@@ -4700,7 +4751,7 @@ class Organizer:
         *,
         automatic_threshold: float = 0.9,
         automatic_preset: str = "balanced",
-    ) -> dict[str, object] | None:
+    ) -> dict[str, Any] | None:
         """为完整连续剧集包构建低于全局阈值的目录身份凭证。
 
         该凭证只证明“整包属于哪个 TMDB 剧集”，绝不证明任一文件的季集
@@ -4712,7 +4763,7 @@ class Organizer:
             not evidence.contiguous
             or evidence.range_start != 1
             or evidence.episode_count < _DIRECTORY_PACKAGE_IDENTITY_MIN_EPISODES
-            or int(member_count or 0) != evidence.episode_count
+            or (member_count or 0) != evidence.episode_count
             or evidence.range_end - evidence.range_start + 1
             != evidence.episode_count
         ):
@@ -4842,7 +4893,7 @@ class Organizer:
             "range_start": evidence.range_start,
             "range_end": evidence.range_end,
             "episode_count": evidence.episode_count,
-            "member_count": int(member_count),
+            "member_count": member_count,
         }
 
     @classmethod
@@ -4854,7 +4905,7 @@ class Organizer:
         *,
         automatic_threshold: float = 0.9,
         automatic_preset: str = "balanced",
-    ) -> dict[str, object] | None:
+    ) -> dict[str, Any] | None:
         """复核 match 内已有的目录身份凭证是否仍匹配当前连续包。
 
         不只比对范围与 ID，而是重新执行构建时的全部强度条件。这样即使
@@ -4882,7 +4933,7 @@ class Organizer:
     @staticmethod
     def _accepted_directory_package_identity_proof(
         match: MatchResult | None,
-    ) -> dict[str, object] | None:
+    ) -> dict[str, Any] | None:
         if match is None:
             return None
         metadata = getattr(match, "metadata", None)
@@ -4918,8 +4969,8 @@ class Organizer:
         """为同一物理目录中的连续剧文件生成保守的身份复用键。"""
         if not isinstance(self.scraper, TMDBScraper) or item.special or rules.nsfw_enabled:
             return None
-        filename = str(item.file.name or "")
-        parent_path = str(
+        filename = (item.file.name or "")
+        parent_path = (
             item.relative_dir if parent_path_override is None else parent_path_override
         )
         if _has_explicit_tmdb_marker(f"{filename} {parent_path}"):
@@ -4955,7 +5006,7 @@ class Organizer:
         return (
             parent_path.casefold(),
             title,
-            str(context.filename_year or context.folder_year or ""),
+            (context.filename_year or context.folder_year or ""),
             "tv",
         )
 
@@ -4980,16 +5031,16 @@ class Organizer:
             or trusted_match_override is not None
         ):
             return None
-        exact_name = str(recognition_name or "").strip()
-        exact_parent = str(parent_path or "").strip()
+        exact_name = (recognition_name or "").strip()
+        exact_parent = (parent_path or "").strip()
         if not exact_name or _has_explicit_tmdb_marker(f"{exact_name} {exact_parent}"):
             return None
         return (
             exact_parent.casefold(),
             exact_name,
-            str(media_type_hint or "").strip().lower(),
-            bool(automatic),
-            str(rules.automatic_match_preset or "balanced").strip().lower(),
+            (media_type_hint or "").strip().lower(),
+            automatic,
+            (rules.automatic_match_preset or "balanced").strip().lower(),
         )
 
     def _task_recognition_cache_key(
@@ -5013,8 +5064,8 @@ class Organizer:
             or trusted_match_override is not None
         ):
             return None
-        exact_name = str(recognition_name or "").strip()
-        exact_parent = str(parent_path or "").strip()
+        exact_name = (recognition_name or "").strip()
+        exact_parent = (parent_path or "").strip()
         if not exact_name or _has_explicit_tmdb_marker(f"{exact_name} {exact_parent}"):
             return None
         try:
@@ -5024,9 +5075,9 @@ class Organizer:
             )
         except Exception:
             return None
-        media_type = str(media_type_hint or recognition_context.media_type or "").strip().lower()
+        media_type = (media_type_hint or recognition_context.media_type or "").strip().lower()
         title = _normalize_media_identity(recognition_context.normalized_title)
-        year = str(
+        year = (
             recognition_context.filename_year
             or recognition_context.folder_year
             or ""
@@ -5045,8 +5096,8 @@ class Organizer:
             title,
             year,
             media_type,
-            bool(automatic),
-            str(rules.automatic_match_preset or "balanced").strip().lower(),
+            automatic,
+            (rules.automatic_match_preset or "balanced").strip().lower(),
         )
 
     @classmethod
@@ -5092,7 +5143,7 @@ class Organizer:
                 r"[\[【(（]\s*(?:e?p?\s*)?\d{1,3}\s*[-~–—]\s*"
                 r"\d{1,3}\s*[\]】)）]",
                 " ",
-                str(owner_hint or ""),
+                (owner_hint or ""),
                 flags=re.IGNORECASE,
             )
             clean_title = getattr(self.scraper, "clean_title", None)
@@ -5164,7 +5215,7 @@ class Organizer:
                         release_parse = self.scraper.parse_media(item.file.name)
                         desired = release_parse.source_episode
                         try:
-                            desired = int(desired) if desired is not None else None
+                            desired = desired if desired is not None else None
                         except (TypeError, ValueError):
                             desired = None
                 if desired is None or desired <= 0 or desired in used:
@@ -5296,9 +5347,9 @@ class Organizer:
                         )
                         match = self.scraper._attach_preprocess(match, processed)
                         if hasattr(match, "context"):
-                            match.context = extract_recognition_context(
+                            setattr(match, "context", extract_recognition_context(
                                 processed.filename, processed.parent_path,
-                            )
+                            ))
                     except Exception:
                         match = None
             else:
@@ -5444,7 +5495,7 @@ class Organizer:
             from app.modules.media_probe import probe_media_profile
             media_profile = probe_media_profile(
                 file,
-                self.client,
+                self._client,
                 enabled=True,
                 timeout=(
                     min(rules.media_probe_timeout, 30)
@@ -5477,7 +5528,7 @@ class Organizer:
         )
         scope = {
             item.strip()
-            for item in str(rules.naming_scope or "guangya").split(",")
+            for item in (rules.naming_scope or "guangya").split(",")
             if item.strip()
         }
         if {"both", "guangya"} & scope:
@@ -5502,8 +5553,8 @@ class Organizer:
 
         source_hint = "/".join(
             part for part in (
-                str(plan.original_path or ""), str(plan.original_name or ""),
-                str(file.name or ""),
+                (plan.original_path or ""), (plan.original_name or ""),
+                (file.name or ""),
             ) if part
         )
         effective_profile = merge_media_profiles(
@@ -5515,7 +5566,7 @@ class Organizer:
         plan.episode = parsed.get("episode")
         try:
             plan.multipart_index = (
-                int(parsed.get("part")) if parsed.get("part") is not None else None
+                int(parsed.get("part", "")) if parsed.get("part") is not None else None
             )
         except (TypeError, ValueError):
             plan.multipart_index = None
@@ -5560,7 +5611,7 @@ class Organizer:
             identity = self._match_identity_key(plan.match)
             if not identity:
                 continue
-            key = (str(plan.original_parent_id or ""), identity, int(plan.season))
+            key = ((plan.original_parent_id or ""), identity, plan.season)
             groups.setdefault(key, []).append(plan)
 
         applied_groups = 0
@@ -5578,7 +5629,7 @@ class Organizer:
             consensus = explicit_sources[0]
             changed = 0
             for plan in group_plans:
-                file = source_files_by_id.get(str(plan.file_id or ""))
+                file = source_files_by_id.get(plan.file_id or "")
                 profile = plan.media_profile
                 if file is None or (profile is not None and getattr(profile, "source", "")):
                     continue
@@ -5586,6 +5637,7 @@ class Organizer:
                     profile if profile is not None else MediaProfile(),
                     source=consensus,
                 )
+                assert plan.match is not None
                 self._apply_media_profile_to_move_plan(
                     plan, file, rules, plan.match,
                     {"season": plan.season, "episode": plan.episode, "part": plan.multipart_index}, effective,
@@ -5634,7 +5686,7 @@ class Organizer:
         candidates: list[GuangYaFile] = []
         seen: set[str] = set()
         for plan in plans:
-            file_id = str(plan.file_id or "")
+            file_id = (plan.file_id or "")
             if plan.action != "move" or not file_id or file_id in seen:
                 continue
             file = source_files_by_id.get(file_id)
@@ -5653,7 +5705,7 @@ class Organizer:
 
         stats["media_probe_online_candidates"] = len(candidates)
         stats["media_probe_workers"] = min(
-            max(1, int(max_workers or resolve_media_probe_workers())),
+            max(1, (max_workers or resolve_media_probe_workers())),
             resolve_media_probe_workers(),
             len(candidates),
         )
@@ -5679,13 +5731,13 @@ class Organizer:
         stats["media_probe_online_profiles"] = len(profiles)
 
         plans_by_file_id = {
-            str(plan.file_id): plan
+            plan.file_id: plan
             for plan in plans
             if plan.action == "move" and plan.match is not None
         }
         for file_id, profile in profiles.items():
-            plan = plans_by_file_id.get(str(file_id))
-            file = source_files_by_id.get(str(file_id))
+            plan = plans_by_file_id.get(file_id)
+            file = source_files_by_id.get(file_id)
             if plan is None or file is None or plan.match is None:
                 continue
             parsed = {"season": plan.season, "episode": plan.episode, "part": plan.multipart_index}
@@ -5712,7 +5764,7 @@ class Organizer:
         recognition_identity_only: bool = False,
         recognition_media_type_hint: str = "",
         match_override: MatchResult | None = None,
-        directory_identity_attestation: dict[str, object] | None = None,
+        directory_identity_attestation: dict[str, Any] | None = None,
         recognition_work_cache: dict[tuple[str, str, str, bool, str], MatchResult] | None = None,
         recognition_work_cache_key: tuple[str, str, str, bool, str] | None = None,
         task_runtime: OrganizeTaskRuntime | None = None,
@@ -5722,7 +5774,7 @@ class Organizer:
         media_probe_cache_prefetched: bool = False,
         automatic: bool = False,
     ) -> OrganizePlan:
-        match_name = str(recognition_name or file.name)
+        match_name = (recognition_name or file.name)
         parent_path = rel if recognition_parent_path is None else recognition_parent_path
         manual_position_confirmed = bool(
             getattr(self.scraper, "manual_position_confirmed", False)
@@ -5751,6 +5803,7 @@ class Organizer:
             task_recognition_key=task_recognition_key,
             stats=stats,
         )
+        assert match is not None
         plan = OrganizePlan(
             file_id=file.file_id, original_name=file.name,
             original_path=rel, original_parent_id=file.parent_id,
@@ -5781,8 +5834,8 @@ class Organizer:
                 value for value in (recognized_tmdb_id, recognized_external_id) if value
             ))
             recognition_context = extract_recognition_context(match_name, parent_path)
-            expects_tv = bool(
-                str(recognition_media_type_hint or "").strip().lower() == "tv"
+            expects_tv = (
+                (recognition_media_type_hint or "").strip().lower() == "tv"
                 or recognition_context.media_type == "tv"
                 or recognition_context.season is not None
                 or recognition_context.episode is not None
@@ -5849,18 +5902,20 @@ class Organizer:
             )
             and isinstance(source_position_override, (tuple, list))
             and len(source_position_override) == 2
+            and source_position_override[0] is not None
+            and source_position_override[1] is not None
             and not any(isinstance(value, bool) for value in source_position_override)
         ):
             try:
-                recovery_source_season = int(source_position_override[0])
-                recovery_source_episode = int(source_position_override[1])
+                recovery_source_season = source_position_override[0]
+                recovery_source_episode = source_position_override[1]
             except (TypeError, ValueError):
                 pass
             else:
-                position_only_mapping_recovery_candidate = bool(
+                position_only_mapping_recovery_candidate = (
                     recovery_source_season >= 2 and recovery_source_episode >= 1
                 )
-        identity_probe_position_recovery_candidate = bool(
+        identity_probe_position_recovery_candidate = (
             automatic
             and self._recoverable_directory_identity_probe_position_failure(
                 match,
@@ -5905,12 +5960,12 @@ class Organizer:
             plan.note = "未识别"
             return plan
 
-        from app.notifier import safe_int
-
         # 仅在 scraper 对象上真实声明统一解析接口时启用。
         # unittest.mock.Mock 会为任意属性动态生成可调用对象，普通 getattr/hasattr
         # 会误判为支持 parse_media；getattr_static 同时兼容类方法和显式实例方法。
         from inspect import getattr_static
+
+        from app.notifier import safe_int
 
         parse_media_declared = getattr_static(self.scraper, "parse_media", None)
         parse_media_impl = (
@@ -5920,8 +5975,8 @@ class Organizer:
         )
         if not callable(parse_media_impl):
             raise TypeError("scraper 必须实现 parse_media 统一识别接口")
-        release_parse = parse_media_impl(file.name, parent_path, match)
-        parsed: dict[str, object] = {
+        release_parse: ReleaseParseResult = self.scraper.parse_media(file.name, parent_path, match)
+        parsed: dict[str, Any] = {
             "title": release_parse.title,
             "year": release_parse.year,
             "type": release_parse.media_type,
@@ -5935,7 +5990,7 @@ class Organizer:
             multipart = extract_nsfw_multipart(
                 file.name, rules.nsfw_strip_domains,
             )
-            override_reader = getattr(self.scraper, "multipart_override", None)
+            override_reader = self._declared_callable(self.scraper, "multipart_override")
             override = (
                 override_reader(file.name, parent_path)
                 if callable(override_reader) else None
@@ -6147,7 +6202,7 @@ class Organizer:
             plan.season = parsed_season
             return plan
         maps_tmdb_source_positions = self._maps_tmdb_source_positions(match)
-        source_position_mapping_eligible = bool(
+        source_position_mapping_eligible = (
             (
                 parsed_override is None
                 or directory_episode_evidence is not None
@@ -6164,6 +6219,8 @@ class Organizer:
         source_position_mapping_input = (
             (plan.source_season, plan.source_episode)
             if source_position_mapping_eligible
+            and plan.source_season is not None
+            and plan.source_episode is not None
             else None
         )
         cached_bare_absolute_episode = (
@@ -6180,7 +6237,7 @@ class Organizer:
             )
             else None
         )
-        if source_position_mapping_eligible and plan.episode_mapping is None:
+        if source_position_mapping_input is not None and plan.episode_mapping is None:
             mapping_source_season, mapping_source_episode = (
                 source_position_mapping_input
             )
@@ -6311,7 +6368,7 @@ class Organizer:
                         **dict(getattr(match, "metadata", None) or {}),
                         "final_position_validation": dict(validation),
                         "tmdb_detail_force_refreshed": True,
-                        "tmdb_detail_refresh_performed": bool(refresh_performed),
+                        "tmdb_detail_refresh_performed": refresh_performed,
                     }
             if validation.get("required") and not validation.get("passed"):
                 message = self.scraper.position_validation_error(validation)
@@ -6324,7 +6381,7 @@ class Organizer:
                     "passed": False,
                     "reason": constraint,
                 })
-                match.threshold_decision = threshold_decision
+                setattr(match, "threshold_decision", threshold_decision)
                 plan.season = parsed_season
                 plan.episode = parsed_episode
                 return plan
@@ -6366,17 +6423,18 @@ class Organizer:
                     plan.season = parsed_season
                     plan.episode = parsed_episode
                     return plan
+                assert mapping is not None
                 plan.mark_matched()
                 recoverable_constraints = {
                     "tmdb_position_season_not_found",
                     "tmdb_position_episode_out_of_range",
                 }
-                match.rejected_constraints = [
+                setattr(match, "rejected_constraints", [
                     item
                     for item in (getattr(match, "rejected_constraints", None) or [])
                     if str(item or "").strip() not in recoverable_constraints
-                ]
-                match.directory_identity_cache_eligible = bool(
+                ])
+                match.directory_identity_cache_eligible = (
                     identity_probe_position_recovery_candidate
                     and str(
                         getattr(match, "matched_by", "") or ""
@@ -6457,12 +6515,12 @@ class Organizer:
                 ).strip() if isinstance(detail, dict) else ""
                 try:
                     proof_season = int(
-                        target_position.get("season")
-                        if isinstance(target_position, dict) else None
+                        target_position.get("season", "")
+                        if isinstance(target_position, dict) else ""
                     )
                     proof_episode = int(
-                        target_position.get("episode")
-                        if isinstance(target_position, dict) else None
+                        target_position.get("episode", "")
+                        if isinstance(target_position, dict) else ""
                     )
                 except (TypeError, ValueError):
                     proof_season = proof_episode = -1
@@ -6497,7 +6555,7 @@ class Organizer:
                 identity_probe_evidence = (
                     directory_identity_evidence or directory_episode_evidence
                 )
-                source_position_in_directory_evidence = bool(
+                source_position_in_directory_evidence = (
                     recognition_identity_only
                     and identity_probe_evidence is not None
                     and plan.source_season == identity_probe_evidence.source_season
@@ -6506,7 +6564,7 @@ class Organizer:
                     <= plan.source_episode
                     <= identity_probe_evidence.range_end
                 )
-                proof_position_matches = bool(
+                proof_position_matches = (
                     parsed_season == proof_season
                     and parsed_episode == proof_episode
                 )
@@ -6538,7 +6596,7 @@ class Organizer:
                         "season": parsed_season,
                         "episode": parsed_episode,
                         "position_validation": dict(validation),
-                        "identity_only_probe": bool(
+                        "identity_only_probe": (
                             source_position_in_directory_evidence
                             and not proof_position_matches
                         ),
@@ -6655,8 +6713,8 @@ class Organizer:
         file_info = getattr(self.client, "file_info", None)
         for attempt in range(max(1, attempts)):
             refreshed = self.client.list_dir(target_id)
-            old_detail = file_info(old_file_id) if callable(file_info) else None
-            new_detail = file_info(new_file_id) if callable(file_info) else None
+            old_detail = self.client.file_info(old_file_id) if callable(file_info) else None
+            new_detail = self.client.file_info(new_file_id) if callable(file_info) else None
             visible_ids = {item.file_id for item in refreshed}
             if old_file_id in visible_ids and new_file_id in visible_ids:
                 break
@@ -6665,7 +6723,7 @@ class Organizer:
         return refreshed, old_detail, new_detail
 
     @staticmethod
-    def _release_fields(release_parse: object) -> dict[str, object]:
+    def _release_fields(release_parse: object) -> dict[str, Any]:
         return {
             "title": str(getattr(release_parse, "title", "") or ""),
             "year": str(getattr(release_parse, "year", "") or ""),
@@ -6679,14 +6737,16 @@ class Organizer:
             ),
         }
 
-    def _parse_media_fields(self, name: str) -> dict[str, object]:
+    def _parse_media_fields(self, name: str) -> dict[str, Any]:
+        if self._scraper is None:
+            return {}
         try:
-            return self._release_fields(self.scraper.parse_media(name))
+            return self._release_fields(self._scraper.parse_media(name))
         except (AttributeError, TypeError, ValueError):
             return {}
 
-    def _parse_existing_media_fields(self, name: str) -> dict[str, object]:
-        parser = getattr(self.scraper, "parse_existing_media", None)
+    def _parse_existing_media_fields(self, name: str) -> dict[str, Any]:
+        parser = getattr(self._scraper, "parse_existing_media", None)
         if callable(parser):
             try:
                 return self._release_fields(parser(name))
@@ -6767,7 +6827,7 @@ class Organizer:
                     or candidate_fields.get("media_type")
                     or ""
                 ).lower()
-                planned_media_type = str(plan.match.media_type or "movie").lower()
+                planned_media_type = (plan.match.media_type or "movie").lower()
                 if (
                     candidate_media_type in {"movie", "tv"}
                     and candidate_media_type != planned_media_type
@@ -6775,7 +6835,7 @@ class Organizer:
                     return False
                 return bool(
                     plan.match.tmdb_id
-                    and candidate_tmdb_id == str(plan.match.tmdb_id)
+                    and candidate_tmdb_id == plan.match.tmdb_id
                 )
             planned_fields = self._parse_media_fields(plan.new_name or plan.original_name)
             candidate_title = str(candidate_fields.get("title") or "")
@@ -6826,7 +6886,7 @@ class Organizer:
         evidence_names: dict[str, str] | None = None,
     ) -> GuangYaFile:
         """从同版本候选中按既有评分、大小和稳定 file-id 选择当前赢家。"""
-        ordered = sorted(candidates, key=lambda item: str(item.file_id))
+        ordered = sorted(candidates, key=lambda item: item.file_id)
         winner = ordered[0]
         evidence_names = evidence_names or {}
         for candidate in ordered[1:]:
@@ -6856,9 +6916,9 @@ class Organizer:
         for file in files:
             if file.is_dir or not file.etag or not file.size:
                 continue
-            evidence = str(evidence_names.get(file.file_id) or file.name)
+            evidence = (evidence_names.get(file.file_id) or file.name)
             cache_key = (
-                str(file.file_id), str(file.etag or ""), int(file.size or 0), evidence
+                file.file_id, (file.etag or ""), (file.size or 0), evidence
             )
             if cache_key in self._existing_variant_cache:
                 continue
@@ -6900,9 +6960,9 @@ class Organizer:
         rules: OrganizeRules,
         evidence_name: str = "",
     ) -> MediaVariant:
-        evidence = str(evidence_name or file.name)
+        evidence = (evidence_name or file.name)
         version_key = (
-            str(file.file_id), str(file.etag or ""), int(file.size or 0)
+            file.file_id, (file.etag or ""), (file.size or 0)
         )
         cache_key = (*version_key, evidence)
         cached_variant = self._existing_variant_cache.get(cache_key)
@@ -6953,7 +7013,7 @@ class Organizer:
             # 自身绝不能参与版本替换，否则会把同一 file_id 当旧版本回收。
             if (
                 plan.file_id
-                and str(candidate.file_id or "") == str(plan.file_id)
+                and (candidate.file_id or "") == plan.file_id
             ):
                 continue
             if not self._same_media_identity(
@@ -7015,18 +7075,18 @@ class Organizer:
     @classmethod
     def _plan_identity(cls, plan: OrganizePlan) -> tuple[str, str]:
         match = plan.match or MatchResult()
-        return str(match.media_type or ""), cls._match_identity_key(match)
+        return (match.media_type or ""), cls._match_identity_key(match)
 
     @staticmethod
     def _identity_marker(path: str) -> str:
         match = re.search(
             r"[\{\(]((?:tmdb-\d+)|(?:(?:metatube|clean_title)-[A-Za-z0-9._-]+))[\}\)]",
-            str(path or ""), re.IGNORECASE,
+            (path or ""), re.IGNORECASE,
         )
         return "{" + match.group(1).lower() + "}" if match else ""
 
     def _historical_root_identities(self, media_root_path: str) -> set[tuple[str, str]]:
-        prefix = str(media_root_path or "").strip("/")
+        prefix = (media_root_path or "").strip("/")
         if not prefix:
             return set()
         result: set[tuple[str, str]] = set()
@@ -7124,7 +7184,7 @@ class Organizer:
             if plan.action != "move":
                 continue
             try:
-                inventory_key = str(plan.target_path or "")
+                inventory_key = (plan.target_path or "")
                 cached_inventory = inventory_cache.get(inventory_key)
                 if cached_inventory is None:
                     target_id, loaded_files, loaded_evidence = inventory_loader(plan)
@@ -7144,7 +7204,7 @@ class Organizer:
                 if (
                     plan.original_parent_id
                     and target_id
-                    and str(plan.original_parent_id) == str(target_id)
+                    and plan.original_parent_id == target_id
                 ):
                     note = "文件已位于目标目录，未执行重复移动、覆盖或回收"
                     plan.action = "skip"
@@ -7157,16 +7217,16 @@ class Organizer:
                     identity_index=identity_indexes[inventory_key],
                 )
                 previous_plan = (
-                    batch_plans_by_file_id.get(str(existing.file_id or ""))
+                    batch_plans_by_file_id.get(existing.file_id or "")
                     if existing is not None else None
                 )
                 plan.conflict_decision = decision
                 plan.conflict_note = note
                 if previous_plan is None:
-                    plan.conflict_existing_id = str(
+                    plan.conflict_existing_id = (
                         existing.file_id if existing is not None else ""
                     )
-                    plan.conflict_existing_name = str(
+                    plan.conflict_existing_name = (
                         existing.name if existing is not None else ""
                     )
                 else:
@@ -7306,13 +7366,13 @@ class Organizer:
                 f"{role}已不存在或类型已变化，请刷新目录后重试"
             )
         mismatches: list[str] = []
-        if str(getattr(current, "name", "") or "") != str(expected.name or ""):
+        if str(getattr(current, "name", "") or "") != (expected.name or ""):
             mismatches.append("文件名")
-        if str(getattr(current, "parent_id", "") or "") != str(expected.parent_id or ""):
+        if str(getattr(current, "parent_id", "") or "") != (expected.parent_id or ""):
             mismatches.append("所在目录")
-        if int(getattr(current, "size", 0) or 0) != int(expected.size or 0):
+        if int(getattr(current, "size", 0) or 0) != (expected.size or 0):
             mismatches.append("文件大小")
-        expected_etag = str(expected.etag or "")
+        expected_etag = (expected.etag or "")
         if expected_etag and str(getattr(current, "etag", "") or "") != expected_etag:
             mismatches.append("ETag")
         if mismatches:
@@ -7354,7 +7414,7 @@ class Organizer:
                 try:
                     conn.execute(
                         "UPDATE organize_log SET legacy_incomplete=1,error=?,updated_at=? WHERE id=?",
-                        ("操作明细写入失败，请人工核对", db.now(), int(log_id)),
+                        ("操作明细写入失败，请人工核对", db.now(), log_id),
                     )
                 except Exception as mark_exc:
                     # 主日志可能由兼容适配器或测试替身写入；保留原始
@@ -7365,7 +7425,25 @@ class Organizer:
                     )
         if item_error is not None:
             raise _OrganizeAuditWriteError(log_id, item_error)
-        return int(log_id)
+        return log_id
+
+    @overload
+    def clean_empty_dirs(
+        self, source_dir_id: str, *, with_report: Literal[True],
+        with_diagnostics: bool = False, protected_source_ids: set[str] | None = None,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    def clean_empty_dirs(
+        self, source_dir_id: str, *, with_report: Literal[False] = False,
+        with_diagnostics: bool = False, protected_source_ids: set[str] | None = None,
+    ) -> int: ...
+
+    @overload
+    def clean_empty_dirs(
+        self, source_dir_id: str, *, with_report: bool,
+        with_diagnostics: bool = False, protected_source_ids: set[str] | None = None,
+    ) -> int | dict[str, Any]: ...
 
     def clean_empty_dirs(
         self,
@@ -7379,8 +7457,8 @@ class Organizer:
         scanned_dirs: list[tuple[str, int, str, int]] = []
         scan_failures = 0
         protected_seen: set[str] = set()
-        protected = {str(item) for item in (protected_source_ids or set()) if str(item)}
-        protected.add(str(source_dir_id))
+        protected = {item for item in (protected_source_ids or set()) if item}
+        protected.add(source_dir_id)
         traversal = TraversalBudget(*self._traversal_limits)
 
         def scan(dir_id: str, depth: int) -> bool:
@@ -7433,7 +7511,7 @@ class Organizer:
                 "空目录扫描超过安全上限，未执行清理；请缩小来源范围后重试"
             ) from exc
         if not scan_complete:
-            report = {
+            report: dict[str, Any] = {
                 "cleaned": 0,
                 "delete_failures": 0,
                 "scan_failures": max(1, scan_failures),
@@ -7493,7 +7571,7 @@ class Organizer:
         protected_count = 0
         not_empty = 0
         unavailable = 0
-        protected = {str(item) for item in (protected_source_ids or set()) if str(item)}
+        protected = {item for item in (protected_source_ids or set()) if item}
         delete_empty = getattr(self.client, "delete_empty_directory", None)
         explicit_capability = getattr(
             self.client, "supports_guarded_empty_directory_delete", None
@@ -7543,12 +7621,12 @@ class Organizer:
         failure_reasons: dict[str, int] = {}
         for item in sorted(unique_dirs.values(), key=lambda row: row[1], reverse=True):
             dir_id, _depth = item[:2]
-            expected_etag = str(item[2] or "") if len(item) > 2 else ""
+            expected_etag = (item[2] or "") if len(item) > 2 else ""
             try:
-                expected_updated_at = max(0, int(item[3] or 0)) if len(item) > 3 else 0
+                expected_updated_at = max(0, (item[3] or 0)) if len(item) > 3 else 0
             except (TypeError, ValueError):
                 expected_updated_at = 0
-            if str(dir_id) in protected:
+            if dir_id in protected:
                 protected_count += 1
                 continue
             try:
@@ -7575,11 +7653,11 @@ class Organizer:
                     trigger="empty_dir_cleanup",
                     reason="整理完成后清理本次扫描确认的空目录",
                     candidate=DeleteCandidate(
-                        file_id=str(dir_id),
+                        file_id=dir_id,
                         name=str(current.name),
                         parent_id=str(current.parent_id),
                     ),
-                    delete_operation=lambda current_id=str(dir_id), current_etag=expected_etag,
+                    delete_operation=lambda current_id=dir_id, current_etag=expected_etag,
                     current_updated_at=expected_updated_at: delete_empty(
                         current_id,
                         expected_etag=current_etag,
@@ -7672,7 +7750,7 @@ class Organizer:
                 cur = new_id
         return cur
 
-    def _find_subdir(self, parent_id: str, name: str) -> str:
+    def _find_subdir(self, parent_id: str, name: str) -> str | None:
         try:
             entries = self.client.list_dir(parent_id)
         except Exception as exc:
@@ -7691,7 +7769,7 @@ class Organizer:
             )
         return matches[0].file_id if matches else None
 
-    def _find_file(self, dir_id: str, name: str) -> GuangYaFile:
+    def _find_file(self, dir_id: str, name: str) -> GuangYaFile | None:
         try:
             for f in self.client.list_dir(dir_id):
                 if not f.is_dir and f.name == name:

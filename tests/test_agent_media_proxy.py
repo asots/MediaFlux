@@ -169,13 +169,17 @@ class AgentMediaProxyTests(IsolatedDatabaseTestCase):
                 {"instance_number": 1, "enabled": False},
                 owner="owner",
             )
+            get_media_proxy_instance_result = db.get_media_proxy_instance(internal_id)
+            assert get_media_proxy_instance_result is not None
             self.assertEqual(
-                int(db.get_media_proxy_instance(internal_id)["enabled"]), 1
+                int(get_media_proxy_instance_result["enabled"]), 1
             )
             confirmed = service.confirm(
                 prepared["action_plan"]["plan_id"], owner="owner"
             )
-        self.assertEqual(int(db.get_media_proxy_instance(internal_id)["enabled"]), 0)
+        get_media_proxy_instance_result_2 = db.get_media_proxy_instance(internal_id)
+        assert get_media_proxy_instance_result_2 is not None
+        self.assertEqual(int(get_media_proxy_instance_result_2["enabled"]), 0)
         clear_cache.assert_called_once_with(internal_id)
         manager.request_reconcile.assert_called_once_with()
         self.assertEqual(confirmed["result"]["status"], "completed")
@@ -209,7 +213,9 @@ class AgentMediaProxyTests(IsolatedDatabaseTestCase):
                 prepared["action_plan"]["plan_id"], owner="owner"
             )
         self.assertEqual(confirmed["result"]["status"], "conflict")
-        self.assertEqual(int(db.get_media_proxy_instance(internal_id)["enabled"]), 1)
+        get_media_proxy_instance_result_3 = db.get_media_proxy_instance(internal_id)
+        assert get_media_proxy_instance_result_3 is not None
+        self.assertEqual(int(get_media_proxy_instance_result_3["enabled"]), 1)
         clear_cache.assert_not_called()
         manager.request_reconcile.assert_not_called()
         self.assertNotIn("changed-secret.invalid", self._serialized(confirmed))

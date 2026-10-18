@@ -166,7 +166,7 @@ def _current_permanent_roots(snapshot: frozenset[str]) -> set[str]:
         raise _RetainDirectory('protected', '当前永久来源或归档配置无法读取，已停止清理') from exc
     if error or not isinstance(target, (str, int)) or isinstance(target, bool):
         raise _RetainDirectory('protected', '当前永久来源或归档配置无效，已停止清理')
-    return set(snapshot) | {'0', str(target or '0').strip()} | {str(item['id']) for item in sources}
+    return set(snapshot) | {'0', (target or '0').strip()} | {item['id'] for item in sources}
 
 
 def cleanup_download_staging(
@@ -177,9 +177,9 @@ def cleanup_download_staging(
 ) -> dict[str, Any]:
     """只清理明确请求与来源根的交集；不从名称/时间猜测请求归属。"""
     report = cleanup_report()
-    original_protected = frozenset(str(value) for value in protected_ids)
-    selected_scope = frozenset(str(value) for value in scope_ids) if scope_ids is not None else None
-    for request_id in dict.fromkeys(int(value) for value in request_ids):
+    original_protected = frozenset(value for value in protected_ids)
+    selected_scope = frozenset(value for value in scope_ids) if scope_ids is not None else None
+    for request_id in dict.fromkeys(value for value in request_ids):
         stored = db.get_download_request(request_id)
         if stored is None:
             continue

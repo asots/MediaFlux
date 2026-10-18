@@ -75,6 +75,7 @@ class AgentStateCommitBufferTests(unittest.TestCase):
             ))
             first = active_agent_resource_candidates(owner="owner-a")
             self.assertEqual(first, snapshot)
+            assert first is not None
             first["candidates"].clear()
             self.assertEqual(
                 active_agent_resource_candidates(owner="owner-a"), snapshot

@@ -4,12 +4,20 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
+from starlette.requests import Request
+
 import tests  # noqa: F401
-from app.indexers.models import IndexerCapabilities, IndexerItem, IndexerPage, IndexerProviderError, IndexerSourceStatus
-from app.indexers.providers.base import report_page
-from app.indexers.providers.base import DirectResultAdapter
+from app.indexers.models import (
+    IndexerCapabilities,
+    IndexerItem,
+    IndexerPage,
+    IndexerProviderError,
+    IndexerSourceStatus,
+)
+from app.indexers.providers.base import DirectResultAdapter, report_page
 from app.indexers.registry import IndexerRegistry
 from app.indexers.result_store import IndexerResultStore
 from app.indexers.service import IndexerService
@@ -132,6 +140,7 @@ class SearchProgressTests(unittest.IsolatedAsyncioTestCase):
         cached = await service.search("Demo")
         self.assertTrue(cached.cached)
         self.assertEqual(next(i.title for i in cached.items if i.magnet == original.magnet), source.first.title)
+        assert frames[0].items[0].result_id is not None
         self.assertEqual(service.result_store.get(frames[0].items[0].result_id).title, original.title)
         await service.aclose()
 
@@ -139,6 +148,7 @@ class SearchProgressTests(unittest.IsolatedAsyncioTestCase):
         from dataclasses import replace
         source = ProgressiveSource()
         anchor = replace(source.first, result_id="frozen", size_bytes=123)
+        assert anchor.magnet is not None
         better = replace(anchor, title="Demo 2026 2160p", site_name="Another source",
                          detail_url="https://example.com/other", magnet=anchor.magnet + "&dn=updated",
                          download_kinds=("torrent",), size_bytes=None, seeders=22, cluster_size=3)
@@ -240,7 +250,7 @@ class SearchProgressTests(unittest.IsolatedAsyncioTestCase):
         source = ProgressiveSource(delayed=True)
         service = service_for(source)
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-        stream = indexers_api._stream_search(request, service, lambda cb: service.search("Demo", on_progress=cb))
+        stream = indexers_api._stream_search(cast(Request, request), service, lambda cb: service.search("Demo", on_progress=cb))
         first = await asyncio.wait_for(anext(stream), 1)
         self.assertTrue(first.startswith("event: progress\n"))
         self.assertFalse(json.loads(first.split("data: ",1)[1])["complete"])
@@ -255,7 +265,7 @@ class SearchProgressTests(unittest.IsolatedAsyncioTestCase):
         source = ProgressiveSource(delayed=True)
         service = service_for(source)
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-        stream = indexers_api._stream_search(request, service, lambda cb: service.search("Demo", on_progress=cb))
+        stream = indexers_api._stream_search(cast(Request, request), service, lambda cb: service.search("Demo", on_progress=cb))
         await asyncio.wait_for(anext(stream), 1)
         await stream.aclose()
         self.assertTrue(source.cancelled)

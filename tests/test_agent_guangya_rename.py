@@ -1,6 +1,8 @@
 """Media Agent 光鸭受控重命名能力测试。"""
 
 from __future__ import annotations
+from app.clients.guangya import GuangYaClient
+from typing import cast
 
 import sqlite3
 import tempfile
@@ -122,7 +124,9 @@ class GuangYaRenameTests(unittest.TestCase):
                     "samples": [{"before": before, "after": after}],
                 })
                 self.assertEqual(preview["sample_changes"], [f"{before} → {after}"])
-                self.assertEqual(actions._safe_preview(preview)["sample_changes"], preview["sample_changes"])
+                safe_preview_result = actions._safe_preview(preview)
+                assert safe_preview_result is not None
+                self.assertEqual(safe_preview_result["sample_changes"], preview["sample_changes"])
 
     def test_filename_preview_still_rejects_credentials_and_private_paths(self):
         for unsafe in ("access_token=private-secret", "/data/private/movie.mp4", r"C:\private\movie.mp4"):
@@ -132,7 +136,9 @@ class GuangYaRenameTests(unittest.TestCase):
                 })
                 self.assertEqual(preview["sample_changes"], [])
                 preview["sample_changes"] = [unsafe]
-                self.assertEqual(actions._safe_preview(preview)["sample_changes"], [])
+                safe_preview_result_2 = actions._safe_preview(preview)
+                assert safe_preview_result_2 is not None
+                self.assertEqual(safe_preview_result_2["sample_changes"], [])
 
     def test_exact_mode_is_rejected_in_favor_of_generic_fs_change(self):
         with self.assertRaisesRegex(Exception, "仅支持 remove_bitrate"):
@@ -149,7 +155,7 @@ class GuangYaRenameTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(Exception, "重命名方式无效"):
             guangya_rename.build_rename_plan(
-                FakeGuangYaClient(),
+                cast(GuangYaClient, FakeGuangYaClient()),
                 owner="owner",
                 targets=["/整理/动漫/师兄太稳健.S01E08.2160p.15.1Mbps.60fps.mp4"],
                 mode="exact",
@@ -170,7 +176,7 @@ class GuangYaRenameTests(unittest.TestCase):
     def test_plan_freezes_safe_entries_and_executes_with_verification(self):
         client = FakeGuangYaClient()
         plan = guangya_rename.build_rename_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             targets=["/整理/动漫"],
             mode="remove_bitrate",
@@ -191,12 +197,14 @@ class GuangYaRenameTests(unittest.TestCase):
                 "owner_digest": "owner-digest",
                 "credential_generation": 7,
             },
-            client_factory=lambda: client,
+            client_factory=lambda: cast(GuangYaClient, client),
         )
         self.assertEqual(result["stats"]["renamed"], 2)
         self.assertEqual(result["stats"]["rename_failed"], 0)
+        file_info_result = client.file_info("f1")
+        assert file_info_result is not None
         self.assertEqual(
-            client.file_info("f1").name, "师兄太稳健.S01E08.2160p.60fps.mp4"
+            file_info_result.name, "师兄太稳健.S01E08.2160p.60fps.mp4"
         )
         stored = guangya_rename.load_rename_plan(
             plan["plan_id"],
@@ -211,7 +219,7 @@ class GuangYaRenameTests(unittest.TestCase):
     def test_legacy_persisted_mode_is_rejected_and_removed(self):
         client = FakeGuangYaClient()
         plan = guangya_rename.build_rename_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             targets=["/整理/动漫/师兄太稳健.S01E08.2160p.15.1Mbps.60fps.mp4"],
             mode="remove_bitrate",
@@ -233,7 +241,7 @@ class GuangYaRenameTests(unittest.TestCase):
     def test_provider_rejection_is_partial_not_false_success(self):
         client = FakeGuangYaClient(reject_ids={"f2"})
         plan = guangya_rename.build_rename_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             targets=["/整理/动漫"],
             mode="remove_bitrate",
@@ -251,12 +259,14 @@ class GuangYaRenameTests(unittest.TestCase):
                 "owner_digest": "owner-digest",
                 "credential_generation": 7,
             },
-            client_factory=lambda: client,
+            client_factory=lambda: cast(GuangYaClient, client),
         )
         self.assertTrue(result["partial"])
         self.assertEqual(result["stats"]["renamed"], 1)
         self.assertEqual(result["stats"]["rename_failed"], 1)
-        self.assertIn("2.4 Mbps", client.file_info("f2").name)
+        file_info_result_2 = client.file_info("f2")
+        assert file_info_result_2 is not None
+        self.assertIn("2.4 Mbps", file_info_result_2.name)
 
     def test_execution_rechecks_each_snapshot_before_late_write(self):
 
@@ -271,7 +281,7 @@ class GuangYaRenameTests(unittest.TestCase):
 
         client = MutatingClient()
         plan = guangya_rename.build_rename_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             targets=["/整理/动漫"],
             mode="remove_bitrate",
@@ -290,12 +300,14 @@ class GuangYaRenameTests(unittest.TestCase):
                     "owner_digest": "owner-digest",
                     "credential_generation": 7,
                 },
-                client_factory=lambda: client,
+                client_factory=lambda: cast(GuangYaClient, client),
             )
         self.assertTrue(result["partial"])
         self.assertEqual(result["stats"]["renamed"], 1)
         self.assertEqual(result["stats"]["rename_failed"], 1)
-        self.assertIn("2.4 Mbps", client.file_info("f2").name)
+        file_info_result_3 = client.file_info("f2")
+        assert file_info_result_3 is not None
+        self.assertIn("2.4 Mbps", file_info_result_3.name)
         stored = guangya_rename.load_rename_plan(
             plan["plan_id"],
             owner="owner",
@@ -311,7 +323,7 @@ class GuangYaRenameTests(unittest.TestCase):
                 guangya_rename.GuangYaRenamePlanError, "计划过大"
             ):
                 guangya_rename.build_rename_plan(
-                    client,
+                    cast(GuangYaClient, client),
                     owner="owner",
                     targets=["/整理/动漫"],
                     mode="remove_bitrate",
@@ -371,7 +383,7 @@ class GuangYaRenameTests(unittest.TestCase):
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
             self._domain_actions.rename.preview_guangya_rename(arguments, context)
         previous = self._domain_actions.rename._flow("owner")
-        self.assertIsNotNone(previous)
+        assert (previous) is not None
         previous_path = guangya_rename._plan_path(previous.plan_id)
         self.assertTrue(previous_path.is_file())
         with (
@@ -384,7 +396,9 @@ class GuangYaRenameTests(unittest.TestCase):
             self.assertRaisesRegex(Exception, "临时读取失败"),
         ):
             self._domain_actions.rename.preview_guangya_rename(arguments, context)
-        self.assertEqual(self._domain_actions.rename._flow("owner").plan_id, previous.plan_id)
+        flow_result = self._domain_actions.rename._flow("owner")
+        assert flow_result is not None
+        self.assertEqual(flow_result.plan_id, previous.plan_id)
         self.assertTrue(previous_path.is_file())
 
     def test_successful_repreview_discards_replaced_private_plan(self):
@@ -401,6 +415,8 @@ class GuangYaRenameTests(unittest.TestCase):
             first = self._domain_actions.rename._flow("owner")
             self._domain_actions.rename.preview_guangya_rename(arguments, context)
             second = self._domain_actions.rename._flow("owner")
+        assert first is not None
+        assert second is not None
         self.assertNotEqual(first.plan_id, second.plan_id)
         self.assertFalse(guangya_rename._plan_path(first.plan_id).exists())
         self.assertTrue(guangya_rename._plan_path(second.plan_id).is_file())

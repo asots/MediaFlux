@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from app.modules.organize_correction import CorrectionItem
+
+from starlette.websockets import WebSocket
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from starlette.requests import Request as StarletteRequest
+
 import asyncio
 import base64
 import errno
@@ -78,6 +86,7 @@ from app.modules.scraper import (
 )
 from app.modules.strm import STRM_SUBDIR, sync_strm
 from tests.support import (
+    ReleaseParseFields,
     InitializedWebTestCase,
     IsolatedDatabaseTestCase,
     PagedDirectoryTestMixin,
@@ -87,8 +96,7 @@ from tests.support import (
 
 
 def _visible_runtime_chunk(offset: int, *, max_bytes: int | None = None):
-    kwargs = {} if max_bytes is None else {"max_bytes": max_bytes}
-    chunk = read_stream_chunk(offset, **kwargs)
+    chunk = read_stream_chunk(offset) if max_bytes is None else read_stream_chunk(offset, max_bytes=max_bytes)
     return (
         [event.line for event in chunk.events],
         chunk.offset,
@@ -96,7 +104,7 @@ def _visible_runtime_chunk(offset: int, *, max_bytes: int | None = None):
     )
 
 
-def _parse_fields(parser, filename: str, parent_path: str = "") -> dict[str, object]:
+def _parse_fields(parser, filename: str, parent_path: str = "") -> ReleaseParseFields:
     return release_parse_fields(parser.parse_media(filename, parent_path))
 
 
@@ -174,7 +182,7 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
                 "get_detail": lambda inner, tmdb_id, media_type, *, force_refresh=False: details[tmdb_id],
             },
         )()
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
 
         concert = MatchResult(
             tmdb_id="concert",
@@ -200,7 +208,7 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
         )
 
     def test_legacy_templates_and_scope_are_ignored_by_fixed_naming_contract(self):
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         match = MatchResult(
             tmdb_id="88", title="Show: Name", year="2026", media_type="tv"
         )
@@ -230,7 +238,7 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
             validate_template("${showTitle")
 
     def test_companion_metadata_matches_video_basename(self):
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         plan = OrganizePlan(
             file_id="v1",
             original_name="Show.S01E01.mkv",
@@ -245,7 +253,7 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
         self.assertEqual([item.file_id for item in matched], ["s1", "n1"])
 
     def test_shorter_video_does_not_steal_extended_metadata(self):
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         short_plan = OrganizePlan(
             file_id="v1",
             original_name="Show.S01E01.mkv",
@@ -290,7 +298,7 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
             action="skip",
             note="需人工确认",
         )
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         stats = {"stopped": 0}
         with (
             patch("app.modules.organize.add_organize_log", return_value=42) as add_log,
@@ -382,7 +390,9 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
         )
 
         self.assertGreater(success_id, pending_id)
-        self.assertEqual(db.get_organize_log(pending_id)["status"], "confirmed")
+        get_organize_log_result = db.get_organize_log(pending_id)
+        assert get_organize_log_result is not None
+        self.assertEqual(get_organize_log_result["status"], "confirmed")
         self.assertEqual(
             db.list_organize_log_items(pending_id)[0]["status"], "confirmed"
         )
@@ -390,7 +400,7 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
         self.assertEqual([row["id"] for row in timeline], [success_id])
 
     def test_safe_replacement_keeps_existing_until_incoming_succeeds(self):
-        operations = []
+        operations: list[tuple] = []
         existing = GuangYaFile("old-file", "Movie (2026)(tmdb-1).mkv", False, 10)
 
         class FakeRaw:
@@ -422,8 +432,8 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
             new_name=existing.name,
             target_path="电影",
         )
-        organizer = Organizer(client=FakeClient(), scraper=object())
-        organizer._ensure_dir_chain = lambda root, path, *_args: "target-id"
+        organizer = Organizer(client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, object()))
+        organizer._ensure_dir_chain = lambda root_id, path, cache=None: "target-id"
         stats = {
             "moved": 0,
             "renamed": 0,
@@ -487,7 +497,7 @@ class MediaProxyTests(InitializedWebTestCase):
         self.assertEqual(
             _websocket_upstream_url(
                 "https://media.example.test/base",
-                websocket,
+                cast(WebSocket, websocket),
                 "socket",
             ),
             "wss://media.example.test/base/socket?api_key=client-token",
@@ -540,8 +550,10 @@ class MediaProxyTests(InitializedWebTestCase):
                     local_root=str(media_root),
                     enabled=1,
                 )
+                get_media_proxy_instance_result = db.get_media_proxy_instance(instance_id)
+                assert get_media_proxy_instance_result is not None
                 self.assertEqual(
-                    db.get_media_proxy_instance(instance_id)["name"], "Test Jellyfin"
+                    get_media_proxy_instance_result["name"], "Test Jellyfin"
                 )
                 binding_id = db.add_media_proxy_binding(
                     instance_id=instance_id,
@@ -551,6 +563,7 @@ class MediaProxyTests(InitializedWebTestCase):
                     local_relative_path="Movies/video.mkv",
                 )
                 binding = db.get_media_proxy_binding(instance_id, "item-1", "source-1")
+                assert binding is not None
                 self.assertEqual(int(binding["id"]), binding_id)
                 self.assertTrue(db.delete_media_proxy_instance(instance_id))
                 self.assertEqual(db.list_media_proxy_bindings(instance_id), [])
@@ -662,10 +675,11 @@ class DatabaseMigrationTests(unittest.TestCase):
                     )
                 db.init_db()
                 row = db.get_rss_entry(entry_id)
+                assert row is not None
                 self.assertEqual(row["status"], "failed")
                 self.assertEqual(row["failure_code"], "submission_outcome_unknown")
                 self.assertEqual(row["failure_retryable"], 0)
-                self.assertIsNotNone(row["failed_at"])
+                assert (row["failed_at"]) is not None
 
 
 class DownloadRequestLocalMediaTests(unittest.TestCase):
@@ -730,6 +744,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                         self._task("/downloads/Movie.mkv", "/downloads"),
                     )
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual(row["local_import_status"], "pending")
                 self.assertEqual(row["local_import_target"], f"local-media-task:{task_id}")
                 self.assertTrue(db.update_local_media_task(task_id, status="completed"))
@@ -738,8 +753,10 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                         request_id, task_id, "/downloads/Movie.mkv"
                     )
                 )
+                get_download_request_result = db.get_download_request(request_id)
+                assert get_download_request_result is not None
                 self.assertEqual(
-                    db.get_download_request(request_id)["local_import_status"],
+                    get_download_request_result["local_import_status"],
                     "completed",
                 )
                 self.assertEqual(
@@ -779,6 +796,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                     )
 
                 request = db.get_download_request(request_id)
+                assert request is not None
                 self.assertEqual(request["local_import_status"], "completed")
                 scheduler.enqueue_completed_torrent.assert_not_called()
                 scheduler.reload.assert_not_called()
@@ -804,6 +822,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                     )
 
                 request = db.get_download_request(request_id)
+                assert request is not None
                 self.assertEqual(request["local_import_status"], "failed")
                 self.assertIn("内容路径不一致", request["local_import_error"])
 
@@ -847,6 +866,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                         db.get_download_request(request_id), task
                     )
                     waiting = db.get_download_request(request_id)
+                    assert waiting is not None
                     self.assertEqual(waiting["local_import_status"], "pending")
                     self.assertEqual(waiting["local_import_attempts"], 1)
                     self.assertIn("扫描路径不存在", waiting["local_import_error"])
@@ -857,6 +877,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                     tracker._start_local_import(waiting, task)
 
                 recovered = db.get_download_request(request_id)
+                assert recovered is not None
                 self.assertEqual(recovered["local_import_status"], "pending")
                 self.assertEqual(
                     recovered["local_import_target"], "local-media-task:77"
@@ -888,6 +909,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                         )
 
                 failed = db.get_download_request(request_id)
+                assert failed is not None
                 self.assertEqual(failed["local_import_status"], "failed")
                 self.assertEqual(failed["local_import_attempts"], 8)
                 self.assertIn("暂时不可完整读取", failed["local_import_error"])
@@ -924,6 +946,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                     )
 
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual(row["local_import_status"], "failed")
                 self.assertIn("Windows/UNC", row["local_import_error"])
                 self.assertIn("Docker 容器路径", row["local_import_error"])
@@ -970,6 +993,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                         )
 
                         current = db.get_download_request(request_id)
+                        assert current is not None
                         self.assertEqual(
                             current["local_import_status"], terminal_status
                         )
@@ -1013,6 +1037,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                     )
 
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual(row["local_import_status"], "pending")
                 self.assertEqual(row["qb_content_path"], str(local_media))
                 self.assertEqual(row["local_import_error"], "")
@@ -1021,6 +1046,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                 ))
                 task_id = int(row["local_import_target"].split(":", 1)[1])
                 local_task = db.get_local_media_task(task_id, owner="admin")
+                assert local_task is not None
                 self.assertEqual(local_task.source_id, source_id)
                 self.assertEqual(local_task.qb_hash, "hash")
                 self.assertEqual(Path(local_task.content_path), local_media)
@@ -1058,6 +1084,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                     )
 
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual(row["local_import_status"], "failed")
                 self.assertEqual(row["qb_content_path"], qb_path)
                 self.assertIn("qB 路径前缀", row["local_import_error"])
@@ -1084,6 +1111,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
                         self._task("/downloads/Movie.mkv", "/downloads"),
                     )
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual(row["local_import_status"], "skipped")
                 self.assertIn("未命中", row["local_import_error"])
                 self.assertEqual(
@@ -1093,7 +1121,7 @@ class DownloadRequestLocalMediaTests(unittest.TestCase):
 
 class OrganizeCorrectionTests(unittest.TestCase):
     def test_batch_validation_rejects_movies_before_cloud_write(self):
-        service = OrganizeCorrectionService(client=Mock(), scraper=object())
+        service = OrganizeCorrectionService(client=Mock(), scraper=cast(TMDBScraper, object()))
         details = {
             1: {
                 "id": 1,
@@ -1112,17 +1140,17 @@ class OrganizeCorrectionTests(unittest.TestCase):
             service, "detail", side_effect=lambda log_id: details[log_id]
         ), self.assertRaisesRegex(ValueError, "包含电影"):
             service.validate_batch([1, 2], "revert")
-        service.client.assert_not_called()
+        cast(Mock, service.client).assert_not_called()
 
     def test_batch_validation_requires_unique_multiple_tv_logs(self):
-        service = OrganizeCorrectionService(client=object(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         with self.assertRaisesRegex(ValueError, "至少选择两条"):
             service.validate_batch([1], "revert")
         with self.assertRaisesRegex(ValueError, "重复 ID"):
             service.validate_batch([1, 1], "delete")
 
     def test_batch_reorganize_requires_explicit_identity_and_preview(self):
-        service = OrganizeCorrectionService(client=object(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         entries = [
             {"log_id": 1, "expected_version": 3, "operation_token": "a"},
             {"log_id": 2, "expected_version": 7, "operation_token": "b"},
@@ -1148,7 +1176,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
         self.assertEqual(execute.call_args_list[1].args, (2, "b", 7, previews[1]))
 
     def test_partial_failure_is_frozen_for_manual_reconciliation(self):
-        service = OrganizeCorrectionService(client=object(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         row = {
             "id": 5,
             "status": "partial_failed",
@@ -1202,7 +1230,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                 log_id = db.add_organize_log(
                     "guangya", "source/folder", "电影/Movie.mkv", "f1", "success", "1"
                 )
-                service = OrganizeCorrectionService(client=object(), scraper=object())
+                service = OrganizeCorrectionService(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
                 detail = service.detail(log_id)
                 self.assertTrue(detail["legacy_incomplete"])
                 self.assertIn("禁止猜测式回退", detail["safety_notice"])
@@ -1261,7 +1289,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     ],
                 )
                 detail = OrganizeCorrectionService(
-                    client=object(), scraper=object()
+                    client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object())
                 ).detail(log_id)
                 self.assertFalse(detail["legacy_incomplete"])
                 self.assertIsNone(detail["release_parse"])
@@ -1340,7 +1368,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     ],
                 )
                 detail = OrganizeCorrectionService(
-                    client=object(), scraper=object()
+                    client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object())
                 ).detail(log_id)
         self.assertEqual(detail["release_parse"], diagnostic)
         self.assertNotIn("release_parse_json", detail)
@@ -1415,7 +1443,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
 
                 client = Mock()
                 service = OrganizeCorrectionService(
-                    client=client, scraper=FakeScraper()
+                    client=client, scraper=cast(TMDBScraper, FakeScraper())
                 )
                 with patch(
                     "app.modules.organize_correction.OrganizeRules.from_config",
@@ -1500,7 +1528,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                         )
 
                 service = OrganizeCorrectionService(
-                    client=Mock(), scraper=FakeScraper()
+                    client=Mock(), scraper=cast(TMDBScraper, FakeScraper())
                 )
                 with patch(
                     "app.modules.organize_correction.OrganizeRules.from_config",
@@ -1750,13 +1778,15 @@ class OrganizeCorrectionTests(unittest.TestCase):
                 client.file_info.return_value = GuangYaFile(
                     "video", "外部改名.mkv", False, 100, "", "target-id"
                 )
-                service = OrganizeCorrectionService(client=client, scraper=object())
+                service = OrganizeCorrectionService(client=client, scraper=cast(TMDBScraper, object()))
                 version = service.detail(log_id)["version"]
                 with self.assertRaisesRegex(RuntimeError, "文件名已被外部修改"):
                     service.return_to_source(log_id, "return-token", version)
                 client.move.assert_not_called()
                 client.rename.assert_not_called()
-                self.assertEqual(db.get_organize_log(log_id)["status"], "success")
+                get_organize_log_result_2 = db.get_organize_log(log_id)
+                assert get_organize_log_result_2 is not None
+                self.assertEqual(get_organize_log_result_2["status"], "success")
 
     @staticmethod
     def _make_correction_log(test_db: Path, *, with_subtitle: bool = True) -> int:
@@ -1933,7 +1963,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                 ),
             ):
                 service = OrganizeCorrectionService(
-                    client=FakeClient(), scraper=object()
+                    client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, object())
                 )
                 version = service.detail(log_id)["version"]
                 result = service.return_to_source(log_id, "return-clean-dirs", version)
@@ -1976,7 +2006,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             file_info=Mock(return_value=directory),
             delete_empty_directory=Mock(return_value=True),
         )
-        service = OrganizeCorrectionService(client=client, scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
 
         def run_delete(*_args, **kwargs):
             return kwargs["delete_operation"]()
@@ -2059,7 +2089,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             return kwargs["delete_operation"]()
 
         self_outer = self
-        service = OrganizeCorrectionService(client=FakeClient(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, object()))
         directories = [remote["season-1"], remote["show-id"], remote["season-2"]]
         with patch(
             "app.modules.organize_correction.execute_recycle_bin_delete",
@@ -2093,7 +2123,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             file_info=Mock(return_value=directory),
             delete_empty_directory=Mock(),
         )
-        service = OrganizeCorrectionService(client=client, scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
         with patch("app.modules.organize_correction.record_blocked_delete") as blocked:
             cleaned, warnings = service._cleanup_archive_directories(
                 log_id=1,
@@ -2115,7 +2145,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             supports_guarded_empty_directory_delete=False,
             delete_empty_directory=Mock(),
         )
-        service = OrganizeCorrectionService(client=client, scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
         directory = GuangYaFile(
             "show-id",
             "Show (2026) {tmdb-1}",
@@ -2152,7 +2182,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             updated_at=30,
         )
         client = SimpleNamespace(delete_empty_directory=Mock())
-        service = OrganizeCorrectionService(client=client, scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
         with patch("app.modules.organize_correction.record_blocked_delete") as blocked:
             cleaned, warnings = service._cleanup_archive_directories(
                 log_id=1,
@@ -2194,8 +2224,8 @@ class OrganizeCorrectionTests(unittest.TestCase):
             ),
         }
         service = OrganizeCorrectionService(
-            client=SimpleNamespace(file_info=lambda file_id: remote.get(file_id)),
-            scraper=object(),
+            client=cast(GuangYaClient, SimpleNamespace(file_info=lambda file_id: remote.get(file_id))),
+            scraper=cast(TMDBScraper, object()),
         )
         item = SimpleNamespace(
             original_parent_id="different-source",
@@ -2214,7 +2244,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                         "tmdb_id": "1",
                         "season": 1,
                     },
-                    items=[item],
+                    items=cast(list[CorrectionItem], [item]),
                     rules=rules,
                 )
             )
@@ -2264,7 +2294,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             file_info=Mock(side_effect=lambda file_id: remote.get(file_id)),
             delete_empty_directory=Mock(),
         )
-        service = OrganizeCorrectionService(client=client, scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
         with patch(
             "app.modules.organize_correction.execute_recycle_bin_delete"
         ) as audited_delete:
@@ -2316,8 +2346,8 @@ class OrganizeCorrectionTests(unittest.TestCase):
             ),
         }
         service = OrganizeCorrectionService(
-            client=SimpleNamespace(file_info=lambda file_id: remote.get(file_id)),
-            scraper=object(),
+            client=cast(GuangYaClient, SimpleNamespace(file_info=lambda file_id: remote.get(file_id))),
+            scraper=cast(TMDBScraper, object()),
         )
         item = SimpleNamespace(
             original_parent_id="source-id",
@@ -2338,7 +2368,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                         "tmdb_id": "1",
                         "season": 1,
                     },
-                    items=[item],
+                    items=cast(list[CorrectionItem], [item]),
                     rules=rules,
                 )
             )
@@ -2374,8 +2404,8 @@ class OrganizeCorrectionTests(unittest.TestCase):
             ),
         }
         service = OrganizeCorrectionService(
-            client=SimpleNamespace(file_info=lambda file_id: remote.get(file_id)),
-            scraper=object(),
+            client=cast(GuangYaClient, SimpleNamespace(file_info=lambda file_id: remote.get(file_id))),
+            scraper=cast(TMDBScraper, object()),
         )
         item = SimpleNamespace(
             original_parent_id="source-id",
@@ -2398,7 +2428,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                         "external_id": "series_1",
                         "season": 1,
                     },
-                    items=[item],
+                    items=cast(list[CorrectionItem], [item]),
                     rules=rules,
                 )
             )
@@ -2421,7 +2451,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     updated_at=10,
                 )
 
-        service = OrganizeCorrectionService(client=FakeClient(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, object()))
         item = SimpleNamespace(
             original_parent_id="source-id", current_parent_id="category-id"
         )
@@ -2437,7 +2467,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                         "media_type": "movie",
                         "tmdb_id": "1",
                     },
-                    items=[item],
+                    items=cast(list[CorrectionItem], [item]),
                     rules=rules,
                 )
             )
@@ -2474,7 +2504,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
 
             with patch("app.database.DB_PATH", test_db):
                 service = OrganizeCorrectionService(
-                    client=FakeClient(), scraper=object()
+                    client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, object())
                 )
                 version = service.detail(log_id)["version"]
                 with self.assertRaisesRegex(RuntimeError, "simulated move failure"):
@@ -2483,7 +2513,9 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     (remote["video"].parent_id, remote["video"].name),
                     ("target-id", "电影.mkv"),
                 )
-                self.assertEqual(db.get_organize_log(log_id)["status"], "failed")
+                get_organize_log_result_3 = db.get_organize_log(log_id)
+                assert get_organize_log_result_3 is not None
+                self.assertEqual(get_organize_log_result_3["status"], "failed")
                 steps = db.list_organize_operation_steps(log_id)
                 self.assertEqual(steps[0]["status"], "failed")
 
@@ -2520,7 +2552,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
 
             with patch("app.database.DB_PATH", test_db):
                 service = OrganizeCorrectionService(
-                    client=FakeClient(), scraper=object()
+                    client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, object())
                 )
                 version = service.detail(log_id)["version"]
                 with self.assertRaisesRegex(RuntimeError, "subtitle move failure"):
@@ -2620,13 +2652,15 @@ class OrganizeCorrectionTests(unittest.TestCase):
                 ),
             ):
                 service = OrganizeCorrectionService(
-                    client=FakeClient(), scraper=FakeScraper()
+                    client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, FakeScraper())
                 )
                 version = service.detail(log_id)["version"]
                 result = service.reorganize(
                     log_id, "reorganize-success", version, "99", "movie"
                 )
-                updated_log = dict(db.get_organize_log(log_id))
+                get_organize_log_result_9 = db.get_organize_log(log_id)
+                assert get_organize_log_result_9 is not None
+                updated_log = dict(get_organize_log_result_9)
 
             self.assertTrue(result["success"])
             self.assertEqual(
@@ -2716,7 +2750,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                 ),
             ):
                 service = OrganizeCorrectionService(
-                    client=FakeClient(), scraper=FakeScraper()
+                    client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, FakeScraper())
                 )
                 version = service.detail(log_id)["version"]
                 with self.assertRaisesRegex(RuntimeError, "simulated rename failure"):
@@ -2727,7 +2761,9 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     (remote["video"].parent_id, remote["video"].name),
                     ("target-id", "电影.mkv"),
                 )
-                self.assertEqual(db.get_organize_log(log_id)["status"], "failed")
+                get_organize_log_result_4 = db.get_organize_log(log_id)
+                assert get_organize_log_result_4 is not None
+                self.assertEqual(get_organize_log_result_4["status"], "failed")
                 self.assertEqual(
                     db.list_organize_operation_steps(log_id)[0]["status"], "failed"
                 )
@@ -2741,11 +2777,13 @@ class OrganizeCorrectionTests(unittest.TestCase):
                 "video", "外部改名.mkv", False, 100, "video-etag", "target-id"
             )
             with patch("app.database.DB_PATH", test_db):
-                service = OrganizeCorrectionService(client=client, scraper=object())
+                service = OrganizeCorrectionService(client=client, scraper=cast(TMDBScraper, object()))
                 version = service.detail(log_id)["version"]
                 with self.assertRaisesRegex(RuntimeError, "文件名已被外部修改"):
                     service.delete_group(log_id, "delete-token", version, "DELETE")
-                self.assertEqual(db.get_organize_log(log_id)["status"], "success")
+                get_organize_log_result_5 = db.get_organize_log(log_id)
+                assert get_organize_log_result_5 is not None
+                self.assertEqual(get_organize_log_result_5["status"], "success")
                 client.delete.assert_not_called()
 
     def test_revert_latest_rolls_back_completed_members(self):
@@ -2807,7 +2845,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                         remote[file_id].parent_id = parent_id
 
                 service = OrganizeCorrectionService(
-                    client=FakeClient(), scraper=object()
+                    client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, object())
                 )
                 version = service.detail(log_id)["version"]
                 with self.assertRaisesRegex(RuntimeError, "revert subtitle failure"):
@@ -2820,14 +2858,18 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     (remote["sub"].parent_id, remote["sub"].name),
                     ("target-id", "电影.zh.ass"),
                 )
-                self.assertEqual(db.get_organize_log(log_id)["status"], "revert_failed")
+                get_organize_log_result_6 = db.get_organize_log(log_id)
+                assert get_organize_log_result_6 is not None
+                self.assertEqual(get_organize_log_result_6["status"], "revert_failed")
 
     def test_init_db_recovers_interrupted_operation_state(self):
         with tempfile.TemporaryDirectory() as root:
             test_db = Path(root) / "organize.db"
             log_id = self._make_correction_log(test_db, with_subtitle=False)
             with patch("app.database.DB_PATH", test_db):
-                version = db.get_organize_log(log_id)["version"]
+                get_organize_log_result_7 = db.get_organize_log(log_id)
+                assert get_organize_log_result_7 is not None
+                version = get_organize_log_result_7["version"]
                 self.assertTrue(
                     db.claim_organize_log_operation(
                         log_id, "busy-token", "returning", ("success",), version
@@ -2842,7 +2884,9 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     status="running",
                 )
                 db.init_db()
-                self.assertEqual(db.get_organize_log(log_id)["status"], "interrupted")
+                get_organize_log_result_8 = db.get_organize_log(log_id)
+                assert get_organize_log_result_8 is not None
+                self.assertEqual(get_organize_log_result_8["status"], "interrupted")
                 step = next(
                     row
                     for row in db.list_organize_operation_steps(log_id)
@@ -2882,7 +2926,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     ],
                 )
                 detail = OrganizeCorrectionService(
-                    client=object(), scraper=object()
+                    client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object())
                 ).detail(log_id)
                 self.assertFalse(detail["allowed_actions"]["reorganize"])
                 self.assertIn("不完整成员快照", detail["safety_notice"])
@@ -2923,7 +2967,7 @@ class MediaRefreshTests(unittest.TestCase):
         client = EmbyClient("http://emby.local", "token")
         client.product_kind = "emby"
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             if path == "/Library/VirtualFolders/Query":
                 return {
                     "Items": [
@@ -2975,7 +3019,7 @@ class STRMIndexTests(IsolatedDatabaseTestCase):
 class JellyfinDashboardTests(unittest.TestCase):
     def setUp(self):
         self.client = JellyfinClient("http://jellyfin.local", "token")
-        self.client._user_id = lambda: "user-id"
+        self.client._user_id = lambda *, deadline_at=None: "user-id"
 
     def test_libraries_use_user_views_and_work_level_counts(self):
         responses = {
@@ -2996,8 +3040,9 @@ class JellyfinDashboardTests(unittest.TestCase):
             },
         }
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             if path == "/Users/user-id/Items":
+                assert params is not None
                 self.assertEqual(params["IncludeItemTypes"], "Series")
                 return {"TotalRecordCount": 236}
             return responses[path]
@@ -3452,9 +3497,9 @@ class TelegramBotTests(unittest.TestCase):
         from app.bot import handlers
 
         bot = self.FakeBot()
-        bot.send_chat_action = lambda *_args, **_kwargs: None
-        bot.get_file = lambda _file_id: SimpleNamespace(file_path="bad.torrent")
-        bot.download_file = lambda _path: b""
+        setattr(bot, "send_chat_action", lambda *_args, **_kwargs: None)
+        setattr(bot, "get_file", lambda _file_id: SimpleNamespace(file_path="bad.torrent"))
+        setattr(bot, "download_file", lambda _path: b"")
         values = {"TG_CHAT_ID": "100"}
         with (
             patch(
@@ -3591,27 +3636,31 @@ class TelegramBotTests(unittest.TestCase):
             patch("app.modules.scheduler.get_scheduler"),
         ):
             self.assertEqual(
-                api.save_config(foreground_request, payload), {"success": True}
+                api.save_config(cast(StarletteRequest, foreground_request), payload), {"success": True}
             )
             reset.assert_called_once()
             restart.assert_not_called()
             reset.reset_mock()
             self.assertEqual(
-                api.save_config(background_request, payload), {"success": True}
+                api.save_config(cast(StarletteRequest, background_request), payload), {"success": True}
             )
             restart.assert_called_once()
             reset.assert_not_called()
 
             restart.reset_mock(return_value=True)
             restart.return_value = False
-            result = api.save_config(background_request, payload)
+            result = api.save_config(cast(StarletteRequest, background_request), payload)
+            assert isinstance(result, dict)
             self.assertTrue(result["success"])
+            assert isinstance(result["warnings"], list)
             self.assertIn("Telegram Bot 配置已保存", result["warnings"][0])
 
             restart.reset_mock(side_effect=True)
             restart.side_effect = RuntimeError("restart failed")
-            result = api.save_config(background_request, payload)
+            result = api.save_config(cast(StarletteRequest, background_request), payload)
+            assert isinstance(result, dict)
             self.assertTrue(result["success"])
+            assert isinstance(result["warnings"], list)
             self.assertIn("运行中实例热更新失败", result["warnings"][0])
 
     def test_notifier_reuses_single_bot_and_escapes_event_content(self):
@@ -3754,6 +3803,7 @@ class DownloadRequestConcurrencyTests(unittest.TestCase):
                     ("guangya",),
                 )
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual(row["qb_status"], "submitted")
                 self.assertEqual(row["gy_status"], "submitting")
                 self.assertFalse(row["attention_cleared_at"])
@@ -3769,6 +3819,7 @@ class DownloadRequestConcurrencyTests(unittest.TestCase):
                     db.claim_download_request_targets(request_id, "guangya"), ()
                 )
                 terminal = db.get_download_request(request_id)
+                assert terminal is not None
                 self.assertEqual(terminal["status"], "completed")
                 self.assertEqual(terminal["qb_status"], "completed")
 
@@ -3810,9 +3861,11 @@ class DownloadRequestConcurrencyTests(unittest.TestCase):
                 self.assertTrue(retry_created)
                 self.assertNotEqual(retry_id, first_id)
                 current = db.get_download_request(retry_id)
+                assert current is not None
                 self.assertEqual(current["request_key"], "retry-key")
                 self.assertEqual(current["status"], "pending")
                 old = db.get_download_request(first_id)
+                assert old is not None
                 self.assertIn(":history:", old["request_key"])
 
                 db.update_download_request(
@@ -3826,8 +3879,10 @@ class DownloadRequestConcurrencyTests(unittest.TestCase):
                 )
                 self.assertTrue(after_cancel_created)
                 self.assertNotEqual(after_cancel_id, retry_id)
+                get_download_request_result_2 = db.get_download_request(retry_id)
+                assert get_download_request_result_2 is not None
                 self.assertIn(
-                    ":history:", db.get_download_request(retry_id)["request_key"]
+                    ":history:", get_download_request_result_2["request_key"]
                 )
 
     def test_canonical_torrent_identity_deduplicates_equivalent_magnet_and_can_retry(
@@ -3857,12 +3912,16 @@ class DownloadRequestConcurrencyTests(unittest.TestCase):
                 retry = create_request(equivalent, "chat", "3")
                 self.assertTrue(retry["created"])
                 self.assertNotEqual(retry["id"], initial["id"])
+                get_download_request_result_3 = db.get_download_request(retry["id"])
+                assert get_download_request_result_3 is not None
                 self.assertEqual(
-                    db.get_download_request(retry["id"])["request_key"],
+                    get_download_request_result_3["request_key"],
                     request_keys(equivalent)[0],
                 )
+                get_download_request_result_4 = db.get_download_request(initial["id"])
+                assert get_download_request_result_4 is not None
                 self.assertIn(
-                    ":history:", db.get_download_request(initial["id"])["request_key"]
+                    ":history:", get_download_request_result_4["request_key"]
                 )
 
     def test_pending_download_owner_requires_persisted_chat_and_user(self):
@@ -3873,10 +3932,12 @@ class DownloadRequestConcurrencyTests(unittest.TestCase):
                 owned_id, _ = db.create_download_request(
                     "owned-key", "magnet", chat_id="-100", user_id="9"
                 )
-                self.assertEqual(
-                    db.bind_pending_download_request_owner(
+                bind_pending_download_request_owner_result = db.bind_pending_download_request_owner(
                         owned_id, chat_id="-100", user_id="9"
-                    )["user_id"],
+                    )
+                assert bind_pending_download_request_owner_result is not None
+                self.assertEqual(
+                    bind_pending_download_request_owner_result["user_id"],
                     "9",
                 )
                 self.assertIsNone(
@@ -4294,7 +4355,7 @@ class SecurityTests(InitializedWebTestCase):
         ):
             response = asyncio.run(
                 logs_api.runtime_log_stream(
-                    Request(),
+                    cast(StarletteRequest, Request()),
                     offset=99,
                     stream_id="old:id",
                     checkpoint="old-checkpoint",
@@ -4354,7 +4415,7 @@ class SecurityTests(InitializedWebTestCase):
         ):
             response = asyncio.run(
                 logs_api.runtime_log_stream(
-                    Request(), offset=0, stream_id="", checkpoint="", generation=0
+                    cast(StarletteRequest, Request()), offset=0, stream_id="", checkpoint="", generation=0
                 )
             )
 
@@ -4959,9 +5020,11 @@ class SecurityTests(InitializedWebTestCase):
                     role="video",
                     owner="admin",
                 )
-                local_token = db.get_local_media_task(
+                get_local_media_task_result = db.get_local_media_task(
                     removable_local, owner="admin"
-                ).operation_token
+                )
+                assert get_local_media_task_result is not None
+                local_token = get_local_media_task_result.operation_token
                 db.add_local_media_operation_step(
                     removable_local,
                     local_token,
@@ -4985,13 +5048,13 @@ class SecurityTests(InitializedWebTestCase):
                     },
                 )
                 self.assertIsNone(db.get_organize_log(removable))
-                self.assertIsNotNone(db.get_organize_log(busy))
+                assert (db.get_organize_log(busy)) is not None
                 self.assertEqual(db.list_organize_log_items(removable), [])
                 self.assertEqual(db.list_organize_operation_steps(removable), [])
                 self.assertIsNone(
                     db.get_local_media_task(removable_local, owner="admin")
                 )
-                self.assertIsNotNone(db.get_local_media_task(busy_local, owner="admin"))
+                assert (db.get_local_media_task(busy_local, owner="admin")) is not None
                 self.assertEqual(
                     db.list_local_media_task_items(removable_local, owner="admin"), []
                 )
@@ -5892,8 +5955,8 @@ class SecurityTests(InitializedWebTestCase):
                     )
                 self.assertEqual(db.purge_processed_rss_entries(7), 1)
                 self.assertIsNone(db.get_rss_entry(old_processed))
-                self.assertIsNotNone(db.get_rss_entry(recent_processed))
-                self.assertIsNotNone(db.get_rss_entry(old_pending))
+                assert (db.get_rss_entry(recent_processed)) is not None
+                assert (db.get_rss_entry(old_pending)) is not None
             finally:
                 db.DB_PATH = original
 
@@ -6272,7 +6335,7 @@ class SecurityTests(InitializedWebTestCase):
                 self.token = kwargs.get("access_token") or ""
                 self.refresh_token_value = kwargs.get("refresh_token") or ""
                 self.device_id = kwargs.get("device_id") or "generated"
-                self.token_expires_at = 1
+                self.token_expires_at: float = 1
                 self._client = SimpleNamespace(headers={})
 
             def refresh_token(self, _refresh_token=None):

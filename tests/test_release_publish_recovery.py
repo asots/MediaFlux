@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import hashlib
 import json
 import os
@@ -135,9 +137,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
 
     def setUp(self) -> None:
         for tool in ("bash", "jq"):
-            self.assertIsNotNone(
-                shutil.which(tool), f"{tool} is required for workflow shell tests"
-            )
+            assert (shutil.which(tool)) is not None, f"{tool} is required for workflow shell tests"
         self.tempdir = tempfile.TemporaryDirectory(prefix="mediaflux-release-recovery-")
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
@@ -156,7 +156,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
             if step.get("name") in self.RELEASE_STEPS
         ]
         self.state_path = self.root / "state.json"
-        self.state = {
+        self.state: dict[str, Any] = {
             "tags": {
                 f"{self.REPOSITORY}:1.2": self.OLD,
                 f"{self.REPOSITORY}:latest": self.OLD,
@@ -286,11 +286,10 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
             self.state = json.loads(self.state_path.read_text())
             if result.returncode:
                 return result
-            outputs.update(
-                line.split("=", 1)
-                for line in output.read_text().splitlines()
-                if "=" in line
-            )
+            for line in output.read_text().splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    outputs[key] = value
             if step["name"] == stop_after:
                 # 模拟 runner 在两个成功的 step 之间中断，不替换任何 run 块。
                 break
@@ -328,12 +327,14 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         first = self.run_pipeline()
         self.assertEqual(first.returncode, 42, first.stdout + first.stderr)
         with self.subTest(boundary="no-public-release"):
+            assert self.state['release'] is not None
             self.assertTrue(self.state["release"]["isDraft"])
         with self.subTest(boundary="no-image-promotion"):
             self.assertEqual(self.promotions(), [])
         second = self.run_pipeline()
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertFalse(self.state["release"]["isDraft"])
+        assert self.state['release'] is not None
         self.assertEqual(set(self.state["release"]["assets"]), set(self.assets()))
         self.assertEqual(
             self.state["tags"][f"{self.REPOSITORY}:latest"], self.CANDIDATE
@@ -343,6 +344,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         self.state["fail_upload_after"] = 1
         first = self.run_pipeline()
         self.assert_failed_closed(first)
+        assert self.state['release'] is not None
         self.assertTrue(self.state["release"]["isDraft"])
         self.assertEqual(set(self.state["release"]["assets"]), {"BUILD-INFO.json"})
         second = self.run_pipeline()
@@ -361,6 +363,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         for flag in ("--draft", "--verify-tag", "--target"):
             self.assertIn(flag, create)
         self.assertEqual(create[create.index("--target") + 1], self.SHA)
+        assert self.state['release'] is not None
         self.assertIn(self.marker(), self.state["release"]["body"].splitlines())
         upload_index = next(
             i
@@ -391,6 +394,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
     ) -> None:
         first = self.run_pipeline()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        assert self.state['release'] is not None
         before_assets = dict(self.state["release"]["assets"])
         before_tags = dict(self.state["tags"])
         self.state["events"] = []
@@ -405,10 +409,12 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         self.assertEqual(self.promotions(), [])
         self.assertEqual(self.gh_writes(), [])
         self.assertEqual(self.state["tags"], before_tags)
+        assert self.state['release'] is not None
         self.assertEqual(self.state["release"]["assets"], before_assets)
 
     def test_complete_owned_draft_reuses_verified_assets_without_clobber(self) -> None:
         self.seed_release(draft=True)
+        assert self.state['release'] is not None
         assets = dict(self.state["release"]["assets"])
         result = self.run_pipeline()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -423,6 +429,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         self.assertEqual(
             checkpoint.returncode, 0, checkpoint.stdout + checkpoint.stderr
         )
+        assert self.state['release'] is not None
         self.assertTrue(self.state["release"]["isDraft"])
         self.assertEqual(set(self.state["release"]["assets"]), set(self.assets()))
         self.assertEqual(self.promotions(), [])
@@ -439,6 +446,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         self.assertEqual(
             checkpoint.returncode, 0, checkpoint.stdout + checkpoint.stderr
         )
+        assert self.state['release'] is not None
         self.assertTrue(self.state["release"]["isDraft"])
         self.assertEqual(set(self.state["release"]["assets"]), set(self.assets()))
         original_digest = self.CANDIDATE
@@ -449,6 +457,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         resumed = self.run_pipeline()
         self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
         self.assertFalse(self.state["release"]["isDraft"])
+        assert self.state['release'] is not None
         self.assertEqual(self.state["release"]["assets"], assets)
         self.assertEqual(set(self.state["tags"].values()), {original_digest})
         self.assertEqual([event[2] for event in self.gh_writes()], ["edit"])
@@ -469,6 +478,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
                     result = self.run_pipeline()
                     self.assert_failed_closed(result)
                     self.assertEqual(self.gh_writes(), [])
+                    assert self.state['release'] is not None
                     self.assertEqual(
                         self.state["release"]["assets"], {"BUILD-INFO.json": manifest}
                     )
@@ -486,6 +496,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
             with self.subTest(variation=variation):
                 self.state["events"] = []
                 self.seed_release(draft=True, assets={})
+                assert self.state['release'] is not None
                 self.state["release"].update(variation)
                 result = self.run_pipeline()
                 self.assert_failed_closed(result)
@@ -503,6 +514,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
                 result = self.run_pipeline()
                 self.assert_failed_closed(result)
                 self.assertEqual(self.gh_writes(), [])
+                assert self.state['release'] is not None
                 self.assertEqual(self.state["release"]["assets"], assets)
 
     def test_existing_download_hash_mismatch_fails_before_any_write(self) -> None:
@@ -522,6 +534,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         self.state["corrupt_download"] = {"RELEASE-NOTES.txt": "corrupted download"}
         result = self.run_pipeline()
         self.assert_failed_closed(result)
+        assert self.state['release'] is not None
         self.assertTrue(self.state["release"]["isDraft"])
         self.assertIn("SHA-256 mismatch", result.stderr)
         self.assertEqual([event[2] for event in self.gh_writes()], ["create", "upload"])
@@ -556,6 +569,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
         }
         result = self.run_pipeline()
         self.assert_failed_closed(result)
+        assert self.state['release'] is not None
         self.assertTrue(self.state["release"]["isDraft"])
         self.assertEqual(set(self.state["release"]["assets"]), set(self.assets()))
 
@@ -576,6 +590,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
                 self.state["tags"][f"{self.REPOSITORY}:1.2.3"] = self.OLD
                 result = self.run_pipeline()
                 self.assert_failed_closed(result)
+                assert self.state['release'] is not None
                 self.assertTrue(self.state["release"]["isDraft"])
 
     def test_verified_same_commit_exact_tag_reuses_original_digest(self) -> None:
@@ -592,6 +607,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
 
         result = self.run_pipeline(before_step=move_tag)
         self.assert_failed_closed(result)
+        assert self.state['release'] is not None
         self.assertTrue(self.state["release"]["isDraft"])
 
     def test_tag_is_rechecked_before_publishing_draft(self) -> None:
@@ -601,6 +617,7 @@ class ReleasePublishRecoveryTests(unittest.TestCase):
 
         result = self.run_pipeline(before_step=move_tag)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        assert self.state['release'] is not None
         self.assertTrue(self.state["release"]["isDraft"])
         self.assertFalse(
             any(

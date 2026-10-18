@@ -1,6 +1,9 @@
 """Task 9：网盘整理 Cron 调度器隔离测试。"""
 from __future__ import annotations
 
+from threading import Thread
+from typing import cast
+
 import json
 import unittest
 from datetime import datetime
@@ -16,6 +19,7 @@ from app.modules.organize_tasks import OrganizeTaskManager
 
 
 class FakeManager:
+    task_result: MagicMock
     def __init__(self, start_result: dict | None = None) -> None:
         self.calls: list[tuple[list[dict[str, str]], OrganizeRules, str]] = []
         self.start_result = start_result or {
@@ -90,7 +94,7 @@ class SchedulerHarness:
 
 class OrganizeSchedulerTests(unittest.TestCase):
     def require_scheduler(self):
-        self.assertIsNotNone(OrganizeScheduler, "缺少 app.modules.organize_scheduler")
+        assert (OrganizeScheduler) is not None, "缺少 app.modules.organize_scheduler"
         return OrganizeScheduler
 
     def test_validate_cron_accepts_standard_five_fields(self):
@@ -104,7 +108,7 @@ class OrganizeSchedulerTests(unittest.TestCase):
     def test_disabled_schedule_clears_next_run_without_starting_task(self):
         self.require_scheduler()
         scheduler = SchedulerHarness(enabled=False).build()
-        self.assertIsNotNone(scheduler)
+        assert (scheduler) is not None
         scheduler._next_run = datetime(2026, 7, 25, 3, 1, 0)
 
         scheduler._tick()
@@ -112,14 +116,16 @@ class OrganizeSchedulerTests(unittest.TestCase):
         status = scheduler.status()
         self.assertFalse(status["enabled"])
         self.assertEqual(status["next_run"], "")
-        self.assertEqual(scheduler._manager.calls, [])
+        self.assertEqual(cast(FakeManager, scheduler._manager).calls, [])
 
     def test_overlap_is_recorded_as_skipped(self):
         self.require_scheduler()
         manager = FakeManager({"ok": False, "error": "网盘整理任务正在运行"})
         harness = SchedulerHarness(cron="* * * * *", manager=manager)
         scheduler = harness.build()
+        assert scheduler is not None
         scheduler._loaded_cron = "* * * * *"
+        assert scheduler is not None
         scheduler._next_run = datetime(2026, 7, 25, 2, 59, 0)
 
         scheduler._tick()
@@ -137,7 +143,9 @@ class OrganizeSchedulerTests(unittest.TestCase):
         ]
         harness = SchedulerHarness(cron="* * * * *", sources=sources)
         scheduler = harness.build()
+        assert scheduler is not None
         scheduler._loaded_cron = "* * * * *"
+        assert scheduler is not None
         scheduler._next_run = datetime(2026, 7, 25, 2, 59, 0)
 
         scheduler._tick()
@@ -155,7 +163,9 @@ class OrganizeSchedulerTests(unittest.TestCase):
         self.require_scheduler()
         harness = SchedulerHarness(cron="0 4 * * *")
         scheduler = harness.build()
+        assert scheduler is not None
         scheduler._loaded_cron = "0 4 * * *"
+        assert scheduler is not None
         scheduler._next_run = datetime(2026, 7, 25, 2, 59, 0)
         scheduler._tick()
         harness.manager.current.update({
@@ -175,7 +185,9 @@ class OrganizeSchedulerTests(unittest.TestCase):
         self.require_scheduler()
         harness = SchedulerHarness(cron="0 4 * * *")
         scheduler = harness.build()
+        assert scheduler is not None
         scheduler._loaded_cron = "0 4 * * *"
+        assert scheduler is not None
         scheduler._next_run = datetime(2026, 7, 25, 2, 59, 0)
         scheduler._tick()
         harness.manager.current.update({
@@ -195,7 +207,9 @@ class OrganizeSchedulerTests(unittest.TestCase):
         self.require_scheduler()
         manager = FakeManager()
         scheduler = SchedulerHarness(cron="0 4 * * *", manager=manager).build()
+        assert scheduler is not None
         scheduler._active_task_id = "cron-task"
+        assert scheduler is not None
         scheduler._last_result = {
             "task_id": "cron-task",
             "trigger_type": "cron",
@@ -235,6 +249,7 @@ class OrganizeSchedulerTests(unittest.TestCase):
         self.require_scheduler()
         harness = SchedulerHarness(enabled=False)
         scheduler = harness.build(interval=60.0)
+        assert scheduler is not None
         scheduler.reload()
         self.assertTrue(scheduler._wake_event.is_set())
 
@@ -242,11 +257,15 @@ class OrganizeSchedulerTests(unittest.TestCase):
         first_thread = scheduler._thread
         scheduler.start()
         try:
+            assert scheduler is not None
             self.assertIs(first_thread, scheduler._thread)
+            assert first_thread is not None
             self.assertTrue(first_thread.daemon)
             self.assertTrue(first_thread.is_alive())
         finally:
+            assert scheduler is not None
             scheduler.stop()
+        assert first_thread is not None
         self.assertFalse(first_thread.is_alive())
 
     def test_stop_does_not_forget_a_scheduler_thread_that_is_still_alive(self):
@@ -263,7 +282,8 @@ class OrganizeSchedulerTests(unittest.TestCase):
                 self.timeout = timeout
 
         thread = StubbornThread()
-        scheduler._thread = thread
+        assert scheduler is not None
+        scheduler._thread = cast(Thread, thread)
 
         scheduler.stop()
 

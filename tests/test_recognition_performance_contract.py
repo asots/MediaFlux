@@ -1,6 +1,9 @@
 """识别热路径的宽松性能契约：约束缓存复用，不绑定具体机器速度。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.tmdb import TMDBClient
+
 import dataclasses
 import unittest
 from pathlib import Path
@@ -21,7 +24,7 @@ class RecognitionPerformanceContractTests(unittest.TestCase):
     def test_release_parse_reuses_one_core_for_context_and_preprocessing(self):
         from app.modules import scraper as module
 
-        parser = module.TMDBScraper("offline-fixture")
+        parser = module.TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(parser.close)
         with patch.object(module, "_parse_release_core", wraps=module._parse_release_core) as build:
             parser.parse_media("Example.Show.S01E03.mkv", "/library/Show")
@@ -30,7 +33,7 @@ class RecognitionPerformanceContractTests(unittest.TestCase):
     def test_deterministic_projection_cannot_mutate_shared_raw_facts(self):
         from app.modules import scraper as module
 
-        parser = module.TMDBScraper("offline-fixture")
+        parser = module.TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(parser.close)
         core = module._parse_release_core("Example.Show.S01E03.mkv", "/library/Show")
         original = dataclasses.asdict(core.context)

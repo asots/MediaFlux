@@ -32,7 +32,7 @@ class CrossProcessLock:
     def __init__(self, name: str, *, directory: str | Path | None = None) -> None:
         safe_name = "".join(
             char if char.isalnum() or char in {"-", "_"} else "-"
-            for char in str(name or "operation")
+            for char in (name or "operation")
         ).strip("-") or "operation"
         self._name = safe_name
         self._directory = Path(directory).expanduser().resolve() if directory else None

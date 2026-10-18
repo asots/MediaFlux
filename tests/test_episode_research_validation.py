@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import copy
 import unittest
+from typing import Any
 
-from app.modules.episode_research import EpisodeEvidenceReader, EpisodeResearchError, normalize_case
+from app.modules.episode_research import (
+    EpisodeEvidenceReader,
+    EpisodeResearchError,
+    normalize_case,
+)
 
 
-def case_payload():
+def case_payload() -> dict[str, Any]:
     return {"identity": "Fixture Show", "reason": "文件集号超出 TMDB 记录范围",
             "directory": "/private/Fixture Show",
             "files": [{"file_id": f"private-{n}", "name": f"Fixture.Show.S01E{n:02d}.NF.WEB-DL.mkv",
@@ -23,7 +28,7 @@ class EvidenceClient:
     def __init__(self):
         self.requests = []
         self.closed = False
-        self.data = {
+        self.data: dict[str, Any] = {
             "/tv/100": {"id": 100, "name": "Fixture Show", "first_air_date": "2018-04-25",
                         "seasons": [{"season_number": 0, "episode_count": 4}, {"season_number": 1, "episode_count": 10}]},
             "/tv/100/alternative_titles": {"id": 100, "results": []},

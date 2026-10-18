@@ -391,7 +391,7 @@ def _tmdb_snapshot(
                 break
             remote_count += 1
             try:
-                episode_number = int(item.get("episode_number"))
+                episode_number = int(item.get("episode_number") or 0)
             except (TypeError, ValueError):
                 continue
             if episode_number <= 0:

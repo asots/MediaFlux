@@ -1,6 +1,8 @@
 """短生命周期 HTTP 客户端和整理服务的所有权回归测试。"""
 from __future__ import annotations
 
+from typing import cast
+
 import json
 import tempfile
 import threading
@@ -308,10 +310,10 @@ class ClientResourceLifecycleTests(unittest.TestCase):
                     scraper.close.side_effect = [failure, True]
                     with patch(scraper_factory, return_value=scraper):
                         if owner is Organizer:
-                            service = Organizer(client=object())
+                            service = Organizer(client=cast(GuangYaClient, object()))
                         else:
                             service = DirectoryScrapeService(
-                                client=object(), store=Mock(),
+                                client=cast(GuangYaClient, object()), store=Mock(),
                             )
 
                     self.assertFalse(service.close())
@@ -440,7 +442,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
             thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
             self.assertEqual(len(rejected), 1)
-            self.assertIsInstance(rejected[0], LocalMediaServiceError)
+            assert isinstance(rejected[0], LocalMediaServiceError)
 
         self.assertEqual(service._lifecycle_state(), (True, False, 0))
         self.assertTrue(service.close())
@@ -449,7 +451,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
         self,
     ) -> None:
         service = DirectoryScrapeService(
-            client=object(), scraper=Mock(), store=Mock(),
+            client=cast(GuangYaClient, object()), scraper=Mock(), store=Mock(),
         )
         rules = OrganizeRules(
             nsfw_enabled=True,
@@ -487,7 +489,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
                     thread.join(timeout=2)
                     self.assertFalse(thread.is_alive())
                     self.assertEqual(len(rejected), 1)
-                    self.assertIsInstance(rejected[0], DirectoryScrapeRequestError)
+                    assert isinstance(rejected[0], DirectoryScrapeRequestError)
 
         self.assertEqual(service._lifecycle_state(), (True, False, 0))
         self.assertEqual(constructed[0].close_calls, 1)
@@ -496,7 +498,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
     def test_global_service_getters_replace_completed_deferred_close_once(self) -> None:
         local_old = LocalMediaService(scraper=Mock())
         directory_old = DirectoryScrapeService(
-            client=object(), scraper=Mock(), store=Mock(),
+            client=cast(GuangYaClient, object()), scraper=Mock(), store=Mock(),
         )
 
         class HealthyReplacement:
@@ -601,7 +603,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
         replacement = HealthyReplacement()
         with directory_scrape_module._service_lock:
             saved = directory_scrape_module._service
-            directory_scrape_module._service = stale
+            directory_scrape_module._service = cast(DirectoryScrapeService, stale)
 
         try:
             results = []

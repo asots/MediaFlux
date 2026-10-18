@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import tests  # noqa: F401 -- 必须先建立隔离运行环境
 from dataclasses import replace
 from types import SimpleNamespace
@@ -105,7 +109,7 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
             with self.subTest(operation=operation):
                 log_id = self._log()
                 cloud = MemoryCloud(operation)
-                service = OrganizeCorrectionService(client=cloud, scraper=object())
+                service = OrganizeCorrectionService(client=cast(GuangYaClient, cloud), scraper=cast(TMDBScraper, object()))
                 with patch.object(
                     service,
                     "_capture_archive_cleanup_directories",
@@ -132,7 +136,7 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
             with self.subTest(failure=failure):
                 log_id = self._log()
                 cloud = MemoryCloud("rename", **{failure: True})
-                service = OrganizeCorrectionService(client=cloud, scraper=object())
+                service = OrganizeCorrectionService(client=cast(GuangYaClient, cloud), scraper=cast(TMDBScraper, object()))
                 with patch.object(
                     service,
                     "_capture_archive_cleanup_directories",
@@ -144,8 +148,10 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
                         )
                 item = dict(db.list_organize_log_items(log_id)[0])
                 self.assertEqual(item["status"], "rollback_failed")
+                get_organize_log_result = db.get_organize_log(log_id)
+                assert get_organize_log_result is not None
                 self.assertEqual(
-                    db.get_organize_log(log_id)["status"], "partial_failed"
+                    get_organize_log_result["status"], "partial_failed"
                 )
                 self.assertFalse(
                     service.detail(log_id)["allowed_actions"]["return_to_source"]
@@ -170,7 +176,7 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
         log_id = self._log()
         cloud = MemoryCloud("rename")
         worker = OrganizeProbeWorker()
-        worker._client = cloud
+        worker._client = cast(GuangYaClient, cloud)
         job_id = db.enqueue_organize_probe_completion(
             log_id, source_id="target", rel_dir="Archive", rules={}
         )
@@ -192,15 +198,17 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
             self._due(job_id)
             self.assertTrue(worker._process_one())
         self.assertEqual(self._job(job_id)["status"], "completed")
+        get_organize_log_result_2 = db.get_organize_log(log_id)
+        assert get_organize_log_result_2 is not None
         self.assertEqual(
-            db.get_organize_log(log_id)["current_name"], cloud.files["video"].name
+            get_organize_log_result_2["current_name"], cloud.files["video"].name
         )
 
     def test_probe_unverifiable_rollback_is_manual_failure_not_external_change(self):
         log_id = self._log()
         cloud = MemoryCloud("rename", unreadable=True)
         worker = OrganizeProbeWorker()
-        worker._client = cloud
+        worker._client = cast(GuangYaClient, cloud)
         job_id = db.enqueue_organize_probe_completion(
             log_id, source_id="target", rel_dir="Archive", rules={}
         )
@@ -220,7 +228,9 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
             worker._process_one()
             self._due(job_id)
             worker._process_one()
-        self.assertEqual(db.get_organize_log(log_id)["status"], "partial_failed")
+        get_organize_log_result_3 = db.get_organize_log(log_id)
+        assert get_organize_log_result_3 is not None
+        self.assertEqual(get_organize_log_result_3["status"], "partial_failed")
         self.assertEqual(
             db.list_organize_log_items(log_id)[0]["status"], "rollback_failed"
         )
@@ -230,7 +240,7 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
         cloud = MemoryCloud(unreadable=True)
         cloud.failed = True
         with self.assertRaises(RuntimeError):
-            Organizer(client=cloud, scraper=object())._restore_remote_file(
+            Organizer(client=cast(GuangYaClient, cloud), scraper=cast(TMDBScraper, object()))._restore_remote_file(
                 GuangYaFile("video", "Archive.mkv", False, 100, "etag", "target"),
                 "target",
                 "Archive.mkv",
@@ -241,7 +251,7 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
         cloud = MemoryCloud()
         cloud.files["video"].name = "Archive-1080p.mkv"
         worker = OrganizeProbeWorker()
-        worker._client = cloud
+        worker._client = cast(GuangYaClient, cloud)
         job_id = db.enqueue_organize_probe_completion(
             log_id, source_id="target", rel_dir="Archive", rules={}
         )
@@ -261,7 +271,9 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
             self._due(job_id)
             self.assertTrue(worker._process_one())
         self.assertEqual(self._job(job_id)["status"], "failed")
-        self.assertEqual(db.get_organize_log(log_id)["status"], "partial_failed")
+        get_organize_log_result_4 = db.get_organize_log(log_id)
+        assert get_organize_log_result_4 is not None
+        self.assertEqual(get_organize_log_result_4["status"], "partial_failed")
         self.assertEqual(cloud.calls, [])
 
     def test_probe_committed_rename_only_finishes_interrupted_step(self):
@@ -301,7 +313,7 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
         cloud = MemoryCloud()
         cloud.files["video"].name = "Archive-1080p.mkv"
         worker = OrganizeProbeWorker()
-        worker._client = cloud
+        worker._client = cast(GuangYaClient, cloud)
         job_id = db.enqueue_organize_probe_completion(
             log_id, source_id="target", rel_dir="Archive", rules={}
         )
@@ -323,7 +335,9 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
             )
         self._due(job_id)
         self.assertTrue(worker._process_one())
-        self.assertEqual(db.get_organize_log(log_id)["status"], "partial_failed")
+        get_organize_log_result_5 = db.get_organize_log(log_id)
+        assert get_organize_log_result_5 is not None
+        self.assertEqual(get_organize_log_result_5["status"], "partial_failed")
         self.assertEqual(self._job(job_id)["status"], "retry_wait")
         with db.get_conn() as conn:
             status = conn.execute(
@@ -396,7 +410,7 @@ class ReleaseChainBusinessSnapshotTests(IsolatedDatabaseTestCase):
                 {"season_number": 2, "episode_count": 12},
             ],
         }
-        service = OrganizeCorrectionService(client=cloud, scraper=scraper)
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, cloud), scraper=scraper)
         self.enterContext(
             patch.object(
                 OrganizeRules,
@@ -432,7 +446,9 @@ class ReleaseChainBusinessSnapshotTests(IsolatedDatabaseTestCase):
             season=2,
             episode=3,
         )
-        row = dict(db.get_organize_log(log_id))
+        get_organize_log_result_10 = db.get_organize_log(log_id)
+        assert get_organize_log_result_10 is not None
+        row = dict(get_organize_log_result_10)
         self.assertEqual((row["season"], row["episode"]), (2, 3))
         self.assertEqual(
             json.loads(row["release_parse_json"])["original_evidence"], "keep"
@@ -461,7 +477,9 @@ class ReleaseChainBusinessSnapshotTests(IsolatedDatabaseTestCase):
                 log_id, "inferred", service.detail(log_id)["version"], "1", "tv"
             )
             preview = service.preview_reorganize(log_id, "1", "tv")
-        row = dict(db.get_organize_log(log_id))
+        get_organize_log_result_11 = db.get_organize_log(log_id)
+        assert get_organize_log_result_11 is not None
+        row = dict(get_organize_log_result_11)
         self.assertEqual((preview["season"], preview["episode"]), (2, 3))
         self.assertEqual((row["season"], row["episode"]), (2, 3))
         self.assertNotIn("manual_position", json.loads(row["release_parse_json"]))
@@ -486,8 +504,10 @@ class ReleaseChainBusinessSnapshotTests(IsolatedDatabaseTestCase):
             (cloud.files["video"].parent_id, cloud.files["video"].name),
             ("old-season", "First.2025.S01E07.mkv"),
         )
+        get_organize_log_result_6 = db.get_organize_log(log_id)
+        assert get_organize_log_result_6 is not None
         self.assertEqual(
-            db.get_organize_log(log_id)["current_name"], cloud.files["video"].name
+            get_organize_log_result_6["current_name"], cloud.files["video"].name
         )
 
     def test_legacy_path_only_revert_explicitly_discloses_missing_identity_snapshot(
@@ -513,7 +533,9 @@ class ReleaseChainBusinessSnapshotTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(result["success"])
         self.assertEqual(cloud.files["video"].name, "First.2025.S01E07.mkv")
-        self.assertEqual(db.get_organize_log(log_id)["tmdb_id"], "2")
+        get_organize_log_result_7 = db.get_organize_log(log_id)
+        assert get_organize_log_result_7 is not None
+        self.assertEqual(get_organize_log_result_7["tmdb_id"], "2")
         self.assertTrue(
             any("身份" in warning and "仅" in warning for warning in result["warnings"])
         )
@@ -544,8 +566,12 @@ class ReleaseChainBusinessSnapshotTests(IsolatedDatabaseTestCase):
                     log_id, "undo-fail", service.detail(log_id)["version"]
                 )
         self.assertEqual(cloud.files["video"], before_undo)
-        self.assertEqual(db.get_organize_log(log_id)["tmdb_id"], "2")
-        self.assertEqual(db.get_organize_log(log_id)["status"], "revert_failed")
+        get_organize_log_result_8 = db.get_organize_log(log_id)
+        assert get_organize_log_result_8 is not None
+        self.assertEqual(get_organize_log_result_8["tmdb_id"], "2")
+        get_organize_log_result_9 = db.get_organize_log(log_id)
+        assert get_organize_log_result_9 is not None
+        self.assertEqual(get_organize_log_result_9["status"], "revert_failed")
 
     def test_revert_uses_complete_operation_not_display_limit_and_stores_one_snapshot(
         self,
@@ -613,7 +639,9 @@ class ReleaseChainBusinessSnapshotTests(IsolatedDatabaseTestCase):
         service.reorganize(
             log_id, "movie", service.detail(log_id)["version"], "1", "movie"
         )
-        row = dict(db.get_organize_log(log_id))
+        get_organize_log_result_12 = db.get_organize_log(log_id)
+        assert get_organize_log_result_12 is not None
+        row = dict(get_organize_log_result_12)
         self.assertIsNone(row["season"])
         self.assertIsNone(row["episode"])
         self.assertNotIn("manual_position", json.loads(row["release_parse_json"]))

@@ -1,4 +1,10 @@
 """紧贴中文片名的目录集号推断：真实解析、人工确认与执行快照回归。"""
+
+from tests.support import assert_present
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
 import unicodedata
 from dataclasses import replace
 from unittest.mock import patch
@@ -46,7 +52,7 @@ def _identities(names):
 
 class DirectoryAttachedEpisodeSequenceTests(IsolatedDatabaseTestCase):
     def setUp(self):
-        self.parser = TMDBScraper("offline-fixture")
+        self.parser = TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(self.parser.close)
         self.scraper = _DirectoryScrapeTMDB()
         # 只替换离线 TMDB 元数据；文件名与父目录均走正式解析器。
@@ -65,7 +71,7 @@ class DirectoryAttachedEpisodeSequenceTests(IsolatedDatabaseTestCase):
              **{item.file_id: item for item in videos}},
         )
         service = DirectoryScrapeService(
-            client=client, scraper=self.scraper, store=DirectoryScrapeStore(),
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, self.scraper), store=DirectoryScrapeStore(),
             rules_loader=lambda: rules or self.rules,
         )
         self.addCleanup(service.close)
@@ -120,6 +126,7 @@ class DirectoryAttachedEpisodeSequenceTests(IsolatedDatabaseTestCase):
             with self.subTest(stage=stage):
                 service, client = self._cloud()
                 inspected = service.inspect("owner", "source")
+                preview = None
                 if stage == "execute":
                     preview = service.preview("owner", inspected["inspection_id"], "123", "tv")
                 # 删除末集仍有有效的 1..60 连续序列，必须因快照变化而拒绝。
@@ -129,7 +136,7 @@ class DirectoryAttachedEpisodeSequenceTests(IsolatedDatabaseTestCase):
                     if stage == "preview":
                         service.preview("owner", inspected["inspection_id"], "123", "tv")
                     else:
-                        service.execute_preview("owner", preview["preview_id"])
+                        service.execute_preview("owner", assert_present(preview)["preview_id"])
                 resolve.assert_not_called()
                 self.assertEqual(client.tree["archive"], [])
 

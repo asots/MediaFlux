@@ -13,7 +13,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -99,8 +99,8 @@ def _resolved_credentials(
     """按来源成对解析凭据，禁止环境值与内置兼容值交叉混用。"""
     if api_key is not None or api_secret is not None:
         return (
-            str(api_key or "").strip(),
-            str(api_secret or "").strip(),
+            (api_key or "").strip(),
+            (api_secret or "").strip(),
             "explicit",
         )
 
@@ -108,8 +108,8 @@ def _resolved_credentials(
     secret_in_environment = "DOUBAN_FRODO_API_SECRET" in os.environ
     if key_in_environment or secret_in_environment:
         return (
-            str(os.environ.get("DOUBAN_FRODO_API_KEY") or "").strip(),
-            str(os.environ.get("DOUBAN_FRODO_API_SECRET") or "").strip(),
+            (os.environ.get("DOUBAN_FRODO_API_KEY") or "").strip(),
+            (os.environ.get("DOUBAN_FRODO_API_SECRET") or "").strip(),
             "environment",
         )
 
@@ -149,7 +149,7 @@ def _finite_timeout(value: TimeoutValue | None) -> TimeoutValue:
 
 
 def _validated_user_agent(value: str | None) -> str:
-    raw = _USER_AGENT if value is None else str(value)
+    raw = _USER_AGENT if value is None else value
     if any(ord(char) < 0x20 or ord(char) > 0x7E for char in raw):
         raise ValueError("user_agent must contain visible ASCII characters only")
     user_agent = raw.strip()
@@ -161,7 +161,7 @@ def _validated_user_agent(value: str | None) -> str:
 def _header(headers: Mapping[str, Any], name: str) -> str:
     wanted = name.lower()
     for key, value in (headers or {}).items():
-        if str(key).lower() == wanted:
+        if key.lower() == wanted:
             return str(value or "")
     return ""
 
@@ -272,17 +272,11 @@ class DoubanFrodoClient:
         self.session = session or requests.Session()
         self.clock = clock or time.time
         self.timeout = _finite_timeout(timeout)
-        try:
-            self.max_response_bytes = int(max_response_bytes)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("max_response_bytes must be positive") from exc
+        self.max_response_bytes = max_response_bytes
         if self.max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be positive")
-        try:
-            normalized_page_size = int(page_size)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("page_size must be an integer") from exc
-        self.page_size = max(1, min(normalized_page_size, 100))
+
+        self.page_size = max(1, min(page_size, 100))
         self._sanitize_session_credentials()
 
     def _clear_cookies(self) -> None:
@@ -349,7 +343,7 @@ class DoubanFrodoClient:
             if length < 0 or length > self.max_response_bytes:
                 raise ProviderInvalidResponse("豆瓣 Frodo 响应过大")
 
-        iterator = getattr(response, "iter_content", None)
+        iterator: Callable[..., Iterable[bytes]] | None = getattr(response, "iter_content", None)
         if not callable(iterator):
             raise ProviderInvalidResponse("豆瓣 Frodo 响应不可读取")
         chunks: list[bytes] = []
@@ -365,7 +359,7 @@ class DoubanFrodoClient:
             chunks.append(chunk)
         try:
             payload = json.loads(b"".join(chunks).decode("utf-8"))
-        except (UnicodeDecodeError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ProviderInvalidResponse("豆瓣 Frodo 返回无效 JSON") from exc
         if not isinstance(payload, dict):
             raise ProviderInvalidResponse("豆瓣 Frodo 响应结构无效")
@@ -447,12 +441,9 @@ class DoubanFrodoClient:
         filters: Mapping[str, Any] | None,
     ) -> DoubanPublicPage:
         self._ensure_configured()
-        normalized_category = str(category or "").strip().lower()
-        normalized_type = "tv" if str(media_type or "").strip().lower() == "tv" else "movie"
-        try:
-            normalized_page = max(1, int(page))
-        except (TypeError, ValueError) as exc:
-            raise ProviderInvalidResponse("豆瓣 Frodo 页码无效") from exc
+        normalized_category = (category or "").strip().lower()
+        normalized_type = "tv" if (media_type or "").strip().lower() == "tv" else "movie"
+        normalized_page = max(1, page)
         start = (normalized_page - 1) * self.page_size
         params: dict[str, Any] = {"start": start, "count": self.page_size}
 
@@ -497,10 +488,10 @@ class DoubanFrodoClient:
 
     def get_detail(self, external_id: str, media_type: str) -> dict[str, Any]:
         self._ensure_configured()
-        subject_id = str(external_id or "").strip()
+        subject_id = (external_id or "").strip()
         if not _EXTERNAL_ID_RE.fullmatch(subject_id):
             raise ProviderInvalidResponse("豆瓣 Frodo 条目 ID 无效")
-        normalized_type = "tv" if str(media_type or "").strip().lower() == "tv" else "movie"
+        normalized_type = "tv" if (media_type or "").strip().lower() == "tv" else "movie"
         payload = self._get(f"/api/v2/{normalized_type}/{subject_id}")
         normalized = _normalize_subject(payload, normalized_type)
         if normalized is None:

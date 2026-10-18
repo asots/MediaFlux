@@ -22,20 +22,20 @@ class OrganizeModuleBoundaryTests(unittest.TestCase):
         for rejected in (None, [], ["existing"], ["constraint"]):
             with self.subTest(rejected=rejected):
                 match = MatchResult(tmdb_id="42", media_type="tv", metadata={"identity": "keep"})
-                match.rejected_constraints = rejected.copy() if isinstance(rejected, list) else None
+                setattr(match, "rejected_constraints", rejected.copy() if isinstance(rejected, list) else None)
                 plan = organize_models.OrganizePlan("video", "A.mkv", "Season", match=match, season=2, episode=3)
                 plan.require_confirmation("needs confirmation", constraint="constraint")
                 plan.require_confirmation("needs confirmation", constraint="constraint")
                 self.assertEqual((plan.action, plan.note, match.need_confirm, match.status, match.error),
                     ("skip", "needs confirmation", True, "low_confidence", "needs confirmation"))
                 expected = None if rejected is None else list(dict.fromkeys([*rejected, "constraint"]))
-                self.assertEqual(match.rejected_constraints, expected)
+                self.assertEqual(getattr(match, "rejected_constraints"), expected)
                 plan.mark_matched()
                 plan.mark_matched()
                 self.assertEqual((match.need_confirm, match.status, match.error), (False, "matched", ""))
                 self.assertEqual((plan.season, plan.episode, plan.action, plan.note), (2, 3, "skip", "needs confirmation"))
                 self.assertEqual(match.metadata, {"identity": "keep"})
-                self.assertEqual(match.rejected_constraints, expected)
+                self.assertEqual(getattr(match, "rejected_constraints"), expected)
 
     def test_inventory_owner_reuses_revision_and_refreshes_at_write_budget(self):
         from types import SimpleNamespace
@@ -146,7 +146,7 @@ assert organize.OrganizeRules is organize_rules.OrganizeRules
     def test_plan_defaults_and_positional_fields_remain_shared_across_entrypoints(self):
         plan = organize.OrganizePlan("video-1", "Movie.mkv", "/source/Movie.mkv", "source", 42)
         other = organize_models.OrganizePlan("video-2", "Other.mkv", "/source/Other.mkv")
-        self.assertIsInstance(plan, organize_models.OrganizePlan)
+        assert isinstance(plan, organize_models.OrganizePlan)
         self.assertEqual((plan.original_parent_id, plan.size), ("source", 42))
         self.assertEqual(plan.variant, other.variant)
         self.assertIsNot(plan.variant, other.variant)

@@ -89,26 +89,22 @@ def register_specs(registry) -> None:
             "required": ["profile_ref", *operation.parameters.get("required", [])],
         }
         validate, query, prepare, confirmed = _handler(operation.operation_id, schema)
-        spec_args = {
-            "name": operation.operation_id,
-            "description": operation.description,
-            "risk": operation.risk,
-            "parameters": schema,
-            "validator": validate,
-            "domains": operation.domains,
-            "examples": operation.examples,
-            "source_kind": "provider_api",
-            "freshness": "live",
-            "related_tools": neighbors.get(
+        is_read = operation.risk is RiskLevel.READ
+        registry.register(ToolSpec(
+            name=operation.operation_id,
+            description=operation.description,
+            risk=operation.risk,
+            parameters=schema,
+            validator=validate,
+            domains=operation.domains,
+            examples=operation.examples,
+            source_kind="provider_api",
+            freshness="live",
+            related_tools=neighbors.get(
                 operation.operation_id, ("provider.capabilities", "provider.query")
             ),
-        }
-        if operation.risk is RiskLevel.READ:
-            spec_args["context_handler"] = query
-        else:
-            spec_args.update(
-                requires_confirmation=True,
-                context_confirmation_preparer=prepare,
-                context_confirmed_handler=confirmed,
-            )
-        registry.register(ToolSpec(**spec_args))
+            context_handler=query if is_read else None,
+            requires_confirmation=not is_read,
+            context_confirmation_preparer=None if is_read else prepare,
+            context_confirmed_handler=None if is_read else confirmed,
+        ))

@@ -255,7 +255,7 @@ def set_recognition_rule_enabled_confirmed(
             )
         snapshot = _snapshot(row, rule_type=rule_type, rule_id=rule_id)
         if not secrets.compare_digest(
-            _fingerprint(snapshot), str(expected_context or "")
+            _fingerprint(snapshot), (expected_context or "")
         ):
             return ToolResult(
                 ok=False,

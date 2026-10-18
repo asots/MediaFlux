@@ -14,7 +14,6 @@ from typing import Any
 from app.agent.errors import AgentToolError
 from app.modules.web_secret import get_web_secret
 
-
 _ALLOWED_JOB_TYPES = {"library_episode_audit"}
 _ACTIVE_STATUSES = {"pending", "running", "retry_wait"}
 _TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
@@ -27,10 +26,10 @@ _MAX_HISTORY_PER_OWNER = 50
 
 def agent_job_owner_digest(owner: str) -> str:
     """使用独立 domain separator 派生不可逆 owner 分区键。"""
-    normalized = str(owner or "").strip()
+    normalized = (owner or "").strip()
     if not normalized or len(normalized) > _MAX_OWNER_LENGTH:
         raise AgentToolError("无法确认当前 Agent 身份", code="identity_required")
-    secret = str(get_web_secret() or "")
+    secret = (get_web_secret() or "")
     if not secret:
         raise AgentToolError("Agent 身份隔离密钥不可用", code="identity_required")
     return hmac.new(
@@ -67,7 +66,7 @@ def _safe_json(value: object, *, field: str) -> str:
         raise ValueError(f"{field}过大")
     try:
         parsed = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError(f"{field}无效") from exc
     if not isinstance(parsed, dict):
         raise ValueError(f"{field}无效")
@@ -125,8 +124,8 @@ def create_agent_job(
     safe_input = _safe_json(input_json, field="Agent 长任务输入")
     safe_checkpoint = _safe_json(checkpoint_json, field="Agent 长任务断点")
     safe_projection = _safe_json(projection_json, field="Agent 长任务投影")
-    safe_total = max(0, min(int(progress_total), 1_000_000))
-    safe_max_attempts = max(1, min(int(max_attempts), 10))
+    safe_total = max(0, min(progress_total, 1_000_000))
+    safe_max_attempts = max(1, min(max_attempts, 10))
     generated_id = job_id or f"job_{secrets.token_urlsafe(18)}"
     safe_id = _safe_job_id(generated_id)
     expected_id = (
@@ -200,7 +199,7 @@ def list_agent_jobs(
     *, owner: str, limit: int = 10, job_type: str | None = None
 ) -> list[sqlite3.Row]:
     owner_digest = agent_job_owner_digest(owner)
-    safe_limit = max(1, min(int(limit), 50))
+    safe_limit = max(1, min(limit, 50))
     values: list[Any] = [owner_digest]
     clause = ""
     if job_type is not None:
@@ -259,7 +258,7 @@ def claim_due_agent_job(
 ) -> sqlite3.Row | None:
     """原子领取一个到期任务，并回收过期租约。"""
     safe_type = _safe_job_type(job_type)
-    timestamp = str(current_time or db.now())
+    timestamp = (current_time or db.now())
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if stale_before:
@@ -270,7 +269,7 @@ def claim_due_agent_job(
                 "error_code=CASE WHEN cancel_requested=1 THEN '' ELSE 'LeaseExpired' END,"
                 "finished_at=CASE WHEN cancel_requested=1 THEN ? ELSE finished_at END,"
                 "updated_at=? WHERE job_type=? AND status='running' AND updated_at<=?",
-                (timestamp, timestamp, timestamp, safe_type, str(stale_before)),
+                (timestamp, timestamp, timestamp, safe_type, stale_before),
             )
         row = conn.execute(
             "SELECT job_id FROM agent_jobs WHERE job_type=? "
@@ -303,12 +302,12 @@ def renew_agent_job_lease(
 ) -> bool:
     """续期仍由当前 generation 持有的运行中租约。"""
     safe_id = _safe_job_id(job_id)
-    timestamp = str(renewed_at or db.now())
+    timestamp = (renewed_at or db.now())
     with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_jobs SET updated_at=? WHERE job_id=? AND status='running' "
             "AND lease_generation=? AND cancel_requested=0",
-            (timestamp, safe_id, max(0, int(expected_lease_generation))),
+            (timestamp, safe_id, max(0, expected_lease_generation)),
         )
         return cur.rowcount == 1
 
@@ -321,7 +320,7 @@ def is_agent_job_cancel_requested(
         row = conn.execute(
             "SELECT cancel_requested FROM agent_jobs WHERE job_id=? "
             "AND status='running' AND lease_generation=?",
-            (safe_id, max(0, int(expected_lease_generation))),
+            (safe_id, max(0, expected_lease_generation)),
         ).fetchone()
     return bool(row and int(row["cancel_requested"] or 0))
 
@@ -340,8 +339,8 @@ def continue_agent_job(
     safe_id = _safe_job_id(job_id)
     safe_checkpoint = _safe_json(checkpoint_json, field="Agent 长任务断点")
     safe_projection = _safe_json(projection_json, field="Agent 长任务投影")
-    current = max(0, min(int(progress_current), 1_000_000))
-    total = max(0, min(int(progress_total), 1_000_000))
+    current = max(0, min(progress_current, 1_000_000))
+    total = max(0, min(progress_total, 1_000_000))
     timestamp = db.now()
     with db.get_conn() as conn:
         cur = conn.execute(
@@ -353,12 +352,12 @@ def continue_agent_job(
                 safe_checkpoint,
                 safe_projection,
                 _safe_summary(summary),
-                str(next_run_at or timestamp),
+                (next_run_at or timestamp),
                 current,
                 total,
                 timestamp,
                 safe_id,
-                max(0, int(expected_lease_generation)),
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -376,9 +375,9 @@ def complete_agent_job(
 ) -> bool:
     safe_id = _safe_job_id(job_id)
     safe_projection = _safe_json(projection_json, field="Agent 长任务投影")
-    timestamp = str(finished_at or db.now())
-    current = max(0, min(int(progress_current), 1_000_000))
-    total = max(0, min(int(progress_total), 1_000_000))
+    timestamp = (finished_at or db.now())
+    current = max(0, min(progress_current, 1_000_000))
+    total = max(0, min(progress_total, 1_000_000))
     with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE agent_jobs SET status='succeeded',projection_json=?,summary=?,"
@@ -393,7 +392,7 @@ def complete_agent_job(
                 timestamp,
                 timestamp,
                 safe_id,
-                max(0, int(expected_lease_generation)),
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -415,11 +414,11 @@ def release_agent_job_lease(
             "next_run_at=?,summary=?,error_code='',updated_at=? WHERE job_id=? "
             "AND status='running' AND lease_generation=? AND cancel_requested=0",
             (
-                str(next_run_at or timestamp),
+                (next_run_at or timestamp),
                 _safe_summary(summary),
                 timestamp,
                 safe_id,
-                max(0, int(expected_lease_generation)),
+                max(0, expected_lease_generation),
             ),
         )
         return cur.rowcount == 1
@@ -436,14 +435,14 @@ def fail_or_retry_agent_job(
 ) -> str:
     """按 max_attempts 决定重试或失败；返回实际状态。"""
     safe_id = _safe_job_id(job_id)
-    safe_attempts = max(1, min(int(attempts), 100))
+    safe_attempts = max(1, min(attempts, 100))
     timestamp = db.now()
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT max_attempts,cancel_requested FROM agent_jobs WHERE job_id=? "
             "AND status='running' AND lease_generation=?",
-            (safe_id, max(0, int(expected_lease_generation))),
+            (safe_id, max(0, expected_lease_generation)),
         ).fetchone()
         if row is None:
             return "stale"
@@ -452,7 +451,7 @@ def fail_or_retry_agent_job(
                 "UPDATE agent_jobs SET status='cancelled',summary='任务已取消',"
                 "error_code='',finished_at=?,updated_at=? WHERE job_id=? "
                 "AND status='running' AND lease_generation=?",
-                (timestamp, timestamp, safe_id, max(0, int(expected_lease_generation))),
+                (timestamp, timestamp, safe_id, max(0, expected_lease_generation)),
             )
             return "cancelled"
         terminal = safe_attempts >= max(1, int(row["max_attempts"] or 1))
@@ -464,14 +463,14 @@ def fail_or_retry_agent_job(
             (
                 status,
                 safe_attempts,
-                str(next_run_at or timestamp),
+                (next_run_at or timestamp),
                 _safe_summary(summary),
                 _safe_error_code(error_code),
                 status,
                 timestamp,
                 timestamp,
                 safe_id,
-                max(0, int(expected_lease_generation)),
+                max(0, expected_lease_generation),
             ),
         )
         return status if cur.rowcount == 1 else "stale"
@@ -531,7 +530,7 @@ def finalize_cancelled_agent_job(
             "UPDATE agent_jobs SET status='cancelled',summary='任务已取消',"
             "error_code='',finished_at=?,updated_at=? WHERE job_id=? "
             "AND status='running' AND lease_generation=? AND cancel_requested=1",
-            (timestamp, timestamp, safe_id, max(0, int(expected_lease_generation))),
+            (timestamp, timestamp, safe_id, max(0, expected_lease_generation)),
         )
         return cur.rowcount == 1
 

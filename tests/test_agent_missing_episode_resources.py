@@ -375,6 +375,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                     self.assertEqual((ineligible["quality"]["match"], ineligible["quality"]["eligible"]), ("exact_episode", False))
                 self.assertEqual(result.model_data, expected)
                 self.assertEqual(len(model_searches[0]["items"]), 0 if mode == "failed" else 2)
+                assert result.model_data is not None
                 self.assertTrue(result.model_data["verification"]["verified_missing"])
                 if mode == "season":
                     self.assertEqual((result.status, expected["failed"], expected["remaining"]), ("partial", 0, 1))
@@ -849,6 +850,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertEqual((result.status, result.data["processed"], result.data["failed"], result.data["remaining"]),
                          ("partial", 2, 1, 2))
         self.assertEqual(result.data["remaining_episodes"], missing[2:])
+        assert result.model_data is not None
         self.assertEqual(result.model_data["remaining_episodes"], missing[2:])
 
     def test_cancel_during_audit_or_search_preserves_exact_unsearched_targets(self):
@@ -889,6 +891,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             result = search_missing_season_resources(args)
         self.assertEqual([call.args[0]["episode"] for call in search.call_args_list], [4])
         for data in (result.data, result.model_data):
+            assert data is not None
             self.assertEqual(data["groups"][0]["missing_total"], 2)
             self.assertEqual(data["groups"][0]["remaining"], 1)
             self.assertEqual(data["groups"][0]["remaining_episodes"], [{"season": 2, "episode": 7}])
@@ -925,6 +928,7 @@ class MultiWorkResourceTests(unittest.TestCase):
                 result = search_missing_season_resources(arguments)
                 self.assertEqual(result.data["recommended_positions"], [2] if include_match else [])
                 self.assertEqual(result.data["review_positions"], [1])
+                assert result.model_data is not None
                 self.assertEqual(result.model_data["items"], result.data["items"][1:])
                 self.assertEqual(result.model_data["recommended_positions"], result.data["recommended_positions"])
                 self.assertNotIn("review_positions", result.model_data)
@@ -1264,8 +1268,9 @@ class MultiWorkResourceTests(unittest.TestCase):
         self.assertEqual(len(reference.value["_private_items"]), 6)
         with patch("app.indexers.runtime.get_indexer_service", return_value=service):
             restored = restore_resource_candidate_reference(reference.value)
-        self.assertIsNotNone(validate_safe_resource_snapshot(restored))
+        assert (validate_safe_resource_snapshot(restored)) is not None
         self.assertEqual(service.result_store.restore.call_count, 6)
+        assert restored is not None
         self.assertEqual([c["_verification_context"]["title"] for c in restored["candidates"]], names[:6])
         self.assertNotIn("magnet:", str(result.to_dict()))
         self.assertNotIn("_verification_context", str(result.to_dict()))
@@ -1306,12 +1311,11 @@ class MissingResourceInventoryFreshnessTests(unittest.TestCase):
             "season_number": 1,
             "episodes": [{"episode_number": episode, "air_date": "2020-01-01"} for episode in range(1, 4)],
         }
-        for target, options in (
-            ("app.services._configured_media_sources", {"side_effect": lambda: list(self.sources)}),
-            ("app.agent.domains.library.episode_audit.TMDBClient", {"return_value": tmdb}),
-            ("app.agent.domains.library.episode_resource_actions.get_indexer_service", {"return_value": Mock()}),
+        for patcher in (
+            patch("app.services._configured_media_sources", side_effect=lambda: list(self.sources)),
+            patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=tmdb),
+            patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=Mock()),
         ):
-            patcher = patch(target, **options)
             patcher.start()
             self.addCleanup(patcher.stop)
         patcher = patch(

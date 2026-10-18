@@ -25,7 +25,7 @@ from .task_context import LocalMediaAgentContextStore, _InspectionRef, _TaskRef
 
 
 def _require_owner(context: ToolContext) -> str:
-    owner = str(context.owner or "").strip()
+    owner = (context.owner or "").strip()
     if not owner:
         raise AgentToolError(
             "本地媒体任务操作需要已登录会话", code="precondition_failed"
@@ -41,7 +41,7 @@ def _task_source_digest(task: Any) -> str:
 def _episode_position(season: int | None, episode: int | None) -> str:
     if season is None or episode is None:
         return "未明确"
-    return f"S{int(season):02d}E{int(episode):02d}"
+    return f"S{season:02d}E{episode:02d}"
 
 
 def _retry_confirmation_snapshot(
@@ -246,9 +246,9 @@ class LocalMediaTaskActions:
             )
         task = db.get_local_media_task(ref.task_id, owner=common._WORKSPACE_OWNER)
         if task is None or (
-            int(task.version) != ref.version
+            (task.version) != ref.version
             or str(task.status) != ref.status
-            or int(task.source_id) != ref.source_id
+            or (task.source_id) != ref.source_id
         ):
             raise AgentToolError(
                 "本地媒体任务状态已变化，请重新列出任务", code="precondition_failed"
@@ -335,11 +335,11 @@ class LocalMediaTaskActions:
             )
         task = db.get_local_media_task(ref.task.task_id, owner=common._WORKSPACE_OWNER)
         if task is None or (
-            int(task.version) != ref.task.version
+            (task.version) != ref.task.version
             or str(task.status) != ref.task.status
             or (
                 bool(_task_source_digest(task))
-                and _task_source_digest(task) != str(ref.digest or "")
+                and _task_source_digest(task) != (ref.digest or "")
             )
         ):
             raise AgentToolError(
@@ -377,7 +377,7 @@ class LocalMediaTaskActions:
                 rebuilt = service.inspect_task(common._WORKSPACE_OWNER, task.id)
                 rebuilt_digest = str(rebuilt.get("digest") or "")
                 if not rebuilt_digest or not secrets.compare_digest(
-                    rebuilt_digest, str(ref.digest or "")
+                    rebuilt_digest, (ref.digest or "")
                 ):
                     raise AgentToolError(
                         "源文件在检查后发生变化，请重新检查任务",
@@ -562,7 +562,7 @@ class LocalMediaTaskActions:
         except AgentToolError as exc:
             raise AgentToolError(exc.safe_message, code="confirmation_stale") from None
         if not secrets.compare_digest(
-            common._fingerprint(confirmation_snapshot), str(expected_context or "")
+            common._fingerprint(confirmation_snapshot), (expected_context or "")
         ):
             raise AgentToolError("任务状态已变化，请重新预检", code="confirmation_stale")
         retry_fields: dict[str, Any] = {
@@ -686,7 +686,7 @@ class LocalMediaTaskActions:
             raise AgentToolError(exc.safe_message, code="confirmation_stale") from None
         try:
             if not secrets.compare_digest(
-                common._fingerprint(snapshot), str(expected_context or "")
+                common._fingerprint(snapshot), (expected_context or "")
             ):
                 raise AgentToolError(
                     "任务或媒体库绑定已变化，请重新预检", code="confirmation_stale"

@@ -1,16 +1,15 @@
 """Media Agent 全局功能开关。"""
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-import threading
 import json
 import secrets
 import sqlite3
+import threading
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 
 from app import config
-
 
 RUNTIME_FENCE_KEY = "agent.runtime_fence.v1"
 
@@ -174,7 +173,7 @@ class AgentRuntimeDisabled(RuntimeError):
 
 
 @contextmanager
-def agent_runtime_transition() -> Iterator[None]:
+def agent_runtime_transition() -> Generator[None, None, None]:
     """串行化运行态开关切换与不可逆确认写操作的准入。"""
     with _runtime_admission_lock:
         yield
@@ -187,7 +186,7 @@ def agent_runtime_admission(
     expected_generation: int | None = None,
     agent_enabled_check: Callable[[], bool] | None = None,
     telegram_enabled_check: Callable[[], bool] | None = None,
-) -> Iterator[int]:
+) -> Generator[int, None, None]:
     """在线性化边界内准入并执行一次确认写操作。
 
     持锁期间关闭动作会等待；若关闭先完成，则新的确认会被拒绝。这样不会
@@ -212,7 +211,7 @@ def agent_runtime_admission(
 
 
 @contextmanager
-def agent_runtime_effect_admission(generation: int) -> Iterator[None]:
+def agent_runtime_effect_admission(generation: int) -> Generator[None, None, None]:
     """线性化后台外部副作用与 Agent 总开关切换。
 
     后台任务在领取时已经记录运行代次；这里不重复解释子功能配置，只保证

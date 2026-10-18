@@ -83,6 +83,7 @@ class AgentPageTests(InitializedWebTestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json(), result)
             from app.agent.owner_routes import web_kernel_owner
+            assert stop.await_args is not None
             self.assertEqual(stop.await_args.args[1:], (web_kernel_owner(web_credentials()[0]), body["session_id"]))
 
     def test_global_switch_hides_navigation_and_redirects_agent_page(self):

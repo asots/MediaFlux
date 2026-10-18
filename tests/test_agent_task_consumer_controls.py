@@ -1,4 +1,5 @@
 """Public-shape table and stream-boundary compatibility (not verifier tests)."""
+from typing import Any
 
 import asyncio
 import copy
@@ -17,7 +18,7 @@ from app.bot.agent_adapter import _render_turn, _task_summary
 from app.bot.telegram_markdown import render_telegram_markdown
 
 
-def shape():
+def shape() -> dict[str, Any]:
     return dict(
         v=1,
         task_id="opaque",

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import unittest
+from _thread import LockType
 from collections.abc import Mapping
 from datetime import datetime
+from typing import cast
 from unittest.mock import Mock, patch
 
 import requests
+from requests.structures import CaseInsensitiveDict
 
 from app import config as app_config
 from app.clients.douban_public import DoubanPublicClient, DoubanPublicPage
@@ -65,7 +68,7 @@ class FakeSession:
             raise response
         return response
 
-    def close(self):
+    def close(self) -> bool | None:
         self.close_calls += 1
 
 
@@ -82,13 +85,13 @@ class CapturingDoubanPublicSession(requests.Session):
             raise AssertionError(f"unexpected request {request.url}")
         response = requests.Response()
         response.status_code = 200
-        response.headers = {"Content-Type": "application/json; charset=utf-8"}
+        response.headers = CaseInsensitiveDict({"Content-Type": "application/json; charset=utf-8"})
         response.url = request.url
         response.request = request
         response._content = json.dumps(
             self.payloads.pop(0), ensure_ascii=False
         ).encode("utf-8")
-        response._content_consumed = True
+        setattr(response, "_content_consumed", True)
         return response
 
 
@@ -188,10 +191,13 @@ class TMDBProviderTests(unittest.TestCase):
                     "number_of_seasons": value, "number_of_episodes": value,
                     "seasons": [{"season_number": 1, "episode_count": value}],
                 }, "tv")
+                assert card is not None
                 self.assertIsNone(card.number_of_seasons)
                 self.assertIsNone(card.number_of_episodes)
+                assert card.seasons is not None
                 self.assertIsNone(card.seasons[0]["episode_count"])
         card = TMDBProvider._card({"id": 1, "name": "待播", "number_of_seasons": 0, "number_of_episodes": 0, "seasons": []}, "tv")
+        assert card is not None
         self.assertEqual((card.number_of_seasons, card.number_of_episodes), (0, 0))
         self.assertEqual(card.to_dict()["seasons"], [])
 
@@ -199,8 +205,10 @@ class TMDBProviderTests(unittest.TestCase):
         for value in (None, {}, [None], [{"season_number": True}], [{"season_number": -1}], [{"name": "缺季号"}]):
             with self.subTest(value=value):
                 card = TMDBProvider._card({"id": 1, "name": "未知", "seasons": value}, "tv")
+                assert card is not None
                 self.assertIsNone(card.seasons)
         movie = TMDBProvider._card({"id": 1, "title": "电影", "number_of_episodes": 10, "seasons": []}, "movie")
+        assert movie is not None
         self.assertIsNone(movie.number_of_episodes)
         self.assertIsNone(movie.seasons)
 
@@ -375,37 +383,37 @@ class CredentialGuardConfig(Mapping):
     SENSITIVE_KEYS = {"DOUBAN_FRODO_API_KEY", "DOUBAN_FRODO_API_SECRET", "DOUBAN_DBCL2"}
 
     def __init__(self, values=None):
-        self.values = dict(values or {})
+        self._values = dict(values or {})
 
     def __getitem__(self, key):
         if key in self.SENSITIVE_KEYS:
             raise AssertionError(f"credential key accessed: {key}")
-        return self.values[key]
+        return self._values[key]
 
     def __iter__(self):
-        return iter(self.values)
+        return iter(self._values)
 
     def __len__(self):
-        return len(self.values)
+        return len(self._values)
 
 
 class CredentialTrackingConfig(Mapping):
     SENSITIVE_KEYS = {"DOUBAN_FRODO_API_KEY", "DOUBAN_FRODO_API_SECRET", "DOUBAN_DBCL2"}
 
     def __init__(self, values):
-        self.values = dict(values)
+        self._values = dict(values)
         self.credential_accesses = []
 
     def __getitem__(self, key):
         if key in self.SENSITIVE_KEYS:
             self.credential_accesses.append(key)
-        return self.values[key]
+        return self._values[key]
 
     def __iter__(self):
-        return iter(self.values)
+        return iter(self._values)
 
     def __len__(self):
-        return len(self.values)
+        return len(self._values)
 
 
 class DoubanProviderTests(unittest.TestCase):
@@ -1201,6 +1209,7 @@ class BangumiProviderTests(unittest.TestCase):
 
         card = BangumiProvider._card(raw, 1)
 
+        assert card is not None
         self.assertEqual(card.release_date, "")
         self.assertEqual(card.year, "")
 
@@ -1212,7 +1221,7 @@ class BangumiProviderTests(unittest.TestCase):
 
 class ProviderLifecycleTests(unittest.TestCase):
     class FlakyCloseSession(FakeSession):
-        def close(self):
+        def close(self) -> bool | None:
             self.close_calls += 1
             if self.close_calls == 1:
                 raise RuntimeError("close failed")
@@ -1254,7 +1263,7 @@ class ProviderLifecycleTests(unittest.TestCase):
             def __exit__(inner_self, exc_type, exc, traceback):
                 return False
 
-        provider._calendar_lock = AssertCloseUnlocked()
+        provider._calendar_lock = cast(LockType, AssertCloseUnlocked())
 
         self.assertTrue(provider.close())
         self.assertIsNone(provider._calendar_payload)
@@ -1297,7 +1306,7 @@ class ProviderLifecycleTests(unittest.TestCase):
 
     def test_douban_rotation_blocks_new_generation_until_failed_close_recovers(self):
         class RetryableSession(FakeSession):
-            def close(self):
+            def close(self) -> bool | None:
                 self.close_calls += 1
                 return False if self.close_calls == 1 else None
 

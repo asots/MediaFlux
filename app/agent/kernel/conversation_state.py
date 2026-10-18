@@ -29,7 +29,7 @@ def retain_conversation(
 
     original_bytes = cost(conversation)
     if original_bytes <= maximum_bytes:
-        return list(conversation)
+        return [dict(row) for row in conversation]
     ratio = maximum_bytes / original_bytes * 0.75
     turns: list[list[dict[str, Any]]] = []
     required_rows: set[int] = set()

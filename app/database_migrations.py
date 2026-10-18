@@ -749,7 +749,7 @@ class _LegacyTelegramHTMLTextExtractor(HTMLParser):
             self._newline()
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(str(data or ""))
+        self.parts.append(data or "")
 
     def text(self) -> str:
         return "".join(self.parts).replace("\r\n", "\n").replace("\r", "\n")
@@ -932,7 +932,7 @@ def _legacy_rss_download_identity(
         parsed = urlsplit(source)
         if kind == "magnet":
             for value in parse_qs(parsed.query).get("xt", []):
-                xt = str(value or "").strip()
+                xt = (value or "").strip()
                 if not xt.lower().startswith("urn:btih:"):
                     continue
                 raw = xt[len("urn:btih:") :]
@@ -1153,7 +1153,8 @@ def _migrate_unify_rss_download_requests_v20(conn: sqlite3.Connection) -> None:
                         f"INSERT INTO download_requests({names}) VALUES({markers})",
                         list(values.values()),
                     )
-                    request_id = int(created.lastrowid)
+                    assert created.lastrowid is not None
+                    request_id = created.lastrowid
                 else:
                     request_id = int(existing[0])
                     current = conn.execute(

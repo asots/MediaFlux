@@ -124,7 +124,7 @@ def preview_directory(request: Request, data: dict | None = Body(default=None)):
             overrides["season"] = season
         if episode is not None:
             overrides["episode"] = episode
-        preview_kwargs = dict(overrides)
+        preview_kwargs: dict = dict(overrides)
         if "numbering_mode" in payload:
             preview_kwargs["numbering_mode"] = str(
                 payload.get("numbering_mode") or "auto"

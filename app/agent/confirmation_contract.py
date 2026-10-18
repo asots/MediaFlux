@@ -511,7 +511,7 @@ def build_confirmation_contract(
     preflight_at: str | None = None,
 ) -> dict[str, Any]:
     """为一次预检生成可持久化、版本化且不含原始参数的确认文案。"""
-    normalized_name = str(tool_name or "").strip()
+    normalized_name = (tool_name or "").strip()
     copy = _CONFIRMATION_COPY.get(normalized_name, {})
     label = public_tool_label(normalized_name)
     contract = {

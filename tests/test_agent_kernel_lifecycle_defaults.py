@@ -1,4 +1,4 @@
-"""R1 compatibility controls: green on the original defaults, not feature RED."""
+"""生命周期协议、默认实现和注入实现的行为契约。"""
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +27,7 @@ SIGNATURES = {
     "prepared": ([('tool', 'KernelToolSpec'), ('arguments', 'Mapping[str, Any]'),
                   ('prepared', 'PreparedEffect'), ('context', 'ToolCallContext')], 'PreparedEffect'),
     "prepare_failed": ([('prepared', 'PreparedEffect'), ('context', 'ToolCallContext')], 'None'),
+    "substep_started": ([('plan', 'EffectPlan')], 'None'),
     "completed": ([('plan', 'EffectPlan'), ('value', 'Any'), ('elapsed_ms', 'int')], 'None'),
     "failed": ([('plan', 'EffectPlan'), ('code', 'str'), ('elapsed_ms', 'int')], 'None'),
     "interrupted": ([('plan', 'EffectPlan')], 'None'),
@@ -48,6 +49,9 @@ class RecordingLifecycle:
     def prepare_failed(self, *, prepared, context):
         self.calls.append(("prepare_failed", dict(prepared=prepared, context=context)))
 
+    def substep_started(self, *, plan):
+        self.calls.append(("substep_started", dict(plan=plan)))
+
     def completed(self, *, plan, value, elapsed_ms):
         self.calls.append(("completed", dict(plan=plan, value=value, elapsed_ms=elapsed_ms)))
 
@@ -61,7 +65,7 @@ class RecordingLifecycle:
         self.calls.append(("cancelled", dict(plan=plan)))
 
 
-def _fixture(lifecycle=None, *, terminal="completed"):
+def _fixture(lifecycle: EffectLifecycle | None = None, *, terminal="completed"):
     prepared = PreparedEffect(
         preview={"summary": "fixture preview", "data": {"nested": [1, {"a": [2]}]}},
         snapshot_fingerprint="r1-snapshot",
@@ -92,7 +96,7 @@ def _fixture(lifecycle=None, *, terminal="completed"):
 
 
 @pytest.mark.parametrize("name", SIGNATURES)
-def test_six_hook_signatures_remain_explicit_keyword_only(name):
+def test_hook_signatures_remain_explicit_keyword_only(name):
     expected, result = SIGNATURES[name]
     for cls in (EffectLifecycle, NoopEffectLifecycle):
         signature = inspect.signature(getattr(cls, name))
@@ -107,8 +111,7 @@ def test_six_hook_signatures_remain_explicit_keyword_only(name):
 
 
 def test_protocol_is_not_instantiable_and_default_pipeline_uses_named_noop():
-    with pytest.raises(TypeError, match="Protocols cannot be instantiated"):
-        EffectLifecycle()
+    pytest.raises(TypeError, EffectLifecycle).match("Protocols cannot be instantiated")
     pipeline, _, _, _ = _fixture()
     assert type(pipeline.effect_lifecycle) is NoopEffectLifecycle
     assert type(NoopEffectLifecycle()).__name__ == "NoopEffectLifecycle"
@@ -137,6 +140,7 @@ def test_noop_returns_identity_and_never_mutates_nested_payloads():
         assert lifecycle.prepared(tool=tool, arguments=arguments,
                                   prepared=prepared, context=context) is prepared
         assert lifecycle.prepare_failed(prepared=prepared, context=context) is None
+        assert lifecycle.substep_started(plan=plan) is None
         assert lifecycle.completed(plan=plan, value=value, elapsed_ms=3) is None
         assert lifecycle.failed(plan=plan, code="fixture", elapsed_ms=3) is None
         assert lifecycle.interrupted(plan=plan) is None
@@ -242,6 +246,7 @@ def test_injected_hooks_run_on_real_pipeline_paths(kind, terminal):
                 assert payload["value"] is value
                 assert isinstance(payload["elapsed_ms"], int)
             if kind == "structural":
+                assert isinstance(lifecycle, RecordingLifecycle)
                 assert [name for name, _ in lifecycle.calls] == ["prepared", terminal]
             elif terminal == "completed":
                 runtime.complete_submission.assert_called_once_with(

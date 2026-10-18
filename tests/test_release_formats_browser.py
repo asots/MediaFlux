@@ -1,10 +1,10 @@
 """移除手动教学界面，保留 Agent 自然语言→真实预览→人工确认→解析器复用。"""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import os
-from pathlib import Path
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
 
 from tests.support import InitializedWebTestCase
 
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _chromium_executable(playwright) -> str | None:
     candidates = []
-    configured = str(os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "").strip()
+    configured = (os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "").strip()
     if configured:
         candidates.append(Path(configured).expanduser())
     candidates.append(Path(playwright.chromium.executable_path))
@@ -32,9 +32,10 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable_path = _chromium_executable(cls.playwright)
-        options = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+        options: dict = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
         if executable_path:
             options["executable_path"] = executable_path
         cls.browser = cls.playwright.chromium.launch(**options)
@@ -48,6 +49,7 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
     @contextmanager
     def real_app_page(self, *, touch: bool = False):
         from fastapi.testclient import TestClient
+
         from app.main import create_app
         from app.modules.recognition import formats
         from tests.support import isolated_test_database
@@ -100,8 +102,11 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
                     self.assertEqual(page.locator("#releaseFormatsModal, #openReleaseFormatsBtn, a[href*='release-format-teaching'], script[src*='release-formats.js']").count(), 0)
                     self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width)
                     if width == 1440:
-                        boxes = [page.locator(f"#{button}").bounding_box() for button, _ in tools]
-                        self.assertTrue(all(box is not None for box in boxes))
+                        boxes = []
+                        for button, _ in tools:
+                            box = page.locator(f"#{button}").bounding_box()
+                            assert box is not None
+                            boxes.append(box)
                         self.assertLess(max(box["y"] for box in boxes) - min(box["y"] for box in boxes), 1)
                     for button, modal in tools:
                         page.locator(f"#{button}").click()
@@ -116,11 +121,12 @@ class ReleaseFormatsBrowserTests(InitializedWebTestCase):
 
     def test_agent_natural_request_previews_and_confirms_through_real_app(self):
         from unittest.mock import patch
+
         from app.agent.kernel.bootstrap import build_agent_kernel_runtime
         from app.modules.recognition import formats
         from app.modules.scraper import _parse_release_core
-        from tests.test_agent_release_format_kernel import TeachingModel, MESSAGE
-        from tests.test_release_formats import filename, PARENT, TEMPLATE
+        from tests.test_agent_release_format_kernel import MESSAGE, TeachingModel
+        from tests.test_release_formats import PARENT, TEMPLATE, filename
 
         with self.real_app_page() as (page, _client, errors):
             model = TeachingModel()

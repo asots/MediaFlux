@@ -56,7 +56,7 @@ def _schedule_label(value: str) -> str:
         "scheduled": "自动刷新正常",
         "scheduled_due": "已到刷新时间",
         "scheduled_invalid": "刷新时间记录异常",
-    }.get(str(value or ""), "状态未知")
+    }.get((value or ""), "状态未知")
 
 
 def list_rss_subscription_summaries(_arguments: dict[str, Any]) -> ToolResult:
@@ -136,7 +136,7 @@ def list_rss_subscription_summaries(_arguments: dict[str, Any]) -> ToolResult:
 
 
 def get_rss_subscription_summary(arguments: dict[str, int]) -> ToolResult:
-    subscription_id = int(arguments["subscription_id"])
+    subscription_id = (arguments["subscription_id"])
     try:
         item = db.get_rss_subscription_safe_summary(subscription_id, db.now())
     except Exception as exc:

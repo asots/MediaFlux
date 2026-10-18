@@ -1,5 +1,6 @@
 """只冻结 share 私有来源；不运行 refresh/新旧对照，不延长旧引用 TTL。"""
 from __future__ import annotations
+from typing import Any
 
 import json
 import tempfile
@@ -46,7 +47,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
             {"file_id": "root-one", "path": "/One", "is_dir": True, "parent_id": "0"},
             {"file_id": "empty-root", "path": "/Empty", "is_dir": True, "parent_id": "0"},
         ]
-        self.entries = [{
+        self.entries: list[dict[str, Any]] = [{
             "handle": ref, "file_id": fid, "parent_id": "root-one", "name": name,
             "is_dir": False, "size": 8, "etag": "etag-" + fid, "updated_at": 17,
             "parent_path": "/One", "relative_parent": "One",
@@ -92,7 +93,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
         })
 
     def revoke_arguments(self, *, with_ref=True):
-        args = {"indices": [4], "guangya_shares": self.collection}
+        args: dict[str, Any] = {"indices": [4], "guangya_shares": self.collection}
         if with_ref:
             args["guangya_shares_ref"] = "ref_original_inventory"
         return args
@@ -248,6 +249,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
                 lease, _ = await state_store.begin_turn(owner=self.context.owner, session_id=session, request_id="prepare")
                 context = ToolCallContext(owner=self.context.owner, session_id=session, request_id=lease.request_id,
                     turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(), report_progress=progress)
+                reference = None
                 if operation == "create":
                     args = {"observation_ref": self.ref, "object_refs": [self.handles[1]], "expires_days": 1, "access_code": "Ab12Cd34"}
                 else:
@@ -255,10 +257,10 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
                     args = {"guangya_shares_ref": reference.ref, "indices": [4]}
                 result = await pipeline.execute("guangya.share." + operation, args, context=context)
                 plan = result.effect_plan
-                self.assertIsNotNone(plan)
+                assert (plan) is not None
                 loaded = ConfirmationEffectPlanStore(SQLiteConfirmationStore()).get_active_plan(
                     owner=self.context.owner, session_id=session, generation=lease.generation, plan_id=plan.plan_id)
-                self.assertIsNotNone(loaded)
+                assert (loaded) is not None
                 source = loaded.metadata["reobservation_source"]
                 self.assertEqual(source, plan.metadata["reobservation_source"])
                 self.assertEqual((source["owner"], source["session_id"]), (self.context.owner, session))
@@ -269,6 +271,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(source["baseline"]["selected"][0]["share_id"], "share-4")
                     # 原生 resolve 丢弃原 *_ref，原 ref 仍可从同一持久计划参数取得。
                     self.assertIsNone(source["baseline"]["ref"])
+                    assert reference is not None
                     self.assertEqual(loaded.arguments[source["baseline"]["ref_argument"]], reference.ref)
                 encoded = json.dumps(source, ensure_ascii=False)
                 for secret in ("Ab12Cd34", "TOKEN-SECRET", "CODE-SECRET", "private.invalid"):

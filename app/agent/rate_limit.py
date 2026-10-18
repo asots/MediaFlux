@@ -290,7 +290,7 @@ class AgentRateLimiter:
         self._clock = clock
         self._wall_clock = wall_clock
         self._operations = 0
-        self._shared = bool(shared)
+        self._shared = shared
 
     def allow(self, key: str, *, limit: int, window_seconds: int, cost: int = 1) -> bool:
         return self.consume(
@@ -311,7 +311,7 @@ class AgentRateLimiter:
         if isinstance(cost, bool) or not isinstance(cost, int) or cost < 1 or cost > limit:
             raise ValueError("cost 必须是 1 到 limit 的整数")
 
-        normalized_key = str(key)
+        normalized_key = key
         if self._shared:
             return self._consume_shared(
                 normalized_key, limit=limit,
@@ -504,7 +504,7 @@ class AgentRateLimiter:
 
 def tool_rate_limit_policy(tool_name: str) -> tuple[str, int, int]:
     """返回直调与 LLM 回退共用的 ``scope / limit / cost``。"""
-    name = str(tool_name or "").strip()
+    name = (tool_name or "").strip()
     scope = _TOOL_RATE_LIMIT_SCOPES.get(name, f"tool:{name}")
     limit = _TOOL_RATE_LIMITS.get(name, 30)
     cost = 2 if name in {
@@ -518,7 +518,7 @@ def consume_agent_tool(
     identity: str, tool_name: str, *, scope_suffix: str = ""
 ) -> RateLimitDecision:
     """按调用身份和真实工具执行预算限流。"""
-    owner = str(identity or "unknown").strip() or "unknown"
+    owner = (identity or "unknown").strip() or "unknown"
     scope, limit, cost = tool_rate_limit_policy(tool_name)
     if scope_suffix:
         scope = f"{scope}:{scope_suffix}"

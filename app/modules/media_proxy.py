@@ -16,7 +16,8 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import Future as ConcurrentFuture
-from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,20 +30,29 @@ import anyio
 import httpx
 import uvicorn
 from aiohttp import (
-    ClientSession, ClientTimeout, TCPConnector, TraceConfig, WSServerHandshakeError,
+    ClientSession,
+    ClientTimeout,
+    TCPConnector,
+    TraceConfig,
     WSMsgType,
+    WSServerHandshakeError,
 )
-from aiohttp.abc import AbstractResolver
+from aiohttp.abc import AbstractResolver, ResolveResult
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.requests import ClientDisconnect
 
 from app import database
 from app.clients.guangya import GuangYaClient, close_guangya_client
 from app.config import get
 from app.logger import get_logger, log_throttled
-from app.modules.media_proxy_recorder import PlaybackRecordWriter
 from app.modules.media_proxy_forwarding import media_proxy_forwarding_config
+from app.modules.media_proxy_recorder import PlaybackRecordWriter
 from app.modules.media_proxy_safety import safe_media_name as _safe_media_name
 from app.modules.media_server_profiles import resolve_proxy_instance
 
@@ -256,7 +266,7 @@ def _proxy_websocket_message_limit() -> int:
     return _bounded_megabytes_setting("MEDIA_PROXY_MAX_WEBSOCKET_MESSAGE_MB", 4, 64)
 
 
-def _valid_websocket_close_code(value: object, default: int = 1000) -> int:
+def _valid_websocket_close_code(value: Any, default: int = 1000) -> int:
     try:
         code = int(value)
     except (TypeError, ValueError):
@@ -288,7 +298,7 @@ def _upstream_timeout() -> httpx.Timeout:
 
 
 def _signed_media_timeout(method: str) -> httpx.Timeout:
-    if str(method or "GET").upper() != "HEAD":
+    if (method or "GET").upper() != "HEAD":
         return _upstream_timeout()
     # HEAD 只用于播放前探测，不能像长视频流一样无限等待响应头。
     return httpx.Timeout(
@@ -301,7 +311,7 @@ def _signed_media_timeout(method: str) -> httpx.Timeout:
 
 async def _read_proxy_request_body(request: Request) -> bytes:
     limit = _proxy_request_body_limit()
-    raw_length = str(request.headers.get("content-length", "") or "").strip()
+    raw_length = (request.headers.get("content-length", "") or "").strip()
     if raw_length:
         try:
             declared_length = int(raw_length)
@@ -337,7 +347,7 @@ async def _read_bounded_upstream_body(response: httpx.Response, limit: int) -> b
 
 def _register_signed_url_cache(instance_id: int, cache: SignedUrlCache) -> None:
     with _signed_url_caches_lock:
-        _signed_url_caches[int(instance_id)] = cache
+        _signed_url_caches[instance_id] = cache
 
 
 def _release_signed_url_cache(instance_id: int, cache: SignedUrlCache) -> int:
@@ -345,13 +355,13 @@ def _release_signed_url_cache(instance_id: int, cache: SignedUrlCache) -> int:
     removed = cache.entry_count
     cache.clear()
     with _signed_url_caches_lock:
-        if _signed_url_caches.get(int(instance_id)) is cache:
-            _signed_url_caches.pop(int(instance_id), None)
+        if _signed_url_caches.get(instance_id) is cache:
+            _signed_url_caches.pop(instance_id, None)
     return removed
 
 
 def classify_proxy_route(path: str, method: str = "GET") -> str:
-    normalized = "/" + str(path or "").lstrip("/")
+    normalized = "/" + (path or "").lstrip("/")
     if _PLAYGY_RE.match(normalized):
         return "guangya_direct"
     if _PLAYBACK_INFO_RE.match(normalized):
@@ -365,7 +375,7 @@ def classify_proxy_route(path: str, method: str = "GET") -> str:
 
 def _range_diagnostic(value: str) -> str:
     """只记录 Range 形态，不记录可能含敏感偏移信息的原始值。"""
-    text = str(value or "").strip()
+    text = (value or "").strip()
     if not text:
         return "none"
     if re.fullmatch(r"bytes=(?:\d+-\d*|-\d+)", text, re.IGNORECASE):
@@ -378,7 +388,7 @@ def clear_signed_url_cache(instance_id: int | None = None) -> int:
         if instance_id is None:
             caches = list(_signed_url_caches.values())
         else:
-            cache = _signed_url_caches.get(int(instance_id))
+            cache = _signed_url_caches.get(instance_id)
             caches = [cache] if cache else []
         removed = sum(cache.entry_count for cache in caches)
         for cache in caches:
@@ -389,7 +399,7 @@ def clear_signed_url_cache(instance_id: int | None = None) -> int:
 def signed_url_cache_metrics(instance_id: int | None = None) -> dict:
     with _signed_url_caches_lock:
         if instance_id is not None:
-            cache = _signed_url_caches.get(int(instance_id))
+            cache = _signed_url_caches.get(instance_id)
             return cache.metrics() if cache else {
                 "hits": 0, "misses": 0, "expired": 0, "fetches": 0,
                 "failures": 0, "evictions": 0, "entries": 0, "capacity": 2048,
@@ -400,7 +410,7 @@ def signed_url_cache_metrics(instance_id: int | None = None) -> dict:
         }
         keys = ("hits", "misses", "expired", "fetches", "failures", "evictions", "entries", "capacity")
         return {
-            **{key: sum(int(value.get(key, 0)) for value in instances.values()) for key in keys},
+            **{key: sum(value.get(key, 0) for value in instances.values()) for key in keys},
             "instances": instances,
         }
 
@@ -467,7 +477,7 @@ class DynamicGuangYaMappings:
             self._ttl_seconds, float(max_ttl_seconds)
         )
         self._clock = clock
-        self._max_entries = max(1, int(max_entries))
+        self._max_entries = max(1, max_entries)
         self._entries: OrderedDict[
             tuple[int, str, str], _DynamicGuangYaMapping
         ] = OrderedDict()
@@ -481,11 +491,11 @@ class DynamicGuangYaMappings:
         file_id: str,
     ) -> None:
         normalized_item = _normalized_media_identifier(item_id)
-        normalized_file = str(file_id or "").strip()
+        normalized_file = (file_id or "").strip()
         if not normalized_item or not normalized_file:
             return
         key = (
-            int(instance_id),
+            instance_id,
             normalized_item,
             _normalized_media_identifier(source_id),
         )
@@ -523,7 +533,7 @@ class DynamicGuangYaMappings:
 
     def get(self, instance_id: int, item_id: str, source_id: str = "") -> str | None:
         now = self._clock()
-        instance_key = int(instance_id)
+        instance_key = instance_id
         item_key = _normalized_media_identifier(item_id)
         source_key = _normalized_media_identifier(source_id)
         with self._lock:
@@ -576,9 +586,9 @@ class SignedUrlCache:
         self._clock = clock
         self._wall_clock = wall_clock
         self._expiry_margin_seconds = max(0.0, float(expiry_margin_seconds))
-        self._max_entries = max(1, int(max_entries))
+        self._max_entries = max(1, max_entries)
         self._entries: OrderedDict[tuple[str, str, str], tuple[str, float]] = OrderedDict()
-        stripe_count = max(1, int(lock_stripes))
+        stripe_count = max(1, lock_stripes)
         self._locks = tuple(asyncio.Lock() for _ in range(stripe_count))
         self._sync_locks = tuple(threading.Lock() for _ in range(stripe_count))
         self._guard = threading.RLock()
@@ -592,9 +602,9 @@ class SignedUrlCache:
     @staticmethod
     def _key(file_id: str, scope: str, user_agent: str, ua_bound: bool) -> tuple[str, str, str]:
         return (
-            str(scope or "").strip(),
-            str(file_id or "").strip(),
-            str(user_agent or "").strip() if ua_bound else "",
+            (scope or "").strip(),
+            (file_id or "").strip(),
+            (user_agent or "").strip() if ua_bound else "",
         )
 
     def _provider_expiry(self, url: str) -> float | None:
@@ -668,11 +678,11 @@ class SignedUrlCache:
         with self._guard:
             now = self._clock()
             self._prune_expired_locked(now)
-            expiry = self._cache_expiry(str(url), now)
+            expiry = self._cache_expiry(url, now)
             if expiry <= now:
                 return False
             self._entries.pop(key, None)
-            self._entries[key] = (str(url), expiry)
+            self._entries[key] = (url, expiry)
             while len(self._entries) > self._max_entries:
                 self._entries.popitem(last=False)
                 self._evictions += 1
@@ -709,7 +719,7 @@ class SignedUrlCache:
         user_agent: str = "",
         ua_bound: bool = False,
     ) -> "SignedUrlCacheResult":
-        normalized = str(file_id or "").strip()
+        normalized = (file_id or "").strip()
         if not normalized:
             return SignedUrlCacheResult(None, False)
         key = self._key(normalized, scope, user_agent, ua_bound)
@@ -735,11 +745,11 @@ class SignedUrlCache:
                     self._failures += 1
                 raise
             if url:
-                self._remember(key, str(url))
+                self._remember(key, url)
             else:
                 with self._guard:
                     self._failures += 1
-            return SignedUrlCacheResult(str(url) if url else None, False)
+            return SignedUrlCacheResult(url if url else None, False)
 
     def get_or_fetch_sync_result(
         self,
@@ -751,7 +761,7 @@ class SignedUrlCache:
         ua_bound: bool = False,
     ) -> "SignedUrlCacheResult":
         """同步路由使用的短缓存入口，保持与异步入口相同的单飞语义。"""
-        normalized = str(file_id or "").strip()
+        normalized = (file_id or "").strip()
         if not normalized:
             return SignedUrlCacheResult(None, False)
         key = self._key(normalized, scope, user_agent, ua_bound)
@@ -777,11 +787,11 @@ class SignedUrlCache:
                     self._failures += 1
                 raise
             if url:
-                self._remember(key, str(url))
+                self._remember(key, url)
             else:
                 with self._guard:
                     self._failures += 1
-            return SignedUrlCacheResult(str(url) if url else None, False)
+            return SignedUrlCacheResult(url if url else None, False)
 
     @property
     def entry_count(self) -> int:
@@ -794,7 +804,7 @@ class SignedUrlCache:
             self._entries.clear()
 
     def clear_scope(self, scope_prefix: str) -> int:
-        prefix = str(scope_prefix or "")
+        prefix = (scope_prefix or "")
         with self._guard:
             keys = [key for key in self._entries if key[0].startswith(prefix)]
             for key in keys:
@@ -810,7 +820,7 @@ class SignedUrlCache:
         ua_bound: bool = False,
     ) -> bool:
         """精确淘汰一条 signed URL，供 relay 收到 CDN 鉴权失败时单次重取。"""
-        normalized = str(file_id or "").strip()
+        normalized = (file_id or "").strip()
         if not normalized:
             return False
         key = self._key(normalized, scope, user_agent, ua_bound)
@@ -849,13 +859,13 @@ class BrowserDirectTargetCache:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._ttl_seconds = max(1.0, float(ttl_seconds))
-        self._max_entries = max(1, int(max_entries))
+        self._max_entries = max(1, max_entries)
         self._clock = clock
         self._entries: OrderedDict[str, float] = OrderedDict()
         self._lock = threading.RLock()
 
     def contains(self, url: str) -> bool:
-        key = str(url or "")
+        key = (url or "")
         now = self._clock()
         with self._lock:
             expiry = self._entries.get(key, 0.0)
@@ -866,7 +876,7 @@ class BrowserDirectTargetCache:
             return False
 
     def remember(self, url: str) -> None:
-        key = str(url or "")
+        key = (url or "")
         if not key:
             return
         with self._lock:
@@ -902,7 +912,7 @@ class ItemLevelBindingScopes:
             self._ttl_seconds, float(max_ttl_seconds)
         )
         self._clock = clock
-        self._max_entries = max(1, int(max_entries))
+        self._max_entries = max(1, max_entries)
         self._entries: OrderedDict[
             tuple[str, int, str, str], _ItemBindingScope
         ] = OrderedDict()
@@ -936,8 +946,8 @@ class ItemLevelBindingScopes:
         auth_scope: str = "",
     ) -> None:
         key = (
-            str(auth_scope or ""),
-            int(instance_id),
+            (auth_scope or ""),
+            instance_id,
             _normalized_media_identifier(item_id),
             _normalized_media_identifier(source_id),
         )
@@ -946,7 +956,7 @@ class ItemLevelBindingScopes:
             self._prune_expired_locked(now)
             self._entries.pop(key, None)
             self._entries[key] = _ItemBindingScope(
-                binding_signature=str(binding_signature),
+                binding_signature=binding_signature,
                 expires_at=now + self._ttl_seconds,
                 max_expires_at=now + self._max_ttl_seconds,
             )
@@ -962,8 +972,8 @@ class ItemLevelBindingScopes:
         auth_scope: str = "",
     ) -> bool:
         key = (
-            str(auth_scope or ""),
-            int(instance_id),
+            (auth_scope or ""),
+            instance_id,
             _normalized_media_identifier(item_id),
             _normalized_media_identifier(source_id),
         )
@@ -971,7 +981,7 @@ class ItemLevelBindingScopes:
             now = self._clock()
             self._prune_expired_locked(now)
             entry = self._entries.get(key)
-            if entry and entry.binding_signature == str(binding_signature):
+            if entry and entry.binding_signature == binding_signature:
                 self._touch_locked(key, entry, now)
                 return True
             return False
@@ -988,10 +998,10 @@ class ItemLevelBindingScopes:
             self._prune_expired_locked(now)
             matches = [
                 key for key, entry in self._entries.items()
-                if key[0] == str(auth_scope or "")
-                and key[1] == int(instance_id)
+                if key[0] == (auth_scope or "")
+                and key[1] == instance_id
                 and key[2] == _normalized_media_identifier(item_id)
-                and entry.binding_signature == str(binding_signature)
+                and entry.binding_signature == binding_signature
             ]
             if len(matches) == 1:
                 key = matches[0]
@@ -1029,7 +1039,7 @@ class PlaybackGrantRegistry:
         self._max_ttl_seconds = max(
             self._ttl_seconds, float(max_ttl_seconds)
         )
-        self._max_entries = max(1, int(max_entries))
+        self._max_entries = max(1, max_entries)
         self._clock = clock
         self._entries: OrderedDict[tuple[str, int, str, str], _PlaybackGrant] = OrderedDict()
         self._lock = threading.RLock()
@@ -1058,16 +1068,16 @@ class PlaybackGrantRegistry:
             return
         key = (
             auth_scope,
-            int(instance_id),
+            instance_id,
             _normalized_media_identifier(item_id),
             _normalized_media_identifier(source_id),
         )
         with self._lock:
             now = self._clock(); self._prune_locked(now); self._entries.pop(key, None)
             self._entries[key] = _PlaybackGrant(
-                str(source_type),
-                str(file_id or ""),
-                str(binding_signature or ""),
+                source_type,
+                (file_id or ""),
+                (binding_signature or ""),
                 now + self._ttl_seconds,
                 now + self._max_ttl_seconds,
             )
@@ -1083,18 +1093,18 @@ class PlaybackGrantRegistry:
             self._prune_locked(now)
             normalized_item = _normalized_media_identifier(item_id)
             normalized_source = _normalized_media_identifier(source_id)
-            keys = [(auth_scope, int(instance_id), normalized_item, normalized_source)]
+            keys = [(auth_scope, instance_id, normalized_item, normalized_source)]
             if not normalized_source:
                 keys = [
                     key for key in self._entries
-                    if key[:3] == (auth_scope, int(instance_id), normalized_item)
+                    if key[:3] == (auth_scope, instance_id, normalized_item)
                 ]
             matches = []
             for key in keys:
                 grant = self._entries.get(key)
                 if not grant: continue
-                if file_id and grant.file_id != str(file_id): continue
-                if binding_signature and grant.binding_signature != str(binding_signature): continue
+                if file_id and grant.file_id != file_id: continue
+                if binding_signature and grant.binding_signature != binding_signature: continue
                 matches.append(key)
             if len(matches) == 1:
                 key = matches[0]
@@ -1113,8 +1123,8 @@ class PlaybackGrantRegistry:
                 (key, grant)
                 for key, grant in self._entries.items()
                 if key[0] == auth_scope
-                and key[1] == int(instance_id)
-                and grant.file_id == str(file_id)
+                and key[1] == instance_id
+                and grant.file_id == file_id
             ]
             if len(matches) == 1:
                 key, grant = matches[0]
@@ -1241,7 +1251,7 @@ class PlaybackSessionRegistry:
             self._capability_ttl_seconds,
             float(capability_max_ttl_seconds),
         )
-        self._max_entries = max(1, int(max_entries))
+        self._max_entries = max(1, max_entries)
         self._max_capabilities = max(4, self._max_entries * 4)
         self._clock = clock
         self._entries: OrderedDict[tuple[str, int, str], _PlaybackSessionLink] = OrderedDict()
@@ -1264,7 +1274,7 @@ class PlaybackSessionRegistry:
 
     @staticmethod
     def _token(value: str) -> str:
-        token = str(value or "").strip()
+        token = (value or "").strip()
         return token if 0 < len(token) <= 256 else ""
 
     def _set_upstream_session_locked(
@@ -1338,7 +1348,7 @@ class PlaybackSessionRegistry:
             dict.fromkeys(
                 signature
                 for signature in (
-                    str(value or "").strip()
+                    (value or "").strip()
                     for value in browser_direct_redirect_signatures
                 )
                 if signature
@@ -1404,14 +1414,14 @@ class PlaybackSessionRegistry:
         item_id: str,
         source_id: str,
     ) -> tuple[str, int, str, str] | None:
-        normalized_scope = str(auth_scope or "")
+        normalized_scope = (auth_scope or "")
         normalized_item = _normalized_media_identifier(item_id)
         normalized_source = _normalized_media_identifier(source_id)
         if not normalized_scope or not normalized_item or not normalized_source:
             return None
         return (
             normalized_scope,
-            int(instance_id),
+            instance_id,
             normalized_item,
             normalized_source,
         )
@@ -1561,9 +1571,9 @@ class PlaybackSessionRegistry:
         if source_id:
             entry.source_id = normalized_source
         if file_id:
-            entry.file_id = str(file_id)
+            entry.file_id = file_id
         if media_name:
-            entry.media_name = str(media_name)
+            entry.media_name = media_name
         elif identity_changed:
             # 同 token 切换 item/source 时，旧标题不能污染新的精确来源键。
             entry.media_name = ""
@@ -1588,17 +1598,15 @@ class PlaybackSessionRegistry:
         if upstream_session_token:
             self._set_upstream_session_locked(key, entry, upstream_session_token)
         if browser_relay is not None:
-            entry.browser_relay = bool(browser_relay)
+            entry.browser_relay = browser_relay
         if native_cross_protocol_relay is not None:
-            entry.native_cross_protocol_relay = bool(
-                native_cross_protocol_relay
-            )
+            entry.native_cross_protocol_relay = native_cross_protocol_relay
         if native_signed_media_relay is not None:
-            entry.native_signed_media_relay = bool(native_signed_media_relay)
+            entry.native_signed_media_relay = native_signed_media_relay
         if native_client_fingerprint:
-            entry.native_client_fingerprint = str(native_client_fingerprint)
+            entry.native_client_fingerprint = native_client_fingerprint
         if native_verified_auth_scope:
-            entry.native_verified_auth_scope = str(native_verified_auth_scope)
+            entry.native_verified_auth_scope = native_verified_auth_scope
         entry.expires_at = now + self._ttl_seconds
         self._entries.move_to_end(key)
         return entry
@@ -1622,7 +1630,7 @@ class PlaybackSessionRegistry:
         native_verified_auth_scope: str = "",
     ) -> _PlaybackSessionLink:
         normalized_token = self._token(token) or secrets.token_urlsafe(24)
-        key = (str(auth_scope or ""), int(instance_id), normalized_token)
+        key = ((auth_scope or ""), instance_id, normalized_token)
         with self._lock:
             now = self._clock()
             self._prune_locked(now)
@@ -1631,7 +1639,7 @@ class PlaybackSessionRegistry:
             if entry is None:
                 normalized_item = _normalized_media_identifier(item_id)
                 normalized_source = _normalized_media_identifier(source_id)
-                resolved_media_name = str(media_name or "")
+                resolved_media_name = (media_name or "")
                 if not resolved_media_name and normalized_item and normalized_source:
                     resolved_media_name = self._resolve_media_name_locked(
                         key[0],
@@ -1646,20 +1654,18 @@ class PlaybackSessionRegistry:
                     instance_id=key[1],
                     item_id=normalized_item,
                     source_id=normalized_source,
-                    file_id=str(file_id or ""),
+                    file_id=(file_id or ""),
                     media_name=resolved_media_name,
                     upstream_session_token="",
                     expires_at=now + self._ttl_seconds,
                     capability_expires_at=0.0,
-                    browser_relay=bool(browser_relay),
-                    native_cross_protocol_relay=bool(
-                        native_cross_protocol_relay
-                    ),
-                    native_signed_media_relay=bool(native_signed_media_relay),
-                    native_client_fingerprint=str(
+                    browser_relay=browser_relay,
+                    native_cross_protocol_relay=native_cross_protocol_relay,
+                    native_signed_media_relay=native_signed_media_relay,
+                    native_client_fingerprint=(
                         native_client_fingerprint or ""
                     ),
-                    native_verified_auth_scope=str(
+                    native_verified_auth_scope=(
                         native_verified_auth_scope or ""
                     ),
                 )
@@ -1745,8 +1751,8 @@ class PlaybackSessionRegistry:
         native_verified_auth_scope: str = "",
     ) -> _PlaybackSessionLink:
         """成功重写 PlaybackInfo 后签发 capability，并绑定上游播放会话别名。"""
-        normalized_scope = str(auth_scope or "")
-        normalized_instance = int(instance_id)
+        normalized_scope = (auth_scope or "")
+        normalized_instance = instance_id
         normalized_token = self._token(token) or secrets.token_urlsafe(24)
         normalized_upstream = self._token(upstream_session_token)
         normalized_item = _normalized_media_identifier(item_id)
@@ -1797,21 +1803,17 @@ class PlaybackSessionRegistry:
                         item_id=normalized_item,
                         source_id="",
                         file_id="",
-                        media_name=str(media_name or ""),
+                        media_name=(media_name or ""),
                         upstream_session_token="",
                         expires_at=now + self._ttl_seconds,
                         capability_expires_at=0.0,
-                        browser_relay=bool(browser_relay),
-                        native_cross_protocol_relay=bool(
-                            native_cross_protocol_relay
-                        ),
-                        native_signed_media_relay=bool(
-                            native_signed_media_relay
-                        ),
-                        native_client_fingerprint=str(
+                        browser_relay=browser_relay,
+                        native_cross_protocol_relay=native_cross_protocol_relay,
+                        native_signed_media_relay=native_signed_media_relay,
+                        native_client_fingerprint=(
                             native_client_fingerprint or ""
                         ),
-                        native_verified_auth_scope=str(
+                        native_verified_auth_scope=(
                             native_verified_auth_scope or ""
                         ),
                     )
@@ -1850,13 +1852,13 @@ class PlaybackSessionRegistry:
         source_signature: str,
     ) -> bool:
         normalized_token = self._token(token)
-        normalized_signature = str(source_signature or "").strip()
+        normalized_signature = (source_signature or "").strip()
         if not normalized_token or not normalized_signature:
             return False
         with self._lock:
             self._prune_capabilities_locked(self._clock())
             allowed = self._capability_browser_direct_redirect_signatures.get(
-                (int(instance_id), normalized_token), ()
+                (instance_id, normalized_token), ()
             )
             return any(
                 hmac.compare_digest(normalized_signature, signature)
@@ -1873,7 +1875,7 @@ class PlaybackSessionRegistry:
         source_signature: str = "",
     ) -> _PlaybackSessionLink | None:
         """用服务端生成的短时 token 恢复认证 scope，不保存或暴露原始凭据。"""
-        normalized_instance = int(instance_id)
+        normalized_instance = instance_id
         normalized_token = self._token(token)
         if not normalized_token:
             return None
@@ -1911,7 +1913,7 @@ class PlaybackSessionRegistry:
                 normalized_token,
             )
             if not source_signature or not hmac.compare_digest(
-                str(source_signature), expected_source_signature
+                source_signature, expected_source_signature
             ):
                 return None
             renewed_expires_at = min(
@@ -1932,8 +1934,8 @@ class PlaybackSessionRegistry:
     def resolve(self, auth_scope: str, instance_id: int, *, token: str = "",
                 item_id: str = "", source_id: str = "", file_id: str = "",
                 media_name: str = "", create: bool = False) -> _PlaybackSessionLink | None:
-        normalized_scope = str(auth_scope or "")
-        normalized_instance = int(instance_id)
+        normalized_scope = (auth_scope or "")
+        normalized_instance = instance_id
         normalized_token = self._token(token)
         with self._lock:
             self._prune_locked(self._clock())
@@ -1988,7 +1990,7 @@ class PlaybackSessionRegistry:
             ]
             preferred: list[tuple[tuple[str, int, str], _PlaybackSessionLink]] = []
             if file_id:
-                preferred = [(key, entry) for key, entry in candidates if entry.file_id == str(file_id)]
+                preferred = [(key, entry) for key, entry in candidates if entry.file_id == file_id]
             elif item_id and source_id:
                 pending = [
                     (key, entry) for key, entry in candidates
@@ -2061,7 +2063,7 @@ def _apply_playback_session(request: Request, entry: _PlaybackSessionLink | None
         return
     request.state.proxy_playback_session_token = entry.token
     request.state.proxy_playback_session_key = _playback_sessions.persistent_key(entry)
-    request.state.proxy_browser_relay = bool(entry.browser_relay)
+    request.state.proxy_browser_relay = entry.browser_relay
     capability_token = _request_query_value(
         request, _PLAYBACK_SESSION_QUERY_KEY
     )
@@ -2071,12 +2073,8 @@ def _apply_playback_session(request: Request, entry: _PlaybackSessionLink | None
             entry.instance_id, capability_token, source_signature
         )
     )
-    request.state.proxy_native_cross_protocol_relay = bool(
-        entry.native_cross_protocol_relay
-    )
-    request.state.proxy_native_signed_media_relay = bool(
-        entry.native_signed_media_relay
-    )
+    request.state.proxy_native_cross_protocol_relay = entry.native_cross_protocol_relay
+    request.state.proxy_native_signed_media_relay = entry.native_signed_media_relay
     if entry.item_id:
         request.state.proxy_media_item_id = entry.item_id
     if entry.source_id:
@@ -2093,18 +2091,18 @@ def _request_query_value(request: Request, *names: str) -> str:
 
 
 def _request_query_values(request: Request, *names: str) -> list[str]:
-    accepted = {str(name).lower() for name in names}
+    accepted = {name.lower() for name in names}
     values: list[str] = []
     for key, value in request.query_params.multi_items():
-        if str(key).lower() in accepted and str(value or "").strip():
-            values.append(str(value).strip())
+        if key.lower() in accepted and (value or "").strip():
+            values.append(value.strip())
     return values
 
 
 def _request_query_has_key(request: Request, *names: str) -> bool:
-    accepted = {str(name).casefold() for name in names}
+    accepted = {name.casefold() for name in names}
     return any(
-        str(key).casefold() in accepted
+        key.casefold() in accepted
         for key, _value in request.query_params.multi_items()
     )
 
@@ -2112,11 +2110,11 @@ def _request_query_has_key(request: Request, *names: str) -> bool:
 def _request_query_has_conflicting_values(
     request: Request, *names: str
 ) -> bool:
-    accepted = {str(name).lower() for name in names}
+    accepted = {name.lower() for name in names}
     values = [
-        str(value or "").strip()
+        (value or "").strip()
         for key, value in request.query_params.multi_items()
-        if str(key).lower() in accepted
+        if key.lower() in accepted
     ]
     if len(values) <= 1:
         return False
@@ -2149,7 +2147,7 @@ def _extract_guangya_file_id(value: Any) -> str | None:
 
 
 def _route_prefix(path: str) -> str:
-    return "/emby" if str(path or "").lower().startswith("/emby/") else ""
+    return "/emby" if (path or "").lower().startswith("/emby/") else ""
 
 
 def _direct_stream_path(
@@ -2160,24 +2158,24 @@ def _direct_stream_path(
     playback_source_signature: str = "",
     container: str = "",
 ) -> str:
-    normalized_container = str(container or "").strip().casefold().split(",", 1)[0]
+    normalized_container = (container or "").strip().casefold().split(",", 1)[0]
     suffix = (
         f".{normalized_container}"
         if re.fullmatch(r"[a-z0-9]{1,12}", normalized_container)
         else ""
     )
-    path = f"{prefix}/Videos/{quote(str(item_id), safe='')}/stream{suffix}"
+    path = f"{prefix}/Videos/{quote(item_id, safe='')}/stream{suffix}"
     query: list[str] = []
     if source_id:
-        query.append(f"MediaSourceId={quote(str(source_id), safe='')}")
+        query.append(f"MediaSourceId={quote(source_id, safe='')}")
     if playback_session_token:
         query.append(
-            f"{_PLAYBACK_SESSION_QUERY_KEY}={quote(str(playback_session_token), safe='')}"
+            f"{_PLAYBACK_SESSION_QUERY_KEY}={quote(playback_session_token, safe='')}"
         )
     if playback_source_signature:
         query.append(
             f"{_PLAYBACK_SOURCE_QUERY_KEY}="
-            f"{quote(str(playback_source_signature), safe='')}"
+            f"{quote(playback_source_signature, safe='')}"
         )
     return f"{path}?{'&'.join(query)}" if query else path
 
@@ -2189,7 +2187,7 @@ def _mark_direct_source(
     *,
     native_client_mode: str = "",
 ) -> None:
-    requested_mode = str(native_client_mode or "").strip().casefold()
+    requested_mode = (native_client_mode or "").strip().casefold()
     mode = (
         requested_mode
         if requested_mode in {"web", "jellyfin_android", "findroid"}
@@ -2199,7 +2197,7 @@ def _mark_direct_source(
     # 保留 MediaFlux 写入 URL 的短时 capability。Protocol=File 则会自行通过
     # SDK 重建标准 /Videos/{id}/stream URL，丢掉 capability 与访问令牌。
     findroid_http_source = mode == "findroid"
-    web_direct_http_source = bool(
+    web_direct_http_source = (
         mode == "web" and source.get("SupportsDirectPlay") is True
     )
     http_source = findroid_http_source or web_direct_http_source
@@ -2265,10 +2263,10 @@ def _mark_direct_source(
 
 def _client_stream_url(path: str, base_url: str, native_client_mode: str) -> str:
     """Findroid 的 HTTP MediaSource 需要绝对 URL；其他客户端保持相对路径。"""
-    raw_path = str(path or "").strip()
-    if str(native_client_mode or "").strip().casefold() != "findroid":
+    raw_path = (path or "").strip()
+    if (native_client_mode or "").strip().casefold() != "findroid":
         return raw_path
-    raw_base = str(base_url or "").strip().rstrip("/")
+    raw_base = (base_url or "").strip().rstrip("/")
     try:
         parsed = urlsplit(raw_base)
     except ValueError:
@@ -2278,7 +2276,7 @@ def _client_stream_url(path: str, base_url: str, native_client_mode: str) -> str
     return f"{raw_base}/{raw_path.lstrip('/')}"
 
 
-def validate_listen_host(value: str) -> str:
+def validate_listen_host(value: object) -> str:
     host = str(value or "127.0.0.1").strip()
     if host not in _ALLOWED_HOSTS:
         raise ValueError("监听地址只允许 127.0.0.1、0.0.0.0、::1 或 ::")
@@ -2295,7 +2293,7 @@ def _validate_upstream_address(address: ipaddress.IPv4Address | ipaddress.IPv6Ad
         raise ValueError("上游地址不能使用链路本地、组播或未指定地址")
 
 
-def _parse_upstream_url(value: str) -> tuple[str, httpx.URL]:
+def _parse_upstream_url(value: object) -> tuple[str, httpx.URL]:
     url = str(value or "").strip().rstrip("/")
     try:
         parsed = httpx.URL(url)
@@ -2305,7 +2303,7 @@ def _parse_upstream_url(value: str) -> tuple[str, httpx.URL]:
         raise ValueError("上游地址必须是有效的 HTTP/HTTPS URL")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("上游地址不能包含凭据、查询参数或片段")
-    host = str(parsed.host).strip().lower()
+    host = parsed.host.strip().lower()
     if host in _BLOCKED_METADATA_HOSTS:
         raise ValueError("上游地址不能指向云元数据服务")
     return url, parsed
@@ -2317,7 +2315,7 @@ def _resolve_upstream_addresses(
     allow_dns_failure: bool,
 ) -> tuple[str, ...]:
     """解析并验证一次地址快照；运行时必须把连接固定到该快照。"""
-    host = str(parsed.host).strip().lower()
+    host = parsed.host.strip().lower()
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
@@ -2366,7 +2364,7 @@ def validate_upstream_url(value: str) -> str:
 def _join_upstream_url(parsed: httpx.URL, request_path: str) -> httpx.URL:
     """拼接固定上游路径，避免 upstream 与请求同时带 /emby 时重复。"""
     base_path = parsed.path.rstrip("/")
-    path = "/" + str(request_path or "").lstrip("/")
+    path = "/" + (request_path or "").lstrip("/")
     if base_path and base_path != "/" and (
         path.lower() == base_path.lower()
         or path.lower().startswith(base_path.lower() + "/")
@@ -2403,7 +2401,7 @@ class _UpstreamClientPool:
     def _key(pinned: _PinnedUpstreamTarget) -> tuple[str, str, int]:
         logical = httpx.URL(pinned.logical_url)
         default_port = 443 if logical.scheme == "https" else 80
-        return (logical.scheme, str(logical.host or ""), int(logical.port or default_port))
+        return (logical.scheme, (logical.host or ""), (logical.port or default_port))
 
     def get(self, pinned: _PinnedUpstreamTarget) -> httpx.AsyncClient:
         key = self._key(pinned)
@@ -2452,7 +2450,7 @@ def _pin_upstream_target(upstream: str, request_path: str) -> _PinnedUpstreamTar
         logical_url=str(logical),
         connect_url=str(connect),
         host_header=logical.netloc.decode("ascii"),
-        sni_hostname=str(parsed.host),
+        sni_hostname=parsed.host,
         addresses=addresses,
     )
 
@@ -2471,7 +2469,7 @@ def _validate_signed_media_address(
 
 def _pin_signed_media_target(value: str) -> _PinnedUpstreamTarget:
     """校验带签名查询参数的媒体 URL，并将连接固定到公共 DNS 快照。"""
-    raw = str(value or "").strip()
+    raw = (value or "").strip()
     try:
         logical = httpx.URL(raw)
     except (httpx.InvalidURL, TypeError, ValueError) as exc:
@@ -2480,7 +2478,7 @@ def _pin_signed_media_target(value: str) -> _PinnedUpstreamTarget:
         raise ValueError("媒体直链必须是有效的 HTTP/HTTPS URL")
     if logical.username or logical.password or logical.fragment:
         raise ValueError("媒体直链不能包含凭据或片段")
-    host = str(logical.host).strip().lower()
+    host = logical.host.strip().lower()
     if host in _BLOCKED_METADATA_HOSTS:
         raise ValueError("媒体直链不能指向云元数据服务")
     addresses = _resolve_upstream_addresses(logical, allow_dns_failure=False)
@@ -2491,7 +2489,7 @@ def _pin_signed_media_target(value: str) -> _PinnedUpstreamTarget:
         logical_url=str(logical),
         connect_url=str(connect),
         host_header=logical.netloc.decode("ascii"),
-        sni_hostname=str(logical.host),
+        sni_hostname=logical.host,
         addresses=addresses,
     )
 
@@ -2502,7 +2500,7 @@ async def probe_media_proxy_instance(
     timeout_seconds: float = 8.0,
 ) -> dict[str, int]:
     """安全探测一个已保存实例；固定 DNS 快照且不返回地址或凭据。"""
-    row = await asyncio.to_thread(database.get_media_proxy_instance, int(instance_id))
+    row = await asyncio.to_thread(database.get_media_proxy_instance, instance_id)
     if row is None:
         raise LookupError("media proxy instance not found")
     resolved = resolve_proxy_instance(row)
@@ -2538,7 +2536,7 @@ async def probe_media_proxy_instance(
             await _read_bounded_upstream_body(
                 response, _playback_info_response_limit()
             )
-            status_code = int(response.status_code)
+            status_code = response.status_code
         finally:
             await response.aclose()
     return {
@@ -2551,15 +2549,15 @@ class _PinnedResolver(AbstractResolver):
     """aiohttp WebSocket resolver：仅返回已校验的 DNS 快照。"""
 
     def __init__(self, hostname: str, addresses: tuple[str, ...]) -> None:
-        self.hostname = str(hostname).rstrip(".").lower()
+        self.hostname = hostname.rstrip(".").lower()
         self.addresses = tuple(addresses)
 
     async def resolve(
         self, host: str, port: int = 0, family: int = socket.AF_INET,
-    ) -> list[dict[str, object]]:
-        if str(host).rstrip(".").lower() != self.hostname:
+    ) -> list[ResolveResult]:
+        if host.rstrip(".").lower() != self.hostname:
             raise OSError("Unexpected upstream hostname")
-        results: list[dict[str, object]] = []
+        results: list[ResolveResult] = []
         for raw in self.addresses:
             address = ipaddress.ip_address(raw)
             address_family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
@@ -2582,9 +2580,9 @@ class _PinnedResolver(AbstractResolver):
 
 
 def resolve_local_binding(local_root: str, relative_path: str) -> Path:
-    root = Path(str(local_root or "")).expanduser().resolve(strict=False)
-    relative = Path(str(relative_path or ""))
-    if not str(local_root or "").strip() or relative.is_absolute():
+    root = Path(local_root or "").expanduser().resolve(strict=False)
+    relative = Path(relative_path or "")
+    if not (local_root or "").strip() or relative.is_absolute():
         raise ValueError("本地绑定必须使用已配置根目录下的相对路径")
     candidate = (root / relative).resolve(strict=False)
     try:
@@ -2599,7 +2597,7 @@ def _connection_header_tokens(headers: Any) -> set[str]:
     values: list[str] = []
     get_list = getattr(headers, "get_list", None)
     if callable(get_list):
-        values = [str(value) for value in get_list("connection")]
+        values = [str(value) for value in headers.get_list("connection")]
     else:
         value = getattr(headers, "get", lambda *_args: None)("connection")
         if value is not None:
@@ -2634,7 +2632,7 @@ def _decoded_response_headers(headers: httpx.Headers) -> dict[str, str]:
 def _without_mediaflux_session_cookie(value: str) -> str:
     """保留媒体服务器 Cookie，但绝不把 MediaFlux 登录会话转给上游。"""
     retained: list[str] = []
-    for raw_part in str(value or "").split(";"):
+    for raw_part in (value or "").split(";"):
         part = raw_part.strip()
         if not part:
             continue
@@ -2671,7 +2669,7 @@ def _same_upstream_redirect_location(
     upstream_base_url: str = "",
 ) -> str:
     """只允许逻辑上游同源跳转，并改写为当前代理 origin 的相对地址。"""
-    raw_location = str(location or "").strip()
+    raw_location = (location or "").strip()
     if not raw_location:
         raise ValueError("上游重定向缺少目标地址")
     joined = urljoin(pinned.logical_url, raw_location)
@@ -2681,8 +2679,8 @@ def _same_upstream_redirect_location(
     target_port = target.port or (443 if target.scheme == "https" else 80)
     if (
         target.scheme.casefold() != base.scheme.casefold()
-        or str(target.hostname or "").casefold()
-        != str(base.hostname or "").casefold()
+        or (target.hostname or "").casefold()
+        != (base.hostname or "").casefold()
         or target_port != base_port
         or target.username
         or target.password
@@ -2703,7 +2701,7 @@ def _same_upstream_redirect_location(
         or any(segment in {".", ".."} for segment in decoded_segments)
     ):
         raise ValueError("上游重定向路径不安全")
-    configured_base = urlsplit(str(upstream_base_url or pinned.logical_url))
+    configured_base = urlsplit(upstream_base_url or pinned.logical_url)
     base_path = configured_base.path.rstrip("/")
     if base_path and base_path != "/" and not (
         target_path.casefold() == base_path.casefold()
@@ -2724,7 +2722,7 @@ def _replace_header(
     value: str,
 ) -> None:
     """大小写无关地替换单值请求头，避免 httpx 合并重复字段。"""
-    normalized_name = str(name or "").casefold()
+    normalized_name = (name or "").casefold()
     for key in tuple(headers):
         if key.casefold() == normalized_name:
             headers.pop(key, None)
@@ -2871,15 +2869,15 @@ def _diagnostic_dict_value(data: Any, *names: str) -> Any:
         return None
     folded = {str(key).casefold(): value for key, value in data.items()}
     for name in names:
-        if str(name).casefold() in folded:
-            return folded[str(name).casefold()]
+        if name.casefold() in folded:
+            return folded[name.casefold()]
     return None
 
 
 def _diagnostic_dict_has_key(data: Any, name: str) -> bool:
     if not isinstance(data, dict):
         return False
-    target = str(name).casefold()
+    target = name.casefold()
     return any(str(key).casefold() == target for key in data)
 
 
@@ -3220,7 +3218,7 @@ def _native_playback_diagnostic_summary(
         ),
         "play_session_present": bool(response_data.get("PlaySessionId")),
         "source_count": len(media_sources) if isinstance(media_sources, list) else -1,
-        "rewritten": bool(changed),
+        "rewritten": changed,
         "sources": source_summaries,
     }
 
@@ -3241,7 +3239,7 @@ def _request_device_ids(request: Any) -> list[str]:
     for key in ("X-Emby-Authorization", "Authorization"):
         for header_value in _header_values(request.headers, key):
             values.extend(_authorization_device_ids(header_value))
-    return [str(value).strip() for value in values if str(value).strip()]
+    return [value.strip() for value in values if value.strip()]
 
 
 def _request_device_id(request: Any) -> str:
@@ -3270,8 +3268,8 @@ def _request_is_cross_protocol_media_target(
     signed_url: str,
 ) -> bool:
     source_scheme = str(request.url.scheme or "").casefold()
-    target_scheme = str(urlsplit(str(signed_url or "")).scheme or "").casefold()
-    return bool(
+    target_scheme = (urlsplit(signed_url or "").scheme or "").casefold()
+    return (
         source_scheme in {"http", "https"}
         and target_scheme in {"http", "https"}
         and source_scheme != target_scheme
@@ -3280,7 +3278,7 @@ def _request_is_cross_protocol_media_target(
 
 def _browser_direct_target_is_secure(signed_url: str) -> bool:
     """浏览器真 302 只下发 HTTPS bearer URL，HTTP 目标统一走 relay。"""
-    target_scheme = str(urlsplit(str(signed_url or "")).scheme or "").casefold()
+    target_scheme = (urlsplit(signed_url or "").scheme or "").casefold()
     return target_scheme == "https"
 
 
@@ -3310,7 +3308,7 @@ def _request_allows_browser_direct_redirect(request: Any) -> bool:
     headers = request.headers
     destination = str(headers.get("Sec-Fetch-Dest") or "").strip().casefold()
     fetch_mode = str(headers.get("Sec-Fetch-Mode") or "").strip().casefold()
-    return bool(
+    return (
         destination in {"audio", "video"}
         and fetch_mode in {"", "no-cors"}
     )
@@ -3386,7 +3384,7 @@ def _head_probe_response(
     # 完整表示语义，不能自行伪造成 206。
     if status_code == 200:
         if content_length_key:
-            raw_length = str(normalized.get(content_length_key) or "").strip()
+            raw_length = (normalized.get(content_length_key) or "").strip()
             if raw_length.isdigit():
                 total_size = int(raw_length)
         if content_range_key:
@@ -3400,7 +3398,7 @@ def _head_probe_response(
 
     if content_range_key:
         normalized.pop(content_range_key, None)
-    requested = str(requested_range or "").strip()
+    requested = (requested_range or "").strip()
     if not requested:
         normalized[content_length_key or "Content-Length"] = str(total_size)
         return 200, normalized
@@ -3429,7 +3427,7 @@ def _header_values(headers: Any, name: str) -> list[str]:
     """返回同名请求头的每个字段值，避免重复鉴权头被折叠或遗漏。"""
     raw_values: list[Any] | None = None
     for method_name in ("getlist", "get_list"):
-        getter = getattr(headers, method_name, None)
+        getter: Callable[..., Any] | None = getattr(headers, method_name, None)
         if not callable(getter):
             continue
         try:
@@ -3443,8 +3441,8 @@ def _header_values(headers: Any, name: str) -> list[str]:
         break
 
     if raw_values is None:
-        normalized_name = str(name).casefold()
-        items = getattr(headers, "items", None)
+        normalized_name = name.casefold()
+        items: Callable[..., Any] | None = getattr(headers, "items", None)
         if callable(items):
             raw_values = [
                 value
@@ -3534,7 +3532,7 @@ def _request_has_websocket_auth_signal(request: Any) -> bool:
     # 日志分级应比凭据解析更保守：即使 Authorization 格式不是当前支持的
     # MediaBrowser Token=...，它仍代表一次真实认证尝试，失败必须保留 WARNING。
     return any(
-        str(value or "").strip()
+        (value or "").strip()
         for header_name in (
             "Authorization",
             "X-Emby-Authorization",
@@ -3550,14 +3548,14 @@ def _websocket_handshake_is_anonymous_rejection(
     request: Any,
     status: int,
 ) -> bool:
-    return bool(
-        int(status or 0) in {401, 403}
+    return (
+        (status or 0) in {401, 403}
         and not _request_has_websocket_auth_signal(request)
     )
 
 
 def _auth_scope_fingerprint(credential: str) -> str:
-    value = str(credential or "").encode("utf-8")
+    value = (credential or "").encode("utf-8")
     return hmac.new(_AUTH_SCOPE_SECRET, value, hashlib.sha256).hexdigest() if value else ""
 
 
@@ -3568,7 +3566,7 @@ def _upstream_playback_token_scope(instance_id: int, token: str) -> str:
         return ""
     return _auth_scope_fingerprint(
         "mediaflux-upstream-playback-token:"
-        f"{int(instance_id)}:{normalized}"
+        f"{instance_id}:{normalized}"
     )
 
 
@@ -3579,12 +3577,12 @@ def _upstream_playback_session_scope(
 ) -> str:
     """把 PlaySessionId 与设备绑定为仅进程内可复现的短时授权域。"""
     normalized = PlaybackSessionRegistry._token(token)
-    normalized_device = str(device_id or "").strip()
+    normalized_device = (device_id or "").strip()
     if not normalized or not normalized_device:
         return ""
     return _auth_scope_fingerprint(
         "mediaflux-upstream-playback-session:"
-        f"{int(instance_id)}:{normalized}:{normalized_device}"
+        f"{instance_id}:{normalized}:{normalized_device}"
     )
 
 
@@ -3594,11 +3592,11 @@ def _playback_source_signature(
     source_id: str,
     playback_session_token: str,
 ) -> str:
-    token = str(playback_session_token or "").strip()
+    token = (playback_session_token or "").strip()
     if not token:
         return ""
     payload = (
-        f"mediaflux-playback-source\0{int(instance_id)}\0"
+        f"mediaflux-playback-source\0{instance_id}\0"
         f"{_normalized_media_identifier(item_id)}\0"
         f"{_normalized_media_identifier(source_id)}\0{token}"
     ).encode("utf-8")
@@ -3606,7 +3604,7 @@ def _playback_source_signature(
 
 
 def _media_browser_authorization(credential: str) -> str:
-    token = str(credential or "").strip()
+    token = (credential or "").strip()
     if not token or any(character in token for character in "\r\n"):
         return ""
     escaped = token.replace("\\", "\\\\").replace('"', '\\"')
@@ -3614,12 +3612,12 @@ def _media_browser_authorization(credential: str) -> str:
 
 
 def _is_single_media_browser_authorization(value: str, credential: str) -> bool:
-    raw_value = str(value or "").strip()
+    raw_value = (value or "").strip()
     tokens = _authorization_tokens(raw_value)
     return bool(
         _MEDIA_BROWSER_AUTH_RE.match(raw_value)
         and len(tokens) == 1
-        and tokens[0] == str(credential or "").strip()
+        and tokens[0] == (credential or "").strip()
     )
 
 
@@ -3628,10 +3626,10 @@ def _apply_upstream_credential(
     credential: str,
     server_type: str = "",
 ) -> dict[str, str]:
-    token = str(credential or "").strip()
+    token = (credential or "").strip()
     if not token:
         return headers
-    normalized_type = str(server_type or "").strip().casefold()
+    normalized_type = (server_type or "").strip().casefold()
     lowered = {key.lower() for key in headers}
     if normalized_type == "jellyfin":
         # Jellyfin 12 的受保护 HTTP/WS 接口使用唯一的 canonical
@@ -3642,7 +3640,7 @@ def _apply_upstream_credential(
         for key in tuple(headers):
             normalized_key = key.lower()
             if normalized_key == "authorization":
-                value = str(headers.pop(key, "") or "").strip()
+                value = (headers.pop(key, "") or "").strip()
                 if (
                     not preserved_authorization
                     and _is_single_media_browser_authorization(value, token)
@@ -3671,7 +3669,7 @@ def _upstream_request_headers(
     headers = _apply_canonical_forwarded_headers(
         _request_headers(request), request
     )
-    if str(server_type or "").strip().casefold() == "jellyfin" and credential:
+    if (server_type or "").strip().casefold() == "jellyfin" and credential:
         authorization_values = _header_values(request.headers, "Authorization")
         authorization_tokens = [
             token
@@ -3716,7 +3714,7 @@ def _upstream_query_string(request: Any, server_type: str = "") -> str:
     """构造上游 query；Jellyfin HLS 仅续传原请求 query 的用户凭据。"""
     pairs = _sanitized_query_pairs(request)
     is_jellyfin_hls = bool(
-        str(server_type or "").strip().casefold() == "jellyfin"
+        (server_type or "").strip().casefold() == "jellyfin"
         and _HLS_PATH_RE.search(str(request.url.path or ""))
     )
     if is_jellyfin_hls:
@@ -3740,7 +3738,7 @@ def _playback_info_request_payload(body: bytes) -> dict[str, Any]:
             content=body,
             headers={"content-type": "application/json"},
         ).json()
-    except (ValueError, UnicodeDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -3829,10 +3827,10 @@ def _parse_range(value: str, size: int) -> tuple[int, int] | None:
 
 
 def media_content_type(filename: str) -> str:
-    suffix = Path(str(filename or "")).suffix.casefold()
+    suffix = Path(filename or "").suffix.casefold()
     return (
         _MEDIA_MIME_OVERRIDES.get(suffix)
-        or mimetypes.guess_type(str(filename or ""))[0]
+        or mimetypes.guess_type(filename or "")[0]
         or "application/octet-stream"
     )
 
@@ -3857,7 +3855,7 @@ class _UpstreamStreamingResponse(StreamingResponse):
         finally:
             with anyio.CancelScope(shield=True):
                 try:
-                    await self.body_iterator.aclose()
+                    await getattr(self.body_iterator, "aclose")()
                 finally:
                     try:
                         await self._upstream_response.aclose()
@@ -3901,7 +3899,7 @@ def _media_proxy_binding(
     auth_scope: str = "",
 ) -> Any:
     """精确绑定直接返回；Item 级绑定必须先在单源 PlaybackInfo 中登记。"""
-    requested_source = str(source_id or "").strip()
+    requested_source = (source_id or "").strip()
     normalized_requested_source = _normalized_media_identifier(requested_source)
     binding = None
     for item_variant in _media_identifier_variants(item_id):
@@ -3978,7 +3976,7 @@ def rewrite_playback_info(
     grant_scopes = tuple(
         dict.fromkeys(
             scope
-            for scope in (str(auth_scope or ""), *additional_auth_scopes)
+            for scope in ((auth_scope or ""), *additional_auth_scopes)
             if scope
         )
     )
@@ -4019,8 +4017,8 @@ def rewrite_playback_info(
             instance_id, item_id, source_id, playback_session_token
         )
         emitted_source_signature = source_signature
-        browser_direct_play_eligible = bool(
-            str(native_client_mode or "").strip().casefold() == "web"
+        browser_direct_play_eligible = (
+            (native_client_mode or "").strip().casefold() == "web"
             and source.get("SupportsDirectPlay") is True
         )
         binding = _media_proxy_binding(
@@ -4140,7 +4138,7 @@ def rewrite_playback_info(
 
 def _authorization_tokens(value: str) -> list[str]:
     tokens: list[str] = []
-    for match in _AUTH_TOKEN_RE.finditer(str(value or "")):
+    for match in _AUTH_TOKEN_RE.finditer(value or ""):
         token = str(match.group(1) or match.group(2) or "").strip()
         if token:
             tokens.append(token)
@@ -4210,7 +4208,7 @@ async def _client_is_authorized(
 
 
 def _websocket_upstream_url(upstream: str, websocket: WebSocket, path: str) -> str:
-    target = httpx.URL(_upstream_target(upstream, "/" + str(path).lstrip("/")))
+    target = httpx.URL(_upstream_target(upstream, "/" + path.lstrip("/")))
     scheme = "wss" if target.scheme == "https" else "ws"
     websocket_target = str(target.copy_with(scheme=scheme))
     query = _sanitized_query_string(websocket) if hasattr(websocket, "query_params") else websocket.url.query
@@ -4375,7 +4373,7 @@ def create_proxy_app(
                     source_id=source_id,
                     source_signature=source_signature,
                 )
-                candidate_allowed = bool(
+                candidate_allowed = (
                     candidate is not None
                     and (not auth_scope or candidate.auth_scope == auth_scope)
                 )
@@ -4587,7 +4585,7 @@ def create_proxy_app(
             diagnostic = {
                 "route": getattr(request.state, "proxy_route_class", route_class),
                 "action": getattr(request.state, "proxy_action", "upstream_passthrough"),
-                "method": str(request.method or "GET").upper(),
+                "method": (request.method or "GET").upper(),
                 "status": status_code,
                 "range": _range_diagnostic(request.headers.get("range", "")),
                 "if_range": int(bool(request.headers.get("if-range", ""))),
@@ -4643,14 +4641,14 @@ def create_proxy_app(
         *,
         refresh_signed_url: Callable[[], Awaitable[str | None]] | None = None,
     ) -> Response:
-        current_url = str(signed_url or "").strip()
+        current_url = (signed_url or "").strip()
         started = time.monotonic()
         relay_client: httpx.AsyncClient | None = None
         is_head_probe = request.method == "HEAD"
         # CDN 的 HEAD 行为并不稳定：部分节点会因 Accept 返回 406，另一些节点
         # 会回 Content-Length: 0。统一改用流式 GET 探测响应头，正文不会被读取。
         upstream_method = "GET" if is_head_probe else request.method
-        requested_range = str(request.headers.get("range") or "").strip()
+        requested_range = (request.headers.get("range") or "").strip()
 
         async def close_relay_client() -> None:
             nonlocal relay_client
@@ -4757,7 +4755,7 @@ def create_proxy_app(
                     await response.aclose()
                     await close_relay_client()
                     try:
-                        refreshed_url = str(await refresh_signed_url() or "").strip()
+                        refreshed_url = (await refresh_signed_url() or "").strip()
                     except Exception as exc:
                         request.state.proxy_failure_stage = "signed_url_refresh"
                         logger.warning(
@@ -4869,7 +4867,7 @@ def create_proxy_app(
                     raw_client = getattr(client, "_raw", None)
                 provider_token = str(getattr(raw_client, "token", "") or "")
                 provider_scope = _auth_scope_fingerprint(provider_token)
-                scope = f"{int(instance_id)}:{provider_scope}"
+                scope = f"{instance_id}:{provider_scope}"
                 ua_bound = bool(
                     getattr(raw_client, "download_url_user_agent_bound", False)
                 )
@@ -4925,7 +4923,7 @@ def create_proxy_app(
                         {"error": "无法获取光鸭直链"},
                         status_code=502,
                     )
-                client_url = str(result.url).strip()
+                client_url = result.url.strip()
 
                 async def refresh_cached_url() -> str | None:
                     signed_urls.invalidate(
@@ -5130,7 +5128,7 @@ def create_proxy_app(
             pinned = await asyncio.to_thread(
                 _pin_upstream_target,
                 str(instance["upstream_url"]),
-                "/" + str(path).lstrip("/"),
+                "/" + path.lstrip("/"),
             )
             target = _websocket_upstream_url(
                 str(instance["upstream_url"]), websocket, path
@@ -5346,7 +5344,7 @@ def create_proxy_app(
                 _request_client_name(request) or "exoplayer",
                 request.method,
                 request.url.path,
-                str(request.headers.get("host") or ""),
+                (request.headers.get("host") or ""),
                 int(bool(_request_query_value(request, "MediaSourceId"))),
                 int(bool(_request_query_value(request, "PlaySessionId"))),
                 int(bool(_request_auth_credential(request))),
@@ -5418,7 +5416,7 @@ def create_proxy_app(
                 int(bool(binding)),
                 int(bool(dynamic_file_id)),
                 int(bool(dynamic_allowed)),
-                ",".join(sorted({str(key).lower() for key in request.query_params.keys()})),
+                ",".join(sorted({key.lower() for key in request.query_params.keys()})),
             )
 
         try:
@@ -5615,11 +5613,7 @@ def create_proxy_app(
                                 request.state.proxy_action = (
                                     "playback_web_audio_direct_retry"
                                 )
-                    except (
-                        ValueError,
-                        ProxyUpstreamBodyTooLarge,
-                        httpx.HTTPError,
-                    ):
+                    except (ValueError, httpx.HTTPError):
                         # 自动优化失败时必须无损回到首次 HLS/转码合同。
                         pass
                     finally:
@@ -5996,7 +5990,7 @@ class MediaProxyManager:
         loop = self._loop
         if self._stopping or loop is None or loop.is_closed() or not loop.is_running():
             return None
-        coroutine = self.restart_instance(int(instance_id))
+        coroutine = self.restart_instance(instance_id)
         try:
             future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         except RuntimeError:
@@ -6011,7 +6005,7 @@ class MediaProxyManager:
             if self._stopping:
                 return {"restarted": False, "reason": "stopping"}
             row = await asyncio.to_thread(
-                database.get_media_proxy_instance, int(instance_id)
+                database.get_media_proxy_instance, instance_id
             )
             if row is None or not int(row["enabled"] or 0):
                 return {"restarted": False, "reason": "not_enabled"}
@@ -6020,21 +6014,21 @@ class MediaProxyManager:
             except ValueError as exc:
                 await asyncio.to_thread(
                     database.update_media_proxy_instance,
-                    int(instance_id),
+                    instance_id,
                     {"status": "error", "last_error": str(exc)},
                 )
                 return {"restarted": False, "reason": "invalid_config"}
-            runtime = self._runtimes.get(int(instance_id))
+            runtime = self._runtimes.get(instance_id)
             if runtime is not None:
                 await self._stop_runtime(runtime)
-                if self._runtimes.get(int(instance_id)) is runtime:
-                    self._runtimes.pop(int(instance_id), None)
+                if self._runtimes.get(instance_id) is runtime:
+                    self._runtimes.pop(instance_id, None)
             try:
                 replacement = await self._start_runtime(resolved)
             except Exception as exc:
                 await asyncio.to_thread(
                     database.update_media_proxy_instance,
-                    int(instance_id),
+                    instance_id,
                     {"status": "error", "last_error": str(exc)},
                 )
                 logger.warning(
@@ -6043,7 +6037,7 @@ class MediaProxyManager:
                     type(exc).__name__,
                 )
                 return {"restarted": False, "reason": "start_failed"}
-            self._runtimes[int(instance_id)] = replacement
+            self._runtimes[instance_id] = replacement
             return {"restarted": True, "reason": ""}
 
     @staticmethod

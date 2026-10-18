@@ -125,15 +125,13 @@ class DefaultAuthorizationPolicy:
             )
         if tool.authorize is not None:
             try:
-                allowed = bool(
-                    tool.authorize(
+                allowed = (tool.authorize(
                         {
                             **context.policy_context(),
                             "arguments": dict(arguments),
                             "effect": tool.effect.value,
                         }
-                    )
-                )
+                    ))
             except Exception as exc:
                 raise ToolPipelineError(
                     "工具授权检查失败", code="authorization_failed"
@@ -148,7 +146,7 @@ class InMemoryRateLimiter:
     """按 owner/tool 的轻量滑动窗口限流；生产可替换而不改变 Pipeline。"""
 
     def __init__(self, *, limit: int = 30, window_seconds: float = 60.0) -> None:
-        self.limit = max(1, int(limit))
+        self.limit = max(1, limit)
         self.window_seconds = max(1.0, float(window_seconds))
         self._lock = CrossLoopAsyncLock()
         self._events: dict[tuple[str, str], list[tuple[float, float]]] = {}
@@ -290,7 +288,7 @@ class ToolPipeline:
                 if re.search(r"~(?![01])", part) or isinstance(node, list) and not re.fullmatch(r"0|[1-9][0-9]*", part):
                     raise KeyError(part)
                 key = part.replace("~1", "/").replace("~0", "~")
-                node = node[int(key)] if isinstance(node, list) and key.isdecimal() else node[key]
+                node = node[int(key)] if isinstance(node, list) else node[key]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise ToolPipelineError("结果路径不存在；请使用原结果truncation中的path。", code="invalid_arguments", invalid_fields=("path",)) from exc
         offset, limit = arguments.get("offset", 0), arguments.get("limit", 50)
@@ -876,6 +874,8 @@ class ToolPipeline:
             exc.mark_execution_started(False)
             raise
         try:
+            # WRITE/DANGER 的处理函数已由 KernelToolSpec 校验。
+            assert tool.execute_confirmed is not None
             value = await invoke(
                 tool.execute_confirmed,
                 resolved_arguments,

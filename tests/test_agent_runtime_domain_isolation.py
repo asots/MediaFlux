@@ -1,5 +1,9 @@
 """构建第二个 runtime 不能重定向第一个 runtime 的领域上下文。"""
 from __future__ import annotations
+from app.agent.session_context import AgentSessionContextRepository
+from app.agent.kernel.model import ModelAdapter
+from app.agent.kernel.persistence import SQLiteKernelStore
+from typing import cast
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -41,10 +45,10 @@ def test_existing_runtime_keeps_its_repository_after_another_build(
         "app.agent.kernel.bootstrap.SQLiteAgentSessionContextRepository",
         side_effect=[first, second],
     ):
-        runtime = build_agent_kernel_runtime(model=object(), store=InMemorySessionStateStore())
+        runtime = build_agent_kernel_runtime(model=cast(ModelAdapter | None, object()), store=cast(SQLiteKernelStore | None, InMemorySessionStateStore()))
         tools = {tool.name: tool for tool in build_tool_specs(domain_actions=runtime.domain_actions)}
         callback = getattr(tools[tool_name], entrypoint)
-        build_agent_kernel_runtime(model=object(), store=InMemorySessionStateStore())
+        build_agent_kernel_runtime(model=cast(ModelAdapter | None, object()), store=cast(SQLiteKernelStore | None, InMemorySessionStateStore()))
 
     context = ToolContext(owner="same-owner", session_id="same-session")
     with pytest.raises(AgentToolError):
@@ -62,8 +66,8 @@ def test_workspace_cursor_uses_the_original_runtime_repository():
         "app.agent.kernel.bootstrap.SQLiteAgentSessionContextRepository",
         side_effect=[first, second],
     ):
-        runtime = build_agent_kernel_runtime(model=object(), store=InMemorySessionStateStore())
-        build_agent_kernel_runtime(model=object(), store=InMemorySessionStateStore())
+        runtime = build_agent_kernel_runtime(model=cast(ModelAdapter | None, object()), store=cast(SQLiteKernelStore | None, InMemorySessionStateStore()))
+        build_agent_kernel_runtime(model=cast(ModelAdapter | None, object()), store=cast(SQLiteKernelStore | None, InMemorySessionStateStore()))
     assert runtime.domain_actions.workspace.latest_guangya_observation_ref("same-owner") == ""
     assert first.reads == [("same-owner", "guangya_workspace")]
     assert second.reads == []
@@ -80,7 +84,7 @@ def test_independent_runtime_memory_does_not_share_local_task_numbers():
 
 
 def test_file_change_uses_its_runtime_workspace_for_latest_selection():
-    first, second = DomainActions(EmptyRepository()), DomainActions(EmptyRepository())
+    first, second = DomainActions(cast(AgentSessionContextRepository | None, EmptyRepository())), DomainActions(cast(AgentSessionContextRepository | None, EmptyRepository()))
     with (
         patch.object(first.workspace, "latest_guangya_observation_ref", return_value="" ) as original,
         patch.object(second.workspace, "latest_guangya_observation_ref", return_value="other-runtime") as other,

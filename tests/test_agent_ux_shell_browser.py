@@ -4,8 +4,12 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
-from pathlib import Path
 import unittest
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser
 from urllib.parse import unquote, urlsplit
 
 from tests import test_agent_kernel_browser as browser_support
@@ -15,6 +19,7 @@ from tests.support import InitializedWebTestCase
 
 @unittest.skipIf(browser_support.sync_playwright is None, '系统环境未安装 Playwright')
 class AgentShellBrowserCase(InitializedWebTestCase):
+    browser: Browser
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -91,11 +96,15 @@ class AgentUXShellBrowserTests(AgentShellBrowserCase):
                 with self.subTest(viewport=viewport, history=history):
                     page, unexpected, errors = self.make_shell(viewport, history=history)
                     before = page.locator('#agentComposer').bounding_box()
+                    assert before is not None
                     page.wait_for_function("document.querySelector('#agentStartActions').getAttribute('aria-busy') === 'false'")
                     page.evaluate('async () => { await document.fonts.ready; }')
                     after = page.locator('#agentComposer').bounding_box()
+                    assert after is not None
                     workspace = page.locator('.agent-workbench').bounding_box()
+                    assert workspace is not None
                     console = page.locator('.agent-console').bounding_box()
+                    assert console is not None
                     self.assertLessEqual(abs(console['height'] - workspace['height']), 0.5)
                     self.assertLessEqual(abs(after['y'] + after['height'] / 2 - workspace['y'] - workspace['height'] / 2), 0.5)
                     self.assertLessEqual(abs(before['y'] - after['y']), 0.5)
@@ -103,7 +112,9 @@ class AgentUXShellBrowserTests(AgentShellBrowserCase):
                     self.assertEqual(page.locator('#agentResponseStatus').evaluate('(node) => getComputedStyle(node).position'), 'absolute')
                     if history:
                         resume = page.locator('#agentResumeLatestSession').bounding_box()
+                        assert resume is not None
                         status = page.locator('#agentStartActionsStatus').bounding_box()
+                        assert status is not None
                         self.assertLessEqual(resume['y'] + resume['height'] + 4, status['y'])
                     page.locator('#toggleAgentRail').click()
                     self.assertEqual(page.locator('#agent-session-heading').inner_text(), '历史会话')
@@ -184,7 +195,9 @@ class AgentSessionStopBrowserTests(AgentShellBrowserCase):
                 page.mouse.move(0, 0)
                 page.evaluate('() => Promise.all(document.getAnimations().map(a => a.finished.catch(() => {})))')
                 for selector, before in zip(('#agentComposer', '.agent-submit-slot'), bounds):
+                    assert before is not None
                     after = page.locator(selector).bounding_box()
+                    assert after is not None
                     for key in ('x', 'y', 'width', 'height'):
                         self.assertAlmostEqual(before[key], after[key], delta=0.5)
                 self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), width)

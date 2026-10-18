@@ -327,7 +327,7 @@ def _task_projection(
 
 
 def _connection_projection(info: TransferInfo) -> dict[str, Any]:
-    raw_status = str(info.connection_status or "").strip().casefold()
+    raw_status = (info.connection_status or "").strip().casefold()
     status = (
         raw_status
         if raw_status in {"connected", "disconnected", "firewalled"}
@@ -346,10 +346,10 @@ def _connection_projection(info: TransferInfo) -> dict[str, Any]:
 
 def _configuration_state() -> tuple[str, dict[str, str]]:
     values = {
-        "url": str(config.get("QB_URL", "") or "").strip(),
-        "username": str(config.get("QB_USERNAME", "") or "").strip(),
-        "password": str(config.get("QB_PASSWORD", "") or ""),
-        "api_key": str(config.get("QB_API_KEY", "") or "").strip(),
+        "url": (config.get("QB_URL", "") or "").strip(),
+        "username": (config.get("QB_USERNAME", "") or "").strip(),
+        "password": (config.get("QB_PASSWORD", "") or ""),
+        "api_key": (config.get("QB_API_KEY", "") or "").strip(),
     }
     if not values["url"]:
         return "not_configured", values

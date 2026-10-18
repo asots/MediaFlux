@@ -1,3 +1,4 @@
+from typing import Any, TypedDict
 import asyncio
 import json
 from copy import deepcopy
@@ -13,10 +14,10 @@ from app.agent.kernel.capabilities import (
 from app.agent.kernel.conversation_context import restore_messages
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.events import AgentEventType
-from app.agent.kernel.model import ModelEventType, ModelMessage, ModelRequest
+from app.agent.kernel.model import ModelEvent, ModelEventType, ModelMessage, ModelRequest
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
-from app.agent.kernel.provider_model import ModelProviderError
+from app.agent.kernel.provider_model import ModelProviderError, UncommittableModelTurn
 from app.agent.kernel.session import AgentSession, SessionLimits
 from app.agent.kernel.state_types import AgentInput, CancellationToken
 from app.agent.public_view import public_conversation_messages
@@ -274,7 +275,8 @@ def test_missing_identity_stays_provider_error(protocol, mode, cid):
     events, error = asyncio.run(observe(protocol, payload(protocol,mode,cid=cid)))
     assert error is not None
     assert not any(e.type is ModelEventType.FINISH for e in events)
-    pending, seen = [error], set()
+    pending: list[BaseException | None] = [error]
+    seen = set()
     while pending:
         current = pending.pop()
         if current is None or id(current) in seen:
@@ -454,7 +456,7 @@ def _native_final(mode):
 
 
 def _native_bad_blocks(thinking=True, mixed=True):
-    blocks = ([{'type': 'thinking', 'thinking': 'NATIVE-BAD-PRIVATE-SENTINEL',
+    blocks: list[dict[str, Any]] = ([{'type': 'thinking', 'thinking': 'NATIVE-BAD-PRIVATE-SENTINEL',
                 'signature': 'NATIVE-BAD-SIGNATURE-SENTINEL'},
                {'type': 'redacted_thinking', 'data': ' NATIVE-BAD-OPAQUE-SENTINEL\n  '}]
               if thinking else [])
@@ -492,17 +494,25 @@ def _assert_original_native_history(request):
     assert json.loads(results[0]['content'])['ok'] is True
 
 
+class _NativeRound(TypedDict):
+    events: list[ModelEvent]
+    error: ModelProviderError | None
+    executed: list[dict[str, Any]]
+    conversation: list[dict[str, Any]]
+    state: dict[str, Any]
+
+
 class _NativeRoundRecorder:
     """只观察真实 adapter；每次请求前冷读 SQLite，不替换模型事件或恢复逻辑。"""
     def __init__(self, adapter, cold_store, executed):
         self.adapter = adapter
         self.cold_store = cold_store
         self.executed = executed
-        self.rounds = []
+        self.rounds: list[_NativeRound] = []
 
     async def stream(self, request, *, cancellation):
         state = await self.cold_store.load(owner='owner', session_id=_NATIVE_SESSION)
-        record = {'events': [], 'error': None, 'executed': deepcopy(self.executed),
+        record: _NativeRound = {'events': [], 'error': None, 'executed': deepcopy(self.executed),
                   'conversation': deepcopy(state.conversation), 'state': deepcopy(state.to_payload())}
         self.rounds.append(record)
         try:
@@ -548,7 +558,7 @@ def test_anthropic_bounded_invalid_json_rebuilds_original_history_once(mode, thi
         assert executed == [{'query': _NATIVE_HISTORY_QUERY}, {'query': _NATIVE_NEW_QUERY}]
         assert len(recorder.rounds) == 3
         bad, rebuilt, completed = recorder.rounds
-        assert isinstance(bad['error'], ModelProviderError)
+        assert isinstance(bad['error'], UncommittableModelTurn)
         assert bad['error'].reason == 'unreplayable_arguments'
         assert not any(event.type is ModelEventType.FINISH for event in bad['events'])
         assert all(event.provider_state is None for event in bad['events'])
@@ -608,7 +618,7 @@ def test_anthropic_repeated_invalid_json_recovers_only_once(mode, store):
         assert events[-1].type is AgentEventType.TURN_FAILED
         assert executed == [{'query': _NATIVE_HISTORY_QUERY}]
         assert len(recorder.rounds) == 2
-        assert all(isinstance(record['error'], ModelProviderError)
+        assert all(isinstance(record['error'], UncommittableModelTurn)
                    and record['error'].reason == 'unreplayable_arguments' for record in recorder.rounds)
         assert not any(event.type is ModelEventType.FINISH
                        for record in recorder.rounds for event in record['events'])
@@ -633,7 +643,7 @@ def test_anthropic_known_invalid_native_group_never_recovers(mode, defect, store
     async def run():
         executed = []
         cold, original = await _seed_original_native_history(mode, store, executed)
-        blocks = _native_bad_blocks()
+        blocks: list[dict[str, Any]] = _native_bad_blocks()
         if defect == 'too-large':
             blocks[-1]['input'] = '{' + 'x' * 32768
         elif defect == 'too-large-utf8':
@@ -716,7 +726,7 @@ def test_anthropic_valid_object_missing_schema_directly_retries_read(mode, store
         from tests.error30_model_inputs import repair_entries
         executed = []
         cold, original = await _seed_original_native_history(mode, store, executed)
-        blocks = [{'type': 'thinking', 'thinking': 'valid-schema-thinking', 'signature': 'valid-schema-signature'},
+        blocks: list[dict[str, Any]] = [{'type': 'thinking', 'thinking': 'valid-schema-thinking', 'signature': 'valid-schema-signature'},
                   {'type': 'tool_use', 'id': 'schema-rejected-native-call', 'name': 'lookup', 'input': {}}]
         transport = Wire(_NATIVE_PROTOCOL, [_native_response(mode, blocks), _native_response(
                 mode, [{'type': 'tool_use', 'id': 'schema-repair-native-call',

@@ -1,6 +1,9 @@
 """规格补全提交后的持久交接：只重试投递，不重复改名。"""
 from __future__ import annotations
 
+from app.clients.guangya import GuangYaClient
+from typing import cast
+
 import json
 import sqlite3
 from dataclasses import asdict
@@ -29,13 +32,15 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
             conn.execute("DELETE FROM organize_log")
         fixture = probe_fixtures.OrganizeProbeWorkerTests()
         self.log_id = fixture._create_log()
-        self.old_name = str(db.get_organize_log(self.log_id)["current_name"])
+        get_organize_log_result = db.get_organize_log(self.log_id)
+        assert get_organize_log_result is not None
+        self.old_name = str(get_organize_log_result["current_name"])
         self.client = probe_fixtures._ProbeCompletionClient([
             GuangYaFile("video-15", self.old_name, False, 1000, "video-etag", "target-parent"),
             GuangYaFile("subtitle-15", self.old_name.rsplit(".", 1)[0] + ".chs.srt", False, 100, "subtitle-etag", "target-parent"),
         ])
         self.worker = OrganizeProbeWorker()
-        self.worker._client = self.client
+        self.worker._client = cast(GuangYaClient, self.client)
         self.scheduler = Mock()
         self.scheduler.trigger.return_value = {"ok": True, "queued": True}
         self.probe = self.enterContext(patch(
@@ -80,7 +85,9 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
         pending = json.loads(self.row()["pending_strm_changes_json"])
         self.assertEqual(len(self.client.renames), 2)
         self.assertNotEqual(self.client.files["video-15"].name, self.old_name)
-        self.assertEqual(db.get_organize_log(self.log_id)["current_name"], self.client.files["video-15"].name)
+        get_organize_log_result_2 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_2 is not None
+        self.assertEqual(get_organize_log_result_2["current_name"], self.client.files["video-15"].name)
 
         restarted = OrganizeProbeWorker()
         self.probe.side_effect = AssertionError("交接重试不得再次探测")
@@ -98,7 +105,9 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
         self.enqueue()
         observed = []
         def accepted(*args, **kwargs):
-            observed.append((self.row(), dict(db.get_organize_log(self.log_id)), kwargs))
+            get_organize_log_result_7 = db.get_organize_log(self.log_id)
+            assert get_organize_log_result_7 is not None
+            observed.append((self.row(), dict(get_organize_log_result_7), kwargs))
             return {"ok": True, "queued": True}
         self.scheduler.trigger.side_effect = accepted
         self.worker._process_one()
@@ -150,7 +159,9 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
         self.worker._process_one()
         self.scheduler.trigger.assert_not_called()
         self.assertEqual(self.client.files["video-15"].name, self.old_name)
-        self.assertEqual(db.get_organize_log(self.log_id)["current_name"], self.old_name)
+        get_organize_log_result_3 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_3 is not None
+        self.assertEqual(get_organize_log_result_3["current_name"], self.old_name)
         self.assertEqual([dict(item) for item in db.list_organize_log_items(self.log_id)], old_items)
         self.assertEqual(self.row()["pending_strm_changes_json"], "[]")
         self.assertEqual(self.row()["status"], "retry_wait")
@@ -167,7 +178,9 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
             self.worker._process_one()
         self.scheduler.trigger.assert_not_called()
         self.assertEqual(self.client.files["video-15"].name, self.old_name)
-        self.assertEqual(db.get_organize_log(self.log_id)["current_name"], self.old_name)
+        get_organize_log_result_4 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_4 is not None
+        self.assertEqual(get_organize_log_result_4["current_name"], self.old_name)
         self.assertEqual(self.row()["pending_strm_changes_json"], "[]")
         self.assertNotEqual(self.row()["status"], "completed")
 
@@ -214,7 +227,9 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
                     log_id, current_name="new-name", new_path="new-path", item_updates=updates,
                     job_id=self.job_id, owner=owner, changes=[{"file_id": "video-15"}],
                 ))
-                self.assertEqual(db.get_organize_log(self.log_id)["current_name"], self.old_name)
+                get_organize_log_result_5 = db.get_organize_log(self.log_id)
+                assert get_organize_log_result_5 is not None
+                self.assertEqual(get_organize_log_result_5["current_name"], self.old_name)
                 self.assertEqual(self.row()["pending_strm_changes_json"], "[]")
 
     def test_completion_without_handoff_ack_cannot_discard_pending(self):
@@ -251,7 +266,9 @@ class OrganizeProbeHandoffTests(IsolatedDatabaseTestCase):
                 "WHERE organize_log_id=NEW.id; END"
             )
         self.worker._process_one()
-        self.assertEqual(db.get_organize_log(self.log_id)["current_name"], self.old_name)
+        get_organize_log_result_6 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_6 is not None
+        self.assertEqual(get_organize_log_result_6["current_name"], self.old_name)
         self.assertEqual(self.client.files["video-15"].name, self.old_name)
         self.assertEqual(self.row()["pending_strm_changes_json"], "[]")
         self.assertEqual(self.row()["status"], "retry_wait")

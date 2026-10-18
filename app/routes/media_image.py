@@ -1,11 +1,11 @@
 """媒体服务器图片代理：为严格 CSP 提供同源海报地址。"""
 from __future__ import annotations
 
-from collections import OrderedDict
 import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 
 import requests
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -27,7 +27,7 @@ def _missing_image_cache_key(
     request: Request, server: str, base_url: str, item_id: str,
 ) -> tuple[str, str, str, str]:
     # 图片 tag 会在 Jellyfin 刷新海报后变化，把它纳入缓存键可避免旧缺图结果误伤新图。
-    image_tag = str(request.query_params.get("tag") or "")[:128]
+    image_tag = (request.query_params.get("tag") or "")[:128]
     return server, base_url, item_id, image_tag
 
 

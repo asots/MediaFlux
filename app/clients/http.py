@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -155,15 +155,15 @@ class FixedHostHttpClient:
         allowed_hosts: set[str] | frozenset[str],
         timeout_seconds: float = 10,
         get_timeout_retries: int = 1,
-        max_response_bytes: int = 2 * 1024 * 1024,
-        max_redirects: int = 3,
+        max_response_bytes: float = 2 * 1024 * 1024,
+        max_redirects: float = 3,
         user_agent: str = "MediaFlux/1.0",
         transport: httpx.AsyncBaseTransport | None = None,
         resolver: Resolver | None = None,
         pin_resolved_address: bool = False,
         require_identity_encoding: bool = False,
     ):
-        hosts = frozenset(str(host).strip().rstrip(".").lower() for host in allowed_hosts if str(host).strip())
+        hosts = frozenset(host.strip().rstrip(".").lower() for host in allowed_hosts if host.strip())
         if not hosts:
             raise ValueError("allowed_hosts cannot be empty")
         if (timeout_seconds <= 0 or max_response_bytes <= 0 or max_redirects < 0
@@ -173,8 +173,8 @@ class FixedHostHttpClient:
         self.max_response_bytes = int(max_response_bytes)
         self.max_redirects = int(max_redirects)
         self._resolver = resolver or self._default_resolver
-        self.pin_resolved_address = bool(pin_resolved_address)
-        self.require_identity_encoding = bool(require_identity_encoding)
+        self.pin_resolved_address = pin_resolved_address
+        self.require_identity_encoding = require_identity_encoding
         self.get_timeout_retries = get_timeout_retries
         if transport is None:
             # 部分站点边缘节点TCP 握手存在间歇性丢包，
@@ -230,7 +230,8 @@ class FixedHostHttpClient:
         headers: Mapping[str, str] | None = None,
         max_redirects: int | None = None,
     ) -> HttpResponse:
-        for attempt in range(self.get_timeout_retries + 1):
+        attempt = 0
+        while True:
             try:
                 return await self._request(
                     "GET", url, params=params, headers=headers, max_redirects=max_redirects
@@ -238,6 +239,7 @@ class FixedHostHttpClient:
             except httpx.TimeoutException:
                 if attempt == self.get_timeout_retries:
                     raise
+                attempt += 1
 
     async def post_form(
         self,
@@ -272,7 +274,7 @@ class FixedHostHttpClient:
         json: Mapping[str, Any],
         headers: Mapping[str, str] | None = None,
         max_redirects: int | None = None,
-    ) -> AsyncIterator[HttpStreamResponse]:
+    ) -> AsyncGenerator[HttpStreamResponse, None]:
         """以与普通请求相同的 SSRF/DNS 约束暴露有界 POST 响应流。"""
         redirect_limit = self.max_redirects if max_redirects is None else max_redirects
         if redirect_limit < 0:
@@ -344,7 +346,7 @@ class FixedHostHttpClient:
         headers: Mapping[str, str] | None = None,
         max_redirects: int | None = None,
     ) -> HttpResponse:
-        verb = str(method or "").upper()
+        verb = (method or "").upper()
         if verb not in {"GET", "POST"}:
             raise ValueError("unsupported HTTP method")
         redirect_limit = self.max_redirects if max_redirects is None else max_redirects
@@ -443,7 +445,7 @@ class FixedHostHttpClient:
     def _resolve(self, host: str, port: int) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
         try:
             records = self._resolver(host, port)
-        except (OSError, socket.gaierror) as exc:
+        except OSError as exc:
             raise HttpSecurityError("upstream DNS resolution failed") from exc
         addresses = []
         for record in records:
@@ -475,15 +477,15 @@ class BrowserImpersonatingHttpClient:
         *,
         allowed_hosts: set[str] | frozenset[str],
         timeout_seconds: float = 15,
-        max_response_bytes: int = 2 * 1024 * 1024,
-        max_redirects: int = 3,
+        max_response_bytes: float = 2 * 1024 * 1024,
+        max_redirects: float = 3,
         resolver: Resolver | None = None,
         session_factory=None,
         sni_host: str = "",
         warmup_url: str = "",
         cookies: Mapping[str, str] | None = None,
     ):
-        hosts = frozenset(str(host).strip().rstrip(".").lower() for host in allowed_hosts if str(host).strip())
+        hosts = frozenset(host.strip().rstrip(".").lower() for host in allowed_hosts if host.strip())
         if not hosts or timeout_seconds <= 0 or max_response_bytes <= 0 or max_redirects < 0:
             raise ValueError("invalid browser HTTP client bounds")
         self.allowed_hosts = hosts
@@ -491,11 +493,11 @@ class BrowserImpersonatingHttpClient:
         self.max_response_bytes = int(max_response_bytes)
         self.max_redirects = int(max_redirects)
         self._resolver = resolver or FixedHostHttpClient._default_resolver
-        self.sni_host = str(sni_host or "").strip().rstrip(".").lower()
+        self.sni_host = (sni_host or "").strip().rstrip(".").lower()
         if self.sni_host and self.sni_host not in hosts:
             raise ValueError("sni_host must be included in allowed_hosts")
-        self.warmup_url = str(warmup_url or "").strip()
-        self._cookies = {str(key): str(value) for key, value in dict(cookies or {}).items() if str(key)}
+        self.warmup_url = (warmup_url or "").strip()
+        self._cookies = {key: value for key, value in dict(cookies or {}).items() if key}
         self._session_factory = session_factory or self._default_session_factory
         self._session = None
         self._lock = CrossLoopAsyncLock()
@@ -558,6 +560,8 @@ class BrowserImpersonatingHttpClient:
         raise HttpSecurityError("redirect limit exceeded")
 
     def _request_once(self, logical_url: httpx.URL, params, headers) -> HttpResponse:
+        session = self._session
+        assert session is not None
         logical_addresses = self._validated_addresses(logical_url)
         request_url = logical_url
         request_headers = dict(headers or {})
@@ -574,14 +578,14 @@ class BrowserImpersonatingHttpClient:
             from curl_cffi.curl import CURL_WRITEFUNC_ERROR
         except ImportError as exc:  # pragma: no cover - 默认 session 已要求 curl_cffi
             raise RuntimeError("curl_cffi is required for browser indexer transport") from exc
-        if not hasattr(self._session, "curl_options"):
-            self._session.curl_options = {}
-        previous_resolve = self._session.curl_options.get(CurlOpt.RESOLVE)
-        connect_host = str(request_url.host or "")
+        if not hasattr(session, "curl_options"):
+            session.curl_options = {}
+        previous_resolve = session.curl_options.get(CurlOpt.RESOLVE)
+        connect_host = (request_url.host or "")
         connect_address = str(connect_addresses[0])
         if ":" in connect_address:
             connect_address = f"[{connect_address}]"
-        self._session.curl_options[CurlOpt.RESOLVE] = [
+        session.curl_options[CurlOpt.RESOLVE] = [
             f"{connect_host}:443:{connect_address}"
         ]
         body = bytearray()
@@ -602,7 +606,7 @@ class BrowserImpersonatingHttpClient:
 
         try:
             try:
-                response = self._session.get(
+                response = session.get(
                     str(request_url),
                     params=params,
                     headers=request_headers,
@@ -623,9 +627,9 @@ class BrowserImpersonatingHttpClient:
                 raise
         finally:
             if previous_resolve is None:
-                self._session.curl_options.pop(CurlOpt.RESOLVE, None)
+                session.curl_options.pop(CurlOpt.RESOLVE, None)
             else:
-                self._session.curl_options[CurlOpt.RESOLVE] = previous_resolve
+                session.curl_options[CurlOpt.RESOLVE] = previous_resolve
         response_headers = {str(key).lower(): str(value) for key, value in dict(response.headers or {}).items()}
         bounded_body = bytes(body)
         # 测试替身或旧 curl_cffi 若未调用 content_callback，仍保持兼容；
@@ -662,7 +666,7 @@ class BrowserImpersonatingHttpClient:
         try:
             records = self._resolver(host, 443)
             addresses = [ipaddress.ip_address(record[4][0]) for record in records]
-        except (OSError, socket.gaierror, IndexError, TypeError, ValueError) as exc:
+        except (OSError, IndexError, TypeError, ValueError) as exc:
             raise HttpSecurityError("upstream DNS validation failed") from exc
         if not addresses or any(not address.is_global for address in addresses):
             raise HttpSecurityError("upstream host resolved to a non-public address")

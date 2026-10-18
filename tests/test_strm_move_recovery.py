@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import subprocess
 import sqlite3
 import sys
@@ -44,7 +47,7 @@ class MoveCloud(PagedDirectoryTestMixin):
 
 def sync(root, location="Old", source="source", **kwargs):
     return strm.sync_strm(
-        source, BASE_URL, str(root), client=MoveCloud(location, source), **kwargs
+        source, BASE_URL, str(root), client=cast(GuangYaClient, MoveCloud(location, source)), **kwargs
     )
 
 
@@ -265,7 +268,7 @@ class StrmMoveRecoveryTests(unittest.TestCase):
                 return original(fid)
 
             cloud.list_dir = entries
-            stats = strm.sync_strm("source", BASE_URL, root, client=cloud)
+            stats = strm.sync_strm("source", BASE_URL, root, client=cast(GuangYaClient, cloud))
             self.assertTrue(old.is_file())
             self.assertTrue(stats["clean_skipped"])
             self.assertEqual(stats["generated"], 0)
@@ -344,7 +347,7 @@ class StrmMoveRecoveryTests(unittest.TestCase):
                 ]
 
                 def execute(**kwargs):
-                    return strm.sync_strm(client=MoveCloud("New", "other"), **kwargs)
+                    return strm.sync_strm(client=cast(GuangYaClient, MoveCloud("New", "other")), **kwargs)
 
                 with (
                     patch(
@@ -386,7 +389,7 @@ class StrmMoveRecoveryTests(unittest.TestCase):
                 "size": 100,
             }
             stats = strm.sync_strm_incremental(
-                "source", [change], BASE_URL, root, client=MoveCloud("New")
+                "source", [change], BASE_URL, root, client=cast(GuangYaClient, MoveCloud("New"))
             )
             self.assertFalse(stats["fallback_required"], stats)
             self.assertFalse(old.exists())
@@ -533,12 +536,12 @@ class StrmMoveRecoveryTests(unittest.TestCase):
                 return real_delete(path, rows, action)
 
             with patch.object(strm, "_delete_owned_file", side_effect=permission_error):
-                stats = strm.sync_strm("source", BASE_URL, root, client=cloud)
+                stats = strm.sync_strm("source", BASE_URL, root, client=cast(GuangYaClient, cloud))
             self.assertTrue(old.exists())
             self.assertEqual(stats["generated"], 1)
             self.assertTrue(stats["clean_skipped"], stats)
             self.assertTrue(stats["error_samples"], stats)
-            retry = strm.sync_strm("source", BASE_URL, root, client=cloud)
+            retry = strm.sync_strm("source", BASE_URL, root, client=cast(GuangYaClient, cloud))
             self.assertFalse(old.exists(), retry)
             self.assertFalse(retry["clean_skipped"], retry)
 

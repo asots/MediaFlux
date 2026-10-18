@@ -5,6 +5,7 @@ import unittest
 from urllib.parse import urlsplit
 
 import requests
+from requests.structures import CaseInsensitiveDict
 
 from app.clients.douban_authenticated import (
     DoubanAuthenticatedClient,
@@ -24,11 +25,11 @@ class CapturingSession(requests.Session):
         self.prepared_requests.append(request)
         response = requests.Response()
         response.status_code = 200
-        response.headers = {"Content-Type": "application/json; charset=utf-8"}
+        response.headers = CaseInsensitiveDict({"Content-Type": "application/json; charset=utf-8"})
         response.url = request.url
         response.request = request
         response._content = json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
-        response._content_consumed = True
+        setattr(response, "_content_consumed", True)
         return response
 
 
@@ -48,11 +49,11 @@ class AuthStatusSession(requests.Session):
             raise self.error
         response = requests.Response()
         response.status_code = self.status_code
-        response.headers = self.response_headers
+        response.headers = CaseInsensitiveDict(self.response_headers)
         response.url = request.url
         response.request = request
         response._content = self.body
-        response._content_consumed = True
+        setattr(response, "_content_consumed", True)
         return response
 
 

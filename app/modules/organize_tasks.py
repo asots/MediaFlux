@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import datetime
@@ -17,8 +18,9 @@ from typing import Any, Callable
 
 from app import config
 from app import database as db
-from app.clients.guangya import close_guangya_client
+from app.clients.guangya import GuangYaClient, close_guangya_client
 from app.logger import get_logger
+from app.modules.directory_scrape import PreviewSnapshotGuangYaClient
 from app.modules.directory_scrape_errors import (
     DirectoryScrapePublicError,
     public_error_message,
@@ -77,10 +79,10 @@ class _OrderedSourceWriteCoordinator:
         self._writer = threading.Lock()
         self._next_index = 0
         self._completed: set[int] = set()
-        self._source_count = max(0, int(source_count))
+        self._source_count = max(0, source_count)
 
     def gate(self, source_index: int) -> "_OrderedSourceWriteGate":
-        return _OrderedSourceWriteGate(self, int(source_index))
+        return _OrderedSourceWriteGate(self, source_index)
 
     def acquire(self, source_index: int) -> None:
         with self._condition:
@@ -93,7 +95,7 @@ class _OrderedSourceWriteCoordinator:
 
     def complete(self, source_index: int) -> None:
         with self._condition:
-            self._completed.add(int(source_index))
+            self._completed.add(source_index)
             while (
                 self._next_index < self._source_count
                 and self._next_index in self._completed
@@ -105,7 +107,7 @@ class _OrderedSourceWriteCoordinator:
 class _OrderedSourceWriteGate:
     def __init__(self, coordinator: _OrderedSourceWriteCoordinator, source_index: int):
         self._coordinator = coordinator
-        self._source_index = int(source_index)
+        self._source_index = source_index
 
     def acquire(self) -> bool:
         self._coordinator.acquire(self._source_index)
@@ -135,7 +137,7 @@ def _unresolved_skip_count(plans: Any) -> int:
     )
 
 
-def _merge_source_stats(aggregate: dict[str, object], stats: dict[str, Any]) -> None:
+def _merge_source_stats(aggregate: dict[str, Any], stats: dict[str, Any]) -> None:
     """稳定合并单来源统计，供串行与并行调度复用。"""
     aggregate["scan_complete"] = bool(
         aggregate.get("scan_complete", True) and stats.get("scan_complete", True)
@@ -207,7 +209,7 @@ def _credential_snapshot_is_current(client: Any, expected_generation: int | None
         logged_in = bool(getattr(client, "logged_in", False))
     except Exception:
         return False
-    return logged_in and generation == int(expected_generation)
+    return logged_in and generation == expected_generation
 
 
 def _publish_download_lifecycles(
@@ -223,7 +225,7 @@ def _publish_download_lifecycles(
 
         for request_id in request_ids:
             accepted = bool(
-                publish_download_lifecycle(int(request_id), stats=stats)
+                publish_download_lifecycle(request_id, stats=stats)
             ) and accepted
     except Exception as exc:
         logger.warning(
@@ -248,8 +250,8 @@ def _protected_organize_root_ids(rules: OrganizeRules) -> tuple[set[str], str]:
     sources, error = normalize_organize_sources(
         config.get("GY_ORGANIZE_SOURCE_DIRS", "")
     )
-    protected = {"0", str(rules.target_dir_id or "").strip()}
-    protected.update(str(item.get("id") or "").strip() for item in sources)
+    protected = {"0", (rules.target_dir_id or "").strip()}
+    protected.update((item.get("id") or "").strip() for item in sources)
     try:
         protected.update(db.list_protected_guangya_staging_ids())
     except Exception as exc:
@@ -266,9 +268,9 @@ def _protected_source_ids(
 ) -> set[str]:
     """合并本轮来源与所有活动下载隔离目录，阻止跨任务误删。"""
     protected = {
-        str(source.get("id") or "").strip()
+        (source.get("id") or "").strip()
         for source in sources
-        if str(source.get("id") or "").strip()
+        if (source.get("id") or "").strip()
     }
     protected.update(db.list_protected_guangya_staging_ids() if staging_ids is None else staging_ids)
     return protected
@@ -299,7 +301,7 @@ def _cleanup_manual_source_root(
         )
         return
 
-    source_id = str(source_id or "").strip()
+    source_id = (source_id or "").strip()
     protected, error = _protected_organize_root_ids(rules)
     if error:
         stats["source_dir_cleanup_skipped"] = int(
@@ -396,7 +398,7 @@ class OrganizeTaskManager:
         *,
         trigger_type: str = "manual",
         chat_id: str = "",
-        download_request_ids: list[int] | None = None,
+        download_request_ids: Sequence[int | str | float] | None = None,
         client: Any | None = None,
         expected_credential_generation: int | None = None,
         take_client_ownership: bool = False,
@@ -410,7 +412,7 @@ class OrganizeTaskManager:
         except (TypeError, ValueError):
             return {"ok": False, "error": "下载请求标识无效"}
         task_id = uuid.uuid4().hex
-        owns_client = client is None or bool(take_client_ownership)
+        owns_client = client is None or take_client_ownership
 
         self._admission_lock.acquire()
         with self._state_lock:
@@ -490,10 +492,10 @@ class OrganizeTaskManager:
                 close = getattr(validator, "close", None)
                 if callable(close):
                     close()
-        run_id = 0
+        run_id: int = 0
         task_initialized = False
         try:
-            resolved_chat_id = str(chat_id or "").strip()
+            resolved_chat_id = (chat_id or "").strip()
             if not resolved_chat_id and request_ids:
                 try:
                     request_row = db.get_download_request(request_ids[0])
@@ -538,7 +540,7 @@ class OrganizeTaskManager:
                     "stoppable": True,
                     "sources": sources,
                     "rules": rules,
-                    "chat_id": str(chat_id or "").strip(),
+                    "chat_id": (chat_id or "").strip(),
                     "current_source": "",
                     "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "finished_at": "",
@@ -564,9 +566,9 @@ class OrganizeTaskManager:
                     run_id,
                     sources,
                     rules,
-                    str(chat_id or "").strip(),
+                    (chat_id or "").strip(),
                     request_ids,
-                    str(trigger_type or "manual").strip().lower(),
+                    (trigger_type or "manual").strip().lower(),
                     client,
                     expected_credential_generation,
                     owns_client,
@@ -684,7 +686,7 @@ class OrganizeTaskManager:
         require_running: bool = False,
     ) -> dict:
         """协作式停止任务；可选原子校验任务身份与运行态。"""
-        expected_id = str(expected_task_id or "").strip()
+        expected_id = (expected_task_id or "").strip()
         with self._state_lock:
             current_id = str(self._task.get("id") or "").strip()
             if expected_id and current_id != expected_id:
@@ -741,12 +743,12 @@ class OrganizeTaskManager:
 
     def task_result(self, task_id: str, *, owner: str | None = None) -> dict | None:
         """按任务 ID 查询当前或近期终态；公开编号必须绑定调用主体。"""
-        expected = str(task_id or "").strip()
+        expected = (task_id or "").strip()
         if not expected:
             return None
         public_reference = expected.upper().startswith("GY-")
         if public_reference:
-            if not str(owner or "").strip():
+            if not (owner or "").strip():
                 return None
             try:
                 expected = organize_operation_job_id_from_public_ref(expected)
@@ -754,7 +756,7 @@ class OrganizeTaskManager:
                 return None
         owner_digest = (
             organize_operation_owner_digest(str(owner))
-            if str(owner or "").strip() else ""
+            if (owner or "").strip() else ""
         )
         with self._state_lock:
             for task in (self._task, *self._task_history):
@@ -780,7 +782,7 @@ class OrganizeTaskManager:
             return None
         try:
             persisted_result = json.loads(str(row["result_json"] or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             persisted_result = {}
         status = str(row["status"] or "")
         public_status = "queued" if status == "pending" else status
@@ -848,8 +850,8 @@ class OrganizeTaskManager:
                     # permanent辅助方法也含活动隔离根；专用收尾单独按请求解保护。
                     permanent_ids -= staging_ids
                     configured_sources, _ = normalize_organize_sources(config.get("GY_ORGANIZE_SOURCE_DIRS", ""))
-                    permanent_ids.update(str(item["id"]) for item in configured_sources)
-                    permanent_ids.update({"0", str(rules.target_dir_id or "0")})
+                    permanent_ids.update(item["id"] for item in configured_sources)
+                    permanent_ids.update({"0", (rules.target_dir_id or "0")})
                     protected_source_ids = _protected_source_ids(sources) | permanent_ids
                     direct_root = sources[0]["id"] if len(sources) == 1 and sources[0]["id"] in staging_ids else ""
                     rows = list_staging_cleanup_requests(source_id=direct_root)
@@ -869,7 +871,7 @@ class OrganizeTaskManager:
                         specialized = cleanup_download_staging(
                             organizer.client, [int(row["id"]) for row in selected],
                             source_ids=selected_ids, protected_ids=permanent_ids,
-                            scope_ids={str(source["id"])},
+                            scope_ids={source["id"]},
                         )
                         merge_cleanup_report(report, specialized)
                         handled.update(selected_ids)
@@ -879,12 +881,12 @@ class OrganizeTaskManager:
                                 report["protected"] += 1
                                 report["reasons"].append("所选目录位于受保护下载范围内，已保留")
                         else:
-                            ordinary = organizer.clean_empty_dirs(
+                            ordinary: dict[str, Any] | int = organizer.clean_empty_dirs(
                                 source["id"], with_report=True, with_diagnostics=True,
                                 protected_source_ids=protected_source_ids,
                             )
                             if not isinstance(ordinary, dict):
-                                ordinary = {"cleaned": int(ordinary or 0)}
+                                ordinary = {"cleaned": (ordinary or 0)}
                             already_reported = set(ordinary.pop("_protected_directory_ids", [])) & handled
                             old_scope_reason = ordinary.pop("_protected_scope_reason", "")
                             if already_reported:
@@ -929,9 +931,9 @@ class OrganizeTaskManager:
         ``queue_if_busy``，在同一进程内按 FIFO 串行执行，避免快速连续
         提交时让用户反复等待和重试。
         """
-        operation = str(operation or "操作").strip() or "操作"
-        reference = str(reference or "").strip()
-        dedupe_key = str(dedupe_key or "").strip()
+        operation = (operation or "操作").strip() or "操作"
+        reference = (reference or "").strip()
+        dedupe_key = (dedupe_key or "").strip()
         task_id = uuid.uuid4().hex
         with self._admission_lock:
             with self._state_lock:
@@ -1031,8 +1033,8 @@ class OrganizeTaskManager:
         云端写操作只有在同一把跨进程锁确认空闲后才收束为 ``manual_review``，
         避免误判仍存活的执行者，也避免对未知远端副作用盲目重放。
         """
-        operation = str(operation or "操作").strip() or "操作"
-        reference = str(reference or "").strip()
+        operation = (operation or "操作").strip() or "操作"
+        reference = (reference or "").strip()
         with self._admission_lock:
             with self._state_lock:
                 if self._shutting_down:
@@ -1199,7 +1201,7 @@ class OrganizeTaskManager:
             raise ValueError("持久化操作参数完整性校验失败")
         try:
             payload = json.loads(str(row.get("payload_json") or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError("持久化操作参数损坏") from exc
         if not isinstance(payload, dict):
             raise ValueError("持久化操作参数损坏")
@@ -1575,8 +1577,8 @@ class OrganizeTaskManager:
                             str(durable_row["created_at"] or ""),
                             str(durable_row["job_id"] or ""),
                         ) if durable_row is not None else None
-                        launch_memory = bool(
-                            memory_item is not None
+                        launch_memory = (
+                            memory_key is not None
                             and (durable_key is None or memory_key <= durable_key)
                         )
                         if launch_memory:
@@ -1674,7 +1676,7 @@ class OrganizeTaskManager:
         expected_credential_generation: int | None = None,
         owns_client: bool = False,
     ) -> None:
-        aggregate: dict[str, object] = {}
+        aggregate: dict[str, Any] = {}
         source_results = []
         current_source = ""
         organizer = None
@@ -1687,20 +1689,20 @@ class OrganizeTaskManager:
             worker_budget = resolve_organize_workers()
             source_worker_count = min(worker_budget, max(1, len(sources)))
             source_rules = [
-                rules.for_source(str(source.get("id") or ""))
+                rules.for_source(source.get("id") or "")
                 for source in sources
             ]
             from app.modules.organize_probe_notifications import (
                 build_notification_context,
             )
 
-            chat_id = str(chat_id or config.get("TG_CHAT_ID", "") or "").strip()
+            chat_id = (chat_id or config.get("TG_CHAT_ID", "") or "").strip()
             request_sources: dict[int, str] = {}
             for request_id in download_request_ids or []:
                 try:
-                    row = db.get_download_request(int(request_id))
+                    row = db.get_download_request(request_id)
                     if row is not None:
-                        request_sources[int(request_id)] = str(row["gy_target_dir"] or "")
+                        request_sources[request_id] = str(row["gy_target_dir"] or "")
                 except Exception as exc:
                     # 通知身份读取失败不能改写整理业务结果，更不能猜测私聊归属。
                     logger.warning("冻结补全通知归属失败 type=%s", type(exc).__name__)
@@ -1710,10 +1712,10 @@ class OrganizeTaskManager:
                     chat_id=chat_id,
                     download_request_ids=[
                         request_id for request_id, source_id in request_sources.items()
-                        if source_id == str(source.get("id") or "")
+                        if source_id == (source.get("id") or "")
                     ],
                     notify_enabled=source_rule.notify_enabled and (
-                        not download_request_ids or str(source.get("id") or "") in request_sources.values()
+                        not download_request_ids or (source.get("id") or "") in request_sources.values()
                     ),
                     topic_enabled=source_rule.notify_enabled and source_rule.library_notify,
                 )
@@ -1752,10 +1754,10 @@ class OrganizeTaskManager:
             )
             task_runtime = OrganizeTaskRuntime()
             source_runtime_lock = threading.Lock()
-            source_runtime = [
+            source_runtime: list[dict[str, Any]] = [
                 {
                     "index": index,
-                    "name": str(source.get("name") or source.get("id") or ""),
+                    "name": (source.get("name") or source.get("id") or ""),
                     "status": "pending",
                     "progress": {},
                     "groups": [],
@@ -1826,7 +1828,7 @@ class OrganizeTaskManager:
             ) -> tuple[int, dict[str, str], dict[str, Any] | None, Exception | None]:
                 local_organizer = source_organizer
                 owns_local_organizer = False
-                source_name = str(source.get("name") or source.get("id") or "")
+                source_name = (source.get("name") or source.get("id") or "")
                 source_execution_gate = (
                     execution_order.gate(index) if execution_order is not None else None
                 )
@@ -1911,7 +1913,7 @@ class OrganizeTaskManager:
                 result: tuple[
                     int, dict[str, str], dict[str, Any] | None, Exception | None
                 ],
-                completed: dict[int, dict[str, object]],
+                completed: dict[int, dict[str, Any]],
                 failures: list[tuple[int, dict[str, str], Exception]],
             ) -> None:
                 index, source, stats, error = result
@@ -1928,7 +1930,7 @@ class OrganizeTaskManager:
                     if self._task.get("id") == task_id:
                         self._task["stats"] = dict(aggregate)
 
-            completed_sources: dict[int, dict[str, object]] = {}
+            completed_sources: dict[int, dict[str, Any]] = {}
             source_failures: list[tuple[int, dict[str, str], Exception]] = []
             if source_worker_count <= 1:
                 for index, source in enumerate(sources):
@@ -1967,11 +1969,11 @@ class OrganizeTaskManager:
                             wait=True, cancel_futures=True,
                         )
 
-            failed_sources: dict[int, dict[str, object]] = {}
+            failed_sources: dict[int, dict[str, Any]] = {}
             if source_failures:
                 source_failures.sort(key=lambda item: item[0])
                 for index, failed_source, failure in source_failures:
-                    source_name = str(
+                    source_name = (
                         failed_source.get("name") or failed_source.get("id") or "未知来源"
                     )
                     failed_sources[index] = {
@@ -2005,7 +2007,7 @@ class OrganizeTaskManager:
             )
             if source_failures and not completed_sources:
                 _index, failed_source, failure = source_failures[0]
-                current_source = str(
+                current_source = (
                     failed_source.get("name") or failed_source.get("id") or ""
                 )
                 raise failure
@@ -2015,7 +2017,7 @@ class OrganizeTaskManager:
 
                 resumed = resume_relocated_staging(
                     organizer.client, aggregate,
-                    source_ids={str(source['id']) for source in sources},
+                    source_ids={source['id'] for source in sources},
                     nsfw_source_ids=rules.selected_nsfw_source_ids() if rules.nsfw_enabled else set(),
                 )
                 if resumed:
@@ -2044,18 +2046,18 @@ class OrganizeTaskManager:
                     for key in ("need_confirm", "unresolved_skipped", "moved"):
                         root_stats[key] = root_stats.get(key, 0) + max(0, int(source_stats.get(key) or 0))
                 for request_id in download_request_ids or []:
-                    request_row = db.get_download_request(int(request_id))
+                    request_row = db.get_download_request(request_id)
                     if request_row is None:
                         continue
                     source_stats = stats_by_root.get(str(request_row["gy_target_dir"] or ""), {})
-                    unresolved = max(0, int(source_stats.get("unresolved_skipped") or 0))
+                    unresolved = max(0, (source_stats.get("unresolved_skipped") or 0))
                     if unresolved:
-                        unresolved_downloads[int(request_id)] = (
-                            unresolved, max(0, int(source_stats.get("moved") or 0)),
+                        unresolved_downloads[request_id] = (
+                            unresolved, max(0, (source_stats.get("moved") or 0)),
                         )
-                    pending_count = max(0, int(source_stats.get("need_confirm") or 0))
-                    if not partial and pending_count and mark_staging_waiting_confirmation(int(request_id), task_id, pending_count):
-                        pending_downloads[int(request_id)] = pending_count
+                    pending_count = max(0, (source_stats.get("need_confirm") or 0))
+                    if not partial and pending_count and mark_staging_waiting_confirmation(request_id, task_id, pending_count):
+                        pending_downloads[request_id] = pending_count
             notification_sent = False
             if source_results or stopped:
                 # 通知 outbox 用任务 ID 作为幂等键，重试不会重复发送汇总。
@@ -2082,14 +2084,14 @@ class OrganizeTaskManager:
                         source_name=f"{len(source_results)} 个源目录",
                         chat_id=chat_id,
                     )
-                    notification_sent = bool(lifecycle_sent and confirmations_sent)
+                    notification_sent = (lifecycle_sent and confirmations_sent)
                 else:
-                    notification_sent = bool(Organizer.notify_task_results(
+                    notification_sent = Organizer.notify_task_results(
                         aggregate,
                         rules,
                         source_name=f"{len(source_results)} 个源目录",
                         chat_id=chat_id,
-                    ))
+                    )
             status = "stopped" if stopped else ("partial" if partial else "completed")
             message = (
                 "整理任务已停止" if stopped
@@ -2104,7 +2106,7 @@ class OrganizeTaskManager:
                     message += f"；已恢复 {len(aggregate['resumed_download_ids'])} 个下载整理任务，等待后台落稳核验"
             finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if status == "completed":
-                cleanup = self._cleanup_download_staging(organizer, download_request_ids or [], sources, rules=rules)
+                cleanup = self._cleanup_download_staging(organizer.client, download_request_ids or [], sources, rules=rules)
                 if isinstance(cleanup, dict):
                     aggregate["empty_dirs_cleaned"] = int(aggregate.get("empty_dirs_cleaned") or 0) + int(cleanup.get("cleaned") or 0)
                     for reason in cleanup.get("reasons", []):
@@ -2140,7 +2142,7 @@ class OrganizeTaskManager:
                     "result": structured_result,
                 })
             for request_id in download_request_ids or []:
-                fields = {
+                fields: dict[str, Any] = {
                     "organize_status": "requires_manual" if request_id in pending_downloads else request_base_status,
                     "organize_error": (f"仍有 {pending_downloads[request_id]} 项媒体等待人工确认"
                                        if request_id in pending_downloads else ""),
@@ -2334,7 +2336,7 @@ class OrganizeTaskManager:
 
     @staticmethod
     def _cleanup_download_staging(
-        organizer: Organizer, request_ids: list[int], sources: list[dict[str, str]],
+        client: GuangYaClient | PreviewSnapshotGuangYaClient | None, request_ids: list[int], sources: list[dict[str, str]],
         *, rules: OrganizeRules | None = None,
         expected_identities: dict[int, dict] | None = None,
     ) -> dict:
@@ -2351,10 +2353,10 @@ class OrganizeTaskManager:
         configured, config_error = normalize_organize_sources(config.get("GY_ORGANIZE_SOURCE_DIRS", ""))
         if config_error:
             raise ValueError(config_error)
-        protected.update(str(item["id"]) for item in configured)
-        protected.update({"0", str(current_rules.target_dir_id or "0")})
+        protected.update(item["id"] for item in configured)
+        protected.update({"0", (current_rules.target_dir_id or "0")})
         return cleanup_download_staging(
-            organizer.client, request_ids, source_ids={str(item["id"]) for item in sources},
+            client, request_ids, source_ids={item["id"] for item in sources},
             protected_ids=protected, enabled=current_rules.clean_empty, allow_running=True,
             expected_identities=expected_identities,
         )

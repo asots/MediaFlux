@@ -4,9 +4,9 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-import re
 from typing import Iterable, Mapping, Sequence
 
 from app.logger import redact_sensitive_text
@@ -71,7 +71,7 @@ def relative_change(
     target: str | Path,
     strm_root: str | Path,
     *,
-    error: str = "",
+    error: object = "",
 ) -> StrmChange:
     """将目标文件转换为相对于 ``光鸭云盘`` 根的安全变化记录。"""
     target_path = Path(target)
@@ -95,7 +95,7 @@ def relative_change(
 def append_change(stats: dict, change: StrmChange | Mapping[str, object], *, limit: int = 5000) -> None:
     """向统计结果追加有界变化记录，超限只累计省略数量。"""
     changes = stats.setdefault("changes", [])
-    if len(changes) >= max(0, int(limit)):
+    if len(changes) >= max(0, limit):
         stats["omitted_count"] = int(stats.get("omitted_count", 0) or 0) + 1
         return
     if isinstance(change, StrmChange):
@@ -196,8 +196,8 @@ def build_strm_detail_messages(
     items = _normalize(changes)
     if not items:
         return []
-    max_items = max(1, int(max_items or 20))
-    max_length = max(400, int(max_length or 2600))
+    max_items = max(1, (max_items or 20))
+    max_length = max(400, (max_length or 2600))
     chunks = _chunk_by_length(
         items,
         max_items=max_items,
@@ -206,9 +206,9 @@ def build_strm_detail_messages(
     )
     total = len(items)
     pages = len(chunks)
-    limit = max(0, int(max_messages or 0))
+    limit = max(0, (max_messages or 0))
     if limit and pages > limit:
-        omitted = int(omitted_count or 0)
+        omitted = (omitted_count or 0)
         summary = (
             f"📄 {source_tag} · STRM 变化明细\n"
             f"本轮共 {total} 条变化，预计需要 {pages} 条消息，已超过上限 {limit} 条。\n"
@@ -229,7 +229,7 @@ def build_strm_detail_messages(
             source_tag=source_tag,
         )
         if page == pages and omitted_count:
-            message += f"\n\n⚠️ 另有 {int(omitted_count)} 条变化因数量上限未展示"
+            message += f"\n\n⚠️ 另有 {omitted_count} 条变化因数量上限未展示"
         messages.append(message[:max_length])
         start += len(chunk)
     return messages

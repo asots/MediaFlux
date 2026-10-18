@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import math
 import secrets
+import sqlite3
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, overload
 
 from app import database as db
 from app.modules.process_lock import CrossProcessLock
@@ -44,12 +46,20 @@ def _decode_settings(value: object) -> dict[str, Any] | None:
         settings = json.loads(
             value, parse_float=_finite_json_number, parse_constant=_finite_json_number
         )
-    except (ValueError, TypeError, RecursionError, UnicodeError):
+    except (ValueError, TypeError, RecursionError):
         return None
     return settings if isinstance(settings, dict) else None
 
 
-def _row(row: Any) -> dict[str, Any] | None:
+@overload
+def _row(row: None) -> None: ...
+
+
+@overload
+def _row(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]: ...
+
+
+def _row(row: sqlite3.Row | Mapping[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
     item = dict(row)
@@ -241,7 +251,7 @@ def claim_due_rules(
             "AND (lease_until='' OR mediaflux_rule_time(lease_until)<=?) "
             "AND mediaflux_rule_settings_valid(settings_json)=1 "
             "ORDER BY mediaflux_rule_time(next_run_at),id LIMIT ?",
-            (stamp, stamp, max(1, min(int(limit), 100))),
+            (stamp, stamp, max(1, min(limit, 100))),
         ).fetchall()
         for row in rows:
             token = secrets.token_urlsafe(18)

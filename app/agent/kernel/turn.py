@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING, Any
 
 from app.agent.errors import ConfirmationClaimError, ToolPipelineError
 from app.agent.kernel.conversation_state import historical_user_sources
-from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.session_state import (
+    CandidateSelectionGuard,
+    PendingEffectGuard,
+    SessionState,
+)
 from app.agent.kernel.state_types import (
     AgentInput,
     CancellationToken,
@@ -35,7 +39,7 @@ from app.sensitive_data import contains_sensitive_credential
 
 from . import telegram_reference
 from .adapters import TurnViewBuilder
-from .capabilities import ToolCatalog, ToolEffect
+from .capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from .continuation import _ContinuationAction, continuation_record
 from .conversation_context import (
     capability_retrieval_context,
@@ -44,6 +48,7 @@ from .conversation_context import (
     tool_error_message,
 )
 from .discovery import CapabilityDiscovery
+from .effects import EffectPlan
 from .events import TERMINAL_EVENT_TYPES, AgentEvent, AgentEventType, EventFactory
 from .model import (
     BudgetedModelAdapter,
@@ -93,6 +98,11 @@ def _provider_failure_message(exc: ModelProviderError) -> str:
 class AgentTurn:
     """一次用户输入/确认/恢复的执行器；状态不挂在共享AgentSession上。"""
 
+    state: SessionState
+    messages: list[ModelMessage]
+    last_user: dict[str, Any] | None
+    tool_context: ToolCallContext
+
     def __init__(self, session: AgentSession, agent_input: AgentInput,
                  queue: asyncio.Queue[AgentEvent | None], *, plan_id: str | None = None,
                  explain_plan_id: str | None = None,
@@ -110,7 +120,11 @@ class AgentTurn:
         self.scope = ExitStack()
         self.confirming = self.plan_id is not None
         self.explaining = self.explain_plan_id is not None
-        self.explanation_plan = None
+        self.explanation_plan: EffectPlan | None = None
+        self.selected_tools: tuple[KernelToolSpec, ...] = ()
+        self.selection_tool: KernelToolSpec | None = None
+        self.model_calls = 0
+        self.round_index = 0
         self.confirmed_result: dict[str, Any] | None = None
         self.diagnosing_effect = False
         self.reobservation_source = None
@@ -128,7 +142,8 @@ class AgentTurn:
         self.attempted_write = self.confirming
         self.resume_read_done = False
         self.is_effect_resume = self.resume_context is not None and self.resume_context[0].continuation_kind == "effect"
-        self.batch_resuming = bool(self.is_effect_resume and self.resume_context[2]["origin"].get("batch_plan"))
+        self.batch_resuming = bool(self.resume_context is not None and self.is_effect_resume
+                                   and self.resume_context[2]["origin"].get("batch_plan"))
         self.is_read_resume = self.resume_context is not None and not self.is_effect_resume
         self.continuation_view = TurnViewBuilder()
 
@@ -138,10 +153,11 @@ class AgentTurn:
         ) as self.measurement:
             try:
                 await self.admit()
+                assert self.lease is not None
                 await self.publish(AgentEventType.TURN_STARTED, {
                     "channel": self.agent_input.channel,
                     "generation": self.lease.generation,
-                    "stream_display_enabled": bool(self.session.stream_display()) if self.session.stream_display else True,
+                    "stream_display_enabled": (self.session.stream_display()) if self.session.stream_display else True,
                     **({"kind": "confirmation"} if self.plan_id is not None else {}),
                 })
                 if self.sensitive_input:
@@ -294,7 +310,8 @@ class AgentTurn:
                         session_id=self.agent_input.session_id,
                     ):
                         raise SessionBusyError("confirmed effect is executing")
-                    begin_options = {}
+                    pending_guard: PendingEffectGuard | None = None
+                    selection_guard: CandidateSelectionGuard | None = None
                     pending_state = await self.session.state_store.load(owner=self.agent_input.owner, session_id=self.agent_input.session_id)
                     if self.validated_selection is not None:
                         self.validated_selection.guard.check(pending_state)
@@ -308,7 +325,7 @@ class AgentTurn:
                             raise ConfirmationClaimError()
                         self.explanation_plan = pending_plan
                     if pending_plan is not None:
-                        begin_options["pending_guard"] = self.session.pipeline.pending_guard(pending_state, pending_plan)
+                        pending_guard = self.session.pipeline.pending_guard(pending_state, pending_plan)
                     elif pending_state.pending_effect_plan_id:
                         await self.session.pipeline._cancel_effect_scoped(
                             pending_state.pending_effect_plan_id,
@@ -316,14 +333,15 @@ class AgentTurn:
                                 pending_state.generation, secrets.token_urlsafe(12), self.agent_input.request_id),
                         )
                     if self.validated_selection is not None:
-                        begin_options["selection_guard"] = self.validated_selection.guard
+                        selection_guard = self.validated_selection.guard
                     elif self.candidate_context is not None:
-                        begin_options["selection_guard"] = self.candidate_context.guard
+                        selection_guard = self.candidate_context.guard
                     self.lease, self.state = await self.session.state_store.begin_turn(
                         owner=self.agent_input.owner,
                         session_id=self.agent_input.session_id,
                         request_id=self.agent_input.request_id,
-                        **begin_options,
+                        pending_guard=pending_guard,
+                        selection_guard=selection_guard,
                     )
                     self.token = await self.session.coordinator.begin(self.lease, task=asyncio.current_task())
                     if not self.sensitive_input and self.agent_input.reply_context:
@@ -354,6 +372,7 @@ class AgentTurn:
         )
 
     def prepare_context(self) -> None:
+        assert self.lease is not None and self.token is not None
         self.selected_model = (
             self.session.model_selector(self.agent_input, self.session.model)
             if self.session.model_selector is not None else ""
@@ -384,24 +403,27 @@ class AgentTurn:
     async def resume_effect(self) -> bool:
         """恢复已确认后台副作用；停止或回执失败就在本阶段终结。"""
         from .continuation import confirmed_result as restore_confirmed
-        result = restore_confirmed(self.session.catalog, self.state, continuation_record(self.state, self.lease.continuation_id, self.lease.continuation_kind))
+        lease = self.tool_context.lease
+        result = restore_confirmed(self.session.catalog, self.state, continuation_record(self.state, lease.continuation_id, lease.continuation_kind))
         if self.batch_resuming:
             from .batch_effects import resume_batch
-            progress = self.state.metadata["effect_waits"][self.lease.continuation_id].get("batch_progress")
+            progress = self.state.metadata["effect_waits"][lease.continuation_id].get("batch_progress")
             result = await resume_batch(self.session.pipeline, result, self.tool_context, progress)
-            self.state = await self.session.state_store.load(owner=self.lease.owner, session_id=self.lease.session_id)
+            plan = result.effect_plan
+            assert plan is not None
+            self.state = await self.session.state_store.load(owner=lease.owner, session_id=lease.session_id)
             saved = await remember_result(self, tool_name=result.tool.name, content=result.outcome.model_message(),
-                public_content=format_public_result(result.outcome.public_content), receipt_plan_id=result.effect_plan.plan_id)
+                public_content=format_public_result(result.outcome.public_content), receipt_plan_id=plan.plan_id)
             await self.publish(AgentEventType.EFFECT_COMPLETED if result.outcome.public_content.get("ok") else AgentEventType.EFFECT_FAILED,
-                {"plan_id": result.effect_plan.plan_id, "tool": result.tool.name,
+                {"plan_id": plan.plan_id, "tool": result.tool.name,
                  "result": result.outcome.audit_result(), "receipt": format_public_result(result.outcome.public_content)})
             self.scope.close()
-            await self.session.coordinator.unprotect(self.lease, self.token)
+            await self.session.coordinator.unprotect(lease, self.tool_context.cancellation)
             if not saved:
                 await self.failure("receipt_unavailable", "已确认组合的结果保存失败，请核对原操作，勿重复执行。")
                 return False
-            stop_state = await self.session.state_store.load(owner=self.lease.owner, session_id=self.lease.session_id)
-            if stop_state.metadata.get("stop_requested_generation") == self.lease.generation:
+            stop_state = await self.session.state_store.load(owner=lease.owner, session_id=lease.session_id)
+            if stop_state.metadata.get("stop_requested_generation") == lease.generation:
                 await self.publish(AgentEventType.TURN_CANCELLED, {"reason": "已停止后续步骤；已完成项以原回执为准。"})
                 return False
         self.confirmed_result = dict(result.outcome.public_content)
@@ -414,12 +436,15 @@ class AgentTurn:
 
     async def confirm_effect(self, *, scoped_trust: bool = False) -> bool:
         """确认只执行一次，保存真实回执后再进入只读诊断/后续规划。"""
+        plan_id = self.plan_id
+        assert plan_id is not None
+        public_result: dict[str, Any]
         result = None
         try:
             if scoped_trust:
-                result = await self.session.pipeline.execute_confirmed(self.plan_id, context=self.tool_context, scoped_trust=True)
+                result = await self.session.pipeline.execute_confirmed(plan_id, context=self.tool_context, scoped_trust=True)
             else:
-                result = await self.session.pipeline.execute_confirmed(self.plan_id, context=self.tool_context)
+                result = await self.session.pipeline.execute_confirmed(plan_id, context=self.tool_context)
             public_result = dict(result.outcome.public_content)
         except (asyncio.CancelledError, StalePublicationError):
             raise
@@ -452,19 +477,20 @@ class AgentTurn:
         # the session guard; a completion poll must not start a competing model loop.
         if receipt_saved and self.last_user:
             from .continuation import adopt_foreground
-            adopted = await adopt_foreground(self.session.state_store, self.lease, self.plan_id)
+            adopted = await adopt_foreground(self.session.state_store, self.tool_context.lease, plan_id)
             if adopted is not None:
                 self.lease = adopted
-                self.state = await self.session.state_store.load(owner=self.lease.owner, session_id=self.lease.session_id)
-                self.tool_context = replace(self.tool_context, lease=self.lease)
+                self.state = await self.session.state_store.load(owner=adopted.owner, session_id=adopted.session_id)
+                self.tool_context = replace(self.tool_context, lease=adopted)
                 if result is None:
                     from .continuation import confirmed_result as restore_confirmed
-                    result = restore_confirmed(self.session.catalog, self.state, continuation_record(self.state, self.lease.continuation_id, self.lease.continuation_kind))
+                    result = restore_confirmed(self.session.catalog, self.state, continuation_record(self.state, adopted.continuation_id, adopted.continuation_kind))
         # 写入及回执已完成：先解除保护，再读停止标记，关闭两者之间的竞态窗口。
         self.scope.close()
-        await self.session.coordinator.unprotect(self.lease, self.token)
-        stop_state = await self.session.state_store.load(owner=self.lease.owner, session_id=self.lease.session_id)
-        if stop_state.metadata.get("stop_requested_generation") == self.lease.generation:
+        lease = self.tool_context.lease
+        await self.session.coordinator.unprotect(lease, self.tool_context.cancellation)
+        stop_state = await self.session.state_store.load(owner=lease.owner, session_id=lease.session_id)
+        if stop_state.metadata.get("stop_requested_generation") == lease.generation:
             await self.publish(AgentEventType.TURN_CANCELLED, {
                 "reason": "已停止后续会话；已提交操作以执行回执和后台任务状态为准。",
             })
@@ -502,7 +528,7 @@ class AgentTurn:
             return False
         self.confirmed_result = public_result
         self.diagnosing_effect = result_state in {"failed", "warning", "pending"}
-        self.tool_context = replace(self.tool_context, lease=self.lease, confirmed_effect=result,
+        self.tool_context = replace(self.tool_context, lease=lease, confirmed_effect=result,
             diagnostic_only=self.diagnosing_effect,
             reobservation_source=self.reobservation_source if self.diagnosing_effect else None)
         self.confirming = False
@@ -511,6 +537,7 @@ class AgentTurn:
         return True
 
     async def prepare_tools(self) -> None:
+        lease = self.tool_context.lease
         reference_kinds = tuple(self.state.ref_kinds | ({"telegram_reference"} if self.agent_input.reply_context.get("reference_handle") or any(row.get("reply_context", {}).get("reference_handle") for row in self.state.conversation) else set()))
         selection = None if self.explaining or self.agent_input.initial_read_tool else self.session.retriever.retrieve(
             self.contextual_message,
@@ -531,7 +558,7 @@ class AgentTurn:
             context={
                 "owner": self.agent_input.owner, "session_id": self.agent_input.session_id,
                 "request_id": self.agent_input.request_id, "channel": self.agent_input.channel,
-                "generation": self.lease.generation, "turn_id": self.lease.turn_id,
+                "generation": lease.generation, "turn_id": lease.turn_id,
                 "has_pending_effect": bool(self.state.pending_effect_plan_id),
                 "has_task": bool(self.state.metadata.get("task")),
                 "reference_kinds": reference_kinds,
@@ -572,7 +599,7 @@ class AgentTurn:
         self.pending_resume_call = None
         if self.resume_context is not None:
             from .continuation import history_call
-            record = continuation_record(self.state, self.lease.continuation_id, self.lease.continuation_kind)
+            record = continuation_record(self.state, lease.continuation_id, lease.continuation_kind)
             if record.get("anchor"):
                 self.pending_resume_call = history_call(self.state, record)
                 self.resumed_tool = self.session.catalog.get(record["anchor"]["tool"])
@@ -580,6 +607,7 @@ class AgentTurn:
                     raise ToolPipelineError("等待能力不可恢复。", code="read_resume_invalid")
                 self.selected_tools = self.discovery.window(self.selected_tools, (self.resumed_tool,))
         if self.validated_selection is not None:
+            assert self.selection_tool is not None
             self.selected_tools = (self.selection_tool,)
         await self.publish(
             AgentEventType.CAPABILITIES_SELECTED,
@@ -607,12 +635,14 @@ class AgentTurn:
         self.tool_context = replace(self.tool_context, capability_search=self.discovery.search)
 
     async def preview_selection(self) -> None:
+        selection, tool = self.validated_selection, self.selection_tool
+        assert selection is not None and tool is not None
         call = ModelToolCall(
-            call_id=f"selection_{self.lease.turn_id}", name=self.selection_tool.name,
-            arguments=dict(self.validated_selection.arguments),
+            call_id=f"selection_{self.tool_context.lease.turn_id}", name=tool.name,
+            arguments=dict(selection.arguments),
         )
         await self.publish_tool(
-            AgentEventType.TOOL_STARTED, call, effect=self.selection_tool.effect.value,
+            AgentEventType.TOOL_STARTED, call, effect=tool.effect.value,
         )
         result = await self.session.pipeline.execute(call.name, call.arguments, context=self.tool_context)
         self.messages.append(ModelMessage(role="assistant", tool_calls=(call,)))
@@ -632,7 +662,8 @@ class AgentTurn:
         self.history_end = self.current_user_index if self.current_user_index is not None else next(
             (i for i in range(len(self.messages) - 1, -1, -1) if self.messages[i].role == "user"), len(self.messages))
         if self.resume_context is not None:
-            record = continuation_record(self.state, self.lease.continuation_id, self.lease.continuation_kind)
+            lease = self.tool_context.lease
+            record = continuation_record(self.state, lease.continuation_id, lease.continuation_kind)
             # Legacy non-TG waits used only the fence-bound default route.
             # A missing TG selection has no historical authority to infer.
             issued_model = record.get('model_policy', None if self.agent_input.channel == 'telegram' else "")
@@ -695,7 +726,8 @@ class AgentTurn:
                     # Early admission/confirmation rejection has no executor
                     # ownership, but must still return its failure display.
                     await self.session.journal.append(event, owner=self.agent_input.owner)
-            if guarded_failure and not await self.session.state_store.is_current(self.lease):
+            if (self.lease is not None and self.token is not None and not self.confirming
+                    and not await self.session.state_store.is_current(self.lease)):
                 return
             # finish 会关闭取消窗口；只能在 journal I/O 后核实发布权再登记。
             await self.record_continuation_event(event, reason=code)
@@ -722,6 +754,7 @@ class AgentTurn:
         payload: Mapping[str, Any] | None = None,
         **extra: Any,
     ) -> None:
+        assert self.lease is not None and self.token is not None and self.factory is not None
         self.token.raise_if_cancelled()
         if not await self.session.coordinator.is_current(self.lease, self.token):
             raise asyncio.CancelledError("superseded")
@@ -782,12 +815,10 @@ class AgentTurn:
             AgentEventType.EFFECT_APPROVAL_REQUIRED
             if plan else AgentEventType.TOOL_COMPLETED
         )
-        await self.publish_tool(
-            event_type,
-            call,
-            result=result.outcome.audit_result(),
-            **({"plan": plan.public_dict()} if plan else {"elapsed_ms": result.elapsed_ms}),
-        )
+        if plan is not None:
+            await self.publish_tool(event_type, call, result=result.outcome.audit_result(), plan=plan.public_dict())
+        else:
+            await self.publish_tool(event_type, call, result=result.outcome.audit_result(), elapsed_ms=result.elapsed_ms)
 
     async def close_failed_call(self,
         call: ModelToolCall,
@@ -830,10 +861,10 @@ class AgentTurn:
         })
 
     async def reserve_budget(self, *, model: int = 0, tools: int = 0) -> None:
-
-        if self.session.continuation_binding is not None and (self.lease.continuation_id or self.state.metadata.get("read_wait")):
+        lease = self.tool_context.lease
+        if self.session.continuation_binding is not None and (lease.continuation_id or self.state.metadata.get("read_wait")):
             try:
-                self.state = await self.session.state_store.commit(self.lease, updates=(_ContinuationAction("", {
+                self.state = await self.session.state_store.commit(lease, updates=(_ContinuationAction("", {
                     "operation": "reserve", "model_spent": model, "tool_spent": tools,
                     "model_limit": self.session.limits.max_model_rounds, "tool_limit": self.session.limits.max_tool_calls,
                 }, binding=self.session.continuation_binding),))

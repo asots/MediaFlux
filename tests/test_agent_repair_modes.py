@@ -1,5 +1,6 @@
 """READ 按 schema 直接重试；写侧修参仍不能扩大授权或跳过确认。"""
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 import json
@@ -114,7 +115,7 @@ def _write_catalog(previews, writes, *, schema=None, authorize=None):
 def test_ordinary_read_max_properties_modes_are_independent_without_name_exception(store):
     async def run():
         executed = []
-        schema = {'type': 'object', 'maxProperties': 1, 'additionalProperties': False, 'properties': {
+        schema: dict[str, Any] = {'type': 'object', 'maxProperties': 1, 'additionalProperties': False, 'properties': {
             'listing': {'type': 'object', 'properties': {}, 'additionalProperties': False},
             'search': {'type': 'string', 'minLength': 1},
         }}
@@ -195,7 +196,7 @@ def test_invalid_write_period_cannot_be_omitted_to_default(period, repair, store
 def test_explicit_mutual_exclusion_repair_must_keep_a_selected_field(replacement, store):
     async def run():
         previews, writes = [], []
-        schema = deepcopy(_WRITE_SCHEMA)
+        schema: dict[str, Any] = deepcopy(_WRITE_SCHEMA)
         schema['properties']['schedule'] = {'type': 'string', 'minLength': 1}
         schema['not'] = {'required': ['period', 'schedule']}
         catalog = _write_catalog(previews, writes, schema=schema)
@@ -258,7 +259,7 @@ def test_empty_read_retry_uses_current_schema_not_old_fields(shape, store):
         else:
             properties = {'filter': {'type': 'string', 'minLength': 1}}
             bad = {'filter': 'unwatched-only', '_错误': '未知字段'}
-        schema = {'type': 'object', 'properties': properties, 'additionalProperties': False, 'maxProperties': 1}
+        schema: dict[str, Any] = {'type': 'object', 'properties': properties, 'additionalProperties': False, 'maxProperties': 1}
         catalog = _read_catalog(schema, executed)
         events, feedback, saved, wire = await _run(catalog, store, 'library.lookup', [bad, {}])
         wire.verify(3)

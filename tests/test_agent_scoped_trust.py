@@ -1,5 +1,6 @@
 """真实本地收藏库、领域 action、SQLite 票据和原 Session 的限定预授权。"""
 
+from typing import Any
 import asyncio
 import json
 from dataclasses import replace
@@ -55,6 +56,7 @@ class TrustRig:
             self.attempts.append(dict(args))
             if self.fail:
                 raise ToolPipelineError("注入执行失败", code="fixture_failure")
+            assert original is not None
             return original(args, snapshot, context)
         self.tool = replace(tool, execute_confirmed=execute)
         self.pipeline = ToolPipeline(catalog=ToolCatalog([self.tool]), state_store=store,
@@ -70,7 +72,7 @@ class TrustRig:
         return (await self.pipeline.execute(TOOL, args or arguments(), context=context)).effect_plan
 
     async def grant(self, context, plan, **overrides):
-        selection = dict(operation="grant", plan_id=plan.plan_id, tool_name=TOOL, scope=SCOPE, max_actions=5, ttl_seconds=300)
+        selection: dict[str, Any] = dict(operation="grant", plan_id=plan.plan_id, tool_name=TOOL, scope=SCOPE, max_actions=5, ttl_seconds=300)
         return await self.pipeline.scoped_trust.set(context=context, **{**selection, **overrides})
 
     async def remaining(self):
@@ -121,6 +123,19 @@ def test_default_off_explicit_scope_allows_different_items_and_debits_once(rig):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("tool_field", [{}, {"tool_name": None}])
+def test_grant_without_tool_name_has_inactive_view(rig, tool_field):
+    async def run():
+        state = await rig.store.load(owner=OWNER, session_id=SESSION)
+        state.metadata["scoped_trust"] = {
+            "owner": OWNER, "session_id": SESSION, "scope": SCOPE,
+            "remaining": 5, "expires_at": rig.now + 300, **tool_field,
+        }
+        assert rig.pipeline.scoped_trust._grant(state) is not None
+        assert rig.pipeline.scoped_trust.view(state) == {"active": False}
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("overrides", [{"ttl_seconds": 0}, {"ttl_seconds": True}, {"ttl_seconds": 3600},
     {"max_actions": 0}, {"max_actions": True}, {"max_actions": 100}, {"tool_name": "cloud.share.create"},
     {"scope": {"provider": "tmdb", "media_type": "movie"}}, {"scope": {"provider": "tmdb"}}])
@@ -160,6 +175,7 @@ def test_low_write_label_alone_write_and_danger_cannot_bypass(rig, name, risk, e
         rig.pipeline = ToolPipeline(catalog=ToolCatalog([changed]), state_store=rig.store,
             effect_store=rig.pipeline.effect_store)
         plan = (await rig.pipeline.execute(name, arguments(301), context=context)).effect_plan
+        assert plan is not None
         assert not plan.public_dict().get("trust_eligible")
         with pytest.raises(ConfirmationClaimError):
             await rig.pipeline.execute_confirmed(plan.plan_id, context=context, scoped_trust=True)

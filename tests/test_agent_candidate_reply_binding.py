@@ -47,8 +47,9 @@ def test_signed_candidate_binding_reaches_current_model_message(store, monkeypat
         reply_markup=NS(keyboard=[[{'callback_data': f"agk:s:{draft['handle']}:p"}]]),
     )
     if kind == 'quote':
-        message.quote = NS(text='选中的候选片段：2 Example.S01E02.2160p')
-        body = message.quote.text
+        quote = NS(text='选中的候选片段：2 Example.S01E02.2160p')
+        setattr(message, "quote", quote)
+        body = quote.text
     # Resolve the actual signed keyboard, not injected metadata or validation.
     assert asyncio.run(agent_candidates.reply_selection_ref(
         runtime, owner=owner, session_id=sid, message=message,

@@ -1,6 +1,6 @@
+import re
 import unittest
 from pathlib import Path
-import re
 
 
 class LocalMediaResponsiveUITests(unittest.TestCase):
@@ -282,58 +282,44 @@ class LocalMediaResponsiveUITests(unittest.TestCase):
         self.assertIn(".lm-table-empty-wrap", css)
 
         # 2. 验证 .lm-empty-icon 取消了实体圆圈背景与边框
-        self.assertIsNotNone(
-            re.search(
+        assert (re.search(
                 r"\.lm-empty-icon\s*\{[^}]*background:\s*transparent[^}]*border:\s*0",
                 css,
-            )
-        )
+            )) is not None
 
         # 3. 验证图标尺寸统一为 26px，透明度 opacity: 0.6
-        self.assertIsNotNone(
-            re.search(
+        assert (re.search(
                 r"\.lm-empty-icon\s+svg\s*\{[^}]*width:\s*26px[^}]*height:\s*26px[^}]*opacity:\s*0\.6",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"\.lm-scrape-placeholder\s+svg\s*\{[^}]*width:\s*26px[^}]*height:\s*26px[^}]*opacity:\s*\.6",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"\.lm-table-empty-wrap\s+svg\s*\{[^}]*width:\s*26px[^}]*height:\s*26px[^}]*opacity:\s*0\.6",
                 css,
-            )
-        )
+            )) is not None
 
         # 4. 验证 is-success 空状态同样对齐柔和灰阶规范
-        self.assertIsNotNone(
-            re.search(
+        assert (re.search(
                 r"\.lm-empty-icon\.is-success\s+svg\s*\{[^}]*color:\s*var\(--text-muted\)[^}]*opacity:\s*0\.6",
                 css,
-            )
-        )
+            )) is not None
 
     def test_local_media_mobile_empty_table_centering_contract(self):
         css_path = Path("app/static/css/local-media.css")
         css = css_path.read_text(encoding="utf-8")
 
         # 验证 @media (max-width: 760px) 中对表格空状态行的重置与居中
-        self.assertIsNotNone(
-            re.search(
+        assert (re.search(
                 r"@media\s*\(max-width:\s*760px\)\s*\{[\s\S]*?\.lm-task-table\s+tr\.is-empty-row,[\s\S]*?\.lm-task-table\s+tr:has\(\.table-empty\)\s*\{[^}]*display:\s*flex[^}]*justify-content:\s*center",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*760px\)\s*\{[\s\S]*?\.lm-task-table\s+td\.table-empty\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column[^}]*align-items:\s*center[^}]*justify-content:\s*center",
                 css,
-            )
-        )
+            )) is not None
 
 
 if __name__ == "__main__":

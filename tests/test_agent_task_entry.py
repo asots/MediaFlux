@@ -1,4 +1,6 @@
 """Natural-query reachability, not a measurement of real LLM adoption."""
+from typing import Any
+from typing import cast
 
 import asyncio
 import json
@@ -107,6 +109,8 @@ class QueryTaskScript(NativeScript):
         if task:
             self.task_name = task["name"]
         step = self.steps.pop(0) if self.steps else "finish"
+        name = None
+        args = None
         if step == "find_task" or step == "find_config":
             discovery = next(
                 f
@@ -158,6 +162,7 @@ class QueryTaskScript(NativeScript):
         if step == "finish":
             message, reason = {"content": "全部任务完成。"}, "stop"
         else:
+            assert name is not None and args is not None
             message, reason = (
                 {
                     "content": "",
@@ -400,7 +405,7 @@ def test_query_create_typed_evidence_prune_cold_resume(isolated_db, tmp_path):
         with patch.object(agent_api, "get_agent_kernel_runtime", return_value=runtime2):
             response = await agent_api.get_session(request, "entry-session-0001")
         assert response.status_code == 200
-        api = json.loads(response.body)
+        api = json.loads(cast(bytearray | bytes | str, response.body))
         assert api["task"] == events2[-1].payload["task"]
         assert api["turn_status"] == events2[-1].payload["turn_status"]
         assert (len(first.requests), len(second.requests)) == (6, 4)
@@ -507,7 +512,7 @@ def test_qa_default_custom_strict_initial_no_task_sql(isolated_db, tmp_path, cus
             session = AgentSession(
                 model=script.adapter,
                 catalog=runtime.session.catalog,
-                retriever=StrictRetriever(),
+                retriever=cast(CapabilityRetriever, StrictRetriever()),
                 pipeline=runtime.session.pipeline,
                 state_store=runtime.store,
                 journal=runtime.store,
@@ -560,7 +565,7 @@ def test_literal_optins_visibility_related_and_description():
     task = task_tool()
     retriever = CapabilityRetriever(minimum=1, maximum=3)
     for mark in (None, False, 1, "true", True):
-        metadata = {"kernel_utility": True}
+        metadata: dict[str, Any] = {"kernel_utility": True}
         if mark is not None:
             metadata["query_discoverable"] = mark
         tool = replace(task, metadata=metadata)
@@ -659,6 +664,7 @@ def test_admitted_multiline_file_goal_is_task_data_not_a_public_summary_filter()
     assert task['status'] == 'blocked', '允许登记不等于伪造通用验收完成'
     assert task['verified_facts'] == []
     public = task_projection(task)
+    assert public is not None
     assert public['root_goal'] == args['root_goal']
     assert public['constraints'] == args['constraints']
     with pytest.raises(ValueError, match='source must be'):

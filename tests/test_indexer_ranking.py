@@ -25,7 +25,10 @@ class IndexerRankingTests(unittest.TestCase):
         items = [rank_item(self._item(f"【国产】理想禁区 {n:02d} 分集标题 1080P"), media=media, fallback_query=media.title) for n in range(1, 12)]
         ranked = sorted(enumerate(items), key=lambda entry: candidate_sort_key((0, entry[0], entry[1]), "relevance_desc"))
         self.assertEqual(ranked[0][0], 6)
-        self.assertGreater(ranked[0][1].relevance_score, ranked[1][1].relevance_score)
+        first_score = ranked[0][1].relevance_score
+        second_score = ranked[1][1].relevance_score
+        assert first_score is not None and second_score is not None
+        self.assertGreater(first_score, second_score)
 
     def test_match_priority_separates_identity_from_popularity_and_year_conflicts(self):
         media = IndexerMediaSearchRequest.create(title="起义", original_title="The Uprising", year=2026)
@@ -129,7 +132,7 @@ class IndexerRankingTests(unittest.TestCase):
 
         clustered = annotate_clusters(items)
 
-        self.assertIsNotNone(clustered[0].cluster_id)
+        assert (clustered[0].cluster_id) is not None
         self.assertEqual(clustered[0].cluster_id, clustered[1].cluster_id)
         self.assertEqual([item.cluster_size for item in clustered], [2, 2])
 

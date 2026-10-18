@@ -98,9 +98,9 @@ _FILTER_DEFAULTS: dict[tuple[str, str, str], dict[str, str]] = {
 
 
 def validate_request(provider: str, category: str, media_type: str) -> tuple[str, str, str]:
-    provider = str(provider or "").strip().lower()
-    category = str(category or "").strip().lower()
-    media_type = str(media_type or "").strip().lower()
+    provider = (provider or "").strip().lower()
+    category = (category or "").strip().lower()
+    media_type = (media_type or "").strip().lower()
     categories = _CATEGORY_MEDIA.get(provider)
     if not categories:
         raise ValueError("不支持的数据源")
@@ -119,6 +119,7 @@ def validate_filters(provider: str, category: str, media_type: str,
     if not isinstance(raw, dict):
         raise ValueError("筛选参数必须是对象")
     allowed: set[str] = set()
+    date_field = "primary_release_date" if media_type == "movie" else "first_air_date"
     if provider == "tmdb" and category == "discover":
         allowed = {
             "with_genres", "with_original_language", "with_origin_country", "sort_by",
@@ -135,11 +136,11 @@ def validate_filters(provider: str, category: str, media_type: str,
         raise ValueError(f"包含不支持的筛选项: {', '.join(sorted(unknown))}")
 
     result = {
-        str(key): str(value).strip()
+        key: value.strip()
         for key, value in _FILTER_DEFAULTS.get((provider, category, media_type), {}).items()
-        if str(value).strip()
+        if value.strip()
     }
-    result.update({str(key): str(value).strip() for key, value in raw.items() if str(value).strip()})
+    result.update({key: str(value).strip() for key, value in raw.items() if str(value).strip()})
     if provider == "tmdb" and category == "discover":
         lower, upper = (result.get(f"{date_field}.{bound}", "") for bound in ("gte", "lte"))
         for value in (lower, upper):
@@ -185,7 +186,7 @@ def validate_filters(provider: str, category: str, media_type: str,
     return {key: value for key, value in result.items() if value != ""}
 
 
-def list_section_definitions(*, douban_enabled: bool | None = None) -> list[dict[str, Any]]:
+def list_section_definitions(*, douban_enabled: bool | int | None = None) -> list[dict[str, Any]]:
     if douban_enabled is None:
         douban_enabled = config.get_bool("DISCOVERY_DOUBAN_ENABLED", True)
     sections = deepcopy(list(_SECTION_DEFINITIONS))
@@ -203,8 +204,8 @@ def _plain_options(values: set[str]) -> list[dict[str, str]]:
 
 
 def list_filter_definitions(provider: str, media_type: str) -> dict[str, Any]:
-    provider = str(provider or "").strip().lower()
-    media_type = str(media_type or "").strip().lower()
+    provider = (provider or "").strip().lower()
+    media_type = (media_type or "").strip().lower()
     if provider == "tmdb" and media_type in {"movie", "tv"}:
         genres = _TMDB_MOVIE_GENRES if media_type == "movie" else _TMDB_TV_GENRES
         sorts = _TMDB_MOVIE_SORTS if media_type == "movie" else _TMDB_TV_SORTS
@@ -268,7 +269,7 @@ def list_filter_definitions(provider: str, media_type: str) -> dict[str, Any]:
 class ProviderRegistry:
     def __init__(self, providers: dict[str, Any] | None = None):
         self._providers = {
-            str(name).lower(): provider for name, provider in (providers or {}).items()
+            name.lower(): provider for name, provider in (providers or {}).items()
         }
         self._lock = threading.RLock()
         self._close_call_lock = threading.Lock()
@@ -289,7 +290,7 @@ class ProviderRegistry:
         with self._lock:
             if self._closed or self._closing:
                 raise ProviderUnavailable("探索数据源注册表已关闭")
-            provider = self._providers.get(str(name or "").lower())
+            provider = self._providers.get((name or "").lower())
         if provider is None:
             raise ProviderNotConfigured("数据源未配置")
         return provider

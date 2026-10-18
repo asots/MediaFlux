@@ -6,7 +6,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Body, Request
 
-from app import config, database as db
+from app import config
+from app import database as db
 from app.logger import get_logger
 from app.modules.scheduler import STRMScheduler, get_scheduler
 from app.modules.strm import retry_all_strm_failures, retry_strm_failures
@@ -84,8 +85,8 @@ def failures(
         return api_error("action 只能是 generate 或 metadata", 400)
     if status not in {"open", "resolved", "all"}:
         return api_error("status 只能是 open、resolved 或 all", 400)
-    current_page = max(1, int(page or 1))
-    size = max(1, min(int(page_size or 120), 500))
+    current_page = max(1, (page or 1))
+    size = max(1, min((page_size or 120), 500))
     offset = (current_page - 1) * size
 
     total = db.count_strm_failures(

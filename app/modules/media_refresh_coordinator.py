@@ -48,7 +48,7 @@ def _retry_seconds(attempts: int) -> int:
     base = max(10, min(config.get_int(
         "MEDIA_REFRESH_RETRY_BASE_SECONDS", _DEFAULT_RETRY_SECONDS,
     ), 600))
-    return min(1800, base * (2 ** min(max(0, int(attempts)), 5)))
+    return min(1800, base * (2 ** min(max(0, attempts), 5)))
 
 
 def _configured_provider_names(*, allow_emby: bool = True) -> tuple[str, ...]:
@@ -80,12 +80,12 @@ def enqueue_media_refresh_paths(
 ) -> dict[str, str]:
     """把变化路径持久加入统一队列，返回逐 provider 的排队状态。"""
     selected = tuple(dict.fromkeys(
-        str(item or "").strip().lower()
+        (item or "").strip().lower()
         for item in (
             providers if providers is not None
             else _configured_provider_names(allow_emby=allow_emby)
         )
-        if str(item or "").strip()
+        if (item or "").strip()
     ))
     results: dict[str, str] = {}
     delay = 0 if immediate else _debounce_seconds()
@@ -174,10 +174,10 @@ class MediaRefreshCoordinator:
             return {
                 **queue,
                 "worker_running": bool(self._thread and self._thread.is_alive()),
-                "consumer_active": bool(self._consumer_active),
+                "consumer_active": self._consumer_active,
                 "last_error_type": self._last_error_type,
-                "completed_session": int(self._completed_session),
-                "failed_session": int(self._failed_session),
+                "completed_session": self._completed_session,
+                "failed_session": self._failed_session,
             }
 
     def _loop(self) -> None:

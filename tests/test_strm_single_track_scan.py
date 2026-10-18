@@ -1,6 +1,8 @@
 """STRM 仅调用带预算与取消语义的正式分页协议，不回退到旧快照接口。"""
 from __future__ import annotations
 
+from typing import cast
+
 import tempfile
 import threading
 import unittest
@@ -25,7 +27,7 @@ class StrmSingleTrackScanTests(unittest.TestCase):
             patch("app.modules.strm.db.list_strm_index", return_value=[]),
             patch("app.modules.strm.clean_invalid_strm") as cleanup,
         ):
-            stats = sync_strm("root", "http://play.invalid", root, client=client, clean_invalid=True)
+            stats = sync_strm("root", "http://play.invalid", root, client=cast(GuangYaClient, client), clean_invalid=True)
         self.assertTrue(stats["scan_incomplete"])
         self.assertTrue(stats["clean_skipped"])
         self.assertEqual(client.calls, 0)
@@ -47,7 +49,7 @@ class StrmSingleTrackScanTests(unittest.TestCase):
             patch("app.modules.strm._scan_limits", return_value=(100, 17, 100, 60)),
             patch("inspect.signature", side_effect=AssertionError("不得探测旧协议")),
         ):
-            stats = sync_strm("root", "http://play.invalid", root, client=client, clean_invalid=False)
+            stats = sync_strm("root", "http://play.invalid", root, client=cast(GuangYaClient, client), clean_invalid=False)
         self.assertFalse(stats["scan_incomplete"])
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0][2], 17)

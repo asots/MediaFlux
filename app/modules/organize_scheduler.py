@@ -90,7 +90,7 @@ class OrganizeScheduler:
     @staticmethod
     def validate_cron(expr: str) -> bool:
         """只接受标准 5 段 cron（分 时 日 月 周）。"""
-        text = str(expr or "").strip()
+        text = (expr or "").strip()
         if len(text.split()) != 5:
             return False
         try:
@@ -140,7 +140,7 @@ class OrganizeScheduler:
 
         cron_expr = self._cron_expr()
         sources = self._configured_sources()
-        target_dir_id = str(self._get_value("GY_ORGANIZE_TARGET_DIR", "0") or "0").strip()
+        target_dir_id = (self._get_value("GY_ORGANIZE_TARGET_DIR", "0") or "0").strip()
         error = self._validate_config(cron_expr, sources, target_dir_id)
         if error:
             with self._state_lock:
@@ -203,7 +203,7 @@ class OrganizeScheduler:
         task = self._manager.task_status()
         if str(task.get("id") or "") != task_id:
             lookup = getattr(self._manager, "task_result", None)
-            task = lookup(task_id) if callable(lookup) else None
+            task = self._manager.task_result(task_id) if callable(lookup) else None
             if not task:
                 return
         outcome = str(task.get("status") or "")
@@ -221,7 +221,7 @@ class OrganizeScheduler:
             self._active_task_id = ""
 
     def _cron_expr(self) -> str:
-        return str(self._get_value("GY_ORGANIZE_SCHEDULE_CRON", "0 4 * * *") or "").strip()
+        return (self._get_value("GY_ORGANIZE_SCHEDULE_CRON", "0 4 * * *") or "").strip()
 
     def _configured_sources(self) -> list[dict[str, str]]:
         sources, error = normalize_organize_sources(

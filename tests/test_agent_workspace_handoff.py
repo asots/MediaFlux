@@ -1,5 +1,10 @@
 """工作区接力专属回归：客户端仅传 action_key，共用原生 READ 执行链。"""
 from __future__ import annotations
+from app.agent.kernel.pipeline import AuthorizationPolicy
+from app.agent.kernel.pipeline import RateLimiter
+from app.agent.kernel.session import TurnAdmissionPolicy
+from app.agent.kernel.turn import AgentTurn
+from typing import cast
 
 import json
 import unittest
@@ -166,7 +171,7 @@ def test_server_handoff_field_is_preserved_and_cannot_mix_selection():
     with pytest.raises(TransportInputError):
         replace(request, selection={"ref": "candidate", "positions": [1], "target": "guangya"}).to_agent_input()
     with pytest.raises(ValueError):
-        AgentInput(message="检查", owner="owner", session_id="session", initial_read_tool={"tool": TARGET})
+        AgentInput(message="检查", owner="owner", session_id="session", initial_read_tool=cast(str, {"tool": TARGET}))
 
 
 @pytest.mark.parametrize("stream", [True, False])
@@ -210,9 +215,9 @@ def make_handoff_session(rounds):
     authorization = SimpleNamespace(authorize=AsyncMock())
     limiter = SimpleNamespace(acquire=AsyncMock())
     admission = SimpleNamespace(begin=AsyncMock(return_value="owner-admitted"), is_current=AsyncMock(return_value=True))
-    pipeline = ToolPipeline(catalog=catalog, state_store=state, authorization=authorization, rate_limiter=limiter)
+    pipeline = ToolPipeline(catalog=catalog, state_store=state, authorization=cast(AuthorizationPolicy | None, authorization), rate_limiter=cast(RateLimiter | None, limiter))
     session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(), pipeline=pipeline,
-                           state_store=state, turn_admission=admission)
+                           state_store=state, turn_admission=cast(TurnAdmissionPolicy | None, admission))
     request = QueryEnvelope(owner="owner-handoff", session_id=SESSION, message="检查下载队列", channel="web",
                             initial_read_tool=TARGET).to_agent_input()
     return SimpleNamespace(session=session, request=request, observed=observed, model=model,
@@ -292,6 +297,7 @@ class WorkspaceHandoffKernelTests(unittest.IsolatedAsyncioTestCase):
         pending_resume = {"arguments": {"page": 2}}
         turn = SimpleNamespace(pending_initial_read=initial, pending_resume_call=pending_resume,
                                tool_definitions=(), session=SimpleNamespace(system_prompt="system"))
-        result = await next_round(turn, None, 4)
+        result = await next_round(cast(AgentTurn, turn), None, 4)
+        assert result is not None
         assert result.calls == (initial,) and result.resuming_read is False
         assert turn.pending_initial_read is None and turn.pending_resume_call is pending_resume

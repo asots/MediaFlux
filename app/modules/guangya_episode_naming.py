@@ -178,7 +178,7 @@ def summarize_episode_naming_observation(
             counts[kind] += 1
             buckets.setdefault((kind, reason), []).append((entry, season, episode))
         regular = _summarize_positions(buckets.get(("regular", ""), []))
-        exceptions = {
+        exceptions: dict[str, list[dict[str, Any]]] = {
             kind: [
                 {"reason": reason, **_summarize_positions(rows)}
                 for (category, reason), rows in sorted(buckets.items()) if category == kind
@@ -251,7 +251,7 @@ def compile_episode_naming_operations(
 
     if bool(observation.get("truncated")):
         raise GuangYaEpisodeNamingError("光鸭目录观察不完整，请扩大 max_items 后重新读取")
-    normalized_title = str(title or "").strip()
+    normalized_title = (title or "").strip()
     if not 1 <= len(normalized_title) <= 180:
         raise GuangYaEpisodeNamingError("title 长度必须在 1 到 180 之间")
     normalized_root = _normalize_path(target_root, field="target_root")
@@ -314,7 +314,7 @@ def compile_episode_naming_operations(
         if expected_count is not None:
             expected_count = int(expected_count)
 
-        selected: list[tuple[int, dict[str, Any]]] = []
+        episode_entries: list[tuple[int, dict[str, Any]]] = []
         unparsed = included_extras = excluded_extras = 0
         for entry in videos:
             if _normalize_path(entry.get("parent_path"), field="parent_path") != source_path:
@@ -333,21 +333,21 @@ def compile_episode_naming_operations(
                 excluded_extras += 1
                 continue
             included_extras += kind == "extra"
-            selected.append((parsed_episode, entry))
+            episode_entries.append((parsed_episode, entry))
 
-        selected.sort(key=lambda pair: (pair[0], str(pair[1].get("name") or "").casefold()))
-        if not selected:
+        episode_entries.sort(key=lambda pair: (pair[0], str(pair[1].get("name") or "").casefold()))
+        if not episode_entries:
             detail = "，且存在无法识别集号的文件" if unparsed else ""
             raise GuangYaEpisodeNamingError(
                 f"第 {index} 个篇章映射没有匹配到可处理文件（非正片默认排除）{detail}"
             )
-        if expected_count is not None and len(selected) != expected_count:
+        if expected_count is not None and len(episode_entries) != expected_count:
             raise GuangYaEpisodeNamingError(
-                f"第 {index} 个篇章映射预期 {expected_count} 集，实际匹配 {len(selected)} 集"
+                f"第 {index} 个篇章映射预期 {expected_count} 集，实际匹配 {len(episode_entries)} 集"
             )
 
         rows = []
-        for source_episode, entry in selected:
+        for source_episode, entry in episode_entries:
             handle = str(entry.get("handle") or "").strip().upper()
             if not handle or handle in selected_handles:
                 raise GuangYaEpisodeNamingError("篇章映射包含重复或无效对象")

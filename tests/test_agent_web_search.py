@@ -1,4 +1,8 @@
 from __future__ import annotations
+from app.agent.models import ToolResult
+from typing import Callable
+from app.clients.http import FixedHostHttpClient
+from typing import cast
 
 import asyncio
 import hashlib
@@ -21,7 +25,6 @@ from app.agent.domains.discovery.web_search_actions import (
     web_search_arguments,
 )
 from app.agent.errors import AgentToolError
-from app.agent.models import ToolResult
 from app.agent.rate_limit import AgentRateLimiter
 from tests.support import IsolatedDatabaseTestCase
 
@@ -201,7 +204,7 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
 
     def _run_two_threads(self, action):
         start = threading.Barrier(2)
-        results = [None, None]
+        results: list[ToolResult | None] = [None, None]
         errors: list[BaseException] = []
 
         def worker(index: int) -> None:
@@ -218,7 +221,11 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
             thread.join(timeout=3)
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(errors, [])
-        return results
+        completed = []
+        for result in results:
+            assert result is not None
+            completed.append(result)
+        return completed
 
     def test_concurrent_identical_search_is_single_flight_and_charged_once(self):
         both_reserved = threading.Event()
@@ -481,7 +488,7 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
                 {"query": "Jellyfin", "topic": "general", "max_results": 5},
                 api_key="secret-key",
                 depth="basic",
-                client_factory=lambda **_kwargs: TimeoutClient(),
+                client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_kwargs: TimeoutClient()),
             )
         )
         self.assertEqual(result.status, "timeout")
@@ -510,7 +517,7 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
                 },
                 api_key="secret-key",
                 depth="basic",
-                client_factory=FakeClient,
+                client_factory=cast(Callable[..., FixedHostHttpClient], FakeClient),
             )
         )
         self.assertTrue(result.ok)

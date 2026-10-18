@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING, ParamSpec, Protocol
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser, ViewportSize
 
 try:
     from playwright.sync_api import sync_playwright
@@ -23,7 +28,7 @@ SESSION_ID = "session_kernel_browser_0001"
 def _chromium_executable(playwright) -> str | None:
     """优先使用与 Playwright 配套的浏览器，避免系统 Chrome 超前导致崩溃。"""
     candidates: list[Path] = []
-    configured = str(os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "").strip()
+    configured = (os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or "").strip()
     if configured:
         candidates.append(Path(configured).expanduser())
     candidates.append(Path(playwright.chromium.executable_path))
@@ -253,13 +258,28 @@ MOCK_FETCH = r"""
 """
 
 
+_CleanupArgs = ParamSpec("_CleanupArgs")
+
+
+class _KernelPageHarness(Protocol):
+    browser: Browser
+    source: str
+    styles: str
+
+    def addCleanup(
+        self, function: Callable[_CleanupArgs, object], /,
+        *args: _CleanupArgs.args, **kwargs: _CleanupArgs.kwargs,
+    ) -> None: ...
+
+
 @unittest.skipIf(sync_playwright is None, "系统环境未安装 Playwright")
 class AgentKernelBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable_path = _chromium_executable(cls.playwright)
-        launch_options = {
+        launch_options: dict = {
             "headless": True,
             "args": ["--no-sandbox", "--disable-dev-shm-usage"],
         }
@@ -280,10 +300,10 @@ class AgentKernelBrowserTests(unittest.TestCase):
         cls.playwright.stop()
 
     def make_page(
-        self,
+        self: _KernelPageHarness,
         config: dict | None = None,
         *,
-        viewport: dict[str, int] | None = None,
+        viewport: ViewportSize | None = None,
         stored_session: str = "",
         hash_fragment: str = "",
         initial_prompt: str = "",
@@ -962,7 +982,9 @@ Season 1 / S01E01
             "() => document.querySelector('#agentResponseStatus').textContent.includes('任务状态未确认')"
         )
         transcript = page.locator("#agentTranscript")
-        self.assertIn("暂停任务已提交", transcript.text_content())
+        text_content = transcript.text_content()
+        assert text_content is not None
+        self.assertIn("暂停任务已提交", text_content)
         self.assertIn("不会自动重试", page.locator("#agentResponseStatus").inner_text())
         self.assertTrue(page.locator("#agentSend").get_attribute("aria-busy") == "false")
         self.assertFalse(page.locator("#agentSend").is_hidden())
@@ -1172,10 +1194,11 @@ Season 1 / S01E01
         self.assertNotIn("执行失败", text)
 
     def test_release_format_hash_is_ordinary_on_desktop_and_mobile(self) -> None:
-        for viewport in (
+        viewports: tuple[ViewportSize, ...] = (
             {"width": 1280, "height": 800},
             {"width": 390, "height": 844},
-        ):
+        )
+        for viewport in viewports:
             with self.subTest(viewport=viewport):
                 page = self.make_page(
                     {"sessions": {"sessions": []}},
@@ -1380,11 +1403,14 @@ Season 1 / S01E01
         page.locator("#agentPrompt").fill("执行一个较长的只读巡检")
         before = page.locator(".agent-submit-slot").bounding_box()
         send_before = page.locator("#agentSend").bounding_box()
+        assert send_before is not None
         self.assertAlmostEqual(send_before["width"], send_before["height"], delta=0.5)
+        assert before is not None
         self.assertAlmostEqual(send_before["width"], before["width"], delta=0.5)
         page.locator("#agentComposer").evaluate("form => form.requestSubmit()")
         page.wait_for_function("document.querySelector('#agentSend').getAttribute('aria-busy') === 'true'")
         during = page.locator(".agent-submit-slot").bounding_box()
+        assert during is not None
         self.assertAlmostEqual(before["width"], during["width"], delta=0.5)
         self.assertAlmostEqual(before["height"], during["height"], delta=0.5)
         layout = page.evaluate("""() => {

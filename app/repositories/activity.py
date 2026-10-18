@@ -13,7 +13,7 @@ _TABLES = {
 
 def search(*, query: str, limit: int = 10) -> list[dict]:
     """先按同一更新时间口径选全域窗口；单条 SQL 同时保证跨模块读快照。"""
-    bounded = max(1, min(int(limit), 20))
+    bounded = max(1, min(limit, 20))
     selections = []
     params: list[object] = []
     for rank, (kind, table) in enumerate(_TABLES.items()):
@@ -47,7 +47,7 @@ def snapshot(kind: str, identifier: int) -> dict | None:
         ).fetchone()
         if row is None:
             return None
-        result = {"kind": kind, "record": dict(row)}
+        result: dict = {"kind": kind, "record": dict(row)}
         if kind == "download":
             result["logs"] = [
                 dict(item)

@@ -8,7 +8,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from app import database as db
@@ -18,10 +18,13 @@ from app.clients.qbittorrent import (
     close_qbittorrent_client,
 )
 from app.config import get
-from app.indexers.providers.base import magnet_infohash, augment_public_magnet
+from app.indexers.providers.base import augment_public_magnet, magnet_infohash
 from app.logger import get_logger
 from app.modules.offline import analyze_offline_url, detect_protocol, submit_offline
-from app.repositories.download_requests import download_display_title, usable_download_title
+from app.repositories.download_requests import (
+    download_display_title,
+    usable_download_title,
+)
 
 logger = get_logger(__name__)
 
@@ -100,7 +103,7 @@ def extract_download_url(text: str) -> str:
     return match.group(1).rstrip(".,，。;；)）]") if match else ""
 
 
-def is_guangya_share_url(url: str) -> bool:
+def is_guangya_share_url(url: object) -> bool:
     """仅识别光鸭官方域名下的 /s/ 或 /share/ 链接，防 lookalike host。"""
     try:
         parsed = urlparse(str(url or "").strip())
@@ -116,7 +119,7 @@ def is_guangya_share_url(url: str) -> bool:
 
 
 def _is_private_or_local_host(hostname: str) -> bool:
-    host = str(hostname or "").strip().lower().rstrip(".")
+    host = (hostname or "").strip().lower().rstrip(".")
     if not host or host == "localhost" or host.endswith((".local", ".localhost")):
         return True
     try:
@@ -126,7 +129,7 @@ def _is_private_or_local_host(hostname: str) -> bool:
     return not address.is_global
 
 
-def is_probable_http_download_url(url: str) -> bool:
+def is_probable_http_download_url(url: object) -> bool:
     """区分明确下载直链与普通网页，避免 Telegram 分享网页时误建任务。"""
     try:
         parsed = urlparse(str(url or "").strip())
@@ -213,7 +216,7 @@ _BTIH_BASE32_RE = re.compile(r"^[A-Z2-7]{32}$", re.IGNORECASE)
 _BTMH_SHA256_RE = re.compile(r"^1220[0-9a-fA-F]{64}$")
 
 
-def http_torrent_infohash_hint(value: str) -> str:
+def http_torrent_infohash_hint(value: object) -> str:
     """读取 HTTP 种子地址路径中显式携带的 v1 infohash。"""
     try:
         path = unquote(urlparse(str(value or "")).path)
@@ -232,7 +235,7 @@ def _hash_request_identity(canonical: str) -> str:
 
 def _magnet_request_identity(source_value: str) -> tuple[str, str, str]:
     xt_values = [
-        str(value or "").strip()
+        (value or "").strip()
         for value in parse_qs(urlparse(source_value).query).get("xt", [])
     ]
     # Hybrid magnet 优先 v1 BTIH；只返回同命名空间的 xt，避免把任意 BTMH
@@ -270,6 +273,7 @@ def prepare_download_input(item: DownloadInput, target: str) -> DownloadInput:
     _url, payload = _prepare_offline_resource(
         item.source_value, item.torrent_data, content_type=item.content_type,
     )
+    assert payload is not None
     display_title = item.display_title
     if not usable_download_title(display_title or item.title):
         display_title = parse_torrent_metadata(payload)[0]
@@ -284,8 +288,8 @@ def request_keys(item: DownloadInput) -> tuple[str, ...]:
     SHA-256，避免与同前 20 bytes 的 v1 infohash 误去重。Hybrid torrent
     同时登记经原始 info 字典证明的 BTIH/BTMH 身份。
     """
-    kind = str(item.kind or "").strip().lower()
-    source_value = str(item.source_value or "").strip()
+    kind = (item.kind or "").strip().lower()
+    source_value = (item.source_value or "").strip()
     namespace = ""
     identity = ""
     verified_btmh_identity = ""
@@ -316,7 +320,7 @@ def request_keys(item: DownloadInput) -> tuple[str, ...]:
             identities.append(f"btmh:{verified_btmh_identity}")
     elif kind == "magnet":
         query = parse_qs(urlparse(source_value).query)
-        xt = str((query.get("xt") or [""])[0] or "").lower()
+        xt = ((query.get("xt") or [""])[0] or "").lower()
         identities.append(f"magnet:{xt or source_value.lower()}")
     else:
         identities.append(f"{kind}:{source_value}")
@@ -338,11 +342,11 @@ def request_key(item: DownloadInput) -> str:
 
 def create_request(
     item: DownloadInput,
-    chat_id: str,
-    message_id: str,
+    chat_id: str | int,
+    message_id: str | int,
     origin: str = "telegram",
     *,
-    user_id: str = "",
+    user_id: str | int = "",
     supersede_request_id: int | None = None,
     admission_id: int | None = None,
     initial_targets: str = "",
@@ -405,12 +409,12 @@ def _finalize_submission_state(
     updates: dict[str, Any],
 ) -> tuple[str, str]:
     committed_status = db.finalize_download_request_submission(
-        int(request_id), claimed_targets, **updates
+        request_id, claimed_targets, **updates
     )
     if committed_status is not None:
-        return str(committed_status), ""
+        return committed_status, ""
 
-    current = db.get_download_request(int(request_id))
+    current = db.get_download_request(request_id)
     current_status = str(current["status"] or "manual_review") if current else "manual_review"
     notice = (
         "下载后端返回结果时请求状态已被恢复或人工接管；"
@@ -418,7 +422,7 @@ def _finalize_submission_state(
     )
     logger.warning(
         "忽略下载提交迟到结果 request=%s targets=%s current_status=%s",
-        int(request_id),
+        request_id,
         ",".join(claimed_targets),
         current_status,
     )
@@ -552,9 +556,31 @@ def public_dispatch_summary(result: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+class _DispatchOptions(TypedDict, total=False):
+    qb_save_path: str
+    qb_category: str
+    qb_runtime_config: dict[str, Any]
+    qb_task_id_hint: str
+    rss_item_id: int
+    log_path: str
+
+
+class _QBSubmissionOptions(TypedDict, total=False):
+    save_path: str
+    category: str
+    runtime_config: dict[str, Any]
+    task_id_hint: str
+
+
+class _GuangYaSubmissionOptions(TypedDict, total=False):
+    target_dir_id: str
+    target_dir_name: str
+    qb_runtime_config: dict[str, Any]
+
+
 def _qb_client_options(runtime_config: dict[str, Any] | None) -> dict[str, Any]:
     """读写 qB 共用连接参数；冻结配置缺项不能回读实时配置。"""
-    options = {
+    options: dict[str, Any] = {
         key: str((runtime_config.get(key) if runtime_config is not None else get(name, "")) or "")
         for key, name in (
             ("url", "QB_URL"), ("username", "QB_USERNAME"),
@@ -575,7 +601,7 @@ def _export_qb_torrent_for_resubmit(
     """尽力从 qB 5.x 恢复种子；失败时由调用者继续走本地或 Magnet 回退。"""
     options = _qb_client_options(qb_runtime_config)
     options["url"] = options["url"].strip()
-    if not options["url"] or not _QB_TORRENT_ID_RE.fullmatch(str(torrent_id or "")):
+    if not options["url"] or not _QB_TORRENT_ID_RE.fullmatch(torrent_id or ""):
         return None
     request_id = 0
     try:
@@ -585,9 +611,9 @@ def _export_qb_torrent_for_resubmit(
     client = None
     try:
         client = QBittorrentClient(**options)
-        payload = client.export_torrent(str(torrent_id).lower())
+        payload = client.export_torrent(torrent_id.lower())
         _title, exported_id = parse_torrent_metadata(payload)
-        if exported_id.lower() != str(torrent_id).lower():
+        if exported_id.lower() != torrent_id.lower():
             logger.warning("qB 导出种子身份不匹配 request=%s", request_id)
             return None
         return payload
@@ -694,7 +720,7 @@ def download_resubmit_capabilities(
             except (TypeError, ValueError):
                 local_torrent_available = False
                 torrent_error = "原始种子数据已损坏"
-        qb_enabled = qb_enabled and bool(
+        qb_enabled = qb_enabled and (
             local_torrent_available or qb_export_available or torrent_magnet_available
         )
     else:
@@ -730,8 +756,8 @@ def download_resubmit_capabilities(
         decision = analyze_offline_url(
             source_value, title=str(row["title"] or ""), content_type=_request_content_type(row),
         )
-        gy_enabled = bool(decision.allowed)
-        gy_reason = "" if gy_enabled else str(decision.reason or "当前规则不允许提交")
+        gy_enabled = decision.allowed
+        gy_reason = "" if gy_enabled else (decision.reason or "当前规则不允许提交")
     elif retryable:
         gy_reason = "原始下载地址已不可用"
     if gy_status in _ACTIVE_BACKEND_STATUSES:
@@ -790,7 +816,7 @@ def resubmit_download_request(
     """安全重试指定目标；活动请求仅补投失败目标，其余创建历史 successor。"""
     if targets not in SUPPORTED_TARGETS:
         return {"ok": False, "error": "下载目标无效"}
-    source_row = db.get_download_request(int(source_request_id))
+    source_row = db.get_download_request(source_request_id)
     if not source_row:
         return {"ok": False, "error": "原下载请求不存在"}
 
@@ -806,13 +832,17 @@ def resubmit_download_request(
             "error": str(target_capability.get("reason") or "当前目标不可重新提交"),
         }
 
-    dispatch_kwargs = {
-        key: value for key, value in (
-            ("qb_save_path", qb_save_path), ("qb_category", qb_category),
-            ("qb_runtime_config", qb_runtime_config),
-            ("rss_item_id", rss_item_id), ("log_path", log_path),
-        ) if value is not None
-    }
+    dispatch_kwargs: _DispatchOptions = {}
+    if qb_save_path is not None:
+        dispatch_kwargs["qb_save_path"] = qb_save_path
+    if qb_category is not None:
+        dispatch_kwargs["qb_category"] = qb_category
+    if qb_runtime_config is not None:
+        dispatch_kwargs["qb_runtime_config"] = qb_runtime_config
+    if rss_item_id is not None:
+        dispatch_kwargs["rss_item_id"] = rss_item_id
+    if log_path is not None:
+        dispatch_kwargs["log_path"] = log_path
 
     # 部分成功请求仍需跟踪另一个后端，不能创建同源 successor，也不能
     # 因两个方向的分支不同而绕过取消检查。统一复用已有目标级 CAS；
@@ -836,16 +866,16 @@ def resubmit_download_request(
             if hint:
                 dispatch_kwargs["qb_task_id_hint"] = hint
         result = dispatch_missing_targets(
-            int(source_request_id), targets, **dispatch_kwargs,
+            source_request_id, targets, **dispatch_kwargs,
         )
         return {
             **result,
-            "source_request_id": int(source_request_id),
-            "request_id": int(source_request_id),
+            "source_request_id": source_request_id,
+            "request_id": source_request_id,
             "created": False,
             "targets": targets,
             "source_attention_preserved": not bool(result.get("ok")) or bool(
-                db.count_download_requests_requiring_attention(int(source_request_id))
+                db.count_download_requests_requiring_attention(source_request_id)
             ),
         }
 
@@ -916,13 +946,15 @@ def resubmit_download_request(
     if source_kind == "http" and (
         item.torrent_data or item.content_type.split(";", 1)[0].strip().lower() == "application/x-bittorrent"
     ):
-        from app.repositories.download_requests import check_download_request_torrent_identity
+        from app.repositories.download_requests import (
+            check_download_request_torrent_identity,
+        )
 
         try:
             # 已验证HTTP种子即使重试qB，也必须先恢复原内容；普通qB直链不受影响。
             item = prepare_download_input(item, "guangya")
             check_download_request_torrent_identity(
-                int(source_request_id), request_keys(item),
+                source_request_id, request_keys(item),
                 source_alias_key=request_source_alias_key(item),
             )
         except ValueError:
@@ -937,24 +969,24 @@ def resubmit_download_request(
         created = create_request(
             item,
             str(source_row["chat_id"] or ""),
-            f"resubmit:{int(source_request_id)}",
-            origin=str(origin or "web"),
+            f"resubmit:{source_request_id}",
+            origin=(origin or "web"),
             user_id=str(source_row["user_id"] or ""),
             # manual_review 不属于普通终态，必须显式指定被接管请求；completed、
             # failed、cancelled 走仓储层既有的终态归档与新建逻辑。
             supersede_request_id=(
-                int(source_request_id) if source_status == "manual_review" else None
+                source_request_id if source_status == "manual_review" else None
             ),
             # successor 认领和媒体准入/候选接管复用同一事务。
             initial_targets=targets,
-            retry_source_request_id=int(source_request_id),
+            retry_source_request_id=source_request_id,
             retry_source_status=source_status,
         )
     except DownloadRequestRetryFenceError as exc:
         return {
             "ok": False,
             "retry_blocked": True,
-            "source_request_id": int(source_request_id),
+            "source_request_id": source_request_id,
             "source_attention_preserved": True,
             "error": str(exc),
         }
@@ -975,7 +1007,7 @@ def resubmit_download_request(
     if successor is None:
         return {
             "ok": False,
-            "source_request_id": int(source_request_id),
+            "source_request_id": source_request_id,
             "request_id": successor_id,
             "source_attention_preserved": True,
             "error": "新下载请求已认领但无法读取，未调用下载后端",
@@ -986,7 +1018,7 @@ def resubmit_download_request(
     )
     if result.get("ok"):
         db.mark_download_request_resubmitted(
-            int(source_request_id),
+            source_request_id,
             successor_request_id=successor_id,
             targets=targets,
         )
@@ -1001,12 +1033,12 @@ def resubmit_download_request(
         }
     return {
         **result,
-        "source_request_id": int(source_request_id),
+        "source_request_id": source_request_id,
         "request_id": successor_id,
         "created": True,
         "targets": targets,
         "source_attention_preserved": not bool(result.get("ok")) or bool(
-            db.count_download_requests_requiring_attention(int(source_request_id))
+            db.count_download_requests_requiring_attention(source_request_id)
         ),
     }
 
@@ -1029,7 +1061,7 @@ def dispatch_missing_targets(
     """向已有资源请求补充尚未提交的后端，不重置已成功目标。"""
     if targets not in SUPPORTED_TARGETS:
         return {"handled": False, "ok": False, "error": "下载目标无效"}
-    row = db.get_download_request(int(request_id))
+    row = db.get_download_request(request_id)
     if not row:
         return {"handled": False, "ok": False, "error": "下载请求不存在"}
     prepared_row = None
@@ -1049,7 +1081,7 @@ def dispatch_missing_targets(
             return {"handled": True, "ok": False, "error": "种子内容与已受理下载不一致，未补充提交"}
         prepared_row = {**dict(row), "torrent_data": prepared_input.torrent_data,
                         "content_type": "application/x-bittorrent"}
-    claimed = db.claim_download_request_targets(int(request_id), targets)
+    claimed = db.claim_download_request_targets(request_id, targets)
     if not claimed:
         return {"handled": False, "ok": False, "duplicate": True, "error": "该目标已提交或正在处理"}
     if prepared_row is not None and "guangya" in claimed:
@@ -1115,24 +1147,29 @@ def _dispatch_claimed_targets(
     title = download_display_title(row)
     source_value = str(row["source_value"] or "")
     results: dict[str, dict[str, Any]] = {}
+    qb_options: _QBSubmissionOptions = {}
+    if qb_save_path is not None:
+        qb_options["save_path"] = qb_save_path
+    if qb_category is not None:
+        qb_options["category"] = qb_category
+    if qb_runtime_config is not None:
+        qb_options["runtime_config"] = qb_runtime_config
+    if qb_task_id_hint:
+        qb_options["task_id_hint"] = qb_task_id_hint
+    guangya_options: _GuangYaSubmissionOptions = {
+        "target_dir_id": gy_target_dir,
+        "target_dir_name": gy_target_name,
+    }
+    if qb_runtime_config is not None:
+        guangya_options["qb_runtime_config"] = qb_runtime_config
     submissions = {
-        "qb": (_submit_qb, {
-            key: value for key, value in (
-                ("save_path", qb_save_path), ("category", qb_category),
-                ("runtime_config", qb_runtime_config), ("task_id_hint", qb_task_id_hint or None),
-            ) if value is not None
-        }),
-        "guangya": (_submit_guangya, {
-            key: value for key, value in (
-                ("target_dir_id", gy_target_dir), ("target_dir_name", gy_target_name),
-                ("qb_runtime_config", qb_runtime_config),
-            ) if value is not None
-        }),
+        "qb": lambda: _submit_qb(row, **qb_options),
+        "guangya": lambda: _submit_guangya(row, **guangya_options),
     }
     for source in claimed_targets:
-        submitter, kwargs = submissions[source]
+        submitter = submissions[source]
         try:
-            result = submitter(row, **kwargs)
+            result = submitter()
             if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
                 raise ValueError("invalid backend submission receipt")
         except Exception as exc:
@@ -1198,7 +1235,7 @@ def _dispatch_claimed_targets(
         db.add_download_log(
             source=source,
             title=title,
-            path=source_value if log_path is None else str(log_path),
+            path=source_value if log_path is None else log_path,
             rss_item_id=rss_item_id,
             request_id=request_id,
             backend_task_id=str(result.get("task_id") or ""),
@@ -1523,7 +1560,7 @@ def _submit_qb(
             category=resolved_category,
             torrents=torrents,
         )
-        failure_code = str(result.failure_code or "")
+        failure_code = (result.failure_code or "")
         error = ""
         if not result.ok:
             error = (
@@ -1531,13 +1568,13 @@ def _submit_qb(
                 if failure_code == "qb_outcome_unknown"
                 else "qB 提交失败"
             )
-        normalized_hint = str(task_id_hint or "").strip().lower()
+        normalized_hint = (task_id_hint or "").strip().lower()
         if row["kind"] != "http" or not _QB_TORRENT_ID_RE.fullmatch(
             normalized_hint
         ):
             normalized_hint = ""
         return {
-            "ok": bool(result.ok),
+            "ok": result.ok,
             "task_id": (
                 result.task_ids[0]
                 if result.task_ids
@@ -1545,7 +1582,7 @@ def _submit_qb(
             ),
             "task_ids": list(result.task_ids),
             "failure_code": failure_code,
-            "retryable": bool(result.retryable),
+            "retryable": result.retryable,
             "error": error,
         }
     finally:
@@ -1560,7 +1597,7 @@ def _submit_guangya(
 
     saved = dict(row)
     requested = str(saved.get("gy_requested_target_dir") or saved.get("gy_staging_parent_dir") or "")
-    target_dir_id = str(target_dir_id or requested)
+    target_dir_id = (target_dir_id or requested)
     nsfw_sources = {source["id"]: source["name"] for source in list_nsfw_download_sources()}
     nsfw = bool(saved.get("gy_requested_nsfw")) or target_dir_id in nsfw_sources
     if nsfw and target_dir_id not in nsfw_sources:
@@ -1584,7 +1621,9 @@ def _submit_guangya(
         ), "guangya")
         torrent_data = item.torrent_data
         if torrent_data is not None:
-            from app.repositories.download_requests import bind_verified_torrent_identity
+            from app.repositories.download_requests import (
+                bind_verified_torrent_identity,
+            )
 
             owner = bind_verified_torrent_identity(
                 int(row["id"]), item.source_value, torrent_data, request_keys(item),

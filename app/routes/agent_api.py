@@ -74,7 +74,7 @@ def _request_id(value: Any) -> str:
 
 def _draft_scope(owner: str) -> str:
     # 使用本请求已捕获的登录主体，异步读取期间切换账号不改变草稿归属。
-    secret = str(get_web_secret() or "")
+    secret = (get_web_secret() or "")
     if not secret:
         raise RuntimeError("draft scope secret unavailable")
     return hmac.new(
@@ -283,7 +283,7 @@ async def explain_action(request: Request, data: Annotated[Any, Body()] = None):
         if not isinstance(data.get("message"), str) or ("stream" in data and type(data["stream"]) is not bool):
             raise TransportInputError("message 无效")
         envelope = ExplainEnvelope(owner=_owner(), session_id=_session_id(data.get("session_id")),
-            plan_id=data.get("plan_id"), message=data["message"],
+            plan_id=str(data.get("plan_id") or ""), message=data["message"],
             request_id=_request_id(data.get("request_id")), channel="web").normalized()
         transport = get_agent_kernel_runtime().web
         if data.get("stream") is True:
@@ -341,7 +341,7 @@ async def edit_confirmation_action(request: Request, data: Annotated[Any, Body()
         _require_enabled()
         _check_rate_limit("confirmation_edit", limit=12)
         envelope = EffectEnvelope(owner=_owner(), session_id=_session_id(data.get("session_id")),
-                                  plan_id=data.get("plan_id"), request_id=_request_id(data.get("request_id")), channel="web").normalized()
+                                  plan_id=str(data.get("plan_id") or ""), request_id=_request_id(data.get("request_id")), channel="web").normalized()
         result = await get_agent_kernel_runtime().session.edit_confirmation(
             owner=envelope.owner, session_id=envelope.session_id, plan_id=envelope.plan_id,
             arguments=data["arguments"], request_id=envelope.request_id, channel="web")

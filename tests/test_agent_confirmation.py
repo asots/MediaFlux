@@ -1,6 +1,7 @@
 """Agent 受控写操作确认协议与光鸭单入口完整计划合同测试。"""
 
 from __future__ import annotations
+from typing import Any, cast
 
 import threading
 import time
@@ -176,7 +177,7 @@ class ConfirmationStoreTests(unittest.TestCase):
 
         with self.assertRaises(AgentToolError) as invalid:
             store.claim_and_rotate_owner(
-                owner="owner-a", confirmation_id=StringLikePlanId()
+                owner="owner-a", confirmation_id=cast(str, StringLikePlanId())
             )
         self.assertEqual(invalid.exception.code, "confirmation_invalid")
         self.assertEqual(
@@ -266,7 +267,7 @@ class ConfirmationStoreTests(unittest.TestCase):
     def test_confirmation_reply_intent_is_explicit_and_non_ambiguous(self):
         for value in ("确认", "好的帮我执行。", "YES", "取消", "算了！"):
             with self.subTest(value=value):
-                self.assertIsNotNone(confirmation_reply_intent(value))
+                assert (confirmation_reply_intent(value)) is not None
         for value in ("请确认状态", "确认第三个", "好的，但是先检查", "不要取消"):
             with self.subTest(value=value):
                 self.assertIsNone(confirmation_reply_intent(value))
@@ -429,7 +430,12 @@ class ConfirmationStoreTests(unittest.TestCase):
         for kwargs in invalid_calls:
             with self.subTest(kwargs=tuple(kwargs)):
                 with self.assertRaises(AgentToolError) as invalid:
-                    store.issue(owner="owner-b", tool_name="write.test", **kwargs)
+                    store.issue(
+                        owner="owner-b", tool_name="write.test",
+                        arguments=cast(dict[str, Any], kwargs["arguments"]),
+                        followup_context=cast(dict[str, Any] | None, kwargs.get("followup_context")),
+                        confirmation_contract=cast(dict[str, Any] | None, kwargs.get("confirmation_contract")),
+                    )
                 self.assertEqual(invalid.exception.code, "confirmation_invalid")
                 self.assertEqual(token_factory.call_count, 0)
                 self.assertEqual(
@@ -735,7 +741,7 @@ class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.confirmed.assert_not_called()
         self.validator.assert_called_once()
         plan = prepared.effect_plan
-        self.assertIsNotNone(plan)
+        assert (plan) is not None
         self.assertEqual(plan.tool_name, "guangya.fs.change.execute")
         self.assertEqual(plan.arguments, self.spec.validator(self.arguments))
         self.assertEqual(len(plan.arguments["operations"]), len(self.arguments["operations"]))
@@ -745,6 +751,7 @@ class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plan.arguments["trigger_strm"])
         self.assertEqual(self.preparer.call_args.args[0], plan.arguments)
         pending = await self.pipeline.get_pending_plan(owner="fs-owner", session_id="fs-session")
+        assert pending is not None
         self.assertEqual(pending.plan_id, plan.plan_id)
 
         result = await self.pipeline.execute_confirmed(plan.plan_id, context=self.context)
@@ -772,6 +779,8 @@ class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.preparer.assert_called_once()
         self.confirmed.assert_not_called()
         pending = await self.pipeline.get_pending_plan(owner="fs-owner", session_id="fs-session")
+        assert pending is not None
+        assert prepared.effect_plan is not None
         self.assertEqual(pending.plan_id, prepared.effect_plan.plan_id)
 
     async def test_persisted_execute_card_keeps_name_and_skips_new_preparation_schema(self):
@@ -797,6 +806,7 @@ class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
             effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
         )
         pending = await rebuilt.get_pending_plan(owner="fs-owner", session_id="fs-session")
+        assert pending is not None
         self.assertEqual(pending.tool_name, "guangya.fs.change.execute")
         self.assertEqual(pending.arguments, {})
         completed = await rebuilt.execute_confirmed(legacy.plan_id, context=self.context)
@@ -873,15 +883,20 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                     self.advance(850)
                     result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
                     plan = result.effect_plan
+                    assert plan is not None
                     self.assertAlmostEqual(plan.expires_at, 2_000_000_900.0, delta=0.02)
                     self.assertAlmostEqual(datetime.fromisoformat(plan.public_dict()["expires_at"]).timestamp(),
                                            plan.expires_at, delta=1)
                     pending = await self.pending()
+                    assert pending is not None
                     self.assertLessEqual(pending.expires_at, plan.expires_at)
                     if sqlite_tickets:
                         self.pipeline.effect_store = ConfirmationEffectPlanStore(
                             SQLiteConfirmationStore(clock=lambda: self.ticket_time))
-                        self.assertAlmostEqual((await self.pending()).expires_at, plan.expires_at, delta=0.02)
+                        assert plan is not None
+                        pending_result = await self.pending()
+                        assert pending_result is not None
+                        self.assertAlmostEqual((pending_result).expires_at, plan.expires_at, delta=0.02)
                     self.assertFalse(self.writes)
 
     async def test_wall_clock_ref_bounds_monotonic_ticket_with_fractional_remaining_ttl(self):
@@ -890,6 +905,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
         reference = await self.reference()
         self.advance(849.5)
         result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
+        assert result.effect_plan is not None
         self.assertAlmostEqual(result.effect_plan.expires_at, 1900.0, delta=0.02)
         self.assertEqual(result.effect_plan.public_dict()["expires_at"], "")
         self.advance(50.5)
@@ -906,10 +922,12 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 self.advance(51)
                 self.assertIsNone(await self.pending())
                 with self.assertRaises(ToolPipelineError) as refused:
+                    assert result.effect_plan is not None
                     await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
                 self.assertEqual(refused.exception.code, "confirmation_stale")
                 self.assertIs(refused.exception.execution_started, False)
                 with self.assertRaises(ToolPipelineError) as repeated:
+                    assert result.effect_plan is not None
                     await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
                 self.assertEqual(repeated.exception.code, "confirmation_invalid")
                 self.assertFalse(self.writes)
@@ -931,6 +949,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(evidence, plan)
                 self.assertIsNone(await self.pipeline.get_confirmation_evidence(owner="other-owner", session_id="ref-session"))
                 # 注销失效证据不能伪造“成功取消了一张有效卡”的历史。
+                assert plan is not None
                 self.assertFalse(await self.pipeline.cancel_effect(plan.plan_id, lease=self.context.lease))
                 self.assertIsNone(await self.pipeline.get_confirmation_evidence(owner="ref-owner", session_id="ref-session"))
                 with self.assertRaises(ToolPipelineError) as repeated:
@@ -946,12 +965,13 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 reference = await self.reference(ttl=5)
                 preview = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
                 plan = preview.effect_plan
+                assert plan is not None
                 self.assertEqual(plan.confirmation_contract["reference_recovery_until"], started + self.tickets.ttl_seconds)
                 self.advance(6)
                 self.assertEqual(await self.pipeline.get_confirmation_evidence(owner="ref-owner", session_id="ref-session"), plan)
                 self.advance(self.tickets.ttl_seconds - 6)
                 # 原行尚在诊断保留期内，但原确认窗口已结束，不能继续启动 Agent。
-                self.assertIsNotNone(self.tickets.inspect_ticket(owner="kernel:ref-owner\x1fref-session", confirmation_id=plan.plan_id))
+                assert (self.tickets.inspect_ticket(owner="kernel:ref-owner\x1fref-session", confirmation_id=plan.plan_id)) is not None
                 self.assertIsNone(await self.pipeline.get_confirmation_evidence(owner="ref-owner", session_id="ref-session"))
                 with self.assertRaises(ToolPipelineError) as expired:
                     await self.pipeline.execute_confirmed(plan.plan_id, context=self.context)
@@ -968,6 +988,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 self.advance(6)
                 self.assertIsNone(await self.pending())
                 with self.assertRaises(ToolPipelineError) as stale:
+                    assert preview.effect_plan is not None
                     await self.pipeline.execute_confirmed(preview.effect_plan.plan_id, context=self.context)
                 self.assertEqual(stale.exception.code, "confirmation_stale")
                 self.assertIs(stale.exception.execution_started, False)
@@ -980,6 +1001,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.advance(850)
         result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
         self.advance(49)
+        assert result.effect_plan is not None
         completed = await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
         self.assertTrue(completed.outcome.public_content["ok"])
         with self.assertRaises(ToolPipelineError):
@@ -993,6 +1015,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.frozen_arguments = {"copied": "frozen-value"}
         args = {"groups": [{"payload_ref": first.ref}], "target": {"target_ref": second.ref}}
         result = await self.pipeline.execute("test.ref_write", args, context=self.context)
+        assert result.effect_plan is not None
         self.assertEqual(result.effect_plan.arguments, self.frozen_arguments)
         self.assertAlmostEqual(result.effect_plan.expires_at, 2_000_000_875.0, delta=0.02)
 
@@ -1003,6 +1026,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
         args = {"steps": [{"tool": "test.ref_write", "arguments": {"payload_ref": first.ref}},
                           {"tool": "test.ref_tail", "arguments": {"payload_ref": second.ref}}]}
         result = await self.pipeline.execute("agent.batch", args, context=self.context)
+        assert result.effect_plan is not None
         self.assertAlmostEqual(result.effect_plan.expires_at, 2_000_000_875.0, delta=0.02)
         self.assertFalse(self.writes)
         self.advance(26)
@@ -1048,7 +1072,9 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
             prepared=PreparedEffect(preview={"ok": True}, snapshot_fingerprint="frozen"))
         await self.state.commit(self.context.lease, updates=(StateUpdate("pending_effect_plan_id", legacy.plan_id),))
         self.assertEqual(legacy.expires_at, self.ticket_time + 600)
-        self.assertAlmostEqual((await self.pending()).expires_at, 2_000_000_900.0, delta=0.02)
+        pending_result_2 = await self.pending()
+        assert pending_result_2 is not None
+        self.assertAlmostEqual((pending_result_2).expires_at, 2_000_000_900.0, delta=0.02)
         self.advance(51)
         self.assertIsNone(await self.pending())
         self.assertFalse(self.writes)
@@ -1074,6 +1100,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                         return plan
                     self.pipeline.effect_store.claim = expire_after_claim
                 with self.assertRaises(ToolPipelineError) as rejected:
+                    assert result.effect_plan is not None
                     await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
                 self.assertIs(getattr(rejected.exception, "execution_started", None), False)
                 self.assertIn("本次未执行", str(rejected.exception))
@@ -1081,6 +1108,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(self.writes)
                 self.assertIsNone(await self.pending())
                 with self.assertRaises(ToolPipelineError):
+                    assert result.effect_plan is not None
                     await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
                 self.assertFalse(self.writes)
 
@@ -1097,6 +1125,7 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 raise ToolPipelineError("后项执行额度不足", code="rate_limited")
 
         self.pipeline.rate_limiter.acquire = refuse_tail
+        assert result.effect_plan is not None
         completed = await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
         public = completed.outcome.public_content
         first, second = public["data"]["steps"]
@@ -1122,10 +1151,12 @@ class ReferenceBoundConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.pipeline.execute("test.ref_write", {"payload_ref": reference.ref}, context=self.context)
                 self.handler_failure, self.verify_failure = phase == "handler", phase == "verify"
                 with self.assertRaises(ToolPipelineError) as failed:
+                    assert result.effect_plan is not None
                     await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
                 self.assertIs(getattr(failed.exception, "execution_started", None), True)
                 self.assertNotIn("本次未执行", str(failed.exception))
                 self.assertEqual(len(self.writes), int(phase == "verify"))
                 with self.assertRaises(ToolPipelineError):
+                    assert result.effect_plan is not None
                     await self.pipeline.execute_confirmed(result.effect_plan.plan_id, context=self.context)
                 self.assertEqual(len(self.writes), int(phase == "verify"))

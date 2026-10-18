@@ -1,4 +1,7 @@
 """Positive safety controls promoted from the independent SPEC probes."""
+from app.agent.kernel.model import ModelAdapter
+from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter
+from typing import cast
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -24,7 +27,7 @@ def test_injected_bool_exception_is_propagated_once(local_config):
     model = Model()
     with patch.object(bootstrap, 'OpenAICompatibleModelAdapter', side_effect=AssertionError('default forbidden')), patch.object(bootstrap.ProviderSettings, 'from_config', side_effect=AssertionError('provider read forbidden')):
         with pytest.raises(ValueError) as caught:
-            bootstrap.build_agent_kernel_runtime(model=model)
+            bootstrap.build_agent_kernel_runtime(model=cast(ModelAdapter | None, model))
     assert caught.value is failure
     assert model.calls == 1
 
@@ -50,7 +53,9 @@ def test_direct_constructor_rechecks_after_real_publication(local_config, failed
                 bootstrap.build_agent_kernel_runtime()
     assert bootstrap._runtime is None
     if not failed:
-        assert bootstrap.build_agent_kernel_runtime().session.model.settings.model == 'changed'
+        rebuilt = bootstrap.build_agent_kernel_runtime()
+        assert isinstance(rebuilt.session.model, OpenAICompatibleModelAdapter)
+        assert rebuilt.session.model.settings.model == 'changed'
 
 
 def test_publisher_does_not_recreate_missing_database(local_config):
@@ -70,6 +75,7 @@ def test_actual_lifespan_storage_authorization(state):
             case.paths.ensure_writable_dirs()
             case.paths.env_file.write_text('MEDIAFLUX_INITIALIZED=1\nENV_WEB_PASSPORT=admin\nENV_WEB_PASSWORD=synthetic-password\nWEB_SECRET_KEY=synthetic-secret\n')
             case._reload_runtime_modules()
+            before = None
             if state == 'corrupt-db':
                 case.paths.database_path.write_bytes(b'not sqlite')
             elif state != 'missing-db':
@@ -78,6 +84,7 @@ def test_actual_lifespan_storage_authorization(state):
                 if state == 'changing':
                     with db.get_conn() as conn:
                         conn.execute('BEGIN IMMEDIATE')
+                        assert before is not None
                         before = feature_gate.begin_runtime_change(conn, before)
                 if state == 'missing-config':
                     case.paths.env_file.unlink()
@@ -101,7 +108,8 @@ def test_actual_lifespan_storage_authorization(state):
                 if state == 'changing':
                     with db.get_conn() as conn:
                         assert feature_gate.read_runtime_fence(conn) == before
-                if state == 'corrupt-db':
+                before = None
+            if state == 'corrupt-db':
                     assert case.paths.database_path.read_bytes() == b'not sqlite'
             assert (case.paths.env_file.read_bytes() if case.paths.env_file.exists() else None) == env_before
         finally:

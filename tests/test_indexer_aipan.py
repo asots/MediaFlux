@@ -25,6 +25,7 @@ def response(url: str, body: bytes | str, *, status: int = 200, content_type: st
 
 
 class FakeHttp:
+    allowed_hosts: set[str]
     def __init__(self, routes):
         self.routes = routes
         self.calls = []
@@ -145,7 +146,7 @@ class AipanAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_detail_candidates_are_capped_and_canceled_tasks_are_reaped(self):
         movies = [{"id": index, "title": f"作品{index}"} for index in range(1, 5)]
-        routes = {AIPAN_SEARCH: response(AIPAN_SEARCH, json.dumps({"movies": movies}))}
+        routes: dict = {AIPAN_SEARCH: response(AIPAN_SEARCH, json.dumps({"movies": movies}))}
         started = asyncio.Event()
         release = asyncio.Event()
         tracker = {"active": 0, "max": 0}

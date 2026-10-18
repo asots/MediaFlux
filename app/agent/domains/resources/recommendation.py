@@ -322,7 +322,7 @@ def _ranked_item(
         confidence = "low"
     public["quality"] = {
         "rank": 0,
-        "score": int(score),
+        "score": score,
         "confidence": confidence,
         "match": match,
         "eligible": eligible,

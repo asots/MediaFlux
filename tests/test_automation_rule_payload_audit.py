@@ -71,10 +71,13 @@ class AutomationRulePayloadAuditTests(IsolatedDatabaseTestCase):
             side_effect=RecursionError("runtime depth limit"),
         ):
             read = rules.get_rule(self.owner, row["id"])
+            assert read is not None
             self.assertTrue(read.get("settings_error"))
             self.assertEqual(rules.claim_due_rules(self.clock), [])
+        get_rule_result = rules.get_rule(self.owner, row["id"])
+        assert get_rule_result is not None
         self.assertEqual(
-            rules.get_rule(self.owner, row["id"])["settings"], row["settings"]
+            get_rule_result["settings"], row["settings"]
         )
 
     def test_invalid_rows_beyond_batch_limit_do_not_starve_valid_rule(self):
@@ -114,6 +117,7 @@ class AutomationRulePayloadAuditTests(IsolatedDatabaseTestCase):
         broken = self._save()
         self._corrupt(broken, '{"hour":')
         read = rules.get_rule(self.owner, broken["id"])
+        assert read is not None
         self.assertTrue(read.get("settings_error"))
         self.assertIsNone(rules.get_rule("another-owner", broken["id"]))
         fixed = rules.save_rule(
@@ -125,7 +129,9 @@ class AutomationRulePayloadAuditTests(IsolatedDatabaseTestCase):
             rule_id=broken["id"],
             expected_revision=read["revision"],
         )
+        assert fixed is not None
         self.assertNotIn("settings_error", fixed)
+        assert fixed is not None
         self.assertEqual(fixed["revision"], read["revision"] + 1)
         self._corrupt(fixed, "null")
         self.assertTrue(

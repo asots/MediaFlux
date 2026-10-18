@@ -28,7 +28,7 @@ class RetiredSessionBridgeTests(InitializedWebTestCase):
             def csrf(path):
                 response = client.get(path)
                 match = re.search(r'name="csrf_token" (?:content|value)="([^"]+)"', response.text)
-                self.assertIsNotNone(match, response.text[:100])
+                assert (match) is not None, response.text[:100]
                 return match.group(1)
 
             username, password = config.web_credentials()

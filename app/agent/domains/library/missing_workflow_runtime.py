@@ -175,9 +175,7 @@ class MissingMediaWorkflowRuntime:
             return
         enqueued = False
         try:
-            enqueued = bool(
-                self.verification_enqueuer(result, verification_context, owner)
-            )
+            enqueued = (self.verification_enqueuer(result, verification_context, owner))
         except Exception as exc:  # noqa: BLE001 - 下载已完成，不得改写执行终态
             logger.warning(
                 "Agent 下载后媒体库自动复核排队失败 type=%s",

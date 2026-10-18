@@ -216,7 +216,7 @@ def test_default_pipeline_long_title_cost_and_reopened_consumers(store, monkeypa
         assert completed[0]["summary"] == value.summary
         assert [ref["kind"] for ref in completed[0]["refs"]] == ["resource_candidates"]
         builder = TurnViewBuilder()
-        restored = [AgentEvent(**{**event, "type": AgentEventType(event["type"])}) for event in journal]
+        restored = [AgentEvent(type=AgentEventType(event["type"]), sequence=event["sequence"], request_id=event["request_id"], session_id=event["session_id"], turn_id=event["turn_id"], occurred_at=event["occurred_at"], event_id=event["event_id"], payload=event["payload"]) for event in journal]
         for event in restored:
             builder.apply(event)
 

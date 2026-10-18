@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+from collections.abc import Callable
+from app.clients.guangya import GuangYaClient
+
 import tempfile
 import unittest
 from copy import deepcopy
@@ -175,7 +179,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
     def test_plan_keeps_media_metadata_and_requires_filename_review(self):
         client = FakeCleanupClient()
         plan = cleanup.build_cleanup_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             sources=[{"id": "source", "name": "整理源"}],
             max_candidates=20,
@@ -204,7 +208,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
             for index in range(cleanup._MAX_REVIEW_FILES + 1)
         ]
         plan = cleanup.build_cleanup_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             sources=[{"id": "source", "name": "整理源"}],
             max_candidates=20,
@@ -212,12 +216,12 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         self.assertEqual(plan["stats"]["candidate_count"], 0)
         self.assertEqual(plan["candidates"], [])
         self.assertGreaterEqual(plan["stats"]["preserved_dir_count"], 1)
-        self.assertIsNotNone(client.file_info("residual"))
+        assert (client.file_info("residual")) is not None
 
     def test_confirmed_execution_quarantines_residual_and_recycles_empty(self):
         client = FakeCleanupClient()
         plan = cleanup.build_cleanup_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             sources=[{"id": "source", "name": "整理源"}],
             max_candidates=20,
@@ -245,14 +249,16 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 "owner_digest": "owner-digest",
                 "credential_generation": 13,
             },
-            client_factory=lambda: client,
+            client_factory=cast(Callable[[], GuangYaClient], lambda: client),
         )
         self.assertFalse(result["partial"])
         self.assertEqual(result["stats"]["quarantined"], 1)
         self.assertEqual(result["stats"]["empty_deleted"], 1)
         self.assertIsNone(client.file_info("empty"))
-        self.assertIsNotNone(client.file_info("residual"))
-        self.assertNotEqual(client.file_info("residual").parent_id, "source")
+        assert (client.file_info("residual")) is not None
+        file_info_result = client.file_info("residual")
+        assert file_info_result is not None
+        self.assertNotEqual(file_info_result.parent_id, "source")
 
     def test_residual_is_rechecked_immediately_before_move(self):
 
@@ -280,7 +286,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
 
         client = MutatingClient()
         plan = cleanup.build_cleanup_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             sources=[{"id": "source", "name": "整理源"}],
             max_candidates=20,
@@ -302,12 +308,14 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 "owner_digest": "owner-digest",
                 "credential_generation": 13,
             },
-            client_factory=lambda: client,
+            client_factory=cast(Callable[[], GuangYaClient], lambda: client),
         )
         self.assertTrue(result["partial"])
         self.assertEqual(result["stats"]["quarantined"], 0)
         self.assertEqual(result["stats"]["precondition_failed"], 1)
-        self.assertEqual(client.file_info("residual").parent_id, "source")
+        file_info_result_2 = client.file_info("residual")
+        assert file_info_result_2 is not None
+        self.assertEqual(file_info_result_2.parent_id, "source")
 
     def test_empty_directory_is_rechecked_immediately_before_delete(self):
 
@@ -335,7 +343,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
 
         client = MutatingClient()
         plan = cleanup.build_cleanup_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             sources=[{"id": "source", "name": "整理源"}],
             max_candidates=20,
@@ -357,12 +365,12 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 "owner_digest": "owner-digest",
                 "credential_generation": 13,
             },
-            client_factory=lambda: client,
+            client_factory=cast(Callable[[], GuangYaClient], lambda: client),
         )
         self.assertTrue(result["partial"])
         self.assertEqual(result["stats"]["empty_deleted"], 0)
         self.assertEqual(result["stats"]["precondition_failed"], 1)
-        self.assertIsNotNone(client.file_info("empty"))
+        assert (client.file_info("empty")) is not None
 
     def test_acknowledged_delete_without_observed_effect_is_not_retried(self):
         class AcknowledgingClient(FakeCleanupClient):
@@ -378,7 +386,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
 
         client = AcknowledgingClient()
         plan = cleanup.build_cleanup_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             sources=[{"id": "source", "name": "整理源"}],
             max_candidates=20,
@@ -400,7 +408,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 "owner_digest": "owner-digest",
                 "credential_generation": 13,
             },
-            client_factory=lambda: client,
+            client_factory=cast(Callable[[], GuangYaClient], lambda: client),
         )
 
         self.assertTrue(result["partial"])
@@ -408,7 +416,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         self.assertEqual(result["stats"]["verification_failed"], 1)
         self.assertEqual(result["stats"]["precondition_failed"], 0)
         self.assertEqual(client.delete_attempts, 1)
-        self.assertIsNotNone(client.file_info("empty"))
+        assert (client.file_info("empty")) is not None
 
     def test_agent_preview_and_durable_submission(self):
         client = FakeCleanupClient()
@@ -544,7 +552,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
             )
 
     def test_persisted_preview_rejects_non_list_public_fields(self):
-        value = {key: 0 for key in actions._PREVIEW_KEYS}
+        value: dict = {key: 0 for key in actions._PREVIEW_KEYS}
         value.update({"sample_directories": [], "review_summaries": "not-a-list"})
         self.assertIsNone(actions._safe_preview(value))
 
@@ -597,7 +605,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
             self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, context)
         previous = self._domain_actions.cleanup._flow("owner")
-        self.assertIsNotNone(previous)
+        assert (previous) is not None
         previous_path = cleanup._plan_path(previous.plan_id)
         self.assertTrue(previous_path.is_file())
         with (
@@ -610,13 +618,15 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
             self.assertRaisesRegex(Exception, "临时读取失败"),
         ):
             self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, context)
-        self.assertEqual(self._domain_actions.cleanup._flow("owner").plan_id, previous.plan_id)
+        flow_result = self._domain_actions.cleanup._flow("owner")
+        assert flow_result is not None
+        self.assertEqual(flow_result.plan_id, previous.plan_id)
         self.assertTrue(previous_path.is_file())
 
     def test_terminal_cleanup_plan_is_removed_after_retention(self):
         client = FakeCleanupClient()
         plan = cleanup.build_cleanup_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             sources=[{"id": "source", "name": "整理源"}],
             max_candidates=20,
@@ -636,7 +646,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
     def test_user_keep_decision_overrides_previous_quarantine_selection(self):
         client = FakeCleanupClient()
         initial = cleanup.build_cleanup_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             sources=[{"id": "source", "name": "整理源"}],
             max_candidates=20,
@@ -670,10 +680,12 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 "owner_digest": "owner-digest",
                 "credential_generation": 13,
             },
-            client_factory=lambda: client,
+            client_factory=cast(Callable[[], GuangYaClient], lambda: client),
         )
         self.assertEqual(result["stats"]["quarantined"], 0)
-        self.assertEqual(client.file_info("residual").parent_id, "source")
+        file_info_result_3 = client.file_info("residual")
+        assert file_info_result_3 is not None
+        self.assertEqual(file_info_result_3.parent_id, "source")
 
     def test_delayed_directory_index_is_verified_without_resubmitting_delete(self):
         class DelayedClient(FakeCleanupClient):
@@ -686,7 +698,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 self.pending = str(file_id)
                 return True
 
-            def list_dir(self, parent_id):
+            def list_dir(self, parent_id="0"):
                 if self.pending and str(parent_id) == 'source':
                     self.reads_after_delete += 1
                     if self.reads_after_delete == 3:
@@ -697,11 +709,11 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         client = DelayedClient()
         # 只复现空目录清理，不把其他作品或残留元数据纳入计划。
         client.directories['source'] = [row for row in client.directories['source'] if row.file_id == 'empty']
-        plan = cleanup.build_cleanup_plan(client, owner='owner', sources=[{'id': 'source', 'name': '整理源'}])
+        plan = cleanup.build_cleanup_plan(cast(GuangYaClient, client), owner='owner', sources=[{'id': 'source', 'name': '整理源'}])
         cleanup.confirm_cleanup_plan(plan['plan_id'], owner='owner', expected_fingerprint=plan['fingerprint'])
         result = cleanup.execute_cleanup_plan(
             {'version': 1, 'plan_id': plan['plan_id'], 'plan_fingerprint': plan['fingerprint'],
-             'owner_digest': 'owner-digest', 'credential_generation': 13}, client_factory=lambda: client)
+             'owner_digest': 'owner-digest', 'credential_generation': 13}, client_factory=cast(Callable[[], GuangYaClient], lambda: client))
         self.assertFalse(result['partial'])
         self.assertEqual(result['stats']['empty_deleted'], 1)
         self.assertEqual(result['stats']['verification_failed'], 0)

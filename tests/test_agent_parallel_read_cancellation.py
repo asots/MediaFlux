@@ -1,4 +1,5 @@
 """并发 READ 取消回归：脚本模型和受控 async handlers，非实机 LLM、不读写实际媒体。"""
+from app.agent.kernel.references import InMemoryReferenceStore
 
 import asyncio
 import json
@@ -95,7 +96,7 @@ def _session(store, read, model, *, journal=None):
         }, read=read, observe=None, metadata={"parallel_read": True},
     )])
     pipeline = ToolPipeline(catalog=catalog, state_store=store,
-                            **({"reference_store": store} if isinstance(store, SQLiteKernelStore) else {}))
+                            reference_store=store if isinstance(store, SQLiteKernelStore) else None)
     return AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
                         pipeline=pipeline, state_store=store, journal=journal)
 
@@ -301,6 +302,7 @@ def test_producer_interrupt_during_materialization_settles_returned_reads_atomic
             with db.get_conn() as conn:
                 assert conn.execute("SELECT COUNT(*) FROM agent_kernel_refs").fetchone()[0] == 0
         else:
+            assert isinstance(session.pipeline.reference_store, InMemoryReferenceStore)
             assert not session.pipeline.reference_store._records
 
     asyncio.run(run())

@@ -1,6 +1,9 @@
 """无标签 NSFW 目录的本地历史身份守卫。"""
 from __future__ import annotations
 
+from typing import cast
+from app.modules.scraper import TMDBScraper
+
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -52,7 +55,7 @@ class LocalNsfwDirectoryIdentityTests(IsolatedDatabaseTestCase):
             provider=provider, external_id=external_id,
             metadata={"number": "SODAH-003", "title": "SODAH-003"},
         )
-        service = LocalMediaService(scraper=FakeScraper(match))
+        service = LocalMediaService(scraper=cast(TMDBScraper, FakeScraper(match)))
         self.addCleanup(service.close)
         return service
 
@@ -79,6 +82,7 @@ class LocalNsfwDirectoryIdentityTests(IsolatedDatabaseTestCase):
         )
         if step_status:
             task = db.get_local_media_task(task_id, owner=owner)
+            assert task is not None
             step = db.add_local_media_operation_step(
                 task_id, task.operation_token, 1, "rename", str(path), str(target), owner=owner,
             )
@@ -183,9 +187,13 @@ class LocalNsfwDirectoryIdentityTests(IsolatedDatabaseTestCase):
                         archived = target.with_name("history.mp4")
                         archived.parent.mkdir(parents=True)
                         archived.write_bytes(b"already-archived")
-                        old_token = db.get_local_media_task(history_task).operation_token
+                        get_local_media_task_result = db.get_local_media_task(history_task)
+                        assert get_local_media_task_result is not None
+                        old_token = get_local_media_task_result.operation_token
                         self.assertTrue(db.reset_local_media_task(history_task))
-                        self.assertNotEqual(db.get_local_media_task(history_task).operation_token, old_token)
+                        get_local_media_task_result_2 = db.get_local_media_task(history_task)
+                        assert get_local_media_task_result_2 is not None
+                        self.assertNotEqual(get_local_media_task_result_2.operation_token, old_token)
                         self.assertEqual(db.list_local_media_task_items(history_task), [])
                         with self.assertRaisesRegex(LocalMediaServiceError, "身份快照已缺失"):
                             self._preview(service, source_id, incoming)

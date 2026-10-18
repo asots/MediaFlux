@@ -53,18 +53,20 @@ class MediaSubscriptionNotificationTests(IsolatedDatabaseTestCase):
             expected_subscription_revision=int(current["subscription_revision"]),
             updates={"enabled": True, **updates},
         )
-        self.assertIsNotNone(result)
+        assert (result) is not None
 
     def _finalize(
         self, *, status: str = "missing", missing_count: int = 1,
         payload: dict | None = None, summary: str = "检查完成",
     ) -> int:
         run_id = db.claim_media_subscription_check_run(self.sid, "manual")
-        self.assertIsNotNone(run_id)
-        revision = int(db.get_media_subscription(self.sid)["revision"])
+        assert (run_id) is not None
+        get_media_subscription_result = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result is not None
+        revision = int(get_media_subscription_result["revision"])
         committed = db.finalize_media_subscription_check(
             self.sid,
-            int(run_id),
+            run_id,
             status=status,
             run_status=status,
             summary=summary,
@@ -78,7 +80,7 @@ class MediaSubscriptionNotificationTests(IsolatedDatabaseTestCase):
             subscription_revision=revision,
         )
         self.assertTrue(committed)
-        return int(run_id)
+        return run_id
 
     def test_disabled_rule_does_not_enqueue(self) -> None:
         self._finalize()
@@ -92,7 +94,9 @@ class MediaSubscriptionNotificationTests(IsolatedDatabaseTestCase):
         self.assertEqual(rows[0]["event_key"], f"media-subscription-run:{run_id}:missing")
         self.assertEqual(rows[0]["status"], "pending")
 
-        revision = int(db.get_media_subscription(self.sid)["revision"])
+        get_media_subscription_result_2 = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result_2 is not None
+        revision = int(get_media_subscription_result_2["revision"])
         duplicate = db.finalize_media_subscription_check(
             self.sid,
             run_id,
@@ -114,8 +118,10 @@ class MediaSubscriptionNotificationTests(IsolatedDatabaseTestCase):
     def test_stale_run_does_not_enqueue(self) -> None:
         self._enable_rule(notify_on_missing=True)
         run_id = db.claim_media_subscription_check_run(self.sid, "manual")
-        self.assertIsNotNone(run_id)
-        old_revision = int(db.get_media_subscription(self.sid)["revision"])
+        assert (run_id) is not None
+        get_media_subscription_result_3 = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result_3 is not None
+        old_revision = int(get_media_subscription_result_3["revision"])
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE media_subscriptions SET revision=revision+1,status='new' WHERE id=?",
@@ -123,7 +129,7 @@ class MediaSubscriptionNotificationTests(IsolatedDatabaseTestCase):
             )
         committed = db.finalize_media_subscription_check(
             self.sid,
-            int(run_id),
+            run_id,
             status="missing",
             run_status="missing",
             summary="旧结果",
@@ -142,11 +148,13 @@ class MediaSubscriptionNotificationTests(IsolatedDatabaseTestCase):
     def test_failure_event_is_enqueued_without_error_body(self) -> None:
         self._enable_rule(notify_on_error=True)
         run_id = db.claim_media_subscription_check_run(self.sid, "manual")
-        self.assertIsNotNone(run_id)
-        revision = int(db.get_media_subscription(self.sid)["revision"])
+        assert (run_id) is not None
+        get_media_subscription_result_4 = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result_4 is not None
+        revision = int(get_media_subscription_result_4["revision"])
         self.assertTrue(db.fail_media_subscription_check(
             self.sid,
-            int(run_id),
+            run_id,
             interval_minutes=60,
             error="PRIVATE traceback /private/path token=SECRET",
             subscription_revision=revision,

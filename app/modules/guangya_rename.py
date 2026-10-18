@@ -15,7 +15,7 @@ import tempfile
 import time
 import uuid
 from collections import Counter, deque
-from collections.abc import Callable, Iterator
+from collections.abc import Generator, Callable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -23,10 +23,10 @@ from typing import Any
 
 from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
 from app.config import PATHS
-from app.modules.process_lock import CrossProcessLock
 from app.modules.guangya_journal import append_guangya_journal
-from app.modules.web_secret import get_web_secret
+from app.modules.process_lock import CrossProcessLock
 from app.modules.strm import cloud_change_sources, trigger_cloud_changes
+from app.modules.web_secret import get_web_secret
 from app.private_files import protect_private_file
 from app.repositories.organize_operation_jobs import organize_operation_owner_digest
 
@@ -84,7 +84,7 @@ def _plan_directory() -> Path:
 
 
 @contextmanager
-def _plan_state_lock() -> Iterator[None]:
+def _plan_state_lock() -> Generator[None, None, None]:
     """确认、执行状态与预览淘汰共用文件锁，防止读后状态变化造成误删。"""
     lock = CrossProcessLock("guangya-rename-state", directory=_plan_directory())
     if not lock.acquire():
@@ -107,13 +107,13 @@ def _ensure_private_directory(path: Path) -> None:
 
 
 def _plan_path(plan_id: str) -> Path:
-    if not _SAFE_PLAN_ID.fullmatch(str(plan_id or "")):
+    if not _SAFE_PLAN_ID.fullmatch(plan_id or ""):
         raise GuangYaRenamePlanError("重命名计划编号无效")
     return _plan_directory() / f"{plan_id}.json"
 
 
 def _journal_path(plan_id: str) -> Path:
-    if not _SAFE_PLAN_ID.fullmatch(str(plan_id or "")):
+    if not _SAFE_PLAN_ID.fullmatch(plan_id or ""):
         raise GuangYaRenamePlanError("重命名计划编号无效")
     return _plan_directory() / f"{plan_id}.jsonl"
 
@@ -129,7 +129,7 @@ def _canonical_payload(payload: dict[str, Any]) -> bytes:
 
 
 def _plan_auth(payload: dict[str, Any]) -> str:
-    secret = str(get_web_secret() or "").encode("utf-8")
+    secret = (get_web_secret() or "").encode("utf-8")
     if not secret:
         raise GuangYaRenamePlanError("重命名计划签名密钥不可用")
     return hmac.new(
@@ -202,7 +202,7 @@ def _read_plan(plan_id: str) -> dict[str, Any]:
 
 
 def _owner_digest(owner: str) -> str:
-    owner_key = str(owner or "").strip()
+    owner_key = (owner or "").strip()
     if not owner_key:
         raise GuangYaRenamePlanError("重命名计划缺少会话身份")
     return organize_operation_owner_digest(owner_key)
@@ -227,7 +227,7 @@ def load_rename_plan(
     fingerprint = str(payload.get("fingerprint") or "")
     if expected_fingerprint and not hmac.compare_digest(
         fingerprint,
-        str(expected_fingerprint or ""),
+        (expected_fingerprint or ""),
     ):
         raise GuangYaRenamePlanStale("重命名计划已变化，请重新预览")
     now_epoch = time.time()
@@ -272,7 +272,7 @@ def update_rename_plan_execution(
 ) -> None:
     with _plan_state_lock():
         payload = _read_plan(plan_id)
-        payload["status"] = str(status or "unknown")[:40]
+        payload["status"] = (status or "unknown")[:40]
         payload["execution"] = dict(execution)
         payload["updated_at"] = _now_iso()
         _atomic_write_plan(_plan_path(plan_id), payload)
@@ -287,17 +287,17 @@ def finalize_rename_plan_job(
     error_code: str = "",
 ) -> dict[str, Any]:
     """把可信队列终态投影到旧 rename plan，且不覆盖已知终态。"""
-    safe_status = str(queue_status or "").strip().casefold()
+    safe_status = (queue_status or "").strip().casefold()
     if safe_status not in _TERMINAL_PLAN_STATUSES:
         raise GuangYaRenamePlanError("重命名任务终态无效")
     with _plan_state_lock():
         payload = _read_plan(plan_id)
         if not hmac.compare_digest(
-            str(payload.get("owner_digest") or ""), str(owner_digest or "")
+            str(payload.get("owner_digest") or ""), (owner_digest or "")
         ):
             raise GuangYaRenamePlanError("重命名任务会话不匹配")
         if not hmac.compare_digest(
-            str(payload.get("fingerprint") or ""), str(expected_fingerprint or "")
+            str(payload.get("fingerprint") or ""), (expected_fingerprint or "")
         ):
             raise GuangYaRenamePlanStale("重命名计划已变化，请重新预览")
         current_status = str(payload.get("status") or "").strip().casefold()
@@ -314,7 +314,7 @@ def finalize_rename_plan_job(
         execution.update(
             {
                 "queue_status": safe_status,
-                "queue_error_code": str(error_code or "")[:80],
+                "queue_error_code": (error_code or "")[:80],
                 "finished_at": str(execution.get("finished_at") or _now_iso()),
             }
         )
@@ -377,19 +377,19 @@ def remove_legacy_bitrate(name: str) -> str:
     """删除紧凑或旧式空格 Mbps 字段，不误伤 H.264/H.265。"""
     # 先处理带空格的完整字段，避免紧凑规则把 ``2.4 Mbps`` 的
     # 小数部分误当成独立的 ``.4Mbps``。
-    updated = _DASH_BITRATE_RE.sub("", str(name or ""))
+    updated = _DASH_BITRATE_RE.sub("", (name or ""))
     updated = _SPACED_BITRATE_RE.sub("", updated)
     updated = _COMPACT_BITRATE_RE.sub("", updated)
     return updated
 
 
 def _extension(name: str) -> str:
-    match = re.search(r"[.。．]([A-Za-z0-9]{1,10})$", str(name or ""))
+    match = re.search(r"[.。．]([A-Za-z0-9]{1,10})$", (name or ""))
     return match.group(1).casefold() if match else ""
 
 
 def _item_extension(item: GuangYaFile) -> str:
-    declared = str(item.extension or "").strip().lstrip(".").casefold()
+    declared = (item.extension or "").strip().lstrip(".").casefold()
     return declared or _extension(item.name)
 
 
@@ -418,7 +418,7 @@ def _cached_list_dir(
     cache: dict[str, list[GuangYaFile]],
     parent_id: str,
 ) -> list[GuangYaFile]:
-    key = str(parent_id)
+    key = parent_id
     if key not in cache:
         cache[key] = client.list_dir(key)
     return cache[key]
@@ -430,6 +430,7 @@ def _resolve_path(
     cache: dict[str, list[GuangYaFile]],
 ) -> tuple[GuangYaFile, str]:
     normalized = _normalize_path(path)
+    current: GuangYaFile | None = None
     parent_id = "0"
     parent_path = ""
     for index, component in enumerate(normalized.strip("/").split("/")):
@@ -446,7 +447,8 @@ def _resolve_path(
         if index < len(normalized.strip("/").split("/")) - 1 and not current.is_dir:
             raise GuangYaRenamePlanError("光鸭路径的中间组件不是目录")
         parent_path = "/" + "/".join(normalized.strip("/").split("/")[:index])
-        parent_id = str(current.file_id)
+        parent_id = current.file_id
+    assert current is not None
     return current, parent_path or "/"
 
 
@@ -462,16 +464,16 @@ def _entry(item: GuangYaFile, *, parent_path: str, new_name: str) -> dict[str, A
         else "/" + new_name
     )
     return {
-        "file_id": str(item.file_id),
-        "parent_id": str(item.parent_id),
+        "file_id": item.file_id,
+        "parent_id": item.parent_id,
         "old_name": item.name,
         "new_name": new_name,
         "old_path": old_path,
         "new_path": new_path,
-        "is_dir": bool(item.is_dir),
-        "size": max(0, int(item.size or 0)),
-        "etag": str(item.etag or ""),
-        "extension": str(item.extension or _extension(item.name)).casefold(),
+        "is_dir": item.is_dir,
+        "size": max(0, (item.size or 0)),
+        "etag": (item.etag or ""),
+        "extension": (item.extension or _extension(item.name)).casefold(),
     }
 
 
@@ -521,10 +523,10 @@ def _maintain_rename_plans_unlocked() -> dict[str, int]:
             if not path.is_file() or path.is_symlink():
                 continue
             plan_ids.add(path.stem)
-            plan_size = max(0, int(path.stat().st_size))
+            plan_size = max(0, path.stat().st_size)
             journal = _journal_path(path.stem)
             journal_size = (
-                max(0, int(journal.stat().st_size))
+                max(0, journal.stat().st_size)
                 if journal.is_file() and not journal.is_symlink()
                 else 0
             )
@@ -639,12 +641,12 @@ def _finalize_rename_plan(
                 sibling
                 for sibling in siblings
                 if sibling.name.casefold() == first["new_name"].casefold()
-                and str(sibling.file_id) != first["file_id"]
+                and sibling.file_id != first["file_id"]
             ]
             if occupied:
                 reason = (
                     "目标名称已存在"
-                    if str(occupied[0].file_id) not in selected_ids
+                    if occupied[0].file_id not in selected_ids
                     else "目标名称与同批次其他文件冲突"
                 )
         if reason:
@@ -663,16 +665,16 @@ def _finalize_rename_plan(
     plan_id = uuid.uuid4().hex
     current = time.time()
     stats = {
-        "scanned_items": max(0, int(scanned_items)),
-        "scanned_dirs": max(0, int(scanned_dirs)),
+        "scanned_items": max(0, scanned_items),
+        "scanned_dirs": max(0, scanned_dirs),
         "matched": len(raw_entries),
         "rename_count": len(safe_entries),
         "conflict_count": len(conflicts),
-        "no_change_count": max(0, int(no_change)),
+        "no_change_count": max(0, no_change),
     }
     for key, value in (extra_stats or {}).items():
-        stats[str(key)] = max(0, int(value or 0))
-    safe_mode = str(mode or "").strip().casefold()
+        stats[key] = max(0, (value or 0))
+    safe_mode = (mode or "").strip().casefold()
     if safe_mode not in CANONICAL_RENAME_PLAN_MODES:
         raise GuangYaRenamePlanError("重命名计划类型无效")
     payload: dict[str, Any] = {
@@ -683,11 +685,11 @@ def _finalize_rename_plan(
         "created_at_epoch": current,
         "expires_at_epoch": current + _PLAN_TTL_SECONDS,
         "status": "preview",
-        "credential_generation": int(client.credential_generation),
+        "credential_generation": client.credential_generation,
         "mode": safe_mode,
-        "recursive": bool(recursive),
+        "recursive": recursive,
         "targets": list(targets),
-        "limit": max(1, min(int(limit), _MAX_RENAMES)),
+        "limit": max(1, min(limit, _MAX_RENAMES)),
         "summary": summary,
         "stats": stats,
         "extension_counts": dict(sorted(extension_counts.items())),
@@ -716,8 +718,8 @@ def _finalize_rename_plan(
         _atomic_write_plan(_plan_path(plan_id), payload)
         capacity = _maintain_rename_plans_unlocked()
         if (
-            int(capacity.get("active") or 0) > _MAX_ACTIVE_PLANS
-            or int(capacity.get("bytes") or 0) > _MAX_PLAN_STORAGE_BYTES
+            (capacity.get("active") or 0) > _MAX_ACTIVE_PLANS
+            or (capacity.get("bytes") or 0) > _MAX_PLAN_STORAGE_BYTES
         ):
             _discard_rename_plan_unlocked(plan_id)
             raise GuangYaRenamePlanError("私有重命名计划空间已满，请稍后重试")
@@ -741,10 +743,10 @@ def build_explicit_rename_plan(
 ) -> dict[str, Any]:
     """把内部扫描器产生的精确名称映射冻结为通用重命名计划。"""
     normalized_target = _normalize_path(target)
-    safe_mode = str(mode or "").strip().casefold()
+    safe_mode = (mode or "").strip().casefold()
     if safe_mode != "media_hygiene":
         raise GuangYaRenamePlanError("显式重命名计划类型无效")
-    safe_limit = max(1, min(int(limit), _MAX_RENAMES))
+    safe_limit = max(1, min(limit, _MAX_RENAMES))
     if len(changes) > safe_limit:
         raise GuangYaRenamePlanError(
             f"匹配文件超过本次上限 {safe_limit} 个，请缩小范围或提高 limit"
@@ -752,7 +754,7 @@ def build_explicit_rename_plan(
     raw_entries: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for item, parent_path, proposed_name in changes:
-        file_id = str(item.file_id or "").strip()
+        file_id = (item.file_id or "").strip()
         if not file_id or file_id in seen_ids:
             raise GuangYaRenamePlanError("显式重命名计划包含重复或无效对象")
         candidate = _validate_name(proposed_name)
@@ -794,10 +796,10 @@ def build_rename_plan(
     normalized_targets = list(dict.fromkeys(_normalize_path(item) for item in targets))
     if not normalized_targets or len(normalized_targets) > _MAX_TARGETS:
         raise GuangYaRenamePlanError(f"一次只能指定 1 到 {_MAX_TARGETS} 个光鸭路径")
-    safe_mode = str(mode or "").strip().casefold()
+    safe_mode = (mode or "").strip().casefold()
     if safe_mode not in {"remove_bitrate", "replace_text"}:
         raise GuangYaRenamePlanError("重命名方式无效")
-    safe_limit = max(1, min(int(limit), _MAX_RENAMES))
+    safe_limit = max(1, min(limit, _MAX_RENAMES))
     if safe_mode == "replace_text":
         if not find_text or len(find_text) > 120 or len(replace_text) > 120:
             raise GuangYaRenamePlanError("文本替换参数无效")
@@ -822,7 +824,7 @@ def build_rename_plan(
             no_change += 1
             return
         candidates.setdefault(
-            str(item.file_id),
+            item.file_id,
             _entry(item, parent_path=parent_path, new_name=candidate),
         )
         if len(candidates) > safe_limit:
@@ -835,7 +837,7 @@ def build_rename_plan(
         if not item.is_dir:
             consider(item, parent_path)
             continue
-        queue = deque([(str(item.file_id), target)])
+        queue = deque([(item.file_id, target)])
         seen_dirs: set[str] = set()
         while queue:
             directory_id, directory_path = queue.popleft()
@@ -854,7 +856,7 @@ def build_rename_plan(
                     if recursive:
                         queue.append(
                             (
-                                str(child.file_id),
+                                child.file_id,
                                 directory_path.rstrip("/") + "/" + child.name,
                             )
                         )
@@ -886,11 +888,11 @@ def _snapshot_matches(
     expected_name = entry["new_name"] if new else entry["old_name"]
     return bool(
         item is not None
-        and str(item.file_id) == str(entry["file_id"])
+        and item.file_id == str(entry["file_id"])
         and item.name == expected_name
-        and bool(item.is_dir) == bool(entry["is_dir"])
-        and max(0, int(item.size or 0)) == max(0, int(entry["size"] or 0))
-        and str(item.etag or "") == str(entry.get("etag") or "")
+        and item.is_dir == bool(entry["is_dir"])
+        and max(0, (item.size or 0)) == max(0, int(entry["size"] or 0))
+        and (item.etag or "") == str(entry.get("etag") or "")
     )
 
 
@@ -927,7 +929,7 @@ def execute_rename_plan(
     try:
         if (
             not client.logged_in
-            or int(client.credential_generation) != expected_generation
+            or client.credential_generation != expected_generation
         ):
             raise GuangYaRenamePlanStale("光鸭登录凭据已变化，请重新预览")
         entries = list(plan.get("entries") or [])
@@ -943,7 +945,7 @@ def execute_rename_plan(
             parent_id = str(entry["parent_id"])
             if parent_id not in parent_snapshots:
                 parent_snapshots[parent_id] = {
-                    str(item.file_id): item for item in client.list_dir(parent_id)
+                    item.file_id: item for item in client.list_dir(parent_id)
                 }
             current = parent_snapshots[parent_id].get(str(entry["file_id"]))
             if not _snapshot_matches(current, entry, new=False):
@@ -952,7 +954,7 @@ def execute_rename_plan(
                 item
                 for item in parent_snapshots[parent_id].values()
                 if item.name.casefold() == str(entry["new_name"]).casefold()
-                and str(item.file_id) != str(entry["file_id"])
+                and item.file_id != str(entry["file_id"])
             ]
             if conflicts:
                 raise GuangYaRenamePlanStale("目标名称已被占用，请重新预览")
@@ -990,7 +992,7 @@ def execute_rename_plan(
             if not _snapshot_matches(current_before, entry, new=False):
                 try:
                     current_before = {
-                        str(item.file_id): item
+                        item.file_id: item
                         for item in client.list_dir(str(entry["parent_id"]))
                     }.get(str(entry["file_id"]))
                 except Exception:
@@ -1030,7 +1032,7 @@ def execute_rename_plan(
             if not _snapshot_matches(current, entry, new=True):
                 try:
                     current = {
-                        str(item.file_id): item
+                        item.file_id: item
                         for item in client.list_dir(str(entry["parent_id"]))
                     }.get(str(entry["file_id"]))
                 except Exception:

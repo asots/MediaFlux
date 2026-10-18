@@ -27,7 +27,7 @@ def load_patrol_progress(
     """续跑必须携带同日有效进度；不能保留游标却把历史计数清零。"""
     try:
         value = json.loads(str(raw or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         value = None
     validated = validate_persisted_patrol_projection(value)
     if validated is not None and validated["as_of"] == as_of:

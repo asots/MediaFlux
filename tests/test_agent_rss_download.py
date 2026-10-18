@@ -169,6 +169,7 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(result.status, "review_required")
         self.assertEqual(result.data["outcome_unknown"], 1)
         self.assertIn("待核对 1", result.summary)
+        assert result.error is not None
         self.assertIn("勿直接重试", result.error)
         self.assertIn("勿直接重复提交", result.suggestions[0])
 
@@ -408,8 +409,12 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             conn.execute("UPDATE rss_entries SET payload='{}' WHERE id=?", (first,))
         self.assertEqual(db.claim_pending_rss_qb_entries(expected), [])
-        self.assertEqual(db.get_rss_entry(first)["status"], "pending")
-        self.assertEqual(db.get_rss_entry(second)["status"], "pending")
+        get_rss_entry_result = db.get_rss_entry(first)
+        assert get_rss_entry_result is not None
+        self.assertEqual(get_rss_entry_result["status"], "pending")
+        get_rss_entry_result_2 = db.get_rss_entry(second)
+        assert get_rss_entry_result_2 is not None
+        self.assertEqual(get_rss_entry_result_2["status"], "pending")
         fresh = db.get_pending_rss_qb_snapshot(default_method="qb", limit=2)
         fresh_expected = [
             {
@@ -425,11 +430,16 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
         ]
         claimed = db.claim_pending_rss_qb_entries(fresh_expected)
         self.assertEqual(len(claimed), 2)
-        self.assertEqual(db.get_rss_entry(first)["status"], "submitting")
-        self.assertEqual(db.get_rss_entry(second)["status"], "submitting")
+        get_rss_entry_result_3 = db.get_rss_entry(first)
+        assert get_rss_entry_result_3 is not None
+        self.assertEqual(get_rss_entry_result_3["status"], "submitting")
+        get_rss_entry_result_4 = db.get_rss_entry(second)
+        assert get_rss_entry_result_4 is not None
+        self.assertEqual(get_rss_entry_result_4["status"], "submitting")
         guangya_sub = self._subscription("GuangYa RSS", "guangya")
         guangya_entry = self._entry(guangya_sub, 90)
         guangya_row = db.get_rss_entry(guangya_entry)
+        assert guangya_row is not None
         forged = [
             {
                 "id": int(guangya_row["id"]),
@@ -444,7 +454,9 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(
             db.claim_pending_rss_qb_entries(forged, default_method="qb"), []
         )
-        self.assertEqual(db.get_rss_entry(guangya_entry)["status"], "pending")
+        get_rss_entry_result_5 = db.get_rss_entry(guangya_entry)
+        assert get_rss_entry_result_5 is not None
+        self.assertEqual(get_rss_entry_result_5["status"], "pending")
 
     def test_engine_uses_frozen_config_and_invalid_payload_does_not_stick(self):
         sub_id = self._subscription()
@@ -490,8 +502,12 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
             category="rss-agent",
             torrents=None,
         )
-        self.assertEqual(db.get_rss_entry(valid)["status"], "downloaded")
-        self.assertEqual(db.get_rss_entry(invalid)["status"], "failed")
+        get_rss_entry_result_6 = db.get_rss_entry(valid)
+        assert get_rss_entry_result_6 is not None
+        self.assertEqual(get_rss_entry_result_6["status"], "downloaded")
+        get_rss_entry_result_7 = db.get_rss_entry(invalid)
+        assert get_rss_entry_result_7 is not None
+        self.assertEqual(get_rss_entry_result_7["status"], "failed")
         logs = db.list_download_logs(source="qb", limit=5)
         serialized_logs = json.dumps([dict(row) for row in logs], ensure_ascii=False)
         self.assertNotIn("PRIVATESECRET1", serialized_logs)
@@ -572,8 +588,12 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["submitted"], 2)
         self.assertEqual(result["failed"], 0)
         add.assert_called_once()
-        self.assertEqual(str(db.get_rss_entry(first)["status"]), "downloaded")
-        self.assertEqual(str(db.get_rss_entry(second)["status"]), "downloaded")
+        get_rss_entry_result_8 = db.get_rss_entry(first)
+        assert get_rss_entry_result_8 is not None
+        self.assertEqual(str(get_rss_entry_result_8["status"]), "downloaded")
+        get_rss_entry_result_9 = db.get_rss_entry(second)
+        assert get_rss_entry_result_9 is not None
+        self.assertEqual(str(get_rss_entry_result_9["status"]), "downloaded")
 
     def test_standard_download_invalid_payload_converges_to_failed(self):
         sub_id = self._subscription()
@@ -585,7 +605,9 @@ class RssPendingDownloadUnitTests(IsolatedDatabaseTestCase):
         result = RSSEngine().download(entry_id)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "条目数据无效")
-        self.assertEqual(db.get_rss_entry(entry_id)["status"], "failed")
+        get_rss_entry_result_10 = db.get_rss_entry(entry_id)
+        assert get_rss_entry_result_10 is not None
+        self.assertEqual(get_rss_entry_result_10["status"], "failed")
 
     def test_qb_add_failure_log_does_not_include_upstream_body_or_private_url(self):
         client = QBittorrentClient("http://qb.internal:8080", api_key="token")

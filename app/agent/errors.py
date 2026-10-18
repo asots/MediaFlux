@@ -17,8 +17,8 @@ class AgentToolError(ValueError):
     def __init__(self, message: str, *, code: str = "invalid_tool_call",
                  argument_schemas: Mapping[str, Mapping[str, Any]] | None = None) -> None:
         super().__init__(message)
-        self.safe_message = str(message)
-        self.code = str(code or "invalid_tool_call")
+        self.safe_message = message
+        self.code = (code or "invalid_tool_call")
         self.argument_schemas = argument_schemas
 
 

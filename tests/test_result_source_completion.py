@@ -29,12 +29,18 @@ def test_complete_dto_cold_reader(sequence):
     async def exercise():
         leaf = {"tail": "last-fact" * 80, "token": "never-store-secret", "path": "/private/media/file.mkv"}
         expected_leaf = {"tail": "last-fact" * 80, "token": "[已隐藏]", "path": "[内部路径已隐藏；请使用返回的 opaque ref]"}
-        raw, expected = leaf, expected_leaf
+        raw: dict[str, object] | list[object] = dict(leaf)
+        expected: dict[str, object] | list[object] = dict(expected_leaf)
         for _ in range(18):
-            raw, expected = {"next": raw}, {"next": expected}
+            raw = {"next": raw}
+            expected = {"next": expected}
         raw = [raw, "final-item"] if sequence else {"tree": raw}
-        expected = [expected, "final-item"] if sequence else {"tree": expected}
-        source = {"ok": True, "status": "success", "summary": "工具执行完成", "data": expected} if sequence else dict(expected, ok=True, status="success", summary="工具执行完成")
+        if sequence:
+            expected = [expected, "final-item"]
+            source = {"ok": True, "status": "success", "summary": "工具执行完成", "data": expected}
+        else:
+            expected = {"tree": expected}
+            source = dict(expected, ok=True, status="success", summary="工具执行完成")
         store = SQLiteKernelStore(secret_provider=lambda: "dto-source-test")
         lease, _ = await store.begin_turn(owner="o", session_id="dto", request_id="read")
         context = ToolCallContext(owner="o", session_id="dto", request_id=lease.request_id, turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(), report_progress=AsyncMock())
@@ -76,14 +82,15 @@ def test_unrecoverable_source_rejected(kind):
     class Broken:
         def to_dict(self):
             raise RuntimeError("not safe to stringify")
-    value = object() if kind == "unsupported" else Broken()
+    value: object = object() if kind == "unsupported" else Broken()
     if kind == "cycle":
         value = []
         value.append(value)
     if kind == "depth":
         value = "tail"
         for _ in range(66):
-            value = [value]
+            level: list[object] = [value]
+            value = level
     with pytest.raises((ValueError, TypeError)):
         DefaultProjector().project(value)
 

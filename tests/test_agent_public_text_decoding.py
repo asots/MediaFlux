@@ -186,7 +186,7 @@ async def observe(store, error, protocol, mixed):
         assert audit == value.to_dict()
     assert not any(event["type"] == "tool.failed" for event in journal)
     assert "已有工具返回真实频率限制" in encode(wire.requests[-1])
-    events = [AgentEvent(**{**event, "type": AgentEventType(event["type"])}) for event in journal]
+    events = [AgentEvent(type=AgentEventType(event["type"]), sequence=event["sequence"], request_id=event["request_id"], session_id=event["session_id"], turn_id=event["turn_id"], occurred_at=event["occurred_at"], event_id=event["event_id"], payload=event["payload"]) for event in journal]
     builder = TurnViewBuilder()
     for event in events:
         builder.apply(event)

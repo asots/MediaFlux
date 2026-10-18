@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
+from typing import cast
 from unittest.mock import patch
 
 from app.agent.domains.library.episode_audit import (
@@ -11,12 +13,18 @@ from app.agent.domains.library.episode_audit import (
 )
 from app.agent.domains.library.update_actions import check_library_updates
 from app.agent.models import ToolResult
-from app.clients.base import SeriesCandidate, SeriesEpisodeInventory, SeriesSearchResult
+from app.clients.base import (
+    MediaServerClient,
+    SeriesCandidate,
+    SeriesEpisodeInventory,
+    SeriesSearchResult,
+)
 from app.discovery.models import ProviderNotConfigured, ProviderUnavailable
 from app.services import _series_source_payload
 
 
 class _FakeTMDB:
+    close: Callable[[], None]
     def __init__(self):
         self.details = {"name": "The Show", "first_air_date": "2026-01-01", "seasons": [{"season_number": 1}, {"season_number": 2}]}
         self.seasons = {
@@ -97,7 +105,7 @@ class SeriesSourcePayloadTests(unittest.TestCase):
             },
         )
         result = _series_source_payload(
-            "jellyfin", "Jellyfin", client, "The Show", "", 2000
+            "jellyfin", "Jellyfin", cast(MediaServerClient, client), "The Show", "", 2000
         )
         self.assertEqual(result["status"], "unmapped")
         self.assertEqual(result["episodes"], [(1, 1), (1, 2)])
@@ -112,7 +120,7 @@ class SeriesSourcePayloadTests(unittest.TestCase):
             },
         )
         result = _series_source_payload(
-            "jellyfin", "Jellyfin", client, "The Show", "12345", 2000
+            "jellyfin", "Jellyfin", cast(MediaServerClient, client), "The Show", "12345", 2000
         )
         self.assertEqual(result["status"], "unmapped")
         self.assertEqual(result["episodes"], [(1, 1)])
@@ -131,7 +139,7 @@ class SeriesSourcePayloadTests(unittest.TestCase):
         )
 
         result = _series_source_payload(
-            "jellyfin", "Jellyfin", client, "The Show", "", 2000,
+            "jellyfin", "Jellyfin", cast(MediaServerClient, client), "The Show", "", 2000,
             library_name="美女库",
         )
 
@@ -151,7 +159,7 @@ class SeriesSourcePayloadTests(unittest.TestCase):
             client = _FakeMediaClient(SeriesSearchResult(), folders=folders)
             with self.subTest(expected=expected):
                 result = _series_source_payload(
-                    "jellyfin", "Jellyfin", client, "The Show", "", 2000,
+                    "jellyfin", "Jellyfin", cast(MediaServerClient, client), "The Show", "", 2000,
                     library_name=requested,
                 )
             self.assertEqual(result["status"], expected)
@@ -178,7 +186,7 @@ class SeriesSourcePayloadTests(unittest.TestCase):
             },
         )
         result = _series_source_payload(
-            "jellyfin", "Jellyfin", client, "The Show", "12345", 2000
+            "jellyfin", "Jellyfin", cast(MediaServerClient, client), "The Show", "12345", 2000
         )
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["episodes"], [(1, 1), (1, 2)])
@@ -188,7 +196,7 @@ class SeriesSourcePayloadTests(unittest.TestCase):
 class EpisodeAuditTests(unittest.TestCase):
     def setUp(self):
         reset_episode_audit_cache_for_tests()
-        self.arguments = {
+        self.arguments: dict = {
             "query": "The Show", "tmdb_id": "", "season": None, "as_of": "2026-08-01"
         }
 
@@ -237,6 +245,7 @@ class EpisodeAuditTests(unittest.TestCase):
         self.assertEqual(batch.data["counts"], {
             "requested": 1, "updates_available": 1, "up_to_date": 0, "uncertain": 0,
         })
+        assert batch.model_data is not None
         for data in (audit.data, batch.data["items"][0], batch.model_data["items"][0]):
             self.assertEqual(data["expected_aired"], 133)
             self.assertEqual(data["local_episode_count"], 7)
@@ -285,6 +294,7 @@ class EpisodeAuditTests(unittest.TestCase):
                 self.assertEqual(batch.data["counts"], {
                     "requested": 1, "updates_available": 0, "up_to_date": 0, "uncertain": 1,
                 })
+                assert batch.model_data is not None
                 for data in (audit.data, batch.data["items"][0], batch.model_data["items"][0]):
                     self.assertEqual(data["missing_count"], len(missing))
                     self.assertEqual(data["missing_sample"], missing)
@@ -501,7 +511,7 @@ class EpisodeAuditTests(unittest.TestCase):
             "selected": {"name": "The Show", "year": "2026", "tmdb_id": ""},
         }
         fake = _FakeTMDB()
-        fake.search = lambda *_args: [
+        fake.search = lambda *_args, **_kwargs: [
             {"id": 1, "name": "The Show", "first_air_date": "2026-01-01"},
             {"id": 2, "name": "The Show", "first_air_date": "2026-05-01"},
         ]
@@ -567,7 +577,7 @@ class EpisodeAuditTests(unittest.TestCase):
                               (ProviderUnavailable("private secret"), "unavailable")):
             reset_episode_audit_cache_for_tests()
             fake = _FakeTMDB()
-            fake.detail = lambda *_args, error=error: (_ for _ in ()).throw(error)
+            fake.detail = lambda *_args, error=error, **_kwargs: (_ for _ in ()).throw(error)
             with patch("app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=[_ready([])]), patch(
                 "app.agent.domains.library.episode_audit.TMDBClient", return_value=fake
             ):
@@ -827,7 +837,7 @@ class EpisodeAuditClientLifecycleTests(unittest.TestCase):
     def test_close_failure_does_not_replace_tmdb_error(self) -> None:
         reset_episode_audit_cache_for_tests()
         client = _FakeTMDB()
-        client.detail = lambda *_args: (_ for _ in ()).throw(
+        client.detail = lambda *_args, **_kwargs: (_ for _ in ()).throw(
             ProviderUnavailable("upstream unavailable")
         )
         client.close = lambda: (_ for _ in ()).throw(RuntimeError("close failed"))

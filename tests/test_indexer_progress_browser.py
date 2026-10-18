@@ -21,6 +21,7 @@ STYLES = ROOT / "app/static/css/main.css"
 class IndexerProgressBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = next(
             (
@@ -243,8 +244,12 @@ class IndexerProgressBrowserTests(unittest.TestCase):
         summary = page.locator(".discovery-resource-site-status[aria-live='polite']")
         page.wait_for_function("() => [...document.querySelectorAll('.discovery-resource-site-status[aria-live=\"polite\"]')].some(el => el.innerText.includes('搜索完成'))")
         self.assertEqual(summary.evaluate("el => el.firstChild.textContent"), "检索")
-        self.assertIn("搜索完成", summary.get_attribute("aria-label"))
-        self.assertIn("搜索完成", summary.get_attribute("title"))
+        text_content = summary.get_attribute("aria-label")
+        assert text_content is not None
+        self.assertIn("搜索完成", text_content)
+        text_content = summary.get_attribute("title")
+        assert text_content is not None
+        self.assertIn("搜索完成", text_content)
         self.assertTrue(summary.evaluate("el => el.classList.contains('is-success')"))
         self.assertEqual(page.locator("[data-resource-result-id]").count(), 3)
 
@@ -341,7 +346,9 @@ class IndexerProgressBrowserTests(unittest.TestCase):
         ], statuses, complete=True))
         page.wait_for_function("window.__readerCancelCalls.includes(0)")
         self.assertEqual(page.locator("[data-resource-result-id]").count(), 2)
-        self.assertIn("本轮 2 条结果", page.locator(".discovery-resource-site-status[aria-live='polite']").get_attribute("aria-label"))
+        text_content = page.locator(".discovery-resource-site-status[aria-live='polite']").get_attribute("aria-label")
+        assert text_content is not None
+        self.assertIn("本轮 2 条结果", text_content)
 
     def test_candidate_cap_is_information_not_failure_or_hidden_load_more(self):
         page = self.open_profile()
@@ -353,8 +360,12 @@ class IndexerProgressBrowserTests(unittest.TestCase):
         self.push_event(page, 0, "complete", payload)
         page.wait_for_function("window.__readerCancelCalls.includes(0)")
         progress = page.locator(".discovery-resource-site-status[aria-live='polite']")
-        self.assertIn("候选上限", progress.get_attribute("aria-label"))
-        self.assertNotIn("失败", progress.get_attribute("aria-label"))
+        text_content = progress.get_attribute("aria-label")
+        assert text_content is not None
+        self.assertIn("候选上限", text_content)
+        text_content = progress.get_attribute("aria-label")
+        assert text_content is not None
+        self.assertNotIn("失败", text_content)
         self.assertEqual(page.locator("[data-resource-result-id]").count(), 1)
 
     def test_source_diagnostic_focus_survives_progress_and_completion(self):
@@ -471,8 +482,12 @@ class IndexerProgressBrowserTests(unittest.TestCase):
         }"""))
         progress = page.locator(".discovery-resource-site-status[aria-live='polite']")
         self.assertEqual(progress.evaluate("el => el.firstChild.textContent"), "检索")
-        self.assertIn("已找到 2 条", progress.get_attribute("aria-label"))
-        self.assertIn("已找到 2 条", progress.get_attribute("title"))
+        text_content = progress.get_attribute("aria-label")
+        assert text_content is not None
+        self.assertIn("已找到 2 条", text_content)
+        text_content = progress.get_attribute("title")
+        assert text_content is not None
+        self.assertIn("已找到 2 条", text_content)
 
     def test_same_context_empty_partial_refresh_preserves_selected_old_result(self):
         page = self.open_profile()
@@ -510,7 +525,9 @@ class IndexerProgressBrowserTests(unittest.TestCase):
         self.assertTrue(page.evaluate("row => row === document.querySelector('[data-resource-result-id=old]')", previous_row))
         self.assertTrue(checkbox.is_checked())
         summary = page.locator(".discovery-resource-site-status[aria-live='polite']")
-        self.assertNotIn("本轮 1 条结果", summary.get_attribute("aria-label"))
+        text_content = summary.get_attribute("aria-label")
+        assert text_content is not None
+        self.assertNotIn("本轮 1 条结果", text_content)
 
     def test_sse_terminal_error_is_not_a_site_snapshot_and_keeps_results(self):
         page = self.open_profile()
@@ -538,8 +555,12 @@ class IndexerProgressBrowserTests(unittest.TestCase):
         self.assertIn("已保留 1 条已显示结果", notice.inner_text())
         self.assertTrue(page.evaluate("() => window.__keptRow === document.querySelector('[data-resource-result-id=kept]')"))
         self.assertTrue(checkbox.is_checked())
-        self.assertNotIn("服务端终止", page.locator("[data-resource-site-filter='alpha']").get_attribute("aria-label"))
-        self.assertNotIn("搜索完成", page.locator(".discovery-resource-site-status[aria-live='polite']").get_attribute("aria-label"))
+        text_content = page.locator("[data-resource-site-filter='alpha']").get_attribute("aria-label")
+        assert text_content is not None
+        self.assertNotIn("服务端终止", text_content)
+        text_content = page.locator(".discovery-resource-site-status[aria-live='polite']").get_attribute("aria-label")
+        assert text_content is not None
+        self.assertNotIn("搜索完成", text_content)
 
     def test_non_json_content_type_is_not_parsed_as_json(self):
         payload = {
@@ -605,9 +626,15 @@ class IndexerProgressBrowserTests(unittest.TestCase):
         import asyncio
         from concurrent.futures import ThreadPoolExecutor
         from types import SimpleNamespace
+        from typing import cast
         from unittest.mock import AsyncMock
-        from app.indexers.config import INDEXER_SITE_DEFINITIONS, AGENT_ONLY_INDEXER_SITE_IDS
+
+        from app.indexers.config import (
+            AGENT_ONLY_INDEXER_SITE_IDS,
+            INDEXER_SITE_DEFINITIONS,
+        )
         from app.indexers.models import IndexerCapabilities, IndexerItem, IndexerPage
+        from app.indexers.providers.base import IndexerAdapter
         from app.indexers.registry import IndexerRegistry
         from app.indexers.result_store import IndexerResultStore
         from app.indexers.service import IndexerService
@@ -624,7 +651,7 @@ class IndexerProgressBrowserTests(unittest.TestCase):
             for site_id, name in INDEXER_SITE_DEFINITIONS
         }
         service = IndexerService(
-            registry=IndexerRegistry(adapters), result_store=IndexerResultStore(),
+            registry=IndexerRegistry(cast(dict[str, IndexerAdapter], adapters)), result_store=IndexerResultStore(),
         )
 
         async def search():

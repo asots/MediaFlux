@@ -1,6 +1,7 @@
 """真实领域 DTO 经 Kernel 到模型下一轮的兼容性；不调用真实 Provider。"""
 
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 import json
@@ -261,7 +262,7 @@ def test_candidate_evidence_is_single_copy_without_losing_original_facts(count):
         assert row["technical_evidence"]["stream_verified"] is False
     # 只读投影既不修改源DTO，也不把同一编号的另一标题覆盖成当前候选。
     assert items == original["data"]["items"]
-    conflicting = {"data": {"items": [{"position": 1, "title": "Other title"}]}}
+    conflicting: dict[str, Any] = {"data": {"items": [{"position": 1, "title": "Other title"}]}}
     annotate_resource_candidates(conflicting, [candidate_item(items[0], 1)])
     assert conflicting["data"]["items"] == [{"position": 1, "title": "Other title"}]
     assert conflicting["candidate_numbers"][0]["title"] == items[0]["title"]
@@ -280,14 +281,17 @@ def test_conflicting_search_hits_stay_in_frozen_scope_but_not_default_recommenda
     titles = ["Example.2026.S04E01.1080p", "Example.2025.S02E01.1080p", "Example.2026.S02E01.1080p"]
     service = FakeIndexerService(items=[rank_item(_resource_item(title=title, result_id=f"opaque-resource-{i:04d}"),
                                                  media=request, fallback_query=request.title) for i, title in enumerate(titles)])
-    service.result_store = IndexerResultStore()
+    real_results = IndexerResultStore()
     for item in service.items:
-        service.result_store.restore(item.result_id, item)
-    with patch('app.agent.domains.resources.indexer_actions.config.get_bool', return_value=True), patch('app.agent.domains.resources.indexer_actions.get_indexer_service', return_value=service):
+        assert item.result_id is not None
+        real_results.restore(item.result_id, item)
+    with patch.object(service, 'result_store', real_results), patch('app.agent.domains.resources.indexer_actions.config.get_bool', return_value=True), patch('app.agent.domains.resources.indexer_actions.get_indexer_service', return_value=service):
         dto = search_resources(search_arguments({"title": "Example", "year": 2026, "season": 2, "episode": 1}))
     assert [row['title'] for row in dto.data['items']] == titles
+    assert dto.model_data is not None
     assert [row['position'] for row in dto.model_data['items']] == [2, 3]
     # 系列首播年不等于后续季发布年；年份冲突仍是观察证据，不能据此隐藏精确季集。
+    assert dto.model_data is not None
     assert 'year_conflict' in dto.model_data['items'][0]['match_reasons']
     assert 'episode_exact' in dto.model_data['items'][0]['match_reasons']
     assert dto.model_data['query_scope']['known_conflicts'] == 1
@@ -298,11 +302,14 @@ def test_conflicting_search_hits_stay_in_frozen_scope_but_not_default_recommenda
     assert [row['position'] for row in numbers] == [2, 3]
     assert titles[0] not in content and titles[1] in content
     # 原始研究快照可精确检查，不破坏依赖发布季映射的缺集业务。
-    with patch('app.indexers.runtime.get_indexer_service', return_value=service):
+    with patch.object(service, 'result_store', real_results), patch('app.indexers.runtime.get_indexer_service', return_value=service):
         restored = restore_resource_candidate_reference(dto.references[0].value)
+    assert restored is not None
     assert [row['position'] for row in restored['candidates']] == [1, 2, 3]
+    assert restored is not None
     assert [row['title'] for row in restored['candidates']] == titles
-    assert [service.result_store.get(row['result_id']).title for row in restored['candidates']] == titles
+    assert restored is not None
+    assert [real_results.get(row['result_id']).title for row in restored['candidates']] == titles
 
 
 @pytest.mark.parametrize("kind", ["episode", "season", "batch"])

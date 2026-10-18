@@ -1,6 +1,8 @@
 """Media Agent 媒体服务器连通性测试。"""
 
 from __future__ import annotations
+from requests import Response
+from typing import cast
 
 import unittest
 from types import SimpleNamespace
@@ -273,19 +275,19 @@ class AgentConfigConnectionTests(unittest.TestCase):
             (requests.ConnectionError("secret host details"), "connection"),
             (
                 requests.HTTPError(
-                    "secret auth details", response=SimpleNamespace(status_code=401)
+                    "secret auth details", response=cast(Response | None, SimpleNamespace(status_code=401))
                 ),
                 "authentication",
             ),
             (
                 requests.HTTPError(
-                    "secret path details", response=SimpleNamespace(status_code=404)
+                    "secret path details", response=cast(Response | None, SimpleNamespace(status_code=404))
                 ),
                 "not_found",
             ),
             (
                 requests.HTTPError(
-                    "secret upstream details", response=SimpleNamespace(status_code=503)
+                    "secret upstream details", response=cast(Response | None, SimpleNamespace(status_code=503))
                 ),
                 "http_error",
             ),

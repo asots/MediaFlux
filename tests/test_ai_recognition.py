@@ -1,6 +1,12 @@
 """Task 17：AI 仅作为确定性 TMDB 识别失败后的结构化回退。"""
 from __future__ import annotations
 
+from app.modules.scraper import RecognitionResult
+
+from typing import cast
+from starlette.requests import Request
+from app.clients.tmdb import TMDBClient
+
 import json
 import unittest
 from pathlib import Path
@@ -512,7 +518,7 @@ class ScraperCacheBoundsTests(unittest.TestCase):
             _RECOGNITION_DETAIL_CACHE_LIMIT,
         )
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         for index in range(_RECOGNITION_DETAIL_CACHE_LIMIT + 5):
             scraper._enrich_candidate_for_scoring(
                 {"id": str(index), "media_type": "movie"}, "movie"
@@ -538,7 +544,7 @@ class ScraperCacheBoundsTests(unittest.TestCase):
             _AI_FAILURE_GENERIC,
         )
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         now = time.monotonic()
         for cache in (
             scraper._ai_failure_cache,
@@ -583,9 +589,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         )
 
     def test_deterministic_success_bypasses_ai(self):
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         matched = RecognitionResult(
             tmdb_id="1", title="Deterministic", year="2024",
             media_type="movie", confidence=1.0, status="matched",
@@ -600,9 +606,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         ai_client.assert_not_called()
 
     def test_ai_disabled_keeps_deterministic_failure(self):
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         failed = RecognitionResult(
             media_type="movie", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -619,9 +625,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         ai_client.assert_not_called()
 
     def test_ai_enabled_but_misconfigured_does_not_construct_client(self):
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         failed = RecognitionResult(
             media_type="movie", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -670,10 +676,10 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         self.assertEqual(provider, ("", "", "", 12, "auto"))
 
     def test_ai_result_runs_fresh_tmdb_search_and_requires_tmdb_detail_revalidation(self):
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
         tmdb_client = _TMDBClient()
-        scraper = TMDBScraper(client=tmdb_client)
+        scraper = TMDBScraper(client=cast(TMDBClient, tmdb_client))
         failed = RecognitionResult(
             media_type="movie", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -701,6 +707,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(result.tmdb_id, "42")
         self.assertEqual(result.matched_by, "ai_tmdb_revalidated")
+        assert isinstance(result, RecognitionResult)
         self.assertTrue(result.ai_diagnostic["attempted"])
         self.assertEqual(result.ai_diagnostic["reason"], "deterministic_failed")
         self.assertEqual(result.ai_diagnostic["output"]["title"], "Corrected Movie")
@@ -712,9 +719,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         set_lock.assert_not_called()
 
     def test_ai_exact_tmdb_result_without_source_anchor_stays_manual(self):
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         failed = RecognitionResult(
             media_type="movie", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -737,13 +744,14 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(result.status, "low_confidence")
         self.assertTrue(result.need_confirm)
+        assert isinstance(result, RecognitionResult)
         anchor = result.ai_diagnostic["tmdb_revalidation"]["source_anchor"]
         self.assertFalse(anchor["passed"])
         self.assertEqual(anchor["reason"], "source_anchor_unverified")
 
     def test_ai_base_franchise_candidate_cannot_drop_distinctive_source_title(self):
         from app.clients.ai_recognition import AIRecognitionResult
-        from app.modules.scraper import Candidate, RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import Candidate, RecognitionContext, TMDBScraper
 
         detail = {
             "id": 100,
@@ -751,9 +759,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             "original_name": "仮面ライダー",
             "first_air_date": "1971-04-03",
         }
-        scraper = TMDBScraper(client=_TMDBClient(
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient(
             corrected_title="Kamen Rider", detail_payload=detail,
-        ))
+        )))
         failed = RecognitionResult(
             media_type="tv", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -806,7 +814,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
     def test_ai_source_anchor_accepts_explicit_quoted_release_wrapper_only(self):
         from app.clients.ai_recognition import AIRecognitionResult
-        from app.modules.scraper import Candidate, RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import Candidate, RecognitionContext, TMDBScraper
 
         title = "北斗之拳 拳王軍雜兵們的輓歌"
         wrapped_title = f"Animatica「{title}」"
@@ -817,9 +825,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             "first_air_date": "2026-01-01",
             "seasons": [{"season_number": 1, "episode_count": 12}],
         }
-        scraper = TMDBScraper(client=_TMDBClient(
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient(
             corrected_title=title, detail_payload=detail,
-        ))
+        )))
         failed = RecognitionResult(
             media_type="tv", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -869,7 +877,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
     def test_ai_title_revalidation_accepts_official_tmdb_alias(self):
         from app.clients.ai_recognition import AIRecognitionResult
-        from app.modules.scraper import Candidate, RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import Candidate, RecognitionContext, TMDBScraper
 
         detail = {
             "id": 30980,
@@ -881,9 +889,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             },
             "seasons": [{"season_number": 1, "episode_count": 24}],
         }
-        scraper = TMDBScraper(client=_TMDBClient(
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient(
             corrected_title="A Certain Magical Index", detail_payload=detail,
-        ))
+        )))
         failed = RecognitionResult(
             media_type="tv", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -933,14 +941,14 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         self.assertTrue(revalidation["source_anchor"]["passed"])
 
     def test_ai_detail_missing_id_or_requested_year_stays_manual(self):
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
         for detail, failed_field in (
             ({"title": "Corrected Movie", "release_date": "2024-01-01"}, "id_verified"),
             ({"id": 42, "title": "Corrected Movie"}, "year_verified"),
         ):
             with self.subTest(failed_field=failed_field):
-                scraper = TMDBScraper(client=_TMDBClient(detail_payload=detail))
+                scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient(detail_payload=detail)))
                 failed = RecognitionResult(
                     media_type="movie", confidence=0.0, status="no_result",
                     need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -962,21 +970,22 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
                     )
 
                 self.assertTrue(result.need_confirm)
+                assert isinstance(result, RecognitionResult)
                 self.assertFalse(
                     result.ai_diagnostic["tmdb_revalidation"][failed_field]
                 )
 
     def test_ai_cannot_override_explicit_source_year_without_confirmation(self):
         from app.clients.ai_recognition import AIRecognitionResult
-        from app.modules.scraper import RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import RecognitionContext, TMDBScraper
 
         detail = {
             "id": 42, "title": "The Thing", "original_title": "The Thing",
             "release_date": "2011-10-12",
         }
-        scraper = TMDBScraper(client=_TMDBClient(
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient(
             corrected_title="The Thing", detail_payload=detail,
-        ))
+        )))
         failed = RecognitionResult(
             media_type="movie", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -1016,7 +1025,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
     def test_ai_tv_candidate_requires_deterministic_episode_to_exist(self):
         from app.clients.ai_recognition import AIRecognitionResult
-        from app.modules.scraper import RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import RecognitionContext, TMDBScraper
 
         detail = {
             "id": 42,
@@ -1026,7 +1035,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             "seasons": [{"season_number": 2, "episode_count": 2}],
         }
         tmdb_client = _TMDBClient(corrected_title="Corrected Show", detail_payload=detail)
-        scraper = TMDBScraper(client=tmdb_client)
+        scraper = TMDBScraper(client=cast(TMDBClient, tmdb_client))
         failed = RecognitionResult(
             media_type="tv", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -1087,7 +1096,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
     def test_ai_fallback_can_reuse_verified_merged_cour_mapping(self):
         from app.clients.ai_recognition import AIRecognitionResult
-        from app.modules.scraper import RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import RecognitionContext, TMDBScraper
 
         detail = {
             "id": 42,
@@ -1101,7 +1110,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             detail_payload=detail,
             season_detail_payload=self._merged_cour_season_detail(),
         )
-        scraper = TMDBScraper(client=tmdb_client)
+        scraper = TMDBScraper(client=cast(TMDBClient, tmdb_client))
         failed = RecognitionResult(
             media_type="tv", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -1148,7 +1157,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
     def test_ai_position_conflict_has_clear_error_and_skips_tavily(self):
         from app.clients.ai_recognition import AIRecognitionResult
-        from app.modules.scraper import RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import RecognitionContext, TMDBScraper
 
         detail = {
             "id": 42,
@@ -1157,9 +1166,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             "first_air_date": "2024-01-01",
             "seasons": [{"season_number": 1, "episode_count": 12}],
         }
-        scraper = TMDBScraper(client=_TMDBClient(
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient(
             corrected_title="Corrected Show", detail_payload=detail
-        ))
+        )))
         failed = RecognitionResult(
             media_type="tv", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -1203,10 +1212,10 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         self.assertEqual(corroboration["reason"], "season_not_found")
 
     def test_ai_candidate_with_missing_tmdb_detail_stays_manual(self):
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
         tmdb_client = _TMDBClient(detail_payload={})
-        scraper = TMDBScraper(client=tmdb_client)
+        scraper = TMDBScraper(client=cast(TMDBClient, tmdb_client))
         failed = RecognitionResult(
             media_type="movie", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -1228,12 +1237,13 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         self.assertTrue(result.need_confirm)
         self.assertEqual(result.status, "low_confidence")
         self.assertIn("详情复核", result.error)
+        assert isinstance(result, RecognitionResult)
         self.assertFalse(result.ai_diagnostic["tmdb_revalidation"]["passed"])
 
     def test_low_ai_confidence_requires_confirmation_even_for_exact_tmdb_match(self):
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         failed = RecognitionResult(
             media_type="movie", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -1264,9 +1274,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
     def test_ai_timeout_returns_original_deterministic_failure_without_credentials(self):
         from app.clients.ai_recognition import AIRecognitionError
-        from app.modules.scraper import RecognitionResult, TMDBScraper
+        from app.modules.scraper import TMDBScraper
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         failed = RecognitionResult(
             media_type="movie", confidence=0.0, status="no_result",
             need_confirm=True, matched_by="search", error="TMDB 无搜索结果",
@@ -1311,7 +1321,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
     @staticmethod
     def _corroboration_failed(*, rejected_constraints=None):
-        from app.modules.scraper import RecognitionContext, RecognitionResult
+        from app.modules.scraper import RecognitionContext
 
         source = "Kage no Jitsuryokusha ni Naritakute"
         return RecognitionResult(
@@ -1343,7 +1353,6 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
         threshold_passed: bool = True,
         rejected_constraints=None,
     ):
-        from app.modules.scraper import RecognitionResult
 
         return RecognitionResult(
             tmdb_id=tmdb_id,
@@ -1380,10 +1389,10 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             "original_title": "The Eminence in Shadow",
             "release_date": "2024-01-01",
         }
-        scraper = TMDBScraper(client=_TMDBClient(
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient(
             corrected_title="The Eminence in Shadow",
             detail_payload=detail,
-        ))
+        )))
         failed = self._corroboration_failed(
             rejected_constraints=rejected_constraints,
         )
@@ -1424,6 +1433,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             "_recognize_context",
             side_effect=[primary, strict],
         ) as recognize, hint_patch as web_search:
+            assert failed.context is not None
             result = scraper._ai_fallback(
                 failed.context.filename,
                 "",
@@ -1563,7 +1573,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
             AIRecognitionProviderError,
             AIRecognitionUnavailableError,
         )
-        from app.modules.scraper import RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import RecognitionContext, TMDBScraper
 
         values = {
             "AGENT_LLM_API_URL": "https://ai.invalid/v1/chat/completions",
@@ -1590,7 +1600,7 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
                 ),
             )
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         unavailable = failed_result()
         with patch("app.modules.scraper.get_bool", return_value=True), patch(
             "app.modules.scraper.get",
@@ -1625,9 +1635,9 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
     def test_tavily_title_hint_always_revalidates_with_strict_tmdb_mode(self):
         from app.modules.recognition_web_hints import RecognitionWebHintResult
-        from app.modules.scraper import RecognitionContext, RecognitionResult, TMDBScraper
+        from app.modules.scraper import RecognitionContext, TMDBScraper
 
-        scraper = TMDBScraper(client=_TMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _TMDBClient()))
         scraper.match_mode = "loose"
         failed = RecognitionResult(
             media_type="movie",
@@ -1673,7 +1683,6 @@ class AIFallbackPipelineTests(IsolatedDatabaseTestCase):
 
 class AIPreviewAndSettingsTests(unittest.TestCase):
     def test_preview_serializes_safe_ai_diagnostics(self):
-        from app.modules.scraper import RecognitionResult
         from app.routes import tools_api
 
         result = RecognitionResult(
@@ -1730,7 +1739,7 @@ class AIPreviewAndSettingsTests(unittest.TestCase):
                 Mock(), {"filename": "Unknown.Release.2024.mkv"}
             )
 
-        payload = json.loads(response.body)
+        payload = json.loads(bytes(response.body))
         self.assertTrue(payload["recognition"]["ai"]["attempted"])
         self.assertEqual(
             payload["recognition"]["ai"]["position_guard"]["kept_season"], 1
@@ -1792,7 +1801,7 @@ class AIRecognitionConfigTests(unittest.TestCase):
     @staticmethod
     def _payload(response):
         if isinstance(response, JSONResponse):
-            return json.loads(response.body)
+            return json.loads(bytes(response.body))
         return response
 
     def _save(self, payload):
@@ -1812,7 +1821,7 @@ class AIRecognitionConfigTests(unittest.TestCase):
         ), patch(
             "app.modules.recognition_web_hints.clear_recognition_web_hint_cache"
         ), patch("app.modules.scheduler.get_scheduler"):
-            response = save_config(self.request, payload)
+            response = save_config(cast(Request, self.request), payload)
         return response, persist
 
     def test_ai_governance_configuration_is_normalized(self):
@@ -1848,6 +1857,7 @@ class AIRecognitionConfigTests(unittest.TestCase):
         ):
             with self.subTest(key=key):
                 response, persist = self._save({key: "removed"})
+                assert isinstance(response, JSONResponse)
                 self.assertEqual(response.status_code, 400)
                 self.assertIn("不允许的配置项", self._payload(response)["error"])
                 persist.assert_not_called()

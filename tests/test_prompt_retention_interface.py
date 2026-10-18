@@ -30,8 +30,8 @@ def test_native_retention_guidance_release_then_actual_eviction(tmp_path):
             return CapabilitySelection((catalog.get(provider.name), catalog.get(old.name)), {})
 
     class Script(NativeScript):
-        async def respond(self, outbound):
-            body = json.loads(outbound.content)
+        async def respond(self, request):
+            body = json.loads(request.content)
             self.requests.append(body)
             index = len(self.requests)
             calls = {

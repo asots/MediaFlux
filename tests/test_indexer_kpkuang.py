@@ -128,6 +128,7 @@ class KPkuangTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(IndexerUnavailable):
                         await KPkuangAdapter(http=http).search(IndexerSearchRequest.create("未知电影"))
                 self.assertEqual(sleep.await_count, 1)
+                assert sleep.await_args is not None
                 self.assertGreater(sleep.await_args.args[0], 5)
             self.assertEqual(len(calls), 2)
             self.assertGreater(calls[0]["params"]["ts"], 10**12)

@@ -36,7 +36,7 @@ class TelegramLocalScanReportTests(IsolatedDatabaseTestCase):
         skipped = self._task("Show.S02E11.mkv", "completed", "skip")
         pending = self._task("Unmatched.S01E11.mp4", "requires_manual")
         old = self._task("Yesterday.mkv", "completed", "move")
-        scan = {
+        scan: dict = {
             "ok": True, "task_ids": [skipped, pending], "candidate_count": 2,
             "source_count": 1, "scanned_sources": 1, "queued_count": 2,
         }

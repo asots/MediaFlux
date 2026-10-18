@@ -1,6 +1,10 @@
 """光鸭整理多版本共存策略回归测试。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import re
 import unittest
 from pathlib import Path
@@ -198,7 +202,7 @@ class MultiVersionNamingTests(unittest.TestCase):
         self.assertTrue(long_name.endswith(".Standard.NonAtmos.mkv"))
 
     def test_build_new_name_carries_variant_tags_even_without_media_info_naming(self):
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         rules = OrganizeRules(
             keep_multi_versions=True,
             keep_remux_variant=True,
@@ -225,7 +229,7 @@ class MultiVersionNamingTests(unittest.TestCase):
         self.assertTrue(name.endswith(".Atmos.mkv"), name)
 
     def test_build_new_name_uses_probe_flags_for_variant_tags(self):
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         rules = OrganizeRules(keep_multi_versions=True, media_info_enabled=True)
         match = MatchResult(
             tmdb_id="123", title="Variant Movie", year="2026",
@@ -252,7 +256,7 @@ class MultiVersionNamingTests(unittest.TestCase):
 
 class MultiVersionPriorityTests(unittest.TestCase):
     def test_dovi_priority_is_not_lost_when_media_info_uses_dovi_label(self):
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         rules = OrganizeRules(conflict_strategy=2, dolby_first=True)
         existing = GuangYaFile(
             file_id="existing",
@@ -330,7 +334,7 @@ class _TvVariantScraper(_VariantScraper):
 
 class MediaIdentitySafetyTests(unittest.TestCase):
     def test_ambiguous_movie_and_tv_identity_fail_closed(self):
-        organizer = Organizer(client=Mock(), scraper=_VariantScraper())
+        organizer = Organizer(client=Mock(), scraper=cast(TMDBScraper, _VariantScraper()))
         rules = OrganizeRules()
         movie = OrganizePlan(
             file_id="new", original_name="Main.Movie.2026.mkv",
@@ -421,7 +425,7 @@ class DuplicateTargetDirectoryTests(unittest.TestCase):
             GuangYaFile("dir-a", "Season 01", True, parent_id="show"),
             GuangYaFile("dir-b", "Season 01", True, parent_id="show"),
         ]
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, _VariantScraper()))
 
         with self.assertRaisesRegex(DirectoryScrapeConflictError, "重复同名目录"):
             organizer._find_existing_dir_chain("show", "Season 01")
@@ -436,7 +440,7 @@ class DuplicateTargetDirectoryTests(unittest.TestCase):
             [GuangYaFile("raced", "Season 01", True, parent_id="show")],
         ]
         client.create_dir.side_effect = RuntimeError("name exists")
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, _VariantScraper()))
         cache: dict[tuple[str, str], str] = {}
 
         result = organizer._ensure_dir_chain("show", "Season 01", cache)
@@ -451,7 +455,7 @@ class DuplicateTargetDirectoryTests(unittest.TestCase):
         client.list_dir.side_effect = [[], []]
         original_error = RuntimeError("permission denied")
         client.create_dir.side_effect = original_error
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, _VariantScraper()))
 
         with self.assertRaises(RuntimeError) as caught:
             organizer._ensure_dir_chain("show", "Season 01", {})
@@ -471,7 +475,7 @@ class DuplicateTargetDirectoryTests(unittest.TestCase):
             ],
         ]
         client.create_dir.side_effect = RuntimeError("name exists")
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=client, scraper=cast(TMDBScraper, _VariantScraper()))
 
         with self.assertRaisesRegex(DirectoryScrapeConflictError, "重复同名目录"):
             organizer._ensure_dir_chain("show", "Season 01", {})
@@ -695,7 +699,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
         incoming = GuangYaFile(incoming_id, incoming_name, False, incoming_size, "incoming-etag")
         existing = GuangYaFile(existing_id, existing_name, False, existing_size, "existing-etag")
         client = _VariantTreeClient(incoming, existing)
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper()))
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
         ):
@@ -720,7 +724,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
             "existing-etag",
         )
         client = _TvVariantTreeClient(incoming, existing)
-        organizer = Organizer(client=client, scraper=_TvVariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _TvVariantScraper()))
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
         ):
@@ -878,7 +882,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
             return original_list_dir(parent_id)
 
         client.list_dir = fail_target_scan
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper()))
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
         ):
@@ -918,7 +922,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
         client = _VariantTreeClient(first, placeholder)
         client.tree["source"] = [first, second]
         client.tree["movie"] = []
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper()))
 
         preview_plans, _preview_stats = organizer.organize(
             "source", self._rules(), dry_run=True, post_actions=False
@@ -940,7 +944,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
         execute_client = _VariantTreeClient(execute_first, placeholder)
         execute_client.tree["source"] = [execute_first, execute_second]
         execute_client.tree["movie"] = []
-        execute_organizer = Organizer(client=execute_client, scraper=_VariantScraper())
+        execute_organizer = Organizer(client=cast(GuangYaClient, execute_client), scraper=cast(TMDBScraper, _VariantScraper()))
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
         ):
@@ -966,7 +970,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
         )
         client = _VariantTreeClient(first, existing)
         client.tree["source"] = [first, second]
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper()))
 
         plans, _stats = organizer.organize(
             "source", self._rules(), dry_run=True, post_actions=False,
@@ -998,7 +1002,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
         client = _VariantTreeClient(smaller, placeholder)
         client.tree["source"] = [smaller, larger]
         client.tree["movie"] = []
-        organizer = Organizer(client=client, scraper=_VariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper()))
 
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
@@ -1034,7 +1038,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
         client = _TvVariantTreeClient(episodes[0], placeholder)
         client.tree["source"] = episodes
         client.tree["season"] = []
-        organizer = Organizer(client=client, scraper=_TvVariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _TvVariantScraper()))
 
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
@@ -1070,7 +1074,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
         client = _VersionedTvVariantTreeClient(episodes[0], placeholder)
         client.tree["source"] = episodes
         client.tree["season"] = []
-        organizer = Organizer(client=client, scraper=_TvVariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _TvVariantScraper()))
 
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
@@ -1118,7 +1122,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
             return original_file_info(file_id)
 
         client.file_info = file_info_with_external_change
-        organizer = Organizer(client=client, scraper=_TvVariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _TvVariantScraper()))
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
         ):
@@ -1163,7 +1167,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
             return original_file_info(file_id)
 
         client.file_info = file_info_with_change_during_refresh
-        organizer = Organizer(client=client, scraper=_TvVariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _TvVariantScraper()))
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
         ):
@@ -1192,7 +1196,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
             False, 10000, "existing-etag", "season",
         )
         client = _VersionedTvVariantTreeClient(incoming, existing)
-        organizer = Organizer(client=client, scraper=_TvVariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _TvVariantScraper()))
         runtime = OrganizeTaskRuntime()
         context = OrganizeContext(
             source_dir_id="source",
@@ -1257,7 +1261,7 @@ class OrganizeMultiVersionExecutionTests(IsolatedDatabaseTestCase):
             return original_list_dir(parent_id)
 
         client.list_dir = list_dir_with_external_change
-        organizer = Organizer(client=client, scraper=_TvVariantScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _TvVariantScraper()))
         with patch("app.modules.organize.add_organize_log", return_value=1), patch(
             "app.modules.organize.add_organize_log_items"
         ):
@@ -1434,7 +1438,7 @@ class MultiVersionConfigApiTests(IsolatedDatabaseTestCase):
             self.assertIn(key, rejected.text)
 
     def test_blank_or_invalid_extension_text_falls_back_to_defaults(self):
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         self.assertIn("mkv", organizer._parse_exts(" , ", {"mkv"}))
         self.assertEqual(organizer._parse_exts("...", {"mkv"}), {"mkv"})
         self.assertEqual(media_role("subtitle.zh.vtt"), "subtitle")

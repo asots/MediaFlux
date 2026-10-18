@@ -97,6 +97,7 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
         self.service.get_week.assert_called_once_with(wait_sources=("youku",), cancelled=ANY)
         self.assertEqual(len(model.requests), 2)
         facts = model.facts
+        assert facts is not None
         self.assertEqual((facts["status"], facts["data"]["total"], facts["data"]["returned"]), ("partial", 1, 1))
         self.assertEqual(facts["data"]["items"][0]["audience"], "member")
         self.assertEqual(facts["data"]["items"][0]["free_progress"], "")
@@ -118,6 +119,7 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
         events = await collect(self.session(model).run(AgentInput(message="今天优酷动漫排期", owner="webk:v1:" + "b" * 64,
                                                                 session_id="loading-session")))
         self.service.get_week.assert_called_once_with(wait_sources=("youku",), cancelled=ANY)
+        assert model.facts is not None
         self.assertEqual(model.facts["status"], "loading")
         self.assertEqual(model.facts["data"]["retry_after"], 5)
         self.assertEqual(len(model.requests), 2)
@@ -173,6 +175,7 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
         events = await asyncio.wait_for(turn, 5)
+        assert model.facts is not None
         facts = model.facts["data"]
         self.assertEqual((facts["total"], facts["returned"]), (53, 53))
         self.assertFalse(facts["has_more"])
@@ -218,5 +221,6 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
         events = await collect(session.run(AgentInput(message="今天优酷追漫日历", owner="webk:v1:" + "c" * 64,
                                                        session_id="disabled-session")))
         self.getter.assert_not_called()
+        assert model.facts is not None
         self.assertEqual(model.facts["status"], "disabled")
         self.assertEqual(events[-1].type, AgentEventType.TURN_COMPLETED)

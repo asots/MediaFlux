@@ -108,6 +108,7 @@ class MetadataCredentialTests(unittest.TestCase):
         self.worker._consecutive_failures = 4
         self.assertTrue(self.worker._process_one())
         self.assertIsNot(self.worker._client, old)
+        assert raw is not None
         self.assertEqual(raw.closed, 1)
         self.assertEqual(self.factory.call_count, 2)
         self.assertEqual(self.row()["status"], "completed")
@@ -116,8 +117,10 @@ class MetadataCredentialTests(unittest.TestCase):
         current = self.worker._client
         self.assertIs(self.worker._runtime_client(), current)
         self.assertEqual(self.factory.call_count, 2)
+        assert current is not None
         current_raw = current._raw
         self.assertTrue(self.worker.stop())
+        assert current_raw is not None
         self.assertEqual(current_raw.closed, 1)
 
     def test_logout_pauses_without_claiming_and_login_resumes(self):
@@ -128,6 +131,7 @@ class MetadataCredentialTests(unittest.TestCase):
             self.assertFalse(self.worker._process_one())
         self.assertEqual(self.row()["status"], "queued")
         self.assertEqual(self.row()["lease_generation"], 0)
+        assert raw is not None
         self.assertEqual(raw.closed, 1)
         self.download.assert_not_called()
         self.assert_no_file_failure()
@@ -138,6 +142,7 @@ class MetadataCredentialTests(unittest.TestCase):
 
     def test_rotation_during_remote_prepare_defers_without_consuming_attempt(self):
         old = self.worker._runtime_client()
+        assert old._raw is not None
         old._raw.before_detail = self.external_client().refresh_now
         self.assertFalse(self.worker._process_one())
         self.assertEqual(self.row()["status"], "retry_wait")
@@ -152,6 +157,7 @@ class MetadataCredentialTests(unittest.TestCase):
 
     def test_logout_during_prepare_defers_then_waits_for_login(self):
         old = self.worker._runtime_client()
+        assert old._raw is not None
         old._raw.before_detail = self.external_client().clear_tokens
         self.assertFalse(self.worker._process_one())
         lease = self.row()["lease_generation"]

@@ -101,6 +101,7 @@ def test_submitted_read_model_synthesis_survives_cold_public_consumption(unresol
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
                                pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
         preview = await consume_events(session.run(AgentInput(message="提交任务并核验目录", owner="o", session_id="s")))
+        assert preview.approval is not None
         final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
         assert writes == [1] and len(model.requests) == 3
         cold = await SQLiteKernelStore(secret_provider=lambda: "answer-completion-fixture").load(owner="o", session_id="s")

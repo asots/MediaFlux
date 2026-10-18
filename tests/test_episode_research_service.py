@@ -6,12 +6,17 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from app import config, database as db
+from app import config
+from app import database as db
 from app.modules import episode_research_service as service
 from app.modules.episode_research import EpisodeEvidenceReader, EpisodeResearchError
 from app.repositories.episode_research import invalidate_episode_research_cache
 from tests.support import IsolatedDatabaseTestCase
-from tests.test_episode_research_validation import EvidenceClient, GROUP_ID, case_payload
+from tests.test_episode_research_validation import (
+    GROUP_ID,
+    EvidenceClient,
+    case_payload,
+)
 
 
 class EpisodeResearchServiceTests(IsolatedDatabaseTestCase):
@@ -137,6 +142,29 @@ class EpisodeResearchServiceTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             stored = conn.execute("SELECT payload FROM episode_research_cache").fetchone()[0]
         self.assertNotIn("private context", stored)
+
+    def test_invalid_verified_proposal_preserves_abstention_and_negative_cache(self):
+        for index, proposal in enumerate((None, [], "bad")):
+            with self.subTest(proposal=proposal):
+                payload = copy.deepcopy(self.payload)
+                payload["files"][0]["size"] += index
+                calls_before = self.calls
+
+                async def invalid_runner(payload, *, reader):
+                    self.calls += 1
+                    reader.close()
+                    return {"status": "verified", "proposal": proposal}
+
+                result = self.research(payload, runner=invalid_runner)
+                self.assertEqual(result["status"], "abstained")
+                self.assertEqual(result["reason_code"], "invalid_research_proposal")
+                self.assertIsNone(result["proposal"])
+
+                cached = self.research(payload, runner=invalid_runner)
+                self.assertTrue(cached["cached"])
+                self.assertEqual(cached["status"], "abstained")
+                self.assertEqual(cached["reason_code"], "invalid_research_proposal")
+                self.assertEqual(self.calls, calls_before + 1)
 
     def test_provider_failure_uses_short_negative_cache_instead_of_retry_storm(self):
         async def broken(payload, *, reader):

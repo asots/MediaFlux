@@ -1,6 +1,8 @@
 """第三方日志降噪与敏感 URL 抑制测试。"""
 from __future__ import annotations
 
+import inspect
+
 import asyncio
 import logging
 import os
@@ -282,7 +284,9 @@ class ThirdPartyLoggingTests(unittest.TestCase):
         })
 
         with self.assertLogs("app.main", level="ERROR") as captured:
-            response = asyncio.run(handler(request, RuntimeError("SECRET-TOKEN")))
+            pending = handler(request, RuntimeError("SECRET-TOKEN"))
+            assert inspect.iscoroutine(pending)
+            response = asyncio.run(pending)
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(len(captured.records), 1)

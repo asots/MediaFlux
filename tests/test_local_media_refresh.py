@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
@@ -6,6 +7,7 @@ from unittest.mock import Mock, patch
 from app.clients.emby import EmbyClient
 from app.clients.jellyfin import JellyfinClient
 from app.modules.local_media_service import LocalMediaService
+from app.modules.local_media_service import LocalMovePlan
 from app.modules.media_refresh_coordinator import MediaRefreshCoordinator
 
 
@@ -91,7 +93,7 @@ class LocalMediaRefreshTests(TestCase):
             "app.modules.media_refresh_coordinator.enqueue_media_refresh_paths",
             return_value={"Jellyfin": "queued"},
         ) as enqueue:
-            warnings = LocalMediaService._refresh_plans(plans)
+            warnings = LocalMediaService._refresh_plans(cast(list[LocalMovePlan], plans))
         self.assertEqual(warnings, [])
         client.list_virtual_folders.assert_not_called()
         enqueue.assert_called_once_with(
@@ -127,7 +129,7 @@ class LocalMediaRefreshTests(TestCase):
             "app.modules.media_refresh_coordinator.enqueue_media_refresh_paths",
             return_value={"Jellyfin": "queued"},
         ) as enqueue:
-            warnings = LocalMediaService._refresh_plans(plans)
+            warnings = LocalMediaService._refresh_plans(cast(list[LocalMovePlan], plans))
 
         self.assertEqual(warnings, [])
         enqueue.assert_called_once_with(

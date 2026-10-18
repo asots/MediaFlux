@@ -186,6 +186,8 @@ class LLMProviderProtocolTests(unittest.TestCase):
         )
         self.assertEqual(turn.text, "已完成。")
         self.assertEqual(turn.finish_reason, "stop")
+        assert turn.assistant_entry is not None
+        assert isinstance(turn.assistant_entry, dict)
         self.assertNotIn("reasoning_content", turn.assistant_entry)
 
     def test_protocol_endpoints_are_distinct(self):

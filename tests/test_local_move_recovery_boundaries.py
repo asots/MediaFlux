@@ -1,6 +1,9 @@
 """移动已发布与回滚占用之间的真实文件系统异常边界。"""
 from __future__ import annotations
 
+from typing import cast
+from app.modules.scraper import TMDBScraper
+
 import errno
 import tempfile
 from pathlib import Path
@@ -68,8 +71,8 @@ class LocalMoveRecoveryBoundariesTests(IsolatedDatabaseTestCase):
             source_id = db.create_local_media_source(name='recovery-boundary', qb_profile='',
                 qb_path_prefix='', local_root=str(src), owner='admin')
             db.upsert_local_library_target(source_id, 'movie', str(dst), owner='admin')
-            service = LocalMediaService(scraper=FakeScraper(MatchResult(
-                tmdb_id='1', title='Movie', year='2026', media_type='movie', confidence=1.0)))
+            service = LocalMediaService(scraper=cast(TMDBScraper, FakeScraper(MatchResult(
+                tmdb_id='1', title='Movie', year='2026', media_type='movie', confidence=1.0))))
             real_lstat = Path.lstat
             faults = []
 
@@ -97,7 +100,9 @@ class LocalMoveRecoveryBoundariesTests(IsolatedDatabaseTestCase):
             self.assertEqual(faults, [True])
             self.assertEqual(caught.exception.rollback_errors, [])
             self.assertEqual(source.read_bytes(), b'only-new-copy')
-            self.assertEqual(db.get_local_media_task(task_id, owner='admin').status, 'failed')
+            get_local_media_task_result = db.get_local_media_task(task_id, owner='admin')
+            assert get_local_media_task_result is not None
+            self.assertEqual(get_local_media_task_result.status, 'failed')
             self.assertEqual([r['status'] for r in db.list_local_media_operation_steps(
                 task_id, owner='admin')], ['rolled_back'])
 

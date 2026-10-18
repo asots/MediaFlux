@@ -6,10 +6,10 @@
 """
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
 import re
 import unicodedata
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from typing import Any
 
 from app import config
@@ -19,7 +19,10 @@ from app.modules.guangya_rename import (
     build_explicit_rename_plan,
 )
 from app.modules.nsfw import NsfwRecognizer, extract_nsfw_identifier, normalize_code
-from app.modules.organize import DEFAULT_ORGANIZE_METADATA_EXTS, DEFAULT_ORGANIZE_VIDEO_EXTS
+from app.modules.organize import (
+    DEFAULT_ORGANIZE_METADATA_EXTS,
+    DEFAULT_ORGANIZE_VIDEO_EXTS,
+)
 from app.modules.organize_postprocess import SUBTITLE_EXTS
 
 _MAX_SCANNED_ITEMS = 10_000
@@ -65,7 +68,7 @@ def _cached_list_dir(
     cache: dict[str, list[GuangYaFile]],
     parent_id: str,
 ) -> list[GuangYaFile]:
-    key = str(parent_id)
+    key = parent_id
     if key not in cache:
         cache[key] = client.list_dir(key)
     return cache[key]
@@ -76,6 +79,7 @@ def _resolve_path(
     path: str,
     cache: dict[str, list[GuangYaFile]],
 ) -> tuple[GuangYaFile, str]:
+    current: GuangYaFile | None = None
     parent_id = "0"
     parent_path = "/"
     components = path.strip("/").split("/")
@@ -93,12 +97,13 @@ def _resolve_path(
         if index < len(components) - 1 and not current.is_dir:
             raise GuangYaRenamePlanError("光鸭路径的中间组件不是目录")
         parent_path = "/" + "/".join(components[:index]) if index else "/"
-        parent_id = str(current.file_id)
+        parent_id = current.file_id
+    assert current is not None
     return current, parent_path
 
 
 def _configured_exts(key: str, defaults: tuple[str, ...]) -> set[str]:
-    raw = str(config.get(key, "") or "")
+    raw = (config.get(key, "") or "")
     if not raw.strip():
         return set(defaults)
     values = {
@@ -110,7 +115,7 @@ def _configured_exts(key: str, defaults: tuple[str, ...]) -> set[str]:
 
 
 def _extension(item: GuangYaFile) -> str:
-    declared = str(item.extension or "").strip().lower().lstrip(".")
+    declared = (item.extension or "").strip().lower().lstrip(".")
     if declared:
         return declared
     match = re.search(r"[.。．]([A-Za-z0-9]{1,10})$", item.name)
@@ -127,10 +132,10 @@ def _stem(item: GuangYaFile) -> str:
 
 
 def _contains_domain(value: str, configured_domains: str) -> bool:
-    if _DOMAIN_RE.search(str(value or "")):
+    if _DOMAIN_RE.search(value or ""):
         return True
-    lowered = str(value or "").casefold()
-    for domain in re.split(r"[,，\s]+", str(configured_domains or "")):
+    lowered = (value or "").casefold()
+    for domain in re.split(r"[,，\s]+", (configured_domains or "")):
         normalized = domain.strip().casefold().lstrip(".")
         if normalized and normalized in lowered:
             return True
@@ -151,10 +156,10 @@ def _safe_stem(value: object, fallback: str) -> str:
 
 
 def _configured_recognizer(strip_domains: str) -> NsfwRecognizer | None:
-    endpoint = str(config.get("GY_ORGANIZE_NSFW_METATUBE_ENDPOINT", "") or "").strip()
+    endpoint = (config.get("GY_ORGANIZE_NSFW_METATUBE_ENDPOINT", "") or "").strip()
     if not endpoint:
         return None
-    token = str(config.get("GY_ORGANIZE_NSFW_METATUBE_TOKEN", "") or "").strip()
+    token = (config.get("GY_ORGANIZE_NSFW_METATUBE_TOKEN", "") or "").strip()
     try:
         timeout = max(
             2,
@@ -188,7 +193,7 @@ def _canonical_stem(
             unique = {
                 _safe_stem(candidate.title, normalized)
                 for candidate in recognizer.candidates(lookup_name)
-                if str(candidate.title or "").strip()
+                if (candidate.title or "").strip()
             }
         except Exception:
             unique = set()
@@ -227,8 +232,8 @@ def build_media_hygiene_plan(
     媒体类型和清理策略的通用能力边界。
     """
     target_path = _normalize_path(path)
-    safe_limit = max(1, min(int(limit), 10_000))
-    strip_domains = str(config.get("GY_ORGANIZE_NSFW_STRIP_DOMAINS", "") or "")
+    safe_limit = max(1, min(limit, 10_000))
+    strip_domains = (config.get("GY_ORGANIZE_NSFW_STRIP_DOMAINS", "") or "")
     video_exts = _configured_exts("GY_ORGANIZE_VIDEO_EXTS", DEFAULT_ORGANIZE_VIDEO_EXTS)
     metadata_exts = _configured_exts(
         "GY_ORGANIZE_METADATA_EXTS", DEFAULT_ORGANIZE_METADATA_EXTS
@@ -242,9 +247,9 @@ def build_media_hygiene_plan(
             raise GuangYaRenamePlanError("媒体名称清理目前只支持精确目录路径")
 
         nodes: dict[str, _DirectoryNode] = {
-            str(target.file_id): _DirectoryNode(target, target_path, parent_path)
+            target.file_id: _DirectoryNode(target, target_path, parent_path)
         }
-        queue = deque([str(target.file_id)])
+        queue = deque([target.file_id])
         scanned_items = 0
         scanned_dirs = 0
         while queue:
@@ -261,11 +266,11 @@ def build_media_hygiene_plan(
                 if child.is_dir:
                     if recursive:
                         child_path = node.path.rstrip("/") + "/" + child.name
-                        nodes[str(child.file_id)] = _DirectoryNode(
+                        nodes[child.file_id] = _DirectoryNode(
                             child, child_path, node.path
                         )
-                        node.children.append(str(child.file_id))
-                        queue.append(str(child.file_id))
+                        node.children.append(child.file_id)
+                        queue.append(child.file_id)
                     continue
                 node.files.append(child)
 
@@ -343,7 +348,7 @@ def build_media_hygiene_plan(
             has_unidentified_video = directory_id in unidentified_video_dirs
             for child_id in node.children:
                 codes.update(subtree_codes.get(child_id, set()))
-                has_unidentified_video = bool(
+                has_unidentified_video = (
                     has_unidentified_video
                     or subtree_has_unidentified_video.get(child_id, False)
                 )

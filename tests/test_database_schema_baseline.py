@@ -125,7 +125,7 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                         "WHERE owner_digest='owner-digest' AND session_digest='session-digest'"
                     ).fetchone()
                 self.assertEqual(version, 33)
-                self.assertIsNotNone(index)
+                assert (index) is not None
                 self.assertIn("json_valid(state_json)", index["sql"])
                 self.assertIn("$.metadata.effect_next_poll_at", index["sql"])
                 self.assertEqual(
@@ -312,7 +312,7 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
             conn.close()
 
         self.assertIsNone(old_table)
-        self.assertIsNotNone(row)
+        assert (row) is not None
         assert row is not None
         self.assertEqual(row[:3], ("organize", "result", "100"))
         event = json.loads(row[3])
@@ -574,7 +574,7 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                 (uncertain_entry,),
             ).fetchone()
 
-        self.assertIsNotNone(request)
+        assert (request) is not None
         self.assertEqual(request["targets"], "both")
         self.assertEqual(request["status"], "completed")
         self.assertEqual(request["qb_status"], "completed")
@@ -588,7 +588,7 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
             for row in db.list_active_download_requests(include_local_import=True)
         }
         self.assertNotIn(int(request["id"]), active_ids)
-        self.assertIsNotNone(uncertain)
+        assert (uncertain) is not None
         self.assertEqual(uncertain["status"], "manual_review")
         self.assertEqual(uncertain["qb_status"], "manual_review")
         self.assertEqual(uncertain_rss["status"], "failed")
@@ -906,10 +906,10 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                     ).fetchone()),
                     ("v0.1.4 sentinel", ""),
                 )
-                self.assertIsNotNone(connection.execute(
+                assert (connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='index' "
                     "AND name='idx_agent_action_history_confirmation'"
-                ).fetchone())
+                ).fetchone()) is not None
                 self.assertEqual(
                     connection.execute("PRAGMA integrity_check").fetchone()[0],
                     "ok",
@@ -1117,7 +1117,7 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                 self.assertEqual(kwargs["reason"], f"pre-migration-1-to-{db.SCHEMA_VERSION}")
                 self.assertFalse(kwargs["include_settings"])
                 self.assertEqual(Path(kwargs["output"]).parent, path.parent / "backups")
-                self.assertIsInstance(kwargs["source_connection"], sqlite3.Connection)
+                assert isinstance(kwargs["source_connection"], sqlite3.Connection)
             finally:
                 db.configure_database(previous_path, test_mode=previous_test_mode)
 
@@ -1456,8 +1456,8 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                 self.assertIn("context_generation", columns)
                 self.assertEqual(preserved["context_type"], "patrol")
                 self.assertEqual(int(preserved["context_generation"]), 0)
-                self.assertIsNotNone(epoch_table)
-                self.assertIsNotNone(generation_sequence)
+                assert (epoch_table) is not None
+                assert (generation_sequence) is not None
             finally:
                 db.configure_database(previous_path, test_mode=previous_test_mode)
 
@@ -1481,8 +1481,10 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
             knowledge.reset_runtime_state_for_tests()
             try:
                 self.assertTrue(knowledge.is_known("ANi", "release_group"))
+                lookup_any_result = knowledge.lookup_any("Nekomoe", "release_group")
+                assert lookup_any_result is not None
                 self.assertEqual(
-                    knowledge.lookup_any("Nekomoe", "release_group")["source"],
+                    lookup_any_result["source"],
                     "builtin",
                 )
                 self.assertFalse(knowledge.is_known("NotAReleaseGroup", "release_group"))
@@ -1535,7 +1537,7 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                         )
                     }
                 self.assertEqual(version, db.SCHEMA_VERSION)
-                self.assertIsNotNone(table)
+                assert (table) is not None
                 self.assertIn("idx_organize_operation_jobs_active_dedupe", indexes)
                 self.assertTrue({
                     "payload_auth", "cancel_requested", "expires_at", "purged_at"
@@ -1969,7 +1971,7 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                     ).fetchone()
                 self.assertIn("session_id", columns)
                 self.assertIsNone(row["session_id"])
-                self.assertIsNotNone(session_table)
+                assert (session_table) is not None
             finally:
                 db.configure_database(previous_path, test_mode=previous_test_mode)
 

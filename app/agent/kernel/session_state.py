@@ -97,7 +97,7 @@ class SessionState:
         return cls(
             owner=owner,
             session_id=session_id,
-            generation=max(0, int(generation)),
+            generation=max(0, generation),
             conversation=conversation_rows(payload.get("conversation", [])),
             summary=str(payload.get("summary") or "")[:8_000],
             recent_refs=[
@@ -152,7 +152,7 @@ class SessionState:
             if type(update) is _ExecutionCapacity:
                 self.execution_capacity = bool(update.value)
                 continue
-            key = str(update.key or "").strip()
+            key = (update.key or "").strip()
             if any(key == "metadata." + field or key.startswith("metadata." + field + ".")
                    for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait", "history_memory_version", "scoped_trust")):
                 raise ValueError("pending binding requires a typed transition")

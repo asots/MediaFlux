@@ -40,7 +40,7 @@ _IMPORTANCE_RANK = {
 
 
 def notification_level() -> str:
-    value = str(config.get("TG_NOTIFICATION_LEVEL", "standard") or "standard").strip().lower()
+    value = (config.get("TG_NOTIFICATION_LEVEL", "standard") or "standard").strip().lower()
     return value if value in _LEVEL_RANK else "standard"
 
 
@@ -58,7 +58,7 @@ def allows_notification(
     命令交互回复不经过本函数。待确认与错误仍受全局总开关约束，但不受
     ``standard/detailed`` 成功信息等级限制。
     """
-    if not notifications_enabled() or not bool(topic_enabled):
+    if not notifications_enabled() or not topic_enabled:
         return False
     try:
         normalized = NotificationImportance(str(importance))

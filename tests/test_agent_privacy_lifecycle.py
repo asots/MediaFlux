@@ -339,7 +339,7 @@ class AgentPrivacyLifecycleTests(IsolatedDatabaseTestCase):
                 "FROM agent_provider_plans WHERE plan_id=?",
                 (plan["plan_ref"].removeprefix("provider_plan:"),),
             ).fetchone()
-        self.assertIsNotNone(row)
+        assert (row) is not None
         self.assertNotEqual(row["owner_digest"], self._digest(
             b"mediaflux-agent-provider-plan-owner:v1\0", owner
         ))

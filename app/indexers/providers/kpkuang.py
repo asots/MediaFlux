@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import html
 import json
 import re
 import time
 from types import MappingProxyType
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -253,7 +253,7 @@ class KPkuangAdapter(DirectResultAdapter):
         return body
 
     @staticmethod
-    def _parse_candidates(body: bytes) -> list[dict[str, object]] | None:
+    def _parse_candidates(body: bytes) -> list[dict[str, Any]] | None:
         try:
             text = body.decode("utf-8-sig")
             wrapper = re.fullmatch(r"\s*cb\s*\((.*)\)\s*;?\s*", text, re.S)
@@ -265,7 +265,7 @@ class KPkuangAdapter(DirectResultAdapter):
             encoded = payload["js"]
             decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
             values = json.loads(decoded.decode("utf-8-sig"))
-        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError, binascii.Error) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             if is_likely_challenge_page(body, usable_markers=("fed-main-info", "fed-part-case")):
                 raise IndexerChallengeRequired("KPkuang search requires verification") from exc
             raise HttpInvalidResponse("KPkuang search response was malformed") from exc
@@ -282,7 +282,8 @@ class KPkuangAdapter(DirectResultAdapter):
             if not title:
                 continue
             try:
-                year = int(data.get("vod_year"))
+                year_value = data.get("vod_year")
+                year = int(year_value) if year_value is not None else None
             except (TypeError, ValueError):
                 year = None
             candidates.append({"id": candidate_id, "title": title, "year": year})
@@ -302,6 +303,7 @@ class KPkuangAdapter(DirectResultAdapter):
     @staticmethod
     def _download_url(soup: BeautifulSoup, candidate_id: str) -> str | None:
         main = soup.select_one(".fed-main-info > .fed-part-case")
+        assert main is not None
         play_data = main.find(class_="fed-play-data", recursive=False)
         if play_data is None:
             return None
@@ -320,6 +322,7 @@ class KPkuangAdapter(DirectResultAdapter):
     @staticmethod
     def _parse_magnets(soup, candidate, detail_url, seen_hashes):
         main = soup.select_one(".fed-main-info > .fed-part-case")
+        assert main is not None
         play_data = main.find(class_="fed-play-data", recursive=False)
         if play_data is None:
             return []
@@ -383,6 +386,6 @@ def _decode_magnet(value: object) -> str | None:
     if not raw.lower().startswith("magnet:"):
         try:
             raw = base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True).decode().strip()
-        except (binascii.Error, UnicodeDecodeError, ValueError):
+        except ValueError:
             return None
     return raw if raw.lower().startswith("magnet:?") and magnet_infohash(raw) else None

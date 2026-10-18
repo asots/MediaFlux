@@ -171,6 +171,7 @@ def test_text_delta_transport_failure_is_model_error_and_never_retried(protocol,
     assert result['events'][0].text == VISIBLE
     assert_failure(result, kind='read_timeout' if fault_type is httpx.ReadTimeout else 'transport_error',
                    phase='response', protocol=protocol, attempts=1, emitted=True, http_status=200)
+    assert result['error'] is not None
     assert result['error'].__cause__ is fault
     assert_safe(caplog.text)
 
@@ -185,6 +186,7 @@ def test_failure_before_headers_retains_retry_budget_and_has_diagnostic(fault_ty
     result = wire([fault], api_url=RAW_URL)
     assert protocols(result) == ['responses', 'responses'] and not result['events']
     assert_failure(result, kind=kind, phase='request', protocol='responses', attempts=2, emitted=False)
+    assert result['error'] is not None
     assert result['error'].__cause__ is fault
     assert result['requests'][0]['body'] == result['requests'][1]['body']
     for client in result['clients']:
@@ -198,6 +200,25 @@ def test_error_response_body_read_timeout_retains_http_status_and_transport_kind
     assert protocols(result) == ['responses'] and not result['events']
     assert_failure(result, kind='read_timeout', phase='response', protocol='responses',
                    attempts=1, emitted=False, http_status=404)
+
+
+@pytest.mark.parametrize('data', [b'{"output":', b'\xff'], ids=['malformed_json', 'invalid_utf8'])
+@pytest.mark.parametrize('configured', [*PROTOCOLS, 'auto'])
+def test_nonstream_decode_failure_retains_invalid_format_error(configured, data):
+    prefix = [http_error(404)] if configured == 'auto' else []
+    expected_protocols = ['responses', 'chat_completions'] if prefix else [configured]
+    result = wire([*prefix, {'status': 200, 'data': data}], configured=configured, api_url=RAW_URL)
+    assert protocols(result) == expected_protocols and not result['events']
+    assert_failure(result, kind='invalid_response', phase='response', protocol=expected_protocols[-1],
+                   attempts=len(expected_protocols), emitted=False, http_status=200)
+    error = result['error']
+    assert isinstance(error, pm.ModelProviderError)
+    assert str(error) == 'Provider 返回格式无效'
+    if prefix:
+        assert isinstance(error.__cause__, pm.ModelProviderError)
+        assert str(error.__cause__) == 'Provider 请求失败（HTTP 404）'
+    else:
+        assert error.__cause__ is None
 
 
 @pytest.mark.parametrize('fault_type', [httpx.ReadTimeout, httpx.ReadError])
@@ -223,7 +244,7 @@ def test_failure_contract_is_frozen_safe_fields_and_local_errors_default_to_none
     failure = assert_failure(result, kind='read_timeout', phase='request', protocol='responses',
                              attempts=2, emitted=False)
     with pytest.raises(FrozenInstanceError):
-        failure.kind = 'unexpected'
+        setattr(failure, 'kind', 'unexpected')
 
 
 @pytest.mark.parametrize('protocol', PROTOCOLS)
@@ -278,6 +299,7 @@ def test_real_stream_deadline_is_distinct_from_read_timeout_and_never_retried(em
     assert [str(event.type) for event in result['events']] == (['text_delta'] if emitted else [])
     assert_failure(result, kind='deadline', phase='response', protocol='responses',
                    attempts=1, emitted=emitted, http_status=200, deadline=0.02)
+    assert result['error'] is not None
     assert isinstance(result['error'].__cause__, TimeoutError)
 
 
@@ -382,5 +404,6 @@ def test_unreplayable_native_arguments_have_safe_classified_diagnostic(caplog):
     error = result['error']
     assert isinstance(error, pm.UncommittableModelTurn)
     assert error.reason == 'unreplayable_arguments'
+    assert error.failure is not None
     assert_safe(str(error), str(error.__cause__), str(error.__context__),
                 json.dumps(asdict(error.failure)), caplog.text)

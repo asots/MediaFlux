@@ -1,6 +1,11 @@
 """日志 8885：下载隔离目录不能参与作品身份或绕过未消歧的人工确认。"""
 from __future__ import annotations
 
+from app.modules.scraper import RecognitionResult
+
+from typing import cast
+from app.clients.tmdb import TMDBClient
+
 import unittest
 from contextlib import ExitStack
 from copy import deepcopy
@@ -54,7 +59,7 @@ class RecognitionStagingIdentityTests(unittest.TestCase):
     def _recognize(self, filename=FILENAME, parent=PARENT, candidates=CANDIDATES, *, details=None, full=False):
         available = deepcopy(candidates)
         client = _OfflineClient(available, deepcopy(details) if details is not None else _details(available))
-        parser = scraper.TMDBScraper(client=client)
+        parser = scraper.TMDBScraper(client=cast(TMDBClient, client))
         parser.match_mode = "strict"
         self.addCleanup(parser.close)
         if not full:
@@ -121,7 +126,9 @@ class RecognitionStagingIdentityTests(unittest.TestCase):
                 result = self._recognize(filename, parent, CANDIDATES[::-1] if reverse else CANDIDATES, full=True)
                 self._assert_matched(result, 34158 if year == "1994" else 303272)
                 self.assertEqual(result.year, year)
+                assert isinstance(result, RecognitionResult)
                 self.assertEqual(getattr(result.context, "filename_year" if source == "filename" else "folder_year"), year)
+                assert result.context is not None
                 self.assertEqual(result.context.parent_path, parent)
 
     def test_full_match_unresolved_exact_or_romaji_identity_never_calls_assisted_sources(self):
@@ -130,6 +137,8 @@ class RecognitionStagingIdentityTests(unittest.TestCase):
                 filename = "Magic Knight Rayearth - 02.mp4" if romaji else FILENAME
                 result = self._recognize(filename, prefix + RELEASE, CANDIDATES[::-1] if reverse else CANDIDATES, full=True)
                 self._assert_manual(result, "ambiguous_romaji_alias" if romaji else "ambiguous_exact_title")
+                assert isinstance(result, RecognitionResult)
+                assert result.context is not None
                 self.assertEqual((result.context.filename_year, result.context.folder_year), ("", ""))
                 self.assertNotIn("ai_revalidation", result.metadata)
 
@@ -138,6 +147,7 @@ class RecognitionStagingIdentityTests(unittest.TestCase):
             with self.subTest(identity=candidate["id"], prefix=prefix):
                 result = self._recognize(parent=prefix + RELEASE, candidates=(candidate,), full=True)
                 self._assert_matched(result, candidate["id"])
+                assert result.candidates[0].score_breakdown is not None
                 self.assertEqual(result.candidates[0].score_breakdown.rejected_constraints, [])
 
     def test_nested_season_and_low_information_episode_use_directory_title(self):
@@ -146,11 +156,17 @@ class RecognitionStagingIdentityTests(unittest.TestCase):
                 parent = "/downloads/" + prefix + RELEASE + "/" + season_name
                 result = self._recognize(filename, parent, details=_details(CANDIDATES, (1, 2)), full=True)
                 self._assert_manual(result)
+                assert isinstance(result, RecognitionResult)
+                assert result.context is not None
                 self.assertEqual((result.context.season, result.context.episode), (2, 2))
                 self.assertEqual((result.effective_season, result.effective_episode), (2, 2))
+                assert result.context is not None
                 self.assertEqual(result.context.parent_path, parent)
                 if filename == "E02.mp4":
+                    assert isinstance(result, RecognitionResult)
+                    assert result.context is not None
                     self.assertEqual(result.context.normalized_title, result.context.folder_title)
+                    assert isinstance(result.context.normalized_title, str)
                     self.assertIn("魔法骑士雷阿斯", result.context.normalized_title)
 
     def test_full_match_unique_season_position_still_resolves_the_ambiguity(self):
@@ -177,7 +193,9 @@ class RecognitionStagingIdentityTests(unittest.TestCase):
                 result = self._recognize(filename, parent, (candidate,))
                 self.assertTrue(result.need_confirm)
                 self.assertEqual(result.status, "low_confidence")
+                assert result.candidates[0].score_breakdown is not None
                 self.assertIn(reason, result.candidates[0].score_breakdown.rejected_constraints)
+                assert isinstance(result, RecognitionResult)
                 self.assertEqual(result.threshold_decision["reason"], reason)
 
     def test_real_filename_with_mf_prefix_is_not_trimmed(self):

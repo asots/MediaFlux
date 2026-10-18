@@ -75,7 +75,7 @@ class ProviderGateway:
         self.artifacts = artifacts or ProviderArtifactStore()
 
     def profiles(self, provider: str = "") -> list[ProviderProfileView]:
-        normalized = str(provider or "").strip()
+        normalized = (provider or "").strip()
         views: list[ProviderProfileView] = []
         for name, transport in sorted(self.transports.items()):
             if normalized and name != normalized:
@@ -199,7 +199,7 @@ class ProviderGateway:
     def query_spec(self, *, profile_ref: str, operation: str) -> ProviderOperationSpec:
         """准入与执行共用选择器契约；未知标识可纠正，已知写操作不是查询。"""
         operations = {spec.operation_id: spec for spec in self.catalog.operations()}
-        spec = operations.get(str(operation or "").strip())
+        spec = operations.get((operation or "").strip())
         if spec is not None and spec.risk is not RiskLevel.READ:
             raise ProviderGatewayError("写操作不能通过 Provider 查询入口执行", code="operation_not_allowed")
         profiles = [item.profile_ref for item in self.profiles(spec.provider if spec else "")]
@@ -419,7 +419,7 @@ class ProviderGateway:
                 status="failed",
                 summary="Provider 写入队列暂不可用，请稍后重新预检",
                 data={
-                    "plan_ref": str(plan_ref or ""),
+                    "plan_ref": (plan_ref or ""),
                     "status": "failed",
                 },
                 error="Provider 写入队列暂不可用",

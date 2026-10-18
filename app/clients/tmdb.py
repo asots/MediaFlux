@@ -31,7 +31,7 @@ _DEFAULT_TMDB_API_URL = "https://api.themoviedb.org/3"
 
 
 def _normalize_path(path: str) -> str:
-    raw = str(path or "").strip()
+    raw = (path or "").strip()
     if not raw.startswith("/") or "://" in raw or "?" in raw or "#" in raw:
         raise ValueError("TMDB path must be relative")
     if not _SAFE_PATH_RE.fullmatch(raw):
@@ -45,7 +45,7 @@ def _normalize_path(path: str) -> str:
 def _config_get(config: Mapping[str, Any] | Callable[[str, str], Any] | None,
                 key: str, default: str = "") -> str:
     if config is None:
-        return str(app_config.get(key, default) or "")
+        return (app_config.get(key, default) or "")
     if callable(config):
         return str(config(key, default) or "")
     return str(config.get(key, default) or "")
@@ -95,15 +95,15 @@ class TMDBClient:
         config: Mapping[str, Any] | Callable[[str, str], Any] | None = None,
     ):
         self.api_key = (
-            _config_get(config, "TMDB_API_KEY") if api_key is None else str(api_key or "")
+            _config_get(config, "TMDB_API_KEY") if api_key is None else (api_key or "")
         ).strip()
         configured_url = _config_get(
             config, "TMDB_API_URL", _DEFAULT_TMDB_API_URL
-        ) if base_url is None else str(base_url or "")
+        ) if base_url is None else (base_url or "")
         self.base_url, self.config_error = _normalize_base_url(configured_url)
-        self.language = str(language or "zh-CN")
+        self.language = (language or "zh-CN")
         self.timeout = timeout
-        self.retries = max(0, min(int(retries), 2))
+        self.retries = max(0, min(retries, 2))
         self.session = session or requests.Session()
         self._close_call_lock = threading.Lock()
         self._lifecycle_condition = threading.Condition(threading.Lock())
@@ -112,7 +112,7 @@ class TMDBClient:
         self._closed = False
 
         proxy = (
-            _config_get(config, "PROXY_URL") if proxy_url is None else str(proxy_url or "")
+            _config_get(config, "PROXY_URL") if proxy_url is None else (proxy_url or "")
         ).strip()
         if proxy:
             normalized = proxy if proxy.startswith(("http://", "https://")) else f"http://{proxy}"
@@ -163,7 +163,7 @@ class TMDBClient:
         query["api_key"] = self.api_key
         query.setdefault("language", self.language)
 
-        attempts = (self.retries if retries is None else max(0, min(int(retries), 2))) + 1
+        attempts = (self.retries if retries is None else max(0, min(retries, 2))) + 1
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -205,10 +205,10 @@ class TMDBClient:
         retries: int | None = None,
     ) -> list[dict[str, Any]]:
         normalized_type = "tv" if media_type == "tv" else "movie"
-        params: dict[str, Any] = {"query": str(title or "")}
+        params: dict[str, Any] = {"query": (title or "")}
         if year:
             key = "first_air_date_year" if normalized_type == "tv" else "year"
-            params[key] = str(year)
+            params[key] = year
         payload = self.get(
             f"/search/{normalized_type}",
             params,
@@ -229,10 +229,10 @@ class TMDBClient:
         retries: int | None = None,
     ) -> list[dict[str, Any]]:
         """按人物名称搜索 TMDB，返回有界候选。"""
-        normalized_query = str(query or "").strip()
+        normalized_query = (query or "").strip()
         if not normalized_query or len(normalized_query) > 120:
             raise ValueError("人物名称必须为 1 到 120 个字符")
-        normalized_limit = max(1, min(int(limit or 10), 20))
+        normalized_limit = max(1, min((limit or 10), 20))
         payload = self.get(
             "/search/person",
             {"query": normalized_query, "page": 1},

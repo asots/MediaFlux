@@ -41,6 +41,7 @@ class LucideLocalRenderingTests(unittest.TestCase):
 class LucideRenderingBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = next((path for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
                            if (path := shutil.which(name))), None)

@@ -3,6 +3,8 @@
 Success quota display, Session projection and durable automatic waiting are not
 implemented by this slice. These tests do not substitute for those contracts.
 """
+from typing import cast
+import operator
 import asyncio
 import hashlib
 import json
@@ -128,7 +130,7 @@ def test_fractional_shared_cost_and_reopen():
         assert d.allowed and d.retry_after_seconds==0 and d.retry_at_epoch is None
     d=limiter.consume('fractional',limit=4,window_seconds=60,cost=2)
     assert (d.remaining,d.retry_after_seconds,d.retry_at_epoch,d.reason)==(0,89.75,210.0,'quota')
-    with pytest.raises(FrozenInstanceError):d.remaining=8
+    with pytest.raises(FrozenInstanceError):setattr(d, 'remaining', 8)
     wall[0]=209.999
     reopened=AgentRateLimiter(shared=True,wall_clock=lambda:wall[0])
     before=rows()
@@ -165,6 +167,7 @@ def test_capacity_is_not_spent_quota(shared):
     assert not d.allowed and d.reason=='capacity' and d.remaining==7
     assert d.retry_after_seconds==(119.75 if shared else 60)
     assert d.retry_at_epoch==(240 if shared else None)
+    assert d.retry_after_seconds is not None
     clock[0]+=d.retry_after_seconds
     assert limiter.consume('b',limit=7,window_seconds=60,cost=2).allowed
 
@@ -206,7 +209,7 @@ def test_authoritative_cost_and_bool_wrapper_same_bucket():
         with pytest.raises(ToolRateLimitError) as raised:
             await port.acquire(owner='cost-owner',tool_name='media.subscription_updates',cost=0,arguments={})
         assert dict(raised.value.rate_limit)=={'limit':4,'cost':2,'remaining':0,'retry_after_seconds':90.0,'retry_at_epoch':210.0,'reason':'quota'}
-        with pytest.raises(AttributeError):raised.value.rate_limit={}
+        with pytest.raises(AttributeError):setattr(raised.value, 'rate_limit', {})
         with db.get_conn() as conn:
             row=conn.execute('SELECT limiter_key,count FROM agent_rate_limit_buckets').fetchone()
         expected=hashlib.sha256(b'mediaflux-agent-rate:v1\0cost-owner:media-subscription-updates').hexdigest()
@@ -220,6 +223,7 @@ def test_unknown_provider_does_not_create_a_bucket():
         with pytest.raises(policy.ToolPipelineError) as raised:
             await policy.MediaFluxToolRateLimiter().acquire(owner='owner',tool_name='provider.query',cost=1,arguments={'operation':'media.operation.not_registered'})
         assert raised.value.code=='invalid_arguments'
+        assert raised.value.argument_schemas is not None
         assert 'operation' in raised.value.argument_schemas
         assert rows()==[]
     with patch.object(rates,'agent_rate_limiter',limiter):asyncio.run(go())
@@ -281,8 +285,8 @@ def test_real_port_public_values_are_immutable_json_scalars(denial):
             assert projection['retry_after_seconds'] is None and projection['retry_at_epoch'] is None
         serialized=json.dumps(dict(projection),allow_nan=False,sort_keys=True)
         assert 'private' not in serialized and '/root' not in serialized
-        with pytest.raises(TypeError):projection['remaining']=100
-        with pytest.raises(AttributeError):error.rate_limit={}
+        with pytest.raises(TypeError):operator.setitem(cast(dict[str, object], projection), 'remaining', 100)
+        with pytest.raises(AttributeError):setattr(error, 'rate_limit', {})
         assert snapshot()==before
         limiter.reset()
         assert json.dumps(dict(projection),allow_nan=False,sort_keys=True)==serialized
@@ -296,7 +300,7 @@ def test_real_decision_and_bool_wrapper_share_exact_single_consumption():
     with patch.object(rates,'agent_rate_limiter',limiter):
         first=rates.consume_agent_tool('owner','media.subscription_updates')
         assert first.allowed is True and first.remaining==2 and first.cost==2
-        with pytest.raises(FrozenInstanceError):first.remaining=999
+        with pytest.raises(FrozenInstanceError):setattr(first, 'remaining', 999)
         assert rates.allow_agent_tool('owner','media.subscription_updates') is True
         denied=rates.consume_agent_tool('owner','media.subscription_updates')
         assert denied.allowed is False and denied.remaining==0
@@ -357,7 +361,9 @@ def test_local_watchlist_reads_share_existing_default_budget_across_workers_with
     assert rates.tool_rate_limit_policy(tool.name) == ('discovery-watchlist-read', 30, 1)
     assert tool.read is not None
     db.add_media_watchlist('tmdb', 'rate-fixture', 'movie', '本地收藏', '2026', 'PRIVATE_POSTER_KEY')
-    number = int(db.get_media_watchlist('tmdb', 'rate-fixture', 'movie')['id'])
+    get_media_watchlist_result = db.get_media_watchlist('tmdb', 'rate-fixture', 'movie')
+    assert get_media_watchlist_result is not None
+    number = int(get_media_watchlist_result['id'])
     variants = (
         {}, {'mode': 'list'}, {'before_number': number}, {'mode': 'statistics'},
         {'watchlist_number': number}, {'watchlist_number': number + 1},
@@ -415,6 +421,7 @@ def test_local_watchlist_reads_share_existing_default_budget_across_workers_with
             with pytest.raises(ToolPipelineError) as raised:
                 await query(index, arguments)
             assert raised.value.code == 'rate_limited'
+            assert isinstance(raised.value, ToolRateLimitError)
             assert raised.value.rate_limit['reason'] == 'quota'
             assert raised.value.rate_limit['limit'] == 30
             assert raised.value.rate_limit['remaining'] == 0

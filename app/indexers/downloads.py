@@ -10,7 +10,7 @@ import threading
 import weakref
 from dataclasses import replace
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import urlsplit
 
 from app import database as db
@@ -85,7 +85,16 @@ async def _resolve(
     return item, resolved
 
 
-def indexer_download_destination(item: Any, target: str) -> dict[str, str]:
+class _DownloadDestination(TypedDict, total=False):
+    gy_target_dir: str
+    gy_target_name: str
+
+
+class _AdmissionOptions(TypedDict, total=False):
+    admission_id: int
+
+
+def indexer_download_destination(item: Any, target: str) -> _DownloadDestination:
     """按服务端保存的来源分类路由；预检与提交共享，不从资源标题猜测。"""
     if target not in {"guangya", "both"} or item.site_id not in SENSITIVE_INDEXER_SITE_IDS:
         return {}
@@ -105,12 +114,12 @@ def indexer_download_destination(item: Any, target: str) -> dict[str, str]:
 
 
 def _torrent_filename(resolved: ResolvedDownload) -> str:
-    filename = str(resolved.filename or "").strip()
+    filename = (resolved.filename or "").strip()
     if filename:
         return PurePosixPath(filename).name or "resource.torrent"
     if isinstance(resolved.value, bytes):
         return "resource.torrent"
-    parsed = urlsplit(str(resolved.value or ""))
+    parsed = urlsplit(resolved.value or "")
     return PurePosixPath(parsed.path).name or "resource.torrent"
 
 
@@ -127,7 +136,7 @@ async def _resolved_download_input(service, stored, resolved: ResolvedDownload):
                 )
             return torrent_download_input(_torrent_filename(resolved), resolved.value)
 
-        response = await client.get(str(resolved.value or ""))
+        response = await client.get(resolved.value or "")
         if response.status_code != 200:
             raise IndexerUnavailable("torrent upstream failed")
         content_type = str(response.headers.get("content-type") or "").split(
@@ -218,10 +227,10 @@ def resubmit_indexer_download_request(
     target: str,
 ) -> dict[str, Any]:
     """按用户明确操作为资源站历史任务创建 successor 请求。"""
-    normalized_target = str(target or "").strip().lower()
+    normalized_target = (target or "").strip().lower()
     if normalized_target not in DOWNLOAD_TARGETS:
         return {"ok": False, "error": "下载目标无效"}
-    existing = db.get_download_request(int(request_id))
+    existing = db.get_download_request(request_id)
     if existing is None:
         return {"ok": False, "not_found": True, "error": "下载请求不存在"}
     existing_status = str(existing["status"] or "").strip().lower()
@@ -238,7 +247,7 @@ def resubmit_indexer_download_request(
             "error": str(capability.get("reason") or "当前目标不可重新提交"),
         }
     return resubmit_download_request(
-        int(request_id),
+        request_id,
         normalized_target,
         allow_completed=True,
         origin=str(existing["origin"] or "indexer"),
@@ -359,13 +368,14 @@ def _persist_and_dispatch(
                 "created": False,
             }, existing_id, _duplicate_dispatch_result(existing, target)
     if created is None:
+        admission_options: _AdmissionOptions = {"admission_id": admission_id} if admission_id is not None else {}
         created = create_request(
             item,
             chat_id,
             message_id,
             origin=origin,
             user_id=user_id,
-            **({"admission_id": admission_id} if admission_id is not None else {}),
+            **admission_options,
         )
         request_id = int(created.get("id") or 0)
         if not request_id:
@@ -437,29 +447,29 @@ def submit_download_input(
     唯一同步入口。调用方可以读取 ``summary`` 做稳定业务映射；``dispatch``
     仅供同进程内部保留失败分类，不应直接透传给 Web/TG。
     """
-    normalized_target = str(target or "").strip().lower()
+    normalized_target = (target or "").strip().lower()
     if normalized_target not in DOWNLOAD_TARGETS:
         raise ValueError("下载目标无效")
     created, request_id, dispatch = _persist_and_dispatch(
         item,
-        str(origin or "").strip() or "unknown",
+        (origin or "").strip() or "unknown",
         normalized_target,
-        chat_id=str(chat_id),
-        user_id=str(user_id),
-        message_id=str(message_id),
+        chat_id=chat_id,
+        user_id=user_id,
+        message_id=message_id,
         admission_id=admission_id,
-        gy_target_dir=str(gy_target_dir or ""),
-        gy_target_name=str(gy_target_name or ""),
+        gy_target_dir=(gy_target_dir or ""),
+        gy_target_name=(gy_target_name or ""),
         qb_save_path=qb_save_path,
         qb_category=qb_category,
         qb_runtime_config=qb_runtime_config,
-        qb_task_id_hint=str(qb_task_id_hint or ""),
+        qb_task_id_hint=(qb_task_id_hint or ""),
         rss_item_id=rss_item_id,
         rss_entry_id=rss_entry_id,
         log_path=log_path,
     )
     return {
-        "request_id": int(request_id),
+        "request_id": request_id,
         "created": bool(created.get("created")),
         "target": normalized_target,
         "summary": public_dispatch_summary(dispatch),
@@ -481,10 +491,10 @@ async def download_indexer_result(
     _public_errors: bool = False,
 ) -> dict[str, Any]:
     """按服务端调用入口校验后解析并提交资源结果。"""
-    normalized_target = str(target or "").strip().lower()
+    normalized_target = (target or "").strip().lower()
     if normalized_target not in DOWNLOAD_TARGETS:
         return _failed_download_result(result_id, normalized_target, "下载目标无效")
-    normalized_origin_namespace = str(origin_namespace or "").strip().lower()
+    normalized_origin_namespace = (origin_namespace or "").strip().lower()
     if normalized_origin_namespace not in {"indexer", "agent"}:
         raise IndexerValidationError("invalid download origin namespace")
 
@@ -503,16 +513,17 @@ async def download_indexer_result(
                 **_failed_download_result(result_id, normalized_target, error),
                 "pre_submission_failure": True,
             }
+        admission_options: _AdmissionOptions = {"admission_id": admission_id} if admission_id is not None else {}
         submitted = await asyncio.to_thread(
             submit_download_input,
             item,
             normalized_target,
             origin=f"{normalized_origin_namespace}:{stored.site_id}",
-            chat_id=str(chat_id),
-            user_id=str(user_id),
-            message_id=str(message_id),
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=message_id,
             **destination,
-            **({"admission_id": admission_id} if admission_id is not None else {}),
+            **admission_options,
         )
 
     request_id = int(submitted["request_id"])

@@ -95,7 +95,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
             targets["B"]["lease_generation"],
             1 if include_second_in_last_failure else 0,
         )
-        self.assertEqual(db.get_download_request(request)["strm_status"], "failed")
+        get_download_request_result = db.get_download_request(request)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["strm_status"], "failed")
         self.assertEqual(self.fixture.admission(admission)["status"], "failed")
         return request, admission, changes[1], error
 
@@ -110,6 +112,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertEqual(len(list(self.fixture.root.rglob("*.strm"))), 1)
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("failed", error))
         self.assertEqual(self.fixture.admission(admission)["status"], "failed")
 
@@ -144,13 +147,17 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
     def test_interleaved_failures_preserve_second_target_until_its_new_lease_succeeds(self):
         """A 先失败、B 后独立耗尽，不能由 A 的成功隐藏仍失败的 B。"""
         request, admission, changes = self.fail_first_and_park()
-        failed_request = dict(db.get_download_request(request))
+        get_download_request_result_9 = db.get_download_request(request)
+        assert get_download_request_result_9 is not None
+        failed_request = dict(get_download_request_result_9)
         failed_admission = self.fixture.admission(admission)
         for _ in range(5):
             db.reschedule_strm_change_targets([changes[1]], not_before_seconds=0)
             self.fail_recovered("target B failure")
             # 只合并失败凭据，不替换 A 的父错误、完成时间或准入状态。
-            self.assertEqual(dict(db.get_download_request(request)), failed_request)
+            get_download_request_result_10 = db.get_download_request(request)
+            assert get_download_request_result_10 is not None
+            self.assertEqual(dict(get_download_request_result_10), failed_request)
             self.assertEqual(self.fixture.admission(admission), failed_admission)
         with db.get_conn() as conn:
             second = dict(conn.execute(
@@ -162,8 +169,12 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         result = self.execute_recovered()
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["stats"]["generated"], 1)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "failed")
-        self.assertEqual(dict(db.get_download_request(request)), failed_request)
+        get_download_request_result_2 = db.get_download_request(request)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["strm_status"], "failed")
+        get_download_request_result_11 = db.get_download_request(request)
+        assert get_download_request_result_11 is not None
+        self.assertEqual(dict(get_download_request_result_11), failed_request)
         self.assertEqual(self.fixture.admission(admission), failed_admission)
         self.assertEqual(self.failure_receipts(request), {"B": second["lease_generation"]})
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
@@ -172,7 +183,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         # 已耗尽 B 通过既有变化入队恢复；不传 request_ids、不重新 trigger，
         # 不能先生成新 request generation 来掩盖原归属凭据的收口缺陷。
         self.assertEqual(db.enqueue_strm_change_targets([changes[1]]), 1)
-        self.assertEqual(dict(db.get_download_request(request)), failed_request)
+        get_download_request_result_12 = db.get_download_request(request)
+        assert get_download_request_result_12 is not None
+        self.assertEqual(dict(get_download_request_result_12), failed_request)
         self.assertEqual(self.failure_receipts(request), {"B": second["lease_generation"]})
         last = self.execute_recovered()
         self.assertTrue(last["ok"], last)
@@ -185,6 +198,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertEqual(recovered["state"], "completed")
         self.assertGreater(recovered["lease_generation"], second["lease_generation"])
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
         self.assertGreater(row["strm_generation"], failed_request["strm_generation"])
         self.assertEqual(self.failure_receipts(request), {})
@@ -194,7 +208,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
     def test_independent_revocation_blocks_running_worker_from_rearming_same_text_failure(self):
         """真实 B worker 仍持有有效 lease，也不能重授被通用写入撤销的凭据。"""
         request, admission, changes = self.fail_first_and_park()
-        error = db.get_download_request(request)["strm_error"]
+        get_download_request_result_3 = db.get_download_request(request)
+        assert get_download_request_result_3 is not None
+        error = get_download_request_result_3["strm_error"]
         db.reschedule_strm_change_targets([changes[1]], not_before_seconds=0)
         independent = {}
 
@@ -211,7 +227,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
             # 同文本、同 request generation；不能靠错误文案判定恢复权限。
             db.update_download_request(request, strm_status="failed", strm_error=error)
             self.assertEqual(self.failure_receipts(request), {"A": -1, "B": -1})
-            independent["request"] = dict(db.get_download_request(request))
+            get_download_request_result_13 = db.get_download_request(request)
+            assert get_download_request_result_13 is not None
+            independent["request"] = dict(get_download_request_result_13)
             independent["admission"] = self.fixture.admission(admission)
             raise OSError(error)
 
@@ -225,7 +243,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
             )
         self.assertFalse(failed["ok"], failed)
         self.assertEqual(self.failure_receipts(request), {"A": -1, "B": -1})
-        self.assertEqual(dict(db.get_download_request(request)), independent["request"])
+        get_download_request_result_14 = db.get_download_request(request)
+        assert get_download_request_result_14 is not None
+        self.assertEqual(dict(get_download_request_result_14), independent["request"])
         self.assertEqual(self.fixture.admission(admission), independent["admission"])
 
         # 后续真实新 lease 即使完成文件写入/ACK，也不能清除独立失败或重开准入。
@@ -234,7 +254,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["stats"]["generated"], 2)
         self.assertEqual(self.failure_receipts(request), {})
-        self.assertEqual(dict(db.get_download_request(request)), independent["request"])
+        get_download_request_result_15 = db.get_download_request(request)
+        assert get_download_request_result_15 is not None
+        self.assertEqual(dict(get_download_request_result_15), independent["request"])
         self.assertEqual(self.fixture.admission(admission), independent["admission"])
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
 
@@ -243,7 +265,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         db.reschedule_strm_change_targets([changes[1]], not_before_seconds=0)
         claimed = db.claim_strm_change_targets(owner="current-worker", limit=1)[0]
         owner = db.current_strm_request_owners([request])[0]
-        before = dict(db.get_download_request(request))
+        get_download_request_result_16 = db.get_download_request(request)
+        assert get_download_request_result_16 is not None
+        before = dict(get_download_request_result_16)
         before_admission = self.fixture.admission(admission)
         receipts = self.failure_receipts(request)
         for invalid_owner, invalid_claims in (
@@ -267,7 +291,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertEqual(self.failure_receipts(request), {
             "A": receipts["A"], "B": claimed["lease_generation"],
         })
-        self.assertEqual(dict(db.get_download_request(request)), before)
+        get_download_request_result_17 = db.get_download_request(request)
+        assert get_download_request_result_17 is not None
+        self.assertEqual(dict(get_download_request_result_17), before)
         self.assertEqual(self.fixture.admission(admission), before_admission)
 
     def test_split_failed_targets_recover_after_each_actual_target_succeeds(self):
@@ -288,6 +314,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertTrue(first_retry["ok"], first_retry)
         self.assertEqual(first_retry["stats"]["generated"], 1)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("failed", error))
         self.assertEqual(self.fixture.admission(admission)["status"], "failed")
 
@@ -298,6 +325,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
         self.assertEqual(len(list(self.fixture.root.rglob("*.strm"))), 2)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
         self.assertEqual(self.fixture.admission(admission)["status"], "processing")
 
@@ -314,8 +342,10 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.fixture.queue(scheduler, [request], [self.fixture.change()])
         db.init_db()
         db.reconcile_startup_media_download_admissions()
+        get_download_request_result_4 = db.get_download_request(request)
+        assert get_download_request_result_4 is not None
         self.assertEqual(
-            db.get_download_request(request)["strm_error"], INTERRUPTED_ERROR
+            get_download_request_result_4["strm_error"], INTERRUPTED_ERROR
         )
         db.update_download_request(
             request, strm_status="failed", strm_error=INTERRUPTED_ERROR
@@ -326,6 +356,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertEqual(result["stats"]["generated"], 1)
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual(
             (row["strm_status"], row["strm_error"]), ("failed", INTERRUPTED_ERROR)
         )
@@ -335,7 +366,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         request, admission, _ = self.fixture.seed()
         scheduler = self.fixture.scheduler()
         self.fixture.queue(scheduler, [request], [self.fixture.change()])
-        self.assertEqual(db.get_download_request(request)["strm_status"], "queued")
+        get_download_request_result_5 = db.get_download_request(request)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5["strm_status"], "queued")
         with db.get_conn() as conn:
             # 升级前 work 的真实默认形态，不通过新代码 seed 的 0 掩盖兼容性。
             conn.execute(
@@ -349,6 +382,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         self.assertEqual(result["stats"]["generated"], 1)
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
         self.assertEqual(self.fixture.admission(admission)["status"], "processing")
 
@@ -357,6 +391,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         STRMMetadataWorker()._flush_media_refresh(force=True)
         self.assertEqual(db.count_strm_refresh_paths(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
         self.assertEqual(self.fixture.admission(admission)["status"], "processing")
 
@@ -401,7 +436,9 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         path.write_text("http://media.invalid/v1\n", encoding="utf-8")
         db.enqueue_strm_refresh_paths([str(path)], request_owners=owners)
         if legacy_work:
-            self.assertEqual(db.get_download_request(request)["strm_status"], "queued")
+            get_download_request_result_6 = db.get_download_request(request)
+            assert get_download_request_result_6 is not None
+            self.assertEqual(get_download_request_result_6["strm_status"], "queued")
             with db.get_conn() as conn:
                 conn.execute(
                     "UPDATE strm_request_work SET failed_lease_generation=-1 WHERE request_id=?",
@@ -413,9 +450,13 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
             )
         db.init_db()
         db.reconcile_startup_media_download_admissions()
-        self.assertEqual(db.get_download_request(request)["strm_status"], "failed")
+        get_download_request_result_7 = db.get_download_request(request)
+        assert get_download_request_result_7 is not None
+        self.assertEqual(get_download_request_result_7["strm_status"], "failed")
+        get_download_request_result_8 = db.get_download_request(request)
+        assert get_download_request_result_8 is not None
         self.assertEqual(
-            db.get_download_request(request)["strm_error"], INTERRUPTED_ERROR
+            get_download_request_result_8["strm_error"], INTERRUPTED_ERROR
         )
         self.assertEqual(self.fixture.admission(admission)["status"], "failed")
         return request, admission
@@ -425,6 +466,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         STRMMetadataWorker()._flush_media_refresh(force=True)
         self.assertEqual(db.count_strm_refresh_paths(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
         self.assertEqual(self.fixture.admission(admission)["status"], "processing")
 
@@ -437,6 +479,7 @@ class STRMFailureLeaseScopeTests(unittest.TestCase):
         STRMMetadataWorker()._flush_media_refresh(force=True)
         self.assertEqual(db.count_strm_refresh_paths(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual(
             (row["strm_status"], row["strm_error"]), ("failed", INTERRUPTED_ERROR)
         )

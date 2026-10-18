@@ -51,7 +51,7 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _bounded_int(value: object, *, maximum: int = 1 << 63) -> int:
+def _bounded_int(value: Any, *, maximum: int = 1 << 63) -> int:
     if isinstance(value, bool):
         return 0
     try:
@@ -170,10 +170,10 @@ def list_guangya_user_shares(
     client: GuangYaClient | None = None
     try:
         client = _open_client()
-        if source is not None and int(client.credential_generation) != source["credential_generation"]:
+        if source is not None and (client.credential_generation) != source["credential_generation"]:
             raise AgentToolError("光鸭账号凭据已变化，不能沿用旧分享选择", code="observation_scope_changed")
         snapshots = _load_share_snapshots(client)
-        generation = int(client.credential_generation)
+        generation = (client.credential_generation)
         if source is not None and generation != source["credential_generation"]:
             raise AgentToolError("读取期间账号凭据已变化，未发布新的分享引用", code="observation_scope_changed")
     except Exception as exc:
@@ -344,7 +344,7 @@ def _workspace_selection(
     try:
         client = _open_client()
         expected_generation = _bounded_int(observation.get("credential_generation"))
-        if int(client.credential_generation) != expected_generation:
+        if (client.credential_generation) != expected_generation:
             raise AgentToolError(
                 "光鸭登录凭据已变化，请重新读取目录",
                 code="confirmation_stale",
@@ -370,15 +370,15 @@ def _file_matches(current: GuangYaFile | None, expected: dict[str, Any]) -> bool
     if current is None:
         return False
     if (
-        str(current.file_id) != str(expected.get("file_id") or "")
-        or str(current.name) != str(expected.get("name") or "")
-        or bool(current.is_dir) != bool(expected.get("is_dir"))
-        or str(current.parent_id) != str(expected.get("parent_id") or "0")
+        (current.file_id) != str(expected.get("file_id") or "")
+        or (current.name) != str(expected.get("name") or "")
+        or (current.is_dir) != bool(expected.get("is_dir"))
+        or (current.parent_id) != str(expected.get("parent_id") or "0")
         or _bounded_int(current.size) != _bounded_int(expected.get("size"))
     ):
         return False
     etag = str(expected.get("etag") or "")
-    return not etag or str(current.etag or "") in {"", etag}
+    return not etag or (current.etag or "") in {"", etag}
 
 
 def _source_fields(value: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
@@ -546,7 +546,7 @@ def _extract_created_share(raw: dict[str, Any]) -> dict[str, str]:
     if candidate_url and len(candidate_url) <= 2048:
         try:
             parsed = urlsplit(candidate_url)
-            hostname = str(parsed.hostname or "").casefold()
+            hostname = (parsed.hostname or "").casefold()
             if (
                 parsed.scheme.casefold() == "https"
                 and not parsed.username
@@ -572,12 +572,12 @@ def execute_create_guangya_share(
         safe, fingerprint, selected, _observation, _identity = _create_snapshot(
             arguments, owner=context.owner, verify_live=True, workspace_actions=workspace_actions
         )
-        if fingerprint != str(expected_context or ""):
+        if fingerprint != (expected_context or ""):
             raise AgentToolError("光鸭分享计划已变化，请重新预检", code="confirmation_stale")
         expected_generation = safe.pop("credential_generation")
         client = _open_client()
         try:
-            if int(client.credential_generation) != expected_generation:
+            if (client.credential_generation) != expected_generation:
                 raise AgentToolError(
                     "光鸭登录凭据已变化，请重新读取目录",
                     code="confirmation_stale",
@@ -696,7 +696,7 @@ def _revoke_snapshot(
     client: GuangYaClient | None = None
     try:
         client = _open_client()
-        if int(client.credential_generation) != _bounded_int(
+        if (client.credential_generation) != _bounded_int(
             collection.get("credential_generation")
         ):
             raise AgentToolError(
@@ -782,12 +782,12 @@ def execute_revoke_guangya_shares(
 ) -> ToolResult:
     try:
         safe, fingerprint, selected, _collection = _revoke_snapshot(arguments, verify_live=True)
-        if fingerprint != str(expected_context or ""):
+        if fingerprint != (expected_context or ""):
             raise AgentToolError("光鸭分享撤销计划已变化，请重新预检", code="confirmation_stale")
         expected_generation = safe.pop("credential_generation")
         client = _open_client()
         try:
-            if int(client.credential_generation) != expected_generation:
+            if (client.credential_generation) != expected_generation:
                 raise AgentToolError(
                     "光鸭登录凭据已变化，请重新查询分享列表",
                     code="confirmation_stale",

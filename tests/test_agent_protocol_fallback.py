@@ -1,5 +1,6 @@
 """Fail-closed protocol negotiation, with offline real-client wire regressions."""
 from __future__ import annotations
+from typing import Any, cast, TypedDict
 
 import asyncio
 import json
@@ -12,6 +13,7 @@ import httpx
 import pytest
 
 from app.agent.kernel import provider_model as pm
+from app.agent.kernel.model import ModelEvent
 from app.agent.kernel.model import (
     ModelMessage,
     ModelRequest,
@@ -145,11 +147,19 @@ def http_error(status=400, text=UNSUPPORTED, **kwargs):
     return dict(status=status, data=text.encode() if isinstance(text, str) else text, **kwargs)
 
 
+class WireResult(TypedDict):
+    requests: list[dict[str, Any]]
+    streams: list[Body]
+    events: list[ModelEvent]
+    error: BaseException | None
+    clients: list[FixedHostHttpClient]
+
+
 def wire(actions, *, configured='auto', messages=(), model='', api_url='https://api.example.com/v1',
          maximum=2 * 1024 * 1024, deadline=60, token=None, sleep=None, exit_error=None,
          generation_profiles_json='', deadline_in_body=False, header_delay=0):
     """Exercise real adapter/client; only network transport and clocks are controlled."""
-    async def run():
+    async def run() -> WireResult:
         requests, streams, clients, events = [], [], [], []
         cancellation = token or CancellationToken()
         deadline_scope = asyncio.Timeout(None) if deadline_in_body else None
@@ -167,7 +177,9 @@ def wire(actions, *, configured='auto', messages=(), model='', api_url='https://
             stream = Body(action.get('data', b''), fault=action.get('fault'), hanging=action.get('hanging', False),
                           close_fault=action.get('close_fault'), task_cancel=action.get('task_cancel', False), deadline_scope=deadline_scope)
             streams.append(stream)
-            return httpx.Response(action.get('status', 200), headers=action.get('headers', {}), stream=stream)
+            headers = action.get('headers', {})
+            assert isinstance(headers, dict)
+            return httpx.Response(cast(int, action.get('status', 200)), headers=headers, stream=stream)
 
         class ExitFaultClient(FixedHostHttpClient):
             @asynccontextmanager
@@ -697,6 +709,7 @@ def assert_native_payload(protocol, body):
 @pytest.mark.parametrize('protocol', list(PROTOCOL_PATHS))
 def test_auto_native_binding_selects_exact_protocol(protocol, caplog):
     messages = native_messages(protocol)
+    assert messages[0].provider_state is not None
     before = messages[0].provider_state.layout_json
     result = wire([None], messages=messages, api_url='https://api.example.com/v1/')
     assert protocols(result) == [protocol]
@@ -736,6 +749,7 @@ def test_conflicting_bound_protocols_fail_before_client_creation():
 def test_unbound_or_user_state_does_not_lock_or_leak(change):
     assistant, tool = native_messages('anthropic_messages')
     state = assistant.provider_state
+    assert state is not None
     if change == 'user_role':
         assistant = replace(assistant, role='user', tool_calls=())
     else:
@@ -753,6 +767,7 @@ def test_unbound_or_user_state_does_not_lock_or_leak(change):
 
 def test_request_model_override_is_native_binding_authority():
     assistant, tool = native_messages('chat_completions')
+    assert assistant.provider_state is not None
     assistant = replace(assistant, provider_state=replace(assistant.provider_state, model='override'))
     result = wire([None], messages=(assistant, tool), model='override')
     assert protocols(result) == ['chat_completions']
@@ -1030,6 +1045,7 @@ def test_error_body_deadline_waits_for_slow_headers_and_keeps_http_evidence():
     result = wire([http_error(404, hanging=True)], deadline=0.02,
                   deadline_in_body=True, header_delay=0.06)
     assert protocols(result) == ['responses'] and not result['events']
+    assert result['error'] is not None
     assert isinstance(result['error'].__cause__, TimeoutError)
     assert any('HTTP 404' in str(exc) for exc in error_chain(result['error']))
 
@@ -1037,7 +1053,10 @@ def test_error_body_deadline_waits_for_slow_headers_and_keeps_http_evidence():
 def test_retry_deadline_waits_for_real_retry_sleep_after_slow_headers():
     result = real_retry_wire('deadline', httpx.ReadError, True, header_delay=0.06)
     assert protocols(result) == ['responses', 'chat_completions']
+    assert result['error'] is not None
     assert isinstance(result['error'].__cause__, TimeoutError)
+    assert isinstance(result['error'], pm.ModelProviderError)
+    assert result['error'].failure is not None
     assert result['error'].failure.phase == 'retry_wait'
     assert not result['events'] and result['cancelling'] == 0
     chain = error_chain(result['error'])
@@ -1049,9 +1068,14 @@ def test_real_total_deadline_before_headers_still_stops_without_retry():
     # 不控制目标阶段：仍直接使用真正的短整轮deadline，证明请求前等待照常受限。
     result = wire([None], deadline=0.01, header_delay=0.06)
     assert len(result['requests']) <= 1 and not result['events']
+    assert result['error'] is not None
     assert isinstance(result['error'].__cause__, TimeoutError)
+    assert isinstance(result['error'], pm.ModelProviderError)
+    assert result['error'].failure is not None
     assert result['error'].failure.kind == 'deadline'
+    assert isinstance(result['error'], pm.ModelProviderError)
     assert result['error'].failure.phase == 'request'
+    assert isinstance(result['error'], pm.ModelProviderError)
     assert result['error'].failure.http_status is None
 
 
@@ -1074,6 +1098,7 @@ def test_anthropic_unreplayable_arguments_keep_reason_without_adapter_resend(pri
     error = result['error']
     assert isinstance(error, pm.UncommittableModelTurn)
     assert error.reason == 'unreplayable_arguments'
+    assert error.failure is not None
     assert error.failure.kind == 'invalid_tool_arguments'
     assert error.failure.http_status == 200 and error.failure.emitted is False
     assert all(SECRET not in str(exc) for exc in error_chain(error))

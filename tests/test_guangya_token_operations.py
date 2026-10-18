@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from typing import Any
 from pathlib import Path
 from time import monotonic, time
 from types import SimpleNamespace
@@ -62,7 +63,7 @@ class _RotatingRawClient:
         self.token_expires_at = None
         self.refresh_calls: list[str | None] = []
 
-    def refresh_token(self, refresh_token=None):
+    def refresh_token(self, refresh_token=None) -> dict[str, Any] | None:
         self.refresh_calls.append(refresh_token)
         self.token = "rotated-access-9999"
         self.refresh_token_value = "rotated-refresh-8888"
@@ -164,13 +165,13 @@ class _NoAtomicEmptyDeleteRawClient(_RotatingRawClient):
 
 
 class _NonRotatingRawClient(_RotatingRawClient):
-    def refresh_token(self, refresh_token=None):
+    def refresh_token(self, refresh_token=None) -> dict[str, Any] | None:
         self.refresh_calls.append(refresh_token)
         return {"code": 401, "message": "refresh rejected"}
 
 
 class _EchoExistingRawClient(_RotatingRawClient):
-    def refresh_token(self, refresh_token=None):
+    def refresh_token(self, refresh_token=None) -> dict[str, Any] | None:
         self.refresh_calls.append(refresh_token)
         return {
             "access_token": self.token,
@@ -179,7 +180,7 @@ class _EchoExistingRawClient(_RotatingRawClient):
 
 
 class _InPlaceNoneRawClient(_RotatingRawClient):
-    def refresh_token(self, refresh_token=None):
+    def refresh_token(self, refresh_token=None) -> dict[str, Any] | None:
         self.refresh_calls.append(refresh_token)
         self.token = "in-place-access-5555"
         self.refresh_token_value = "in-place-refresh-6666"
@@ -188,7 +189,7 @@ class _InPlaceNoneRawClient(_RotatingRawClient):
 
 
 class _NestedRefreshRawClient(_RotatingRawClient):
-    def refresh_token(self, refresh_token=None):
+    def refresh_token(self, refresh_token=None) -> dict[str, Any] | None:
         self.refresh_calls.append(refresh_token)
         return {
             "data": {
@@ -208,7 +209,7 @@ class _PartialRotationRawClient(_RotatingRawClient):
             headers={"authorization": f"Bearer {self.token}"}
         )
 
-    def refresh_token(self, refresh_token=None):
+    def refresh_token(self, refresh_token=None) -> dict[str, Any] | None:
         self.refresh_calls.append(refresh_token)
         self.refresh_token_value = "partial-refresh-0000"
         self.token_expires_at = 1_900_000_400
@@ -234,7 +235,7 @@ class _BlockingRawClient(_RotatingRawClient):
     refresh_started = threading.Event()
     allow_refresh = threading.Event()
 
-    def refresh_token(self, refresh_token=None):
+    def refresh_token(self, refresh_token=None) -> dict[str, Any] | None:
         self.refresh_calls.append(refresh_token)
         self.refresh_started.set()
         if not self.allow_refresh.wait(timeout=2):
@@ -401,6 +402,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 self.assertTrue(client.delete_empty_directory(
                     "empty-dir", expected_etag="version-1", expected_updated_at=123,
                 ))
+                assert raw is not None
                 self.assertEqual(raw.deleted, [["empty-dir"]])
                 self.assertEqual(raw.delete_preconditions, {
                     "expected_etag": "version-1",
@@ -408,6 +410,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 })
 
                 raw.deleted.clear()
+                assert raw is not None
                 raw.detail["etag"] = "version-2"
                 with self.assertRaisesRegex(RuntimeError, "版本已变化"):
                     client.delete_empty_directory(
@@ -415,7 +418,9 @@ class GuangYaTokenClientTests(unittest.TestCase):
                     )
                 self.assertEqual(raw.deleted, [])
 
+                assert raw is not None
                 raw.detail["etag"] = "version-1"
+                assert raw is not None
                 raw.children = [{"fileId": "child", "fileName": "child.mkv", "resType": 1}]
                 with self.assertRaisesRegex(RuntimeError, "已包含内容"):
                     client.delete_empty_directory(
@@ -423,6 +428,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                     )
                 self.assertEqual(raw.deleted, [])
 
+                assert raw is not None
                 raw.children = []
                 with self.assertRaisesRegex(RuntimeError, "缺少可验证"):
                     client.delete_empty_directory("empty-dir")
@@ -446,6 +452,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                     expected_updated_at=123,
                 ))
 
+            assert raw is not None
             self.assertEqual(raw.detail_calls, 2)
             self.assertEqual(raw.list_calls, 2)
             self.assertEqual(raw.fs_delete_calls, [["empty-dir"]])
@@ -459,6 +466,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
             ):
                 client = GuangYaClient(token_file=token_file)
                 raw = client._raw
+                assert raw is not None
                 raw.children_by_call = [[], [{
                     "fileId": "late-child",
                     "fileName": "late.mkv",
@@ -472,6 +480,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                         expected_updated_at=123,
                     )
 
+            assert raw is not None
             self.assertEqual(raw.detail_calls, 2)
             self.assertEqual(raw.list_calls, 2)
             self.assertEqual(raw.fs_delete_calls, [])
@@ -482,6 +491,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
             with patch("app.clients.guangya._load_raw", return_value=_VersionedDeleteRawClient):
                 client = GuangYaClient(token_file=token_file)
                 raw = client._raw
+                assert raw is not None
                 raw.fs_delete_empty = Mock(return_value={
                     "code": 409,
                     "message": "version conflict",
@@ -494,6 +504,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                         expected_updated_at=123,
                     )
 
+                assert raw is not None
                 raw.fs_delete_empty.assert_called_once()
 
     def test_delete_empty_directory_rejects_failure_message_with_success_code(self):
@@ -519,7 +530,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                                 expected_updated_at=123,
                             )
 
-                        self.assertIsInstance(raised.exception.__cause__, GuangYaWriteRejected)
+                        assert isinstance(raised.exception.__cause__, GuangYaWriteRejected)
                         delete.assert_called_once()
 
     def test_client_startup_cleans_token_and_generation_temp_files(self):
@@ -573,6 +584,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
 
             self.assertFalse(thread.is_alive())
             self.assertFalse(active_temp.exists())
+            assert result['client']._raw is not None
             self.assertEqual(result["client"]._raw.token, "writer-access-2468")
             self.assertEqual(
                 result["client"].credential_generation,
@@ -594,6 +606,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                     status = client.refresh_now()
 
             persisted = json.loads(token_file.read_text(encoding="utf-8"))
+            assert client._raw is not None
             self.assertEqual(client._raw.refresh_calls, ["refresh-secret-4321"])
             self.assertEqual(replace.call_count, 1)
             self.assertEqual(persisted["access_token"], "rotated-access-9999")
@@ -627,8 +640,8 @@ class GuangYaTokenClientTests(unittest.TestCase):
             stale_alias, stale_module = _load_isolated_guangya_module()
             writer_alias, writer_module = _load_isolated_guangya_module()
             try:
-                stale_module._load_raw = lambda: _RotatingRawClient
-                writer_module._load_raw = lambda: _RotatingRawClient
+                setattr(stale_module, "_load_raw", lambda: _RotatingRawClient)
+                setattr(writer_module, "_load_raw", lambda: _RotatingRawClient)
                 stale = stale_module.GuangYaClient(token_file=token_file)
                 writer = writer_module.GuangYaClient(token_file=token_file)
                 stale_raw = stale._raw
@@ -656,6 +669,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "未返回新的 access token"):
                     client.refresh_now()
 
+            assert client._raw is not None
             self.assertEqual(client._raw.refresh_calls, ["refresh-secret-4321"])
             self.assertEqual(token_file.read_text(encoding="utf-8"), original_payload)
 
@@ -668,6 +682,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "未返回新的 access token"):
                     client.refresh_now()
 
+            assert client._raw is not None
             self.assertEqual(client._raw.token, "access-secret-7890")
             self.assertEqual(client._raw.refresh_token_value, "refresh-secret-4321")
             self.assertEqual(token_file.read_text(encoding="utf-8"), original_payload)
@@ -682,6 +697,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "未返回新的 access token"):
                     client.refresh_now()
 
+            assert client._raw is not None
             self.assertEqual(client._raw.token, "access-secret-7890")
             self.assertEqual(client._raw.refresh_token_value, "refresh-secret-4321")
             self.assertAlmostEqual(client._raw.token_expires_at, original_expiry, delta=1)
@@ -711,6 +727,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 status = client.refresh_now()
 
             persisted = json.loads(token_file.read_text(encoding="utf-8"))
+            assert client._raw is not None
             self.assertEqual(client._raw.token, "nested-access-7777")
             self.assertEqual(client._raw.refresh_token_value, "nested-refresh-8888")
             self.assertEqual(persisted["expires_at"], 1_900_000_200)
@@ -728,8 +745,10 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 persisted_after_rotation = token_file.read_text(encoding="utf-8")
 
                 with self.assertRaisesRegex(RuntimeError, "凭证已变化"):
+                    assert stale_raw is not None
                     stale_raw.refresh_token()
 
+            assert stale_raw is not None
             self.assertEqual(stale_raw.refresh_calls, [])
             self.assertEqual(
                 token_file.read_text(encoding="utf-8"),
@@ -774,6 +793,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 reachable = client.probe_connection()
 
             self.assertTrue(reachable)
+            assert client._raw is not None
             self.assertEqual(client._raw.token, "rotated-access-9999")
             persisted = json.loads(token_file.read_text(encoding="utf-8"))
             self.assertEqual(persisted["access_token"], "rotated-access-9999")
@@ -787,6 +807,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 valid = client.validate()
 
             self.assertFalse(valid)
+            assert client._raw is not None
             self.assertEqual(client._raw.refresh_calls, [])
             self.assertEqual(token_file.read_text(encoding="utf-8"), original_payload)
 
@@ -799,6 +820,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 valid = client.validate()
 
             self.assertFalse(valid)
+            assert client._raw is not None
             self.assertEqual(client._raw.fs_calls, 1)
             self.assertEqual(client._raw.refresh_calls, [])
             self.assertEqual(token_file.read_text(encoding="utf-8"), original_payload)
@@ -808,6 +830,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
             token_file = self._token_file(directory, expires_at=time() + 7200)
             with patch("app.clients.guangya._load_raw", return_value=_RotatingRawClient):
                 client = GuangYaClient(token_file=token_file)
+            assert client._raw is not None
             client._raw.fs_files = Mock(side_effect=[
                 {"code": 127, "msg": "操作过于频繁，请稍后重试"},
                 {"code": 127, "msg": "操作过于频繁，请稍后重试"},
@@ -820,6 +843,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 valid = client.validate()
 
             self.assertTrue(valid)
+            assert client._raw is not None
             self.assertEqual(client._raw.fs_files.call_count, 3)
             self.assertEqual(client._raw.refresh_calls, [])
 
@@ -830,6 +854,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 client = GuangYaClient(token_file=token_file)
                 for unsafe in ("1900000000", 1_500_000_000, 4_200_000_000, True):
                     with self.subTest(unsafe=unsafe):
+                        assert client._raw is not None
                         client._raw.token_expires_at = unsafe
                         self.assertIsNone(client.token_status()["expires_at"])
 
@@ -853,6 +878,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
             self.assertEqual(len(sources), 1)
             self.assertTrue(all(name.endswith(".tmp") for name in sources))
             self.assertTrue(second.token_status(valid=True)["has_access_token"])
+            assert second._raw is not None
             self.assertEqual(second._raw.refresh_calls, [])
 
     def test_refresh_and_clear_share_real_path_lock_across_instances(self):
@@ -975,6 +1001,7 @@ class GuangYaTokenClientTests(unittest.TestCase):
                 ok = client.login("13800138000", "123456", verification_id="vid-1", captcha_token="cap-1")
                 self.assertTrue(ok)
                 self.assertTrue(client.logged_in)
+                assert client._raw is not None
                 self.assertEqual(client._raw.token, "new-login-access-1111")
                 status = client.token_status()
                 self.assertTrue(status["valid"])
@@ -993,7 +1020,7 @@ class _ApiTokenClient:
     def logged_in(self):
         return self.present
 
-    def _status(self, valid=True):
+    def _status(self, valid=True) -> dict[str, Any]:
         return {
             "has_access_token": self.present,
             "has_refresh_token": self.present,
@@ -1025,11 +1052,11 @@ class _ApiTokenClient:
 
 
 class _UnsafeMaskedApiTokenClient(_ApiTokenClient):
-    def _status(self, valid=True):
+    def _status(self, valid=True) -> dict[str, Any]:
         status = super()._status(valid=valid)
         status["access_token_masked"] = "must-never-leak-from-mask-field"
         status["refresh_token_masked"] = "must-never-leak-refresh-mask"
-        status["expires_at"] = "1900000000"
+        status = {**status, "expires_at": "1900000000"}
         return status
 
 
@@ -1303,7 +1330,7 @@ class GuangYaReadRetryPolicyTests(unittest.TestCase):
         client = object.__new__(GuangYaClient)
         calls = []
         error = RuntimeError("unauthorized")
-        error.response = SimpleNamespace(status_code=401)
+        setattr(error, "response", SimpleNamespace(status_code=401))
 
         def operation():
             calls.append(1)
@@ -1331,6 +1358,7 @@ class GuangYaReadRetryPolicyTests(unittest.TestCase):
         def refresh_now():
             nonlocal refresh_calls
             refresh_calls += 1
+            assert client._raw is not None
             client._raw.token = "new-access"
             return {}
 
@@ -1342,7 +1370,7 @@ class GuangYaReadRetryPolicyTests(unittest.TestCase):
             if first:
                 request_barrier.wait(timeout=2)
                 error = RuntimeError("unauthorized")
-                error.response = SimpleNamespace(status_code=401)
+                setattr(error, "response", SimpleNamespace(status_code=401))
                 raise error
             return "ok"
 
@@ -1398,7 +1426,7 @@ class GuangYaReadRetryPolicyTests(unittest.TestCase):
     def test_bounded_read_does_not_start_unbounded_refresh_on_401(self):
         client = object.__new__(GuangYaClient)
         error = RuntimeError("unauthorized")
-        error.response = SimpleNamespace(status_code=401)
+        setattr(error, "response", SimpleNamespace(status_code=401))
         operation = Mock(side_effect=error)
 
         with patch.object(client, "refresh_now") as refresh:
@@ -1417,7 +1445,7 @@ class GuangYaReadRetryPolicyTests(unittest.TestCase):
             token_expires_at = None
             refresh_token_value = "refresh-secret"
 
-            def refresh_token(self, refresh_token=None):
+            def refresh_token(self, refresh_token=None) -> dict[str, Any] | None:
                 return {"access_token": "new-access"}
 
             def request(self, url, method="GET", **kwargs):

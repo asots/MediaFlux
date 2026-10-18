@@ -28,13 +28,11 @@ def _accepts_keyword(sender: Callable[..., Any], name: str) -> bool:
     except (TypeError, ValueError):
         return False
     parameter = parameters.get(name)
-    return bool(
-        parameter is not None
+    return (parameter is not None
         and parameter.kind in {
             inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
         }
-        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
-    )
+        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()))
 
 
 def telegram_message_options(

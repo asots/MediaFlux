@@ -1,6 +1,9 @@
 """已提交的后台规格改名必须独立于探测可用性完成审计/任务收尾。"""
 from __future__ import annotations
 
+from app.clients.guangya import GuangYaClient
+from typing import cast
+
 import sqlite3
 import unittest
 from types import SimpleNamespace
@@ -35,7 +38,7 @@ class ProbeCommittedFinalizationTests(unittest.TestCase):
 
     def new_worker(self):
         worker = OrganizeProbeWorker()
-        worker._client = self.cloud
+        worker._client = cast(GuangYaClient, self.cloud)
         return worker
 
     def row(self):
@@ -46,7 +49,9 @@ class ProbeCommittedFinalizationTests(unittest.TestCase):
         return (worker or self.worker)._process_one()
 
     def assert_committed(self):
-        self.assertEqual(db.get_organize_log(self.log_id)["current_name"], "Archive-1080p.mkv")
+        get_organize_log_result = db.get_organize_log(self.log_id)
+        assert get_organize_log_result is not None
+        self.assertEqual(get_organize_log_result["current_name"], "Archive-1080p.mkv")
         self.assertEqual(self.cloud.files["video"].name, "Archive-1080p.mkv")
         self.assertEqual(self.row()["attempts"], 0)
         self.assertEqual(self.probe.call_count, 1)
@@ -141,7 +146,9 @@ class ProbeCommittedFinalizationTests(unittest.TestCase):
         with patch.object(db, "commit_organize_probe_rename", side_effect=sqlite3.OperationalError("busy")):
             self.run_due()
         self.assertEqual(self.cloud.files["video"].name, "Archive.mkv")
-        self.assertEqual(db.get_organize_log(self.log_id)["current_name"], "Archive.mkv")
+        get_organize_log_result_2 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_2 is not None
+        self.assertEqual(get_organize_log_result_2["current_name"], "Archive.mkv")
         self.assertEqual(self.row()["status"], "retry_wait")
         self.assertEqual(self.row()["attempts"], 1)
         self.assertTrue(all(row["status"] != "success" for row in db.list_organize_operation_steps(self.log_id)))
@@ -156,7 +163,7 @@ class ProbeSupersededFinalizationTests(unittest.TestCase):
                 try:
                     log_id, cloud, service = fixture._fixture()
                     worker = OrganizeProbeWorker()
-                    worker._client = cloud
+                    worker._client = cast(GuangYaClient, cloud)
                     job_id = db.enqueue_organize_probe_completion(log_id, source_id="target", rel_dir="Archive", rules={})
                     real_complete = db.complete_organize_probe_job
 
@@ -183,7 +190,9 @@ class ProbeSupersededFinalizationTests(unittest.TestCase):
                         clock._due(job_id)
                         second._process_one()
                     self.assertEqual(dict(db.list_organize_log_items(log_id)[0]), before)
-                    self.assertEqual(db.get_organize_log(log_id)["status"], "success")
+                    get_organize_log_result_3 = db.get_organize_log(log_id)
+                    assert get_organize_log_result_3 is not None
+                    self.assertEqual(get_organize_log_result_3["status"], "success")
                     self.assertEqual(clock._job(job_id)["status"], "cancelled")
                     self.assertEqual((cloud.files["video"].parent_id, cloud.files["video"].name),
                                      (before["current_parent_id"], before["current_name"]))

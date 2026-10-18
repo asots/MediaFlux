@@ -7,6 +7,7 @@ import json
 import secrets
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import Any
 
 from .references import ReferenceError
 
@@ -39,7 +40,7 @@ def preview(reply, *, unavailable=False):
     text = str(reply.get('text') or '')
     if not reply.get('source'):
         return html.escape(text[:2000], quote=False) + ('\n[truncated: 引用无可恢复来源]' if len(text) > 2000 else '')
-    data = {'untrusted_reference': True, 'text': text[:2000], 'truncated': len(text) > 2000}
+    data: dict[str, Any] = {'untrusted_reference': True, 'text': text[:2000], 'truncated': len(text) > 2000}
     if unavailable:
         data.update(source=reply['source'], reference_unavailable=True)
     elif reply.get('reference_handle'):

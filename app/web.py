@@ -55,7 +55,7 @@ def _static_asset_digest(
 
 
 def _resolve_static_asset(path: str) -> tuple[str, Path]:
-    normalized = str(path or "").strip().replace("\\", "/")
+    normalized = (path or "").strip().replace("\\", "/")
     pure_path = PurePosixPath(normalized)
     if (
         not normalized
@@ -79,19 +79,20 @@ def static_url(context: Any, path: str) -> str:
     normalized, resolved = _resolve_static_asset(path)
     stat = resolved.stat()
     signature = (
-        int(stat.st_dev),
-        int(stat.st_ino),
-        int(stat.st_size),
-        int(stat.st_mtime_ns),
-        int(stat.st_ctime_ns),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
     )
     version = _static_asset_digest(str(resolved), signature)
     base = relative_url_for(context, "static", path=normalized)
     return f"{base}{'&' if '?' in base else '?'}v={version}"
 
 
-templates.env.globals["url_for"] = relative_url_for
-templates.env.globals["static_url"] = static_url
+template_globals: dict[str, Any] = templates.env.globals
+template_globals["url_for"] = relative_url_for
+template_globals["static_url"] = static_url
 
 
 def csrf_token(request: Request) -> str:

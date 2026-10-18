@@ -1,12 +1,11 @@
 """Agent 网页搜索每日额度的数据访问。"""
 from __future__ import annotations
 
-from datetime import date, datetime
 import json
 import re
 import time
-from typing import Any
-from typing import TYPE_CHECKING
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -25,7 +24,7 @@ def current_agent_web_search_usage_date() -> str:
 
 
 def _validate_agent_web_search_usage_date(value: str) -> str:
-    usage_date = str(value or "").strip()
+    usage_date = (value or "").strip()
     try:
         parsed = datetime.strptime(usage_date, "%Y-%m-%d")
     except ValueError as exc:
@@ -38,14 +37,14 @@ def _validate_agent_web_search_usage_date(value: str) -> str:
 def reserve_agent_web_search_credits(
     *, provider: str, usage_date: str, cost: int, daily_limit: int
 ) -> bool:
-    provider_name = str(provider or "").strip().lower()
+    provider_name = (provider or "").strip().lower()
     if not re.fullmatch(r"[a-z][a-z0-9_-]{1,31}", provider_name):
         raise ValueError("provider 无效")
     day = _validate_agent_web_search_usage_date(usage_date)
     if isinstance(cost, bool) or isinstance(daily_limit, bool):
         raise ValueError("搜索额度参数无效")
-    unit_cost = int(cost)
-    limit = int(daily_limit)
+    unit_cost = cost
+    limit = daily_limit
     if unit_cost < 1 or limit < unit_cost:
         return False
 
@@ -71,11 +70,11 @@ def reserve_agent_web_search_credits(
 def refund_agent_web_search_credits(
     *, provider: str, usage_date: str, cost: int
 ) -> bool:
-    provider_name = str(provider or "").strip().lower()
+    provider_name = (provider or "").strip().lower()
     if not re.fullmatch(r"[a-z][a-z0-9_-]{1,31}", provider_name):
         raise ValueError("provider 无效")
     day = _validate_agent_web_search_usage_date(usage_date)
-    if isinstance(cost, bool) or int(cost) < 1:
+    if isinstance(cost, bool) or cost < 1:
         raise ValueError("搜索额度参数无效")
     database = _database()
     with database.get_conn() as conn:
@@ -84,13 +83,13 @@ def refund_agent_web_search_credits(
             "UPDATE agent_web_search_daily_usage "
             "SET credits_used=MAX(0,credits_used-?),updated_at=? "
             "WHERE provider=? AND usage_date=?",
-            (int(cost), database.now(), provider_name, day),
+            (cost, database.now(), provider_name, day),
         )
         return cursor.rowcount == 1
 
 
 def _validate_cache_key(value: str) -> str:
-    cache_key = str(value or "").strip().lower()
+    cache_key = (value or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
         raise ValueError("cache_key 无效")
     return cache_key
@@ -122,7 +121,7 @@ def set_agent_web_search_cache(
     cache_key: str, payload: dict[str, Any], *, ttl_seconds: int
 ) -> None:
     key = _validate_cache_key(cache_key)
-    if isinstance(ttl_seconds, bool) or not 1 <= int(ttl_seconds) <= 86400:
+    if isinstance(ttl_seconds, bool) or not 1 <= ttl_seconds <= 86400:
         raise ValueError("缓存 TTL 无效")
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     if len(encoded.encode("utf-8")) > 512 * 1024:
@@ -133,7 +132,7 @@ def set_agent_web_search_cache(
             "INSERT INTO agent_web_search_cache(cache_key,payload,expires_at,updated_at) "
             "VALUES(?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET "
             "payload=excluded.payload,expires_at=excluded.expires_at,updated_at=excluded.updated_at",
-            (key, encoded, int(time.time()) + int(ttl_seconds), database.now()),
+            (key, encoded, int(time.time()) + ttl_seconds, database.now()),
         )
         conn.execute(
             "DELETE FROM agent_web_search_cache WHERE expires_at<=?",
@@ -147,7 +146,7 @@ def clear_agent_web_search_cache() -> None:
 
 
 def get_agent_web_search_daily_usage(*, provider: str, usage_date: str) -> int:
-    provider_name = str(provider or "").strip().lower()
+    provider_name = (provider or "").strip().lower()
     if not re.fullmatch(r"[a-z][a-z0-9_-]{1,31}", provider_name):
         raise ValueError("provider 无效")
     day = _validate_agent_web_search_usage_date(usage_date)

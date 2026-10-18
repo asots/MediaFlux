@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing, suppress
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
@@ -50,7 +50,7 @@ class QueryEnvelope:
         owner = _owner(self.owner)
         session_id = _scope(self.session_id, "session_id")
         request_id = _request_id(self.request_id)
-        channel = str(self.channel or "api").strip().casefold()
+        channel = (self.channel or "api").strip().casefold()
         if channel not in {"web", "telegram", "api", "test"}:
             raise TransportInputError("channel 无效")
         try:
@@ -84,10 +84,10 @@ class EffectEnvelope:
     delivery_route: Mapping[str, Any] = field(default_factory=dict)
 
     def normalized(self) -> EffectEnvelope:
-        plan_id = str(self.plan_id or "").strip()
+        plan_id = (self.plan_id or "").strip()
         if not _PLAN_RE.fullmatch(plan_id):
             raise TransportInputError("plan_id 无效或已损坏")
-        channel = str(self.channel or "api").strip().casefold()
+        channel = (self.channel or "api").strip().casefold()
         if channel not in {"web", "telegram", "api", "test"}:
             raise TransportInputError("channel 无效")
         return EffectEnvelope(
@@ -142,7 +142,7 @@ class _KernelTransport:
 class WebKernelTransport(_KernelTransport):
     """Web 只取得真实 NDJSON 事件并转发控制命令。"""
 
-    async def explain(self, request: ExplainEnvelope) -> AsyncIterator[bytes]:
+    async def explain(self, request: ExplainEnvelope) -> AsyncGenerator[bytes, None]:
         events = self.session.explain(**asdict(replace(request, channel="web").normalized()))
         async with aclosing(events):
             async for chunk in iter_ndjson(events):
@@ -153,7 +153,7 @@ class WebKernelTransport(_KernelTransport):
         async with aclosing(events):
             return await consume_events(events)
 
-    async def query(self, request: QueryEnvelope) -> AsyncIterator[bytes]:
+    async def query(self, request: QueryEnvelope) -> AsyncGenerator[bytes, None]:
         async with aclosing(self.session.run(replace(request, channel="web", delivery_route={}).to_agent_input())) as events:
             async for chunk in iter_ndjson(events):
                 yield chunk
@@ -162,7 +162,7 @@ class WebKernelTransport(_KernelTransport):
         async with aclosing(self.session.run(replace(request, channel="web", delivery_route={}).to_agent_input())) as events:
             return await consume_events(events)
 
-    async def confirm(self, request: EffectEnvelope) -> AsyncIterator[bytes]:
+    async def confirm(self, request: EffectEnvelope) -> AsyncGenerator[bytes, None]:
         events = self.session.confirm(**asdict(replace(request, channel="web", delivery_route={}).normalized()))
         async with aclosing(events):
             async for chunk in iter_ndjson(events):
@@ -205,8 +205,8 @@ class TelegramKernelTransport(_KernelTransport):
         events = self.session.run(normalized.to_agent_input())
         cancel_task = None
 
-        async def cancel_on_stop():
-            await cancellation.wait()
+        async def cancel_on_stop(token: CancellationToken):
+            await token.wait()
             await self.cancel(owner=normalized.owner, session_id=normalized.session_id)
 
         async def cancellable_events():
@@ -214,7 +214,7 @@ class TelegramKernelTransport(_KernelTransport):
             async for event in events:
                 # 先注册真实 turn，再响应停机，避免 stop 早于 admission 时丢失取消。
                 if cancellation is not None and event.type is AgentEventType.TURN_STARTED:
-                    cancel_task = asyncio.create_task(cancel_on_stop())
+                    cancel_task = asyncio.create_task(cancel_on_stop(cancellation))
                 yield event
 
         try:

@@ -1,4 +1,6 @@
 from __future__ import annotations
+from app.agent.kernel.model import ModelAdapter
+from typing import cast
 
 import json
 import unittest
@@ -18,7 +20,7 @@ class NoModel:
 class AgentKernelCapabilityCorpusTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.session = build_agent_kernel(model=NoModel())
+        cls.session = build_agent_kernel(model=cast(ModelAdapter | None, NoModel()))
 
     def test_global_and_cloud_questions_use_one_capability_catalog(self) -> None:
         for message in ("你是谁？你能做什么？", "列出光鸭能力和哪些操作需要确认"):

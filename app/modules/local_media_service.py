@@ -13,8 +13,10 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from app import config, database as db
+from app import config
+from app import database as db
 from app.clients.guangya import GuangYaFile
+from app.logger import get_logger
 from app.modules.directory_media import (
     DirectoryInspection,
     DirectoryMediaInspector,
@@ -24,14 +26,28 @@ from app.modules.directory_media import (
 from app.modules.directory_scrape import DirectoryScrapeService, FixedMatchScraper
 from app.modules.directory_scrape_errors import DirectoryScrapeRequestError
 from app.modules.episode_mapping import NUMBERING_MODES, normalize_numbering_mode
-from app.modules.local_move_transaction import LocalMoveTransaction, MoveTransactionResult
 from app.modules.local_media_candidates import move_candidate_to_trash
+from app.modules.local_media_cleanup import (
+    cleanup_candidates_from_snapshots,
+    delete_cleanup_items,
+    probable_sample_video_paths,
+)
 from app.modules.local_media_models import (
+    LocalLibraryTarget,
     canonical_local_media_content_path,
     local_media_paths_overlap,
 )
-from app.modules.process_lock import CrossProcessLock
-from app.modules.qb_control import qb_control_write_lease
+from app.modules.local_media_recognition_summary import (
+    build_recognition_summary,
+    serialize_recognition_summary,
+)
+from app.modules.local_media_recognition_summary import (
+    infer_recognition_summary as infer_local_recognition_summary,
+)
+from app.modules.local_move_transaction import (
+    LocalMoveTransaction,
+    MoveTransactionResult,
+)
 from app.modules.local_path_mapping import (
     assert_within,
     require_container_absolute_path,
@@ -45,36 +61,26 @@ from app.modules.local_storage import (
     LocalStorageError,
     snapshot_digest,
 )
-from app.modules.local_media_cleanup import (
-    cleanup_candidates_from_snapshots,
-    delete_cleanup_items,
-    probable_sample_video_paths,
-)
-from app.modules.local_media_recognition_summary import (
-    build_recognition_summary,
-    infer_recognition_summary as infer_local_recognition_summary,
-    serialize_recognition_summary,
-)
-from app.modules.organize import (
-    OrganizePlan,
-    OrganizeRules,
-    Organizer,
-    enforce_fixed_organize_rules,
-)
-from app.modules.organize_scan import OrganizeScanResult, ScannedVideo
-from app.modules.organize_postprocess import media_role
 from app.modules.media_probe import ProbeBudget, probe_local_media_profile
 from app.modules.media_server_path_mapping import (
     MediaServerPathMapping,
 )
+from app.modules.organize import (
+    OrganizePlan,
+    Organizer,
+    OrganizeRules,
+    enforce_fixed_organize_rules,
+)
+from app.modules.organize_postprocess import media_role
+from app.modules.organize_scan import OrganizeScanResult, ScannedVideo
+from app.modules.process_lock import CrossProcessLock
+from app.modules.qb_control import qb_control_write_lease
 from app.modules.scraper import MatchResult, TMDBScraper
-from app.logger import get_logger
 from app.modules.special_media import (
     is_special_media_name,
     is_special_path,
     special_parent_context,
 )
-
 
 logger = get_logger(__name__)
 
@@ -155,9 +161,9 @@ class _InspectionStore:
         max_records: int = 64,
         max_snapshot_entries: int = 40_000,
     ) -> None:
-        self.ttl_seconds = max(1, int(ttl_seconds))
-        self.max_records = max(1, int(max_records))
-        self.max_snapshot_entries = max(1, int(max_snapshot_entries))
+        self.ttl_seconds = max(1, ttl_seconds)
+        self.max_records = max(1, max_records)
+        self.max_snapshot_entries = max(1, max_snapshot_entries)
         self._records: OrderedDict[str, _Inspection] = OrderedDict()
         self._scope_ids: dict[tuple[str, int, str], str] = {}
         self._snapshot_entries = 0
@@ -166,20 +172,20 @@ class _InspectionStore:
     @staticmethod
     def _scope_key(record: _Inspection) -> tuple[str, int, str]:
         return (
-            str(record.owner),
-            int(record.source_id),
+            record.owner,
+            record.source_id,
             str(record.selected_path),
         )
 
     def _remove_locked(self, inspection_id: str) -> _Inspection | None:
-        record = self._records.pop(str(inspection_id), None)
+        record = self._records.pop(inspection_id, None)
         if record is None:
             return None
         self._snapshot_entries = max(
             0, self._snapshot_entries - len(record.snapshots)
         )
         scope_key = self._scope_key(record)
-        if self._scope_ids.get(scope_key) == str(inspection_id):
+        if self._scope_ids.get(scope_key) == inspection_id:
             self._scope_ids.pop(scope_key, None)
         return record
 
@@ -207,9 +213,9 @@ class _InspectionStore:
     def get(self, owner: str, inspection_id: str) -> _Inspection:
         with self._lock:
             self._prune_locked()
-            normalized_id = str(inspection_id)
+            normalized_id = inspection_id
             record = self._records.get(normalized_id)
-            if record is None or record.owner != str(owner):
+            if record is None or record.owner != owner:
                 raise LocalMediaServiceError("检查记录不存在或已过期")
             self._records.move_to_end(normalized_id)
             return record
@@ -217,9 +223,9 @@ class _InspectionStore:
     def discard(self, owner: str, inspection_id: str) -> bool:
         with self._lock:
             self._prune_locked()
-            normalized_id = str(inspection_id)
+            normalized_id = inspection_id
             record = self._records.get(normalized_id)
-            if record is None or record.owner != str(owner):
+            if record is None or record.owner != owner:
                 return False
             self._remove_locked(normalized_id)
             return True
@@ -227,9 +233,9 @@ class _InspectionStore:
     def consume(self, owner: str, inspection_id: str) -> _Inspection:
         with self._lock:
             self._prune_locked()
-            normalized_id = str(inspection_id)
+            normalized_id = inspection_id
             record = self._records.get(normalized_id)
-            if record is None or record.owner != str(owner):
+            if record is None or record.owner != owner:
                 raise LocalMediaServiceError("检查记录不存在或已过期")
             consumed = self._remove_locked(normalized_id)
             assert consumed is not None
@@ -289,9 +295,9 @@ class LocalMediaService:
         self._operation_lock = threading.RLock()
         # 与配置发布共用锁，保证 Key、端点、代理和模式来自同一次读取。
         with config._lock:
-            self._runtime_config = config.get_many(LOCAL_MEDIA_RUNTIME_KEYS)
+            self._runtime_config: dict[str, str] | None = config.get_many(LOCAL_MEDIA_RUNTIME_KEYS)
             self.scraper = scraper or TMDBScraper()
-            self.organizer = Organizer(client=object(), scraper=self.scraper)
+            self.organizer = Organizer(local_only=True, scraper=self.scraper)
         self.inspections = inspection_store or _InspectionStore()
         self._sibling_scan_batch = LocalSiblingScanBatch()
 
@@ -319,7 +325,7 @@ class LocalMediaService:
                 values = config.get_many(LOCAL_MEDIA_RUNTIME_KEYS)
                 scraper = TMDBScraper()
                 try:
-                    organizer = Organizer(client=object(), scraper=scraper)
+                    organizer = Organizer(local_only=True, scraper=scraper)
                 except BaseException:
                     scraper.close()
                     raise
@@ -537,13 +543,13 @@ class LocalMediaService:
                     break
         digest = snapshot_digest(snapshots)
         inspection_id = self.inspections.put(_Inspection(
-            owner=str(owner), source_id=int(source_id), root=root, selected_path=selected,
+            owner=owner, source_id=source_id, root=root, selected_path=selected,
             snapshots=snapshots, digest=digest, created_at=time.time(),
             media_type=detected_media_type,
         ))
         return {
             "inspection_id": inspection_id,
-            "source_id": int(source_id),
+            "source_id": source_id,
             "selected_name": selected.name,
             "selected_kind": "file" if selected.is_file() else "directory",
             "file_count": len(visible_snapshots),
@@ -571,7 +577,7 @@ class LocalMediaService:
             raise LocalMediaServiceError("仅待确认任务可以进入人工复核")
         result = self.inspect_source(owner, task.source_id, task.content_path)
         if str(getattr(task, "title", "") or "").strip():
-            result["suggested_query"] = str(task.title).strip()
+            result["suggested_query"] = task.title.strip()
         result.update({
             "task_error": str(getattr(task, "error", "") or ""),
             "task_title": str(getattr(task, "title", "") or ""),
@@ -601,7 +607,7 @@ class LocalMediaService:
                 raise LocalMediaServiceError(
                     "成人番号专用来源不使用 TMDB 搜索，请直接运行 MetaTube 自动识别"
                 )
-        effective_type = str(media_type or "").strip().lower()
+        effective_type = (media_type or "").strip().lower()
         if effective_type == "auto":
             if inspection_id:
                 effective_type = self.inspections.get(owner, inspection_id).media_type
@@ -637,10 +643,10 @@ class LocalMediaService:
             raise LocalMediaServiceError(
                 "成人番号专用来源不使用豆瓣/BGM 或普通 TMDB 线索"
             )
-        search_query = str(query or "").strip()
+        search_query = (query or "").strip()
         if not search_query:
             raise LocalMediaServiceError("请输入外部资料搜索词")
-        normalized_type = str(media_type or "auto").strip().lower()
+        normalized_type = (media_type or "auto").strip().lower()
         if normalized_type not in {"auto", "movie", "tv"}:
             raise LocalMediaServiceError("媒体类型只能是自动、电影或剧集")
         resolved_type = (
@@ -703,7 +709,7 @@ class LocalMediaService:
                 etag=self._local_etag(snapshot),
                 parent_id=str(snapshot.path.parent.resolve(strict=False)),
             )
-            special = bool(
+            special = (
                 is_special_path(relative_dir)
                 or is_special_media_name(snapshot.path.name)
             )
@@ -793,7 +799,7 @@ class LocalMediaService:
             )
 
             special_container = is_special_path(item.relative_dir)
-            special = bool(item.special or special_container)
+            special = (item.special or special_container)
             if special:
                 season = 0
             snapshot = MediaSnapshot(
@@ -886,7 +892,7 @@ class LocalMediaService:
 
     @staticmethod
     def _normalize_numbering_mode(value: str) -> str:
-        mode = str(value or "auto").strip().lower()
+        mode = (value or "auto").strip().lower()
         if mode not in NUMBERING_MODES:
             raise LocalMediaServiceError("剧集编号模式无效")
         return normalize_numbering_mode(mode)
@@ -917,7 +923,7 @@ class LocalMediaService:
             raise LocalMediaServiceError(
                 f"未配置 {plan.main_category or '当前媒体'} 或默认归档目标"
             )
-        parts = [part for part in str(plan.target_path or "").split("/") if part]
+        parts = [part for part in (plan.target_path or "").split("/") if part]
         if (
             target_config.category != "default"
             and parts
@@ -949,7 +955,7 @@ class LocalMediaService:
                 "WHERE t.owner=? AND substr(step.target_path,1,?)=? "
                 "AND step.status='completed' AND (i.role='video' OR i.id IS NULL) "
                 "AND step.action IN ('rename','copy_verify_delete','replace')",
-                (str(owner or "").strip(), len(prefix), prefix),
+                ((owner or "").strip(), len(prefix), prefix),
             ).fetchall()
         identities: set[tuple[str, str]] = set()
         for row in rows:
@@ -1105,7 +1111,7 @@ class LocalMediaService:
     @staticmethod
     def _restore_rules_snapshot(raw: str) -> OrganizeRules:
         try:
-            payload = json.loads(str(raw or ""))
+            payload = json.loads(raw or "")
         except (TypeError, ValueError) as exc:
             raise LocalMediaServiceError("整理规则快照无效，请重新生成预览") from exc
         if not isinstance(payload, dict):
@@ -1204,18 +1210,16 @@ class LocalMediaService:
         else:
             rules = OrganizeRules.from_config()
         if overrides:
-            allowed_overrides = {
-                key: bool(overrides[key])
-                for key in ("region_split", "year_split")
-                if key in overrides
-            }
-            if allowed_overrides:
-                rules = replace(rules, **allowed_overrides)
+            rules = replace(
+                rules,
+                region_split=bool(overrides["region_split"]) if "region_split" in overrides else rules.region_split,
+                year_split=bool(overrides["year_split"]) if "year_split" in overrides else rules.year_split,
+            )
         rules = enforce_fixed_organize_rules(rules).for_local_source(source.media_type)
         nsfw_only = source.media_type == "nsfw"
         if nsfw_only and (
             not rules.nsfw_enabled
-            or not str(rules.nsfw_metatube_endpoint or "").strip()
+            or not (rules.nsfw_metatube_endpoint or "").strip()
         ):
             raise LocalMediaServiceError(
                 "该来源已设为成人番号专用，但 MetaTube 成人识别尚未启用或配置完整"
@@ -1239,9 +1243,9 @@ class LocalMediaService:
         if not videos:
             raise LocalMediaServiceError("选择路径中没有可整理的视频")
 
-        requested_media_type = str(media_type or "").strip().lower()
+        requested_media_type = (media_type or "").strip().lower()
         if nsfw_only:
-            if str(tmdb_id or "").strip():
+            if (tmdb_id or "").strip():
                 raise LocalMediaServiceError(
                     "成人番号专用来源不能套用 TMDB 候选，只接受 MetaTube 精确番号结果"
                 )
@@ -1265,7 +1269,7 @@ class LocalMediaService:
         ) and effective_media_type != "tv":
             raise LocalMediaServiceError("只有剧集整理可以指定季数或集数")
         if (
-            not str(tmdb_id or "").strip()
+            not (tmdb_id or "").strip()
             and (
                 normalized_numbering_mode != "auto"
                 or season_override is not None
@@ -1278,22 +1282,22 @@ class LocalMediaService:
             inspection, videos, companions,
         )
         planner_scraper = self.scraper
-        position_overrides: dict[object, tuple[int | None, int | None]] = {}
+        position_overrides: dict[str | tuple[str, str], tuple[int | None, int | None]] = {}
         episode_mappings = {}
         source_positions_by_file_id: dict[str, tuple[int | None, int | None]] = {}
         fixed_match: MatchResult | None = None
         detail: dict[str, Any] = {}
         manual_pending_confirmations: list[dict[str, Any]] = []
-        requested_tmdb_id = str(tmdb_id or "").strip()
+        requested_tmdb_id = (tmdb_id or "").strip()
         if requested_tmdb_id:
             fixed_match = self.scraper.match_from_tmdb(
                 requested_tmdb_id, effective_media_type,
             )
             if not self.organizer._match_external_id(fixed_match) or fixed_match.need_confirm:
                 raise LocalMediaServiceError("TMDB 详情不存在或无法确认")
-            detail_loader = getattr(self.scraper, "get_detail_with_credits", None)
+            detail_loader = Organizer._declared_callable(self.scraper, "get_detail_with_credits")
             if not callable(detail_loader):
-                detail_loader = getattr(self.scraper, "get_detail", None)
+                detail_loader = Organizer._declared_callable(self.scraper, "get_detail")
             detail = (
                 detail_loader(requested_tmdb_id, effective_media_type)
                 if callable(detail_loader) else {}
@@ -1349,8 +1353,8 @@ class LocalMediaService:
                     }
                     for item in directory_inspection.pending_videos
                 ]
-            season_detail_loader = getattr(
-                self.scraper, "get_tv_season_detail", None,
+            season_detail_loader = Organizer._declared_callable(
+                self.scraper, "get_tv_season_detail",
             )
             position_overrides, episode_mappings = (
                 DirectoryScrapeService._mapped_position_overrides(
@@ -1378,14 +1382,14 @@ class LocalMediaService:
         planner = (
             self.organizer
             if planner_scraper is self.scraper
-            else Organizer(client=object(), scraper=planner_scraper)
+            else Organizer(local_only=True, scraper=planner_scraper)
         )
         probe_budget = ProbeBudget(attempts=24, max_seconds=20)
 
         def load_media_profile(file: GuangYaFile, _plan: OrganizePlan):
             if not rules.media_info_enabled or not rules.media_probe_enabled:
                 return None
-            snapshot = snapshots_by_id.get(str(file.file_id))
+            snapshot = snapshots_by_id.get(file.file_id)
             if snapshot is None or snapshot.role != "video":
                 return None
             return probe_local_media_profile(
@@ -1398,16 +1402,16 @@ class LocalMediaService:
                 budget=probe_budget,
             )
 
-        target_directory_cache: dict[str, tuple[object, Path]] = {}
+        target_directory_cache: dict[str, tuple[LocalLibraryTarget, Path]] = {}
         inventory_cache: dict[
             str, tuple[str, list[GuangYaFile], dict[str, str]]
         ] = {}
 
         def target_for_plan(plan: OrganizePlan):
-            cached = target_directory_cache.get(str(plan.file_id))
+            cached = target_directory_cache.get(plan.file_id)
             if cached is None:
                 cached = self._target_directory_for_plan(plan, targets)
-                target_directory_cache[str(plan.file_id)] = cached
+                target_directory_cache[plan.file_id] = cached
             return cached
 
         def load_target_inventory(plan: OrganizePlan):
@@ -1428,7 +1432,7 @@ class LocalMediaService:
         planning_result, planning_stats = planner.plan_scan_result(
             scan_result,
             rules,
-            automatic=bool(automatic and not requested_tmdb_id),
+            automatic=(automatic and not requested_tmdb_id),
             source_dir_id=str(inspection.selected_path),
             source_name="",
             media_type_hint=effective_media_type,
@@ -1448,7 +1452,7 @@ class LocalMediaService:
 
         for plan in planning_result.plans:
             match = plan.match or MatchResult()
-            snapshot = snapshots_by_id.get(str(plan.file_id))
+            snapshot = snapshots_by_id.get(plan.file_id)
             if match.need_confirm or plan.action == "conflict":
                 # 单文件明确绑定的作品身份与季集位置是两回事。位置越界仍需
                 # 人工确认，但不能丢失已锁定身份，让后续季集纠偏无从继续。
@@ -1523,7 +1527,7 @@ class LocalMediaService:
             ))
 
             for subtitle_plan in planning_result.subtitle_plans_by_video.get(
-                str(plan.file_id), []
+                plan.file_id, []
             ):
                 subtitle_snapshot = snapshots_by_id.get(
                     str(subtitle_plan.file.file_id)
@@ -1572,7 +1576,7 @@ class LocalMediaService:
                     ),
                 ))
 
-            mapping = episode_mappings.get(str(plan.file_id))
+            mapping = episode_mappings.get(plan.file_id)
             matches.append({
                 "tmdb_id": match.tmdb_id,
                 "title": match.title,
@@ -1836,7 +1840,7 @@ class LocalMediaService:
                 numbering_mode=task.numbering_mode,
             )
             return {
-                "task_id": int(task_id),
+                "task_id": task_id,
                 "status": str(preview.get("status") or ""),
                 "pending_confirmations": len(
                     preview.get("pending_confirmations") or []
@@ -1852,7 +1856,7 @@ class LocalMediaService:
             rows = conn.execute(
                 "SELECT id,content_path FROM local_media_tasks "
                 "WHERE owner=? AND status NOT IN ('completed','failed') ORDER BY id",
-                (str(owner or "").strip(),),
+                ((owner or "").strip(),),
             ).fetchall()
         for row in rows:
             try:
@@ -1874,7 +1878,7 @@ class LocalMediaService:
     ) -> Path:
         """在统一本地媒体 Writer 内把一级媒体条目移入可恢复回收区。"""
         with _local_media_write_lease():
-            source = db.get_local_media_source(int(source_id), owner=owner)
+            source = db.get_local_media_source(source_id, owner=owner)
             if source is None:
                 raise LocalMediaServiceError("本地媒体来源不存在")
             root = require_container_absolute_path(source.local_root, label="来源目录")
@@ -1909,6 +1913,7 @@ class LocalMediaService:
         move_committed = False
         qb_task_retired = False
         committed_targets: list[str] = []
+        inspection: dict[str, Any] = {}
         try:
             if task.qb_hash and qb_client is None:
                 raise LocalMediaServiceError("qB 任务缺少可用客户端，已拒绝移动源文件")
@@ -2044,7 +2049,7 @@ class LocalMediaService:
                     allowed_root=Path(source.local_root),
                     selected_path=Path(task.content_path),
                     source_parent_dirs={item.source.parent for item in result.moved},
-                    remove_empty_dirs=bool(rules.clean_empty),
+                    remove_empty_dirs=rules.clean_empty,
                 )
                 warnings.extend(cleanup_result.warnings)
             db.update_local_media_task(task_id, owner=owner, status="refreshing")

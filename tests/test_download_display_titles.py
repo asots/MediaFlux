@@ -152,6 +152,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
 
         request_id = result["request_id"]
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["title"], item.title)
         self.assertEqual(row["display_title"], stored.title)
         self.assertEqual(row["source_value"], magnet)
@@ -173,6 +174,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         )
 
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["display_title"], "光鸭实际名称")
         self.assertEqual(row["title"], "磁力任务")
         logs = [log for log in db.list_download_logs() if log["request_id"] == request_id]
@@ -186,6 +188,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
             request_id, ["gy-kept"], [self._gy_task("gy-kept", "云端另一个名称")]
         )
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["display_title"], "用户确认的标题")
         self.assertEqual(row["title"], "磁力任务")
 
@@ -195,6 +198,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
             request_id, ["expected-id"], [self._gy_task("unrelated-id", "不可认领名称")]
         )
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["display_title"], "")
         self.assertEqual(download_display_title(row), "磁力任务")
 
@@ -209,7 +213,9 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
                 request_id, _ = self._create_request()
                 tasks = [self._gy_task(task_id, name) for task_id, name in zip(ids, names)]
                 self._track_guangya(request_id, ids, tasks)
-                self.assertEqual(db.get_download_request(request_id)["display_title"], expected)
+                get_download_request_result = db.get_download_request(request_id)
+                assert get_download_request_result is not None
+                self.assertEqual(get_download_request_result["display_title"], expected)
 
     def test_qb_task_name_is_used_only_after_exact_hash_match(self) -> None:
         infohash = "b" * 40
@@ -231,6 +237,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
             db.get_download_request(request_id), [task], [], gy_available=False
         )
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["display_title"], "qB 任务名称")
         self.assertEqual(row["title"], "磁力任务")
 
@@ -238,18 +245,24 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         stale_id, _ = self._create_request()
         stale_snapshot = db.get_download_request(stale_id)
         db.update_download_request(stale_id, error="state advanced")
+        assert stale_snapshot is not None
         self.assertIsNone(apply_download_tracker_update(
             stale_snapshot, display_title="过期观察名称", status="downloading"
         ))
-        self.assertEqual(db.get_download_request(stale_id)["display_title"], "")
+        get_download_request_result_2 = db.get_download_request(stale_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["display_title"], "")
 
         cancelled_id, _ = self._create_request()
         cancelled_snapshot = db.get_download_request(cancelled_id)
         db.update_download_request(cancelled_id, status="cancelled")
+        assert cancelled_snapshot is not None
         self.assertIsNone(apply_download_tracker_update(
             cancelled_snapshot, display_title="取消后的名称", status="downloading"
         ))
-        self.assertEqual(db.get_download_request(cancelled_id)["display_title"], "")
+        get_download_request_result_3 = db.get_download_request(cancelled_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["display_title"], "")
 
     def test_copied_download_input_keeps_known_display_title(self) -> None:
         original = download_dispatcher.DownloadInput(
@@ -262,6 +275,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         self.assertEqual(copied.display_title, original.display_title)
         created = download_dispatcher.create_request(copied, "", "", origin="indexer")
         row = db.get_download_request(created["id"])
+        assert row is not None
         self.assertEqual(row["title"], original.title)
         self.assertEqual(row["display_title"], original.display_title)
 
@@ -301,7 +315,9 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["id"], log_id)
         self.assertEqual(logs[0]["title"], item.display_title)
-        self.assertEqual(db.get_download_request(request_id)["title"], item.title)
+        get_download_request_result_4 = db.get_download_request(request_id)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["title"], item.title)
 
     def test_explicit_failed_retry_inherits_display_without_changing_business_title(self) -> None:
         item = download_dispatcher.DownloadInput(
@@ -321,6 +337,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["ok"], result)
         self.assertNotEqual(result["request_id"], old_id)
         row = db.get_download_request(result["request_id"])
+        assert row is not None
         self.assertEqual((row["title"], row["display_title"]), (item.title, item.display_title))
         self.assertEqual(row["source_value"], item.source_value)
         self.assertEqual(submit.call_args.args[0]["title"], item.title)
@@ -338,7 +355,9 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         with patch("app.modules.telegram_download_lifecycle.get_notification_thread_event", return_value=None):
             event = build_download_lifecycle_event(db.get_download_request(request_id))
         self.assertEqual(dict(event.fields)["媒体"], "通知中的媒体名")
-        self.assertEqual(db.get_download_request(request_id)["notification_delivery_status"], "sent")
+        get_download_request_result_5 = db.get_download_request(request_id)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5["notification_delivery_status"], "sent")
 
     def test_prepared_http_torrent_uses_cached_metadata_without_changing_route_title(self) -> None:
         payload = b"d4:infod6:lengthi1e4:name4:test12:piece lengthi16384e6:pieces20:xxxxxxxxxxxxxxxxxxxxee"

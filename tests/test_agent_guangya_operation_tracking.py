@@ -319,6 +319,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.data["verified"])
         self.assertFalse(result.data["verification_pending"])
         self.assertEqual(result.data["background_job"]["progress"], 1.0)
+        assert result.model_data is not None
         self.assertTrue(result.model_data["verified"])
         self.assertEqual(status.call_count, 2)
         self.assertEqual(sleep.await_count, 1)
@@ -742,6 +743,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             "app.agent.kernel.ports.existing_actions.wait_for_effect_completion",
             new=AsyncMock(side_effect=lambda value, **_kwargs: value),
         ) as wait:
+            assert tool.verify is not None
             result = await tool.verify({}, accepted, context)
 
         self.assertIs(result, accepted)
@@ -800,6 +802,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         verify_done: list[bool] = []
 
         async def run_verify():
+            assert tool.verify is not None
             await tool.verify({}, accepted, context)
             verify_done.append(True)
 
@@ -866,10 +869,12 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             "app.agent.kernel.ports.existing_actions.wait_for_effect_completion",
             new=AsyncMock(return_value=terminal),
         ) as wait:
+            assert tool.verify is not None
             result = await tool.verify({}, accepted, context)
 
         self.assertIs(result, terminal)
         wait.assert_awaited_once()
+        assert wait.await_args is not None
         self.assertEqual(wait.await_args.kwargs["tool"], "guangya.fs.change.execute")
 
     async def test_non_streaming_kernel_verify_returns_submission_without_waiting(
@@ -918,6 +923,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             "app.agent.kernel.ports.existing_actions.wait_for_effect_completion",
             new=AsyncMock(),
         ) as wait:
+            assert tool.verify is not None
             result = await tool.verify({}, accepted, context)
 
         self.assertIs(result, accepted)
@@ -963,6 +969,7 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
             result = await wait_for_effect_completion(accepted, tool='guangya.organize.cleanup.execute', context=ToolContext(owner='owner'))
         self.assertFalse(result.ok)
         self.assertEqual(result.status, 'partial')
+        assert result.error is not None
         self.assertIn('2 项写后状态未核验通过', result.error)
         self.assertIn('请勿直接重复提交', format_public_result(result.to_dict()))
         self.assertNotIn('do-not-expose', str(result.to_dict()))
@@ -977,6 +984,7 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
         with patch('app.agent.domains.guangya.runtime.guangya_organize_status', return_value=snapshot):
             result = await wait_for_effect_completion(accepted, tool='guangya.fs.change.execute', context=ToolContext(owner='owner'))
         self.assertTrue(result.ok)
+        assert result.model_data is not None
         self.assertEqual(result.data['scope_note'], result.model_data['scope_note'])
         text = format_public_result(result.to_dict())
         self.assertIn('改名 6 项', text)
@@ -986,7 +994,9 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
     def test_preflight_and_audit_failure_counts_have_distinct_explanations(self):
         from app.agent.domains.guangya.runtime import _project_guangya_status
         result = _project_guangya_status({'status': 'manual_review', 'stats': {'precondition_failed': 1, 'audit_failures': 2}}, overview={})
+        assert result.error is not None
         self.assertIn('1 项写前核对未通过，后续动作未执行', result.error)
+        assert result.error is not None
         self.assertIn('2 项执行审计未完整保存', result.error)
         success = _project_guangya_status({'status': 'completed', 'stats': {}}, overview={})
         self.assertEqual(success.error, '')
@@ -998,7 +1008,9 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
                 {"position": 1, "operation": "rename", "status": "unknown", "completed_actions": []},
                 {"position": 2, "operation": "rename", "status": "not_started", "completed_actions": []},
             ]}}, overview={})
+        assert result.error is not None
         self.assertIn("已发生的变更以逐项回执为准", result.error)
+        assert result.error is not None
         self.assertNotIn("本次变更未执行", result.error)
 
     def test_task_projection_passes_sanitized_operation_items_and_keeps_legacy_stats(self):
@@ -1246,6 +1258,7 @@ class LocalMediaScanCompletionTests(unittest.IsolatedAsyncioTestCase):
             turn_id=lease.turn_id, lease=lease, cancellation=CancellationToken(),
             report_progress=AsyncMock(), wait_for_completion=True,
         )
+        assert tool.verify is not None
         result = await tool.verify({}, accepted, context)
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.data["stats"]["archived_video_count"], 1)
@@ -1354,7 +1367,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
 
         job = self.create_agent_job()
         claimed = db.claim_due_agent_job(job_type="library_episode_audit")
-        self.assertIsNotNone(claimed)
+        assert (claimed) is not None
         _, outcome = db.cancel_agent_job(owner=self.scope_args["owner"], job_id=job["job_id"])
         self.assertEqual(outcome, "requested")
         result = await self.handoff_agent_job(job, operation="cancel")
@@ -1389,7 +1402,9 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OSError):
                 await self.handoff_agent_job(job)
         poll.assert_not_awaited()
-        self.assertEqual(db.get_agent_job(owner=self.scope_args["owner"], job_id=job["job_id"])["status"], "pending")
+        get_agent_job_result = db.get_agent_job(owner=self.scope_args["owner"], job_id=job["job_id"])
+        assert get_agent_job_result is not None
+        self.assertEqual(get_agent_job_result["status"], "pending")
         self.assertEqual((await self.store.load(**self.scope_args)).metadata.get("effect_waits", {}), {})
         # 提交后跟踪登记失败不能靠重放制造第二份任务；重新确认复用原队列行。
         from app.agent.domains.system.jobs_actions import (
@@ -1599,7 +1614,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         from app.modules.telegram_notification_center import _event_key
         event_key = _event_key("event", "agent", key, "123")
         row = get_notification(event_key)
-        self.assertIsNotNone(row)
+        assert (row) is not None
         self.assertEqual(row["chat_id"], "123")
         self.assertTrue(agent_effect_reply_is_current(event_key))
         self.assertEqual((await self.finish())[0], 0)

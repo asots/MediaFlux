@@ -1,4 +1,7 @@
 """命中即停止的历史查询不能先把整张历史结果取到Python内存。"""
+
+from typing import cast
+from sqlite3 import Connection
 import json
 
 from app import database as db
@@ -58,6 +61,7 @@ class StreamingHistoryQueryTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             observed = ObservedConnection(conn)
             row = knowledge._find_by_normalized(observed, 'release_group', {'g0'})
+            assert row is not None
             self.assertEqual(row['canonical_value'], 'G0')
             self.assertEqual(observed.cursors[0].fetched, 1)
             self.assertTrue(observed.cursors[0].closed)
@@ -67,6 +71,7 @@ class StreamingHistoryQueryTests(IsolatedDatabaseTestCase):
             first = conn.execute('SELECT id FROM recognition_knowledge ORDER BY id LIMIT 1').fetchone()['id']
             observed = ObservedConnection(conn)
             row = knowledge._find_by_normalized(observed, 'release_group', {'g0', 'g1'}, exclude_id=first)
+            assert row is not None
             self.assertEqual(row['canonical_value'], 'G1')
             self.assertEqual(observed.cursors[0].fetched, 2)
             self.assertIsNone(knowledge._find_by_normalized(observed, 'release_group', {'missing'}))
@@ -78,8 +83,9 @@ class StreamingHistoryQueryTests(IsolatedDatabaseTestCase):
             conn.execute("UPDATE local_media_tasks SET content_path='/synthetic//stream/f-1999.mkv' WHERE id=(SELECT MAX(id) FROM local_media_tasks)")
             observed = ObservedConnection(conn)
             row = local_media._latest_terminal_local_media_task_for_path(
-                observed, source_id=self.source_id, owner='admin', content_path='/synthetic/stream/f-1999.mkv',
+                cast(Connection, observed), source_id=self.source_id, owner='admin', content_path='/synthetic/stream/f-1999.mkv',
             )
+            assert row is not None
             self.assertEqual(row['operation_token'], 'token-1999')
             self.assertEqual(observed.cursors[0].fetched, 1)
             self.assertTrue(observed.cursors[0].closed)
@@ -90,7 +96,7 @@ class StreamingHistoryQueryTests(IsolatedDatabaseTestCase):
                 with self.subTest(path=path):
                     observed = ObservedConnection(conn)
                     row = local_media._latest_terminal_local_media_task_for_path(
-                        observed, source_id=self.source_id, owner='admin', content_path=path,
+                        cast(Connection, observed), source_id=self.source_id, owner='admin', content_path=path,
                     )
                     self.assertEqual(row['operation_token'] if row else None, expected)
                     self.assertEqual(observed.cursors[0].fetched, 2000)

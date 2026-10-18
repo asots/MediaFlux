@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+from collections.abc import Callable
+from app.clients.guangya import GuangYaClient
+
 import tempfile
 import unittest
 from copy import deepcopy
@@ -140,7 +144,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
     def test_preview_cleans_domain_pollution_and_preserves_companion_suffix(self):
         client = FakeHygieneClient()
         plan = hygiene.build_media_hygiene_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             path="/NSFW/(spam.example.com)-ABC-123",
             recursive=True,
@@ -171,7 +175,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
             )
         )
         plan = hygiene.build_media_hygiene_plan(
-            client,
+            cast(GuangYaClient, client),
             owner="owner",
             path="/NSFW/(spam.example.com)-ABC-123",
             recursive=True,
@@ -232,7 +236,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
             with self.subTest(source_id=source_id):
                 client = FakeHygieneClient()
                 client.directories["0"].append(GuangYaFile("outside", "outside", True, parent_id="0"))
-                plan = hygiene.build_media_hygiene_plan(client, owner="owner", path="/NSFW/(spam.example.com)-ABC-123", recursive=True, limit=100)
+                plan = hygiene.build_media_hygiene_plan(cast(GuangYaClient, client), owner="owner", path="/NSFW/(spam.example.com)-ABC-123", recursive=True, limit=100)
                 guangya_rename.confirm_rename_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
                 scheduler = mock.Mock()
                 scheduler.trigger.return_value = {"ok": True, "queued": True}
@@ -241,7 +245,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
                       mock.patch.object(guangya_rename.time, "sleep")):
                     result = guangya_rename.execute_rename_plan(
                         {"version": 1, "plan_id": plan["plan_id"], "plan_fingerprint": plan["fingerprint"],
-                         "owner_digest": "owner-digest", "credential_generation": 11}, client_factory=lambda: client)
+                         "owner_digest": "owner-digest", "credential_generation": 11}, client_factory=cast(Callable[[], GuangYaClient], lambda: client))
                 self.assertEqual(result["stats"]["renamed"], 3)
                 self.assertFalse(result["partial"])
                 if expected:
@@ -252,7 +256,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
 
     def test_removed_legacy_mode_cannot_trigger_strm(self):
         client = FakeHygieneClient()
-        plan = hygiene.build_media_hygiene_plan(client, owner="owner", path="/NSFW/(spam.example.com)-ABC-123", recursive=True, limit=100)
+        plan = hygiene.build_media_hygiene_plan(cast(GuangYaClient, client), owner="owner", path="/NSFW/(spam.example.com)-ABC-123", recursive=True, limit=100)
         guangya_rename.confirm_rename_plan(plan["plan_id"], owner="owner", expected_fingerprint=plan["fingerprint"])
         stored = guangya_rename.load_rename_plan(plan["plan_id"], require_confirmed=True)
         stored["mode"] = "declarative"
@@ -265,7 +269,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
     def test_terminal_private_plan_is_removed_after_retention(self):
         client = FakeHygieneClient()
         plan = hygiene.build_media_hygiene_plan(
-            client, owner="owner", path="/NSFW/(spam.example.com)-ABC-123", limit=100
+            cast(GuangYaClient, client), owner="owner", path="/NSFW/(spam.example.com)-ABC-123", limit=100
         )
         guangya_rename.update_rename_plan_execution(
             plan["plan_id"], status="completed", execution={"renamed": 3}

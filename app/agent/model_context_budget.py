@@ -34,7 +34,7 @@ def conservative_tokens(value: object) -> int:
 
 def decode_tool_content(content: str) -> dict[str, Any]:
     """读取规范 JSON；只在恢复旧历史时迁移旧的多行引用附录。"""
-    text = str(content or "")
+    text = (content or "")
     body, separator, suffix = text.partition("\nopaque_refs=")
     if text.startswith("opaque_refs="):
         body, separator, suffix = "{}", "legacy", text.removeprefix("opaque_refs=")
@@ -297,7 +297,12 @@ def compact_tool_content(
         if page is not None and len(source) > RESULT_PATH_MAX:
             fail_budget()
         retained = max(minimum_string if isinstance(value, str) else 1, len(value) // 2)
-        parent[key] = dict(list(value.items())[:retained]) if isinstance(value, dict) else value[:retained]
+        replacement = dict(list(value.items())[:retained]) if isinstance(value, dict) else value[:retained]
+        if isinstance(parent, list):
+            assert isinstance(key, int)
+            parent[key] = replacement
+        else:
+            parent[key] = replacement
         previous = omitted.get(source, {})
         omitted[source] = record(source, retained, subtree=previous.get("scope") == "subtree")
         encoded = encode()
@@ -366,7 +371,7 @@ def _native_history(messages: Sequence[Any], *, reserved_ids: set[str] | None = 
 
 def protocol_history_groups(messages: Sequence[Any], *, history_end: int):
     """Select whole user groups by native identity only, before any budget loss."""
-    split_at = max(0, min(int(history_end), len(messages)))
+    split_at = max(0, min(history_end, len(messages)))
     history = list(messages[:split_at])
     current = list(messages[split_at:])
     current_counts = Counter(call.call_id for message in current for call in message.tool_calls)
@@ -422,10 +427,10 @@ def bounded_model_messages(
     estimate = conservative_tokens if conservative else estimated_tokens
     message_budget = max(
         0,
-        int(context_window_tokens)
+        context_window_tokens
         - estimate(system_prompt)
         - estimate(tool_definitions)
-        - int(output_tokens)
+        - output_tokens
         - 512,
     )
 

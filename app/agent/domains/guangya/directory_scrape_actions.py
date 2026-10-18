@@ -18,6 +18,7 @@ from app.agent.public_safety import sanitize_public_text
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
+    PersistedAgentContext,
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.directory_scrape import get_directory_scrape_service
@@ -105,7 +106,7 @@ def _preview_safe_payload(value: Any) -> dict[str, Any] | None:
     candidate_number = value.get("candidate_number")
     if isinstance(candidate_number, bool) or not isinstance(candidate_number, int):
         return None
-    result = {
+    result: dict[str, Any] = {
         "candidate_number": candidate_number,
         "candidate_title": sanitize_public_text(
             value.get("candidate_title"), limit=160
@@ -120,7 +121,7 @@ def _preview_safe_payload(value: Any) -> dict[str, Any] | None:
     if not isinstance(raw_actions, dict):
         return None
     result["actions"] = {
-        str(action): max(0, int(count or 0))
+        str(action): max(0, (count or 0))
         for action, count in raw_actions.items()
         if str(action) in _SAFE_PLAN_ACTIONS | {"other"}
         and isinstance(count, int)
@@ -287,7 +288,7 @@ def _flow_from_payload(
     ):
         return None
     return _Flow(
-        owner=str(owner),
+        owner=owner,
         scope_type=scope_type,
         scope_id=scope_id,
         inspection_id=inspection_id,
@@ -297,8 +298,8 @@ def _flow_from_payload(
         selected_candidate=selected,
         preview_arguments=preview_arguments,
         updated_at=time.monotonic(),
-        generation=max(0, int(generation or 0)),
-        revision=max(0, int(revision or 0)),
+        generation=max(0, (generation or 0)),
+        revision=max(0, (revision or 0)),
     )
 
 
@@ -402,7 +403,7 @@ def directory_scrape_preview_arguments(arguments: dict[str, Any]) -> dict[str, A
         or not 1 <= candidate <= 10
     ):
         raise AgentToolError("candidate_number 必须是 1 到 10 的整数")
-    result: dict[str, Any] = {"candidate_number": int(candidate)}
+    result: dict[str, Any] = {"candidate_number": candidate}
     if "season" in arguments:
         season = arguments["season"]
         if (
@@ -411,7 +412,7 @@ def directory_scrape_preview_arguments(arguments: dict[str, Any]) -> dict[str, A
             or not 0 <= season <= 99
         ):
             raise AgentToolError("season 必须是 0 到 99 的整数")
-        result["season"] = int(season)
+        result["season"] = season
     if "episode" in arguments:
         episode = arguments["episode"]
         if (
@@ -420,7 +421,7 @@ def directory_scrape_preview_arguments(arguments: dict[str, Any]) -> dict[str, A
             or not 1 <= episode <= 999
         ):
             raise AgentToolError("episode 必须是 1 到 999 的整数")
-        result["episode"] = int(episode)
+        result["episode"] = episode
     mode = str(arguments.get("numbering_mode") or "auto").strip().casefold()
     if mode not in _ALLOWED_NUMBERING:
         raise AgentToolError("numbering_mode 无效")
@@ -555,7 +556,7 @@ class DirectoryScrapeActions:
         owner: str,
         delete_persisted: bool = True,
     ) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return False
         with self._lock:
@@ -576,7 +577,7 @@ class DirectoryScrapeActions:
         return removed
 
     def _flow(self, owner: str) -> _Flow | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return None
         if self._repository is not None:
@@ -624,7 +625,7 @@ class DirectoryScrapeActions:
     def _begin_flow(self, owner: str) -> AgentContextWriteGuard:
         if self._repository is None:
             return AgentContextWriteGuard(generation=0, revision=0)
-        begin = getattr(self._repository, "begin_context", None)
+        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
         if not callable(begin):
             return AgentContextWriteGuard(generation=0, revision=0)
         return begin(owner=owner, context_type=_CONTEXT_TYPE)
@@ -633,7 +634,7 @@ class DirectoryScrapeActions:
         item.updated_at = time.monotonic()
         if self._repository is not None:
             try:
-                guarded = getattr(self._repository, "replace_latest_guarded", None)
+                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
                 if callable(guarded):
                     if item.generation <= 0:
                         with self._lock:
@@ -788,7 +789,7 @@ class DirectoryScrapeActions:
                 finally:
                     client.close()
                 resolved_arguments = {
-                    "directory_id" if target.is_dir else "file_id": str(target.file_id)
+                    "directory_id" if target.is_dir else "file_id": (target.file_id)
                 }
             payload = (
                 service.inspect(context.owner, resolved_arguments["directory_id"])
@@ -1084,7 +1085,7 @@ class DirectoryScrapeActions:
         try:
             service = get_directory_scrape_service()
             record = self._ensure_preview_for_run(service, context.owner, flow)
-            if _run_fingerprint(flow, record) != str(expected_context or ""):
+            if _run_fingerprint(flow, record) != (expected_context or ""):
                 raise AgentToolError(
                     "刮削预览已变化，请重新预检", code="confirmation_stale"
                 )
@@ -1108,7 +1109,7 @@ class DirectoryScrapeActions:
                 payload={
                     "version": 1,
                     "execution_owner": execution_owner,
-                    "expected_context": str(expected_context or "").strip().casefold(),
+                    "expected_context": (expected_context or "").strip().casefold(),
                     "flow": _durable_flow_payload(flow),
                 },
                 dedupe_key=f"agent-directory-scrape:{context.owner}:{expected_context}",

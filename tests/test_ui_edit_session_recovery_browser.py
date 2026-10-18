@@ -87,6 +87,7 @@ def candidate(tmdb_id):
 class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = _chromium_executable(cls.playwright)
         if executable is None:
@@ -234,6 +235,7 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
                 )
                 return
             if path == SCRAPE + "/inspect":
+                assert body is not None
                 route.fulfill(
                     json=inspection(body.get("directory_id", body.get("file_id")))
                 )
@@ -242,6 +244,7 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
                 route.fulfill(json={"candidates": [candidate(101), candidate(202)]})
                 return
             if path == SCRAPE + "/preview":
+                assert body is not None
                 route.fulfill(
                     json=dict(
                         preview_id=f"{body['inspection_id']}-{body['tmdb_id']}",
@@ -523,12 +526,15 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
         self.assertTrue(metrics)
         self.assertTrue(all(item["font"] >= 16 and item["height"] >= 44 for item in metrics), metrics)
         close = page.locator("#mediaSubModal .rss-modal-header .icon-btn").bounding_box()
+        assert close is not None
         self.assertGreaterEqual(close["width"], 44)
         self.assertGreaterEqual(close["height"], 44)
         save = page.locator("#mediaSubSaveBtn")
         save.scroll_into_view_if_needed()
         before = save.bounding_box()
+        assert before is not None
         self.assertGreaterEqual(before["height"], 44)
+        assert page.viewport_size is not None
         self.assertLessEqual(before["y"] + before["height"], page.viewport_size["height"])
         self.save_held(1, payload={"error": "当前保存失败"}, status=500)
         self.assertEqual(before, save.bounding_box())
@@ -546,7 +552,9 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
         page = self.make_page("rss", 1280)
         self.edit(1)
         self.assertEqual(page.locator("#ms_sites").evaluate("el => getComputedStyle(el).fontSize"), "14px")
-        self.assertEqual(page.locator("#mediaSubSaveBtn").bounding_box()["height"], 42)
+        bounding_box_result = page.locator("#mediaSubSaveBtn").bounding_box()
+        assert bounding_box_result is not None
+        self.assertEqual(bounding_box_result["height"], 42)
 
     def test_media_current_failure_keeps_input_and_can_retry_successfully(self):
         page = self.make_page("rss")

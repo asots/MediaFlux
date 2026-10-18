@@ -1,6 +1,7 @@
 """Agent 第10批：持久确认、链路追踪、异常脱敏与指标。"""
 
 from __future__ import annotations
+from typing import cast
 
 import json
 import threading
@@ -48,7 +49,7 @@ class SQLiteConfirmationStoreTests(IsolatedDatabaseTestCase):
 
         with self.assertRaises(AgentToolError) as invalid:
             store.claim_and_rotate_owner(
-                owner="owner-a", confirmation_id=StringLikePlanId()
+                owner="owner-a", confirmation_id=cast(str, StringLikePlanId())
             )
         self.assertEqual(invalid.exception.code, "confirmation_invalid")
         self.assertEqual(
@@ -98,7 +99,7 @@ class SQLiteConfirmationStoreTests(IsolatedDatabaseTestCase):
                 "SELECT owner_digest FROM agent_confirmations WHERE confirmation_id=?",
                 (ticket.confirmation_id,),
             ).fetchone()
-        self.assertIsNotNone(row)
+        assert (row) is not None
         self.assertNotEqual(row["owner_digest"], "owner-a")
         self.assertRegex(str(row["owner_digest"]), "^[0-9a-f]{64}$")
         claimed = SQLiteConfirmationStore().claim_and_rotate_owner(
@@ -215,7 +216,7 @@ class SQLiteConfirmationStoreTests(IsolatedDatabaseTestCase):
                 "SELECT safe_details FROM agent_action_history WHERE confirmation_id=?",
                 (f"{ticket.confirmation_id}-{ticket.owner_generation}",),
             ).fetchone()
-        self.assertIsNotNone(row)
+        assert (row) is not None
         self.assertEqual(json.loads(str(row["safe_details"])), {"plan_ref": plan_ref})
 
     def test_concurrent_claim_is_atomic_across_store_instances(self) -> None:

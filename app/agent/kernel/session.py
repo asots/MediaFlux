@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import secrets
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -144,7 +144,7 @@ class AgentSession:
         self.coordinator = coordinator or TurnCoordinator()
         self.journal = journal
         self.limits = limits or SessionLimits()
-        self.system_prompt = str(system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
+        self.system_prompt = (system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
         self.stream_display = stream_display
         self.turn_admission = turn_admission or AllowAllTurnAdmission()
         self.model_selector = model_selector
@@ -156,7 +156,7 @@ class AgentSession:
         # 其它入口的普通轮次继续遵循各自的消费者取消约定。
         self._detached_tasks: set[asyncio.Task[None]] = set()
 
-    async def run(self, agent_input: AgentInput) -> AsyncIterator[AgentEvent]:
+    async def run(self, agent_input: AgentInput) -> AsyncGenerator[AgentEvent, None]:
         """Web轮次独立于页面存活，其它入口维持原消费者取消约定。"""
         async with aclosing(self._run_background(
             lambda queue: AgentTurn(self, agent_input, queue).run(),
@@ -212,7 +212,7 @@ class AgentSession:
     async def explain(
         self, *, owner: str, session_id: str, plan_id: str, message: str,
         request_id: str = "", channel: str = "api", delivery_route: Mapping[str, Any] | None = None,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         agent_input = AgentInput(message=message, owner=owner, session_id=session_id,
                                  request_id=request_id, channel=channel, delivery_route=delivery_route or {})
         async with aclosing(self._run_background(
@@ -231,12 +231,12 @@ class AgentSession:
         request_id: str = "",
         channel: str = "api",
         delivery_route: Mapping[str, Any] | None = None,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         async with aclosing(self._run_background(
             lambda queue: AgentTurn(self,
                 AgentInput(message="继续已确认任务", owner=owner, session_id=session_id,
                            request_id=request_id, channel=channel, delivery_route=delivery_route or {}),
-                queue, plan_id=str(plan_id or "").strip(),
+                queue, plan_id=(plan_id or "").strip(),
             ).run(),
             cancel_on_consumer_close=False,
         )) as events:
@@ -244,8 +244,8 @@ class AgentSession:
                 yield event
 
     async def cancel(self, *, owner: str, session_id: str, request_id: str = "") -> bool:
-        owner, session_id = str(owner or "").strip(), str(session_id or "").strip()
-        request_id = str(request_id or "").strip()
+        owner, session_id = (owner or "").strip(), (session_id or "").strip()
+        request_id = (request_id or "").strip()
         try:
             durable = await self.state_store.cancel_publication(
                 owner=owner, session_id=session_id, request_id=request_id,
@@ -340,7 +340,7 @@ class AgentSession:
         producer: Callable[[asyncio.Queue[AgentEvent | None]], Awaitable[None]],
         *,
         cancel_on_consumer_close: bool = True,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         queue: asyncio.Queue[AgentEvent | None] = asyncio.Queue()
         async def drive_to_completion() -> None:
             try:

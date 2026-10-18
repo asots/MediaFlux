@@ -92,7 +92,7 @@ def trigger_patrol_now_confirmed(
     _arguments: dict[str, Any], expected_context: str
 ) -> ToolResult:
     current = _capture()
-    if current["fingerprint"] != str(expected_context or ""):
+    if current["fingerprint"] != (expected_context or ""):
         raise AgentToolError(
             "巡检策略或任务状态已变化，请重新预检", code="confirmation_stale"
         )

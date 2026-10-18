@@ -1,9 +1,12 @@
 from __future__ import annotations
+from app.agent.kernel.effects import EffectPlanStore
+from typing import cast
 
 import asyncio
 import json
 import types
 import unittest
+import unittest.mock
 from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
@@ -185,7 +188,7 @@ class AgentKernelApiTests(unittest.TestCase):
         from app.agent.kernel.pipeline import ToolPipeline
         self.runtime.session.pipeline = ToolPipeline(
             catalog=ToolCatalog([]), state_store=self.runtime.store,
-            effect_store=self.lifecycle.effect_store,
+            effect_store=cast(EffectPlanStore | None, self.lifecycle.effect_store),
         )
         self.patches = [
             patch.object(agent_kernel_api, "require_api_login", return_value=None),
@@ -833,6 +836,7 @@ class AgentKernelApiTests(unittest.TestCase):
             )
 
         result = asyncio.run(execute_preview())
+        assert result.effect_plan is not None
         restored = effect_store.get_active_plan(
             owner="owner-pipeline",
             session_id="session-pipeline",
@@ -841,6 +845,7 @@ class AgentKernelApiTests(unittest.TestCase):
         )
         self.assertEqual(result.outcome.public_content["summary"], "公开预检摘要")
         self.assertNotEqual(result.outcome.public_content, preview)
+        assert restored is not None
         self.assertEqual(restored.public_result, result.outcome.public_content)
         self.assertEqual(restored.preview, preview)
 
@@ -894,6 +899,7 @@ class AgentKernelApiTests(unittest.TestCase):
                             session_id=session_id,
                             request_id=f"generation-{index + 1}",
                         )
+                    assert lease is not None
                     await state_store.commit(
                         lease,
                         conversation=[
@@ -940,16 +946,16 @@ class AgentKernelApiTests(unittest.TestCase):
                 self.runtime.store = SQLiteKernelStore(
                     secret_provider=lambda: "test-kernel-secret"
                 )
-                self.lifecycle.effect_store = ConfirmationEffectPlanStore(
+                self.enterContext(patch.object(self.lifecycle, "effect_store", ConfirmationEffectPlanStore(
                     SQLiteConfirmationStore()
-                )
+                )))
                 self.runtime.session.pipeline.state_store = self.runtime.store
                 self.runtime.session.pipeline.effect_store = self.lifecycle.effect_store
                 response = self.client.get(f"/api/agent/sessions/{session_id}")
 
         self.assertEqual(response.status_code, 200, response.text)
         approval = response.json()["pending_approval"]
-        self.assertIsNotNone(approval)
+        assert (approval) is not None
         self.assertEqual(approval["plan_id"], plan.plan_id)
         self.assertEqual(approval["tool_name"], "cloud.archive")
         self.assertEqual(approval["preview"], preview)
@@ -1001,7 +1007,7 @@ class AgentKernelApiTests(unittest.TestCase):
                     generation=3,
                     plan_id=legacy_ticket.confirmation_id,
                 )
-                self.assertIsNotNone(legacy)
+                assert (legacy) is not None
                 self.assertEqual(legacy.public_result, {})
                 self.assertEqual(legacy.public_approval_dict()["confirmation"], {})
                 self.assertEqual(
@@ -1040,7 +1046,7 @@ class AgentKernelApiTests(unittest.TestCase):
                     generation=8,
                     plan_id=plan.plan_id,
                 )
-                self.assertIsNotNone(restored)
+                assert (restored) is not None
                 self.assertEqual(restored.public_result, public_result)
                 self.assertEqual(restored.preview, preview)
                 self.assertEqual(restored.public_approval_dict()["confirmation"], confirmation)

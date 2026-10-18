@@ -33,7 +33,7 @@ def list_staging_cleanup_requests(*, source_id: str = '', limit: int = 1000,
     params: list[object] = []
     if source_id:
         where += ' AND gy_target_dir=?'
-        params.append(str(source_id))
+        params.append(source_id)
     elif not active_only:
         where += " AND COALESCE(gy_staging_cleanup_status,'')!='completed'"
     if active_only:
@@ -47,14 +47,15 @@ def list_staging_cleanup_requests(*, source_id: str = '', limit: int = 1000,
             "AND CASE WHEN json_valid(c.payload_json) THEN "
             "CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT) END=download_requests.gy_target_dir))))"
         )
-    params.append(max(1, min(int(limit), 1000)) + 1)
+    fetch_limit = max(1, min(limit, 1000)) + 1
+    params.append(fetch_limit)
     with (nullcontext(conn) if conn is not None else db.get_conn()) as connection:
         if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='download_requests'").fetchone() is None:
             return []  # 与全局staging保护查询保持初始化前的兼容行为。
         rows = connection.execute(
             f'SELECT {_COLUMNS} FROM download_requests WHERE {where} ORDER BY id LIMIT ?', params
         ).fetchall()
-    if len(rows) > int(params[-1]) - 1:
+    if len(rows) > fetch_limit - 1:
         raise RuntimeError('待复核下载目录超过安全上限，请缩小清理范围')
     return [dict(row) for row in rows]
 
@@ -84,7 +85,7 @@ def unresolved_staging_confirmations(source_id: str) -> int:
             "WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id) AND "
             "CASE WHEN json_valid(c.payload_json) THEN "
             "CAST(COALESCE(json_extract(c.payload_json,'$.source_dir_id'),'') AS TEXT)=? "
-            "ELSE c.status NOT IN ('completed','cancelled','expired') END", (str(source_id),),
+            "ELSE c.status NOT IN ('completed','cancelled','expired') END", (source_id,),
         ).fetchall()
     return sum(
         _unsafe_confirmation_stats(row['result_json']) if row['status'] == 'completed'
@@ -101,7 +102,7 @@ def is_current_staging_confirmation(confirmation_id: int, source_id: str, *, con
             "AND CASE WHEN json_valid(c.payload_json) THEN "
             "CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT)=? ELSE 0 END "
             "AND NOT EXISTS (SELECT 1 FROM organize_confirmations newer "
-            "WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id)", (int(confirmation_id), str(source_id)),
+            "WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id)", (confirmation_id, source_id),
         ).fetchone()
     return row is not None and row['status'] == 'completed' and not _unsafe_confirmation_stats(row['result_json'])
 
@@ -208,7 +209,7 @@ def update_staging_cleanup(expected: dict, *, status: str, error: str = '') -> b
             "AND COALESCE(organize_status,'') NOT IN ('resubmitted','cleared','failed','stopped') "
             "AND COALESCE(attention_cleared_at,'')='' "
             "AND COALESCE(gy_staging_cleanup_status,'')=? AND " + where,
-            [status, str(error or '')[:500], db.now(), int(expected['id']),
+            [status, (error or '')[:500], db.now(), int(expected['id']),
              str(expected.get('gy_staging_cleanup_status') or ''),
              *(str(expected.get(key) or '') for key in _IDENTITY_KEYS)],
         )
@@ -223,7 +224,7 @@ def staging_confirmation_summary(source_id: str, *, conn=None) -> dict[str, int]
             f"WHERE NOT {_RELOCATED_CONFIRMATION_SQL} AND json_valid(c.payload_json) "
             "AND CAST(json_extract(c.payload_json,'$.source_dir_id') AS TEXT)=? "
             "AND NOT EXISTS (SELECT 1 FROM organize_confirmations newer "
-            "WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id)", (str(source_id),),
+            "WHERE newer.fingerprint=c.fingerprint AND newer.id>c.id)", (source_id,),
         ).fetchall()
     result = {'total': len(rows), 'completed': 0, 'pending': 0, 'failed': 0}
     for row in rows:
@@ -366,6 +367,6 @@ def mark_staging_waiting_confirmation(request_id: int, task_id: str, count: int)
             "UPDATE download_requests SET organize_status='requires_manual',organize_error=?,"
             "organize_finished_at=NULL,updated_at=? WHERE id=? AND organize_task_id=? "
             "AND gy_status='completed' AND status NOT IN ('cancelled','resubmitted','failed')",
-            (f'仍有 {max(1, int(count))} 项媒体等待人工确认', db.now(), int(request_id), str(task_id)),
+            (f'仍有 {max(1, count)} 项媒体等待人工确认', db.now(), request_id, task_id),
         )
     return cur.rowcount == 1

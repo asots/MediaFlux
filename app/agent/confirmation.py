@@ -45,7 +45,6 @@ def confirmation_context_fingerprint(value: Any, *, domain: str) -> str:
         ValueError,
         OverflowError,
         RecursionError,
-        UnicodeError,
     ) as exc:
         raise ValueError("确认上下文无法稳定序列化") from exc
     message = (
@@ -167,7 +166,7 @@ def _snapshot_json_object(
         # 任何容量淘汰或 owner epoch 变更之前。
         encoded.encode("utf-8")
         decoded = json.loads(encoded, parse_constant=_reject_json_constant)
-    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError) as exc:
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise AgentToolError(
             "确认请求内容无效，请重新生成确认请求",
             code="confirmation_invalid",
@@ -226,8 +225,8 @@ class ConfirmationStore:
         clock: Callable[[], float] = time.monotonic,
         token_factory: Callable[[], str] | None = None,
     ) -> None:
-        self.ttl_seconds = max(1, int(ttl_seconds))
-        self.max_entries = max(1, int(max_entries))
+        self.ttl_seconds = max(1, ttl_seconds)
+        self.max_entries = max(1, max_entries)
         self._clock = clock
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(24))
         self._lock = threading.RLock()
@@ -256,12 +255,12 @@ class ConfirmationStore:
         replace_active_ticket: bool = False,
         deadline: float | None = None,
     ) -> ConfirmationTicket:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             raise AgentToolError(
                 "当前会话无法创建确认请求", code="confirmation_invalid"
             )
-        normalized_tool_name = str(tool_name or "").strip()
+        normalized_tool_name = (tool_name or "").strip()
         if not normalized_tool_name:
             raise AgentToolError(
                 "确认请求内容无效，请重新生成确认请求",
@@ -332,7 +331,7 @@ class ConfirmationStore:
                 owner=owner_key,
                 tool_name=normalized_tool_name,
                 arguments=normalized_arguments,
-                context_fingerprint=str(context_fingerprint or ""),
+                context_fingerprint=(context_fingerprint or ""),
                 expires_at=expires_at,
                 owner_generation=owner_generation,
                 followup_context=normalized_followup,
@@ -343,7 +342,7 @@ class ConfirmationStore:
 
     def ticket_owner_match(self, *, owner: str, confirmation_id: str) -> bool | None:
         """判断有效票据是否属于 owner；不存在/过期返回 ``None``，且不消费。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
         if not owner_key or not ticket_id:
             return None
@@ -360,7 +359,7 @@ class ConfirmationStore:
 
     def inspect_ticket(self, *, owner: str, confirmation_id: str) -> ConfirmationTicket | None:
         """读取未消费/撤销的原票据证据；过期证据不出现在有效卡列表中。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
         with self._lock:
             self._prune_locked(self._clock())
@@ -381,7 +380,7 @@ class ConfirmationStore:
         execution_owner: str = "",
     ) -> ConfirmationTicket:
         """原子领取一张票据并推进 owner epoch，撤销同会话其余票据。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
         with self._lock:
             now = self._clock()
@@ -413,7 +412,7 @@ class ConfirmationStore:
                 except ValueError:
                     default_risk = RiskLevel.WRITE
                 record_confirmation_claimed(
-                    owner=str(execution_owner or "").strip() or owner_key,
+                    owner=(execution_owner or "").strip() or owner_key,
                     confirmation_id=ticket.confirmation_id,
                     owner_generation=ticket.owner_generation,
                     tool_name=ticket.tool_name,
@@ -439,7 +438,7 @@ class ConfirmationStore:
 
     def list_active_tickets(self, *, owner: str) -> list[ConfirmationTicket]:
         """返回 owner 当前世代的有效票据快照，不消费票据。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return []
         now = self._clock()
@@ -462,7 +461,7 @@ class ConfirmationStore:
 
     def discard(self, *, owner: str, confirmation_id: str) -> bool:
         """撤销属于指定会话且尚未消费的确认票据。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
         now = self._clock()
         with self._lock:
@@ -481,7 +480,7 @@ class ConfirmationStore:
         self, *, owner: str, preserve_active: bool = False
     ) -> tuple[int, int]:
         """推进 owner epoch。默认撤销票据；查询抢占时可保留当前有效票据。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             raise AgentToolError(
                 "当前会话无法创建确认请求", code="confirmation_invalid"
@@ -509,14 +508,14 @@ class ConfirmationStore:
 
     def revoke_owner(self, *, owner: str) -> int:
         """撤销某个会话仍然有效的全部确认票据。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return 0
         revoked, _generation = self.rotate_owner(owner=owner_key)
         return revoked
 
     def owner_generation(self, *, owner: str) -> int:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             raise AgentToolError(
                 "当前会话无法创建确认请求", code="confirmation_invalid"
@@ -605,8 +604,8 @@ class SQLiteConfirmationStore(ConfirmationStore):
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
     ) -> None:
-        self.ttl_seconds = max(1, int(ttl_seconds))
-        self.max_entries = max(1, int(max_entries))
+        self.ttl_seconds = max(1, ttl_seconds)
+        self.max_entries = max(1, max_entries)
         self._clock = clock
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(24))
 
@@ -639,7 +638,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
         try:
             value.encode("utf-8")
             decoded = json.loads(value, parse_constant=_reject_json_constant)
-        except (TypeError, ValueError, RecursionError, UnicodeError) as exc:
+        except (TypeError, ValueError, RecursionError) as exc:
             raise AgentToolError(
                 "确认请求内容无效，请重新生成确认请求",
                 code="confirmation_invalid",
@@ -711,12 +710,12 @@ class SQLiteConfirmationStore(ConfirmationStore):
 
         from app import database as db
 
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             raise AgentToolError(
                 "当前会话无法创建确认请求", code="confirmation_invalid"
             )
-        normalized_tool_name = str(tool_name or "").strip()
+        normalized_tool_name = (tool_name or "").strip()
         if not normalized_tool_name:
             raise AgentToolError(
                 "确认请求内容无效，请重新生成确认请求",
@@ -802,7 +801,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
                             owner_digest,
                             normalized_tool_name,
                             arguments_json,
-                            str(context_fingerprint or ""),
+                            (context_fingerprint or ""),
                             expires_at,
                             owner_generation,
                             followup_json,
@@ -830,7 +829,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
             owner=owner_key,
             tool_name=normalized_tool_name,
             arguments=normalized_arguments,
-            context_fingerprint=str(context_fingerprint or ""),
+            context_fingerprint=(context_fingerprint or ""),
             expires_at=expires_at,
             owner_generation=owner_generation,
             followup_context=normalized_followup,
@@ -841,7 +840,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
         """跨 Worker 判断有效票据归属，不读取动作内容也不消费票据。"""
         from app import database as db
 
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
         if not owner_key or not ticket_id:
             return None
@@ -881,7 +880,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
         """跨 Worker 读取原票据证据；保留原截止，不恢复写权限。"""
         from app import database as db
 
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
         if not owner_key or not ticket_id:
             return None
@@ -914,7 +913,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
         """在同一 SQLite 事务中领取票据、推进 epoch 并撤销同 owner 票据。"""
         from app import database as db
 
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
         if not owner_key or not ticket_id:
             raise AgentToolError("确认请求无效或已过期", code="confirmation_invalid")
@@ -945,14 +944,11 @@ class SQLiteConfirmationStore(ConfirmationStore):
                 epoch_generation = _stored_owner_generation(epoch["generation"])
             except (AgentToolError, TypeError, ValueError, OverflowError):
                 invalid_payload = True
-            if (
-                not invalid_payload
-                and claimed_ticket is not None
-                and claimed_ticket.owner_generation != epoch_generation
-            ):
-                raise AgentToolError(
-                    "确认请求无效或已过期", code="confirmation_invalid"
-                )
+            else:
+                if claimed_ticket.owner_generation != epoch_generation:
+                    raise AgentToolError(
+                        "确认请求无效或已过期", code="confirmation_invalid"
+                    )
             expired = claimed_ticket is not None and claimed_ticket.expires_at <= now
             if record_execution and claimed_ticket is not None and not invalid_payload and not expired:
                 from app.agent.action_history import record_confirmation_claimed
@@ -965,7 +961,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
                 except ValueError:
                     default_risk = RiskLevel.WRITE
                 record_confirmation_claimed(
-                    owner=str(execution_owner or "").strip() or owner_key,
+                    owner=(execution_owner or "").strip() or owner_key,
                     confirmation_id=claimed_ticket.confirmation_id,
                     owner_generation=claimed_ticket.owner_generation,
                     tool_name=tool_name,
@@ -1008,7 +1004,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
         """跨 Worker 查询 owner 当前世代的有效票据快照。"""
         from app import database as db
 
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return []
         owner_digest = self._owner_digest(owner_key)
@@ -1067,7 +1063,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
     def discard(self, *, owner: str, confirmation_id: str) -> bool:
         from app import database as db
 
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         ticket_id = normalize_action_plan_id(confirmation_id)
         if not owner_key or not ticket_id:
             return False
@@ -1087,7 +1083,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
     ) -> tuple[int, int]:
         from app import database as db
 
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             raise AgentToolError(
                 "当前会话无法创建确认请求", code="confirmation_invalid"
@@ -1105,7 +1101,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
             )
 
     def revoke_owner(self, *, owner: str) -> int:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return 0
         revoked, _generation = self.rotate_owner(owner=owner_key)
@@ -1114,7 +1110,7 @@ class SQLiteConfirmationStore(ConfirmationStore):
     def owner_generation(self, *, owner: str) -> int:
         from app import database as db
 
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             raise AgentToolError(
                 "当前会话无法创建确认请求", code="confirmation_invalid"

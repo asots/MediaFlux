@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from app import database as db
@@ -55,6 +55,7 @@ class MediaAdmissionTransactionBoundaryTests(unittest.TestCase):
             episode=episode,
             subscription_revision=1,
         )
+        assert admission is not None
         self.assertTrue(
             db.begin_media_download_dispatch(
                 admission, subscription_id=self.subscription, subscription_revision=1
@@ -66,6 +67,7 @@ class MediaAdmissionTransactionBoundaryTests(unittest.TestCase):
             )
         else:
             request = existing_request
+            assert admission is not None
             self.assertTrue(
                 db.bind_media_download_admission_request(admission, request)
             )
@@ -158,7 +160,9 @@ class MediaAdmissionTransactionBoundaryTests(unittest.TestCase):
                         newer = new_pool.submit(new_writer)
                         self.assertGreaterEqual(older.result(timeout=10), 1)
                         self.assertEqual(newer.result(timeout=10), 1)
-                self.assertEqual(db.get_download_request(request)["error"], new_reason)
+                get_download_request_result = db.get_download_request(request)
+                assert get_download_request_result is not None
+                self.assertEqual(get_download_request_result["error"], new_reason)
                 result = self.admission(admission)
                 self.assertEqual(result["status"], "processing")
                 self.assertEqual(result["error"], new_reason)
@@ -201,6 +205,7 @@ class MediaAdmissionTransactionBoundaryTests(unittest.TestCase):
         request, first = self.seed(1)
         _, second = self.seed(2, existing_request=request)
         _, terminal = self.seed(3, existing_request=request)
+        assert terminal is not None
         db.update_media_download_admission(
             terminal, status="cancelled", error="用户已取消"
         )
@@ -276,6 +281,7 @@ class MediaAdmissionTransactionBoundaryTests(unittest.TestCase):
     def test_exit_mid_bulk_publish_rolls_back_and_zip_can_replay_once(self):
         import subprocess
         import sys
+
         from app.modules import backup
         from tests.test_ten_pass_process_restore_audit import runtime_paths
 

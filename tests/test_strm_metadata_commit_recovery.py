@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from app.clients.guangya import GuangYaClient
+from typing import cast
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,7 +27,7 @@ class StrmMetadataCommitRecoveryTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.remote = GuangYaFile("meta", "Movie.nfo", False, 8, "m1", "source")
         self.client = _TreeClient({"source": [self.remote]})
-        self.job = {
+        self.job: dict[str, Any] = {
             "source_id": "source",
             "source_name": "整理",
             "file_id": self.remote.file_id,
@@ -35,7 +40,7 @@ class StrmMetadataCommitRecoveryTests(unittest.TestCase):
         }
         self.target = self.root / STRM_SUBDIR / "Movie" / "Movie.nfo"
         self.worker = STRMMetadataWorker()
-        self.worker._client = self.client
+        self.worker._client = cast(GuangYaClient, self.client)
         self.enterContext(
             patch("app.modules.strm_metadata_worker.get_bool", return_value=True)
         )

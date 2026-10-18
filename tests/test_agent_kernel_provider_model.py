@@ -1,8 +1,11 @@
 from __future__ import annotations
+from typing import Callable
+from app.clients.http import FixedHostHttpClient
+from typing import cast
 
 import json
 import unittest
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import patch
@@ -20,7 +23,7 @@ from app.agent.kernel.state_types import CancellationToken
 from app.clients.openai_compatible import ProviderStreamError, iter_provider_text_deltas
 
 
-async def chunks(events: list[dict | str], *, split: int = 0) -> AsyncIterator[bytes]:
+async def chunks(events: Sequence[dict[str, Any] | str], *, split: int = 0) -> AsyncIterator[bytes]:
     payload = "".join(
         f"data: {item if isinstance(item, str) else json.dumps(item)}\n\n"
         for item in events
@@ -74,7 +77,7 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
         for final_type in ("response.function_call_arguments.done", "response.output_item.done"):
             for final_arguments in (None, "", "   "):
                 with self.subTest(final_type=final_type, final_arguments=final_arguments):
-                    final = {"type": final_type, "output_index": 0, "item_id": "item1", "arguments": final_arguments}
+                    final: dict[str, Any] = {"type": final_type, "output_index": 0, "item_id": "item1", "arguments": final_arguments}
                     if final_type.endswith("output_item.done"):
                         final["item"] = {"type": "function_call", "id": "item1", "call_id": "call1", "name": "inspect", "arguments": final_arguments}
                     frames = [
@@ -106,7 +109,7 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls[0].argument_error, "invalid_json")
                 self.assertEqual(calls[0].raw_arguments, delta)
                 self.assertEqual(events[-1].type, ModelEventType.FINISH)
-                self.assertIsNotNone(events[-1].provider_state)
+                assert (events[-1].provider_state) is not None
             else:
                 events = await collect(stream)
                 calls = [e.tool_call for e in events if e.type is ModelEventType.TOOL_CALL_COMPLETED]
@@ -128,7 +131,7 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
             async def aclose(self):
                 pass
         settings = ProviderSettings(api_url="https://api.example.com/v1", model="global", protocol="chat_completions")
-        adapter = OpenAICompatibleModelAdapter(settings, client_factory=lambda **_: Client())
+        adapter = OpenAICompatibleModelAdapter(settings, client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: Client()))
         for model in ("chat-selected", ""):
             await collect(adapter.stream(ModelRequest(system_prompt="", messages=(), tools=(), model=model), cancellation=CancellationToken()))
         self.assertEqual([x[1] for x in seen], ["chat-selected", "global"])
@@ -168,7 +171,7 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
                 client = Client()
                 adapter = OpenAICompatibleModelAdapter(
                     ProviderSettings(api_url="https://api.example.com/v1", model="sample", protocol="responses"),
-                    client_factory=lambda **_: client,
+                    client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: client),
                 )
                 stream = adapter.stream(
                     ModelRequest(system_prompt="检查状态", messages=(), tools=()), cancellation=CancellationToken()
@@ -245,7 +248,7 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
                 model="test-model",
                 protocol="responses",
             ),
-            client_factory=lambda **_kwargs: client,
+            client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_kwargs: client),
         )
 
         with patch(
@@ -300,7 +303,7 @@ class ProviderModelStreamTests(unittest.IsolatedAsyncioTestCase):
                 model="test-model",
                 protocol="responses",
             ),
-            client_factory=lambda **_kwargs: client,
+            client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_kwargs: client),
         )
 
         with patch(
@@ -626,7 +629,7 @@ class ToolArgumentDecoderParityTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(calls[0].argument_error, "invalid_json")
                     self.assertEqual(calls[0].raw_arguments, arguments)
                     self.assertEqual(events[-1].type, ModelEventType.FINISH)
-                    self.assertIsNotNone(events[-1].provider_state)
+                    assert (events[-1].provider_state) is not None
                 else:
                     with self.assertRaisesRegex(ModelProviderError, message):
                         await self.stream_tool_arguments(arguments)
@@ -696,7 +699,7 @@ class CompleteTurnContractTests(unittest.IsolatedAsyncioTestCase):
             }}]}
             adapter = OpenAICompatibleModelAdapter(
                 ProviderSettings(api_url="https://api.example.com/v1", model="test", protocol="chat_completions"),
-                client_factory=lambda **_: Client(),
+                client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: Client()),
             )
             seen = []
             with self.subTest(reason=reason):
@@ -763,7 +766,7 @@ class NativeAnswerCompletionTests(unittest.IsolatedAsyncioTestCase):
         client = Client()
         adapter = OpenAICompatibleModelAdapter(
             ProviderSettings(api_url='https://api.example.com/v1', model='sample', protocol=protocol),
-            client_factory=lambda **_kwargs: client,
+            client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_kwargs: client),
         )
         events = []
         error = None
@@ -794,7 +797,7 @@ class NativeAnswerCompletionTests(unittest.IsolatedAsyncioTestCase):
             for streamed in (True, False):
                 with self.subTest(protocol=protocol, streamed=streamed):
                     events, error = await self.run_adapter(protocol, streamed=streamed, complete=False)
-                    self.assertIsInstance(error, UncommittableModelTurn)
+                    assert isinstance(error, UncommittableModelTurn)
                     self.assertNotIn(ModelEventType.FINISH, [e.type for e in events])
 
     async def test_complete_native_tool_rounds_preserve_tool_calls(self):
@@ -835,7 +838,7 @@ class ParallelToolCallPermissionTests(unittest.IsolatedAsyncioTestCase):
             wire = nativefixtures.WireClient([reply] * (len(cases) * 2))
             adapter = OpenAICompatibleModelAdapter(
                 ProviderSettings(api_url="https://api.example.com/v1", model="sample", protocol=protocol),
-                client_factory=lambda **_: wire,
+                client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: wire),
             )
             for has_tools in (True, False):
                 for options in cases:
@@ -909,7 +912,7 @@ class ParallelToolCallPermissionTests(unittest.IsolatedAsyncioTestCase):
                     wire = nativefixtures.WireClient([frames if streamed else reply, final], split=3)
                     adapter = OpenAICompatibleModelAdapter(
                         ProviderSettings(api_url="https://api.example.com/v1", model="sample", protocol=protocol),
-                        client_factory=lambda **_: wire,
+                        client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: wire),
                     )
                     user = ModelMessage(role="user", content="分别核验两个条目")
                     events = await collect(adapter.stream(ModelRequest(
@@ -922,7 +925,7 @@ class ParallelToolCallPermissionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual([call.arguments for call in parsed], arguments)
                     visible = "".join(event.text for event in events)
                     self.assertEqual(visible, "核验中")
-                    self.assertIsNotNone(events[-1].provider_state)
+                    assert (events[-1].provider_state) is not None
                     history = (user, ModelMessage(role="assistant", content=visible, tool_calls=parsed,
                                                   provider_state=events[-1].provider_state), *(
                         ModelMessage(role="tool", content=f"result-{index}", tool_call_id=cid)

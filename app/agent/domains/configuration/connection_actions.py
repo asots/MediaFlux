@@ -62,7 +62,7 @@ def _safe_identity_text(
     if "://" in folded or folded.startswith(("/", "\\")):
         return default
     for secret in forbidden:
-        normalized = str(secret or "").strip().casefold()
+        normalized = (secret or "").strip().casefold()
         if normalized and normalized in folded:
             return default
     return text
@@ -119,8 +119,8 @@ def _configured_endpoint(server_type: str) -> tuple[str, str] | None:
     keys = _SERVER_CONFIG[server_type]
     if not config.get_bool(keys["enabled"], False):
         return None
-    url = str(config.get(keys["url"], "") or "").strip().rstrip("/")
-    credential = str(config.get(keys["credential"], "") or "").strip()
+    url = (config.get(keys["url"], "") or "").strip().rstrip("/")
+    credential = (config.get(keys["credential"], "") or "").strip()
     try:
         parsed = urlsplit(url)
         port_valid = parsed.port is None or 1 <= parsed.port <= 65535
@@ -201,7 +201,7 @@ def _failure_status(exc: Exception) -> tuple[str, str, list[str]]:
 
 def test_media_server(arguments: dict[str, Any]) -> ToolResult:
     server_type = str(arguments["server_type"])
-    label = str(_SERVER_CONFIG[server_type]["label"])
+    label = (_SERVER_CONFIG[server_type]["label"])
     configured = _configured_endpoint(server_type)
     if configured is None:
         return _safe_result(

@@ -41,8 +41,9 @@ class ScopedTrustPolicy:
 
     def view(self, state: SessionState) -> dict[str, Any]:
         grant = self._grant(state)
-        if (grant is None or not self._catalog.has(grant.get("tool_name"))
-                or self._catalog.get(grant["tool_name"]).approval_scope is None):
+        tool_name = grant.get("tool_name") if grant is not None else None
+        if (grant is None or tool_name is None or not self._catalog.has(tool_name)
+                or self._catalog.get(tool_name).approval_scope is None):
             return {"active": False}
         return {"active": True, "tool_name": grant["tool_name"], "scope": dict(grant["scope"]),
                 "remaining": grant["remaining"], "expires_at": grant["expires_at"]}

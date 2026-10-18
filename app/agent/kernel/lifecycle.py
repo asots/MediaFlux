@@ -46,7 +46,7 @@ class AgentSessionLifecycle:
     async def _change[T](
         self, change: Callable[..., Awaitable[T]], owner: str, session_id: str,
     ) -> T:
-        owner_key, session_key = str(owner or "").strip(), str(session_id or "").strip()
+        owner_key, session_key = (owner or "").strip(), (session_id or "").strip()
         with session_scope_guard(owner_key, session_key):
             async with self.session._start_lock:
                 if await self.session.coordinator.has_protected_turn(

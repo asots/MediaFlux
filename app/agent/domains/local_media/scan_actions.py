@@ -84,13 +84,13 @@ def _snapshot(source_numbers: list[int]) -> tuple[dict[str, Any], list[int], set
                 "updated_at": str(source.updated_at),
                 "targets": [
                     {
-                        "id": int(target.id),
-                        "category": str(target.category),
-                        "path": str(target.path),
-                        "provider": str(target.provider),
-                        "library_id": str(target.library_id),
-                        "server_path": str(target.server_path),
-                        "updated_at": str(target.updated_at),
+                        "id": (target.id),
+                        "category": (target.category),
+                        "path": (target.path),
+                        "provider": (target.provider),
+                        "library_id": (target.library_id),
+                        "server_path": (target.server_path),
+                        "updated_at": (target.updated_at),
                     }
                     for target in targets
                 ],
@@ -145,7 +145,7 @@ def scan_local_media_sources_confirmed(
     normalized = local_media_scan_arguments(arguments)
     snapshot, public_numbers, eligible_ids = _snapshot(normalized["source_numbers"])
     snapshot["query"] = normalized["query"]
-    if not secrets.compare_digest(common._fingerprint(snapshot), str(expected_context or "")):
+    if not secrets.compare_digest(common._fingerprint(snapshot), (expected_context or "")):
         raise AgentToolError(
             "本地媒体来源或归档目标已变化，请重新预检",
             code="confirmation_stale",

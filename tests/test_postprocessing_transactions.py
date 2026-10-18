@@ -97,7 +97,7 @@ class PostprocessingTransactionTests(IsolatedDatabaseTestCase):
 
         def interrupted(conn, **kwargs):
             self.assertTrue(conn.in_transaction)
-            self.assertIsNotNone(original(conn, **kwargs))
+            assert (original(conn, **kwargs)) is not None
             raise RuntimeError("synthetic interruption after intent")
 
         with (
@@ -126,7 +126,7 @@ class PostprocessingTransactionTests(IsolatedDatabaseTestCase):
             with mock.patch.object(db, "get_conn", side_effect=AssertionError("nested connection forbidden")):
                 first = reconcile.enqueue_confirmation_cleanup(conn, token="synthetic-token-78", timestamp=db.now())
                 second = reconcile.enqueue_confirmation_cleanup(conn, token="synthetic-token-78", timestamp=db.now())
-            self.assertIsNotNone(first)
+            assert (first) is not None
             self.assertEqual(first, second)
         self.assertEqual(self._state(), ("completed", 1, 0))
 

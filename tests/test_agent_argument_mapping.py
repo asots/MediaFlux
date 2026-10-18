@@ -1,5 +1,8 @@
 """Root Mapping compatibility without widening nested JSON admission."""
 from __future__ import annotations
+from typing import Any
+from collections.abc import Mapping
+from typing import cast
 
 import asyncio
 from collections import UserDict
@@ -122,7 +125,7 @@ def test_non_json_mapping_neighbors_reject_entire_batch(kind):
         catalog = ToolCatalog([declaration(lambda a, c: handled.append(a) or {"data": {}})])
         model = MappingModel([
             ModelToolCall("good", "inspect_args", {"safe": "prefix"}),
-            ModelToolCall("bad", "inspect_args", args),
+            ModelToolCall("bad", "inspect_args", cast(Mapping[str, Any] | None, args)),
         ])
         events = await collect(session(catalog, SimpleNamespace(adapter=model)))
         assert handled == []

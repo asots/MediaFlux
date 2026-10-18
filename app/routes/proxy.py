@@ -22,7 +22,7 @@ _playgy_signed_urls = SignedUrlCache(max_entries=512)
 
 
 def _playgy_response_etag(value: str) -> str:
-    digest = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+    digest = hashlib.sha256((value or "").encode("utf-8")).hexdigest()
     return f'"mf-{digest}"'
 
 
@@ -106,16 +106,12 @@ def play_gy(
                     "Referrer-Policy": "no-referrer",
                     "X-Content-Type-Options": "nosniff",
                 }
-                range_value = str(
-                    request.headers.get("range", "")
+                range_value = (request.headers.get("range", "")
                     if request is not None
-                    else ""
-                ).strip()
-                if_range = str(
-                    request.headers.get("if-range", "")
+                    else "").strip()
+                if_range = (request.headers.get("if-range", "")
                     if request is not None
-                    else ""
-                ).strip()
+                    else "").strip()
                 # If-Range 只接受本响应给出的强 entity-tag；weak tag、日期或
                 # 其他 validator 均视为失配，并按完整表示返回 200。
                 if range_value and if_range and if_range != response_etag:

@@ -269,6 +269,7 @@ class MediaFluxPolicyTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         self.assertEqual(raised.exception.code, "invalid_arguments")
+        assert raised.exception.argument_schemas is not None
         self.assertIn("operation", raised.exception.argument_schemas)
         allowed.assert_not_called()
 

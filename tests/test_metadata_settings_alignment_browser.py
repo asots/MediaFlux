@@ -59,7 +59,9 @@ class MetadataSettingsAlignmentBrowserTests(unittest.TestCase):
                 for card in cards:
                     self.assertGreaterEqual(card.locator(".metadata-card-body").bounding_box()["height"], 100)
                 for field in ("tmdbApiUrlInput", "tmdbApiKeyInput"):
-                    self.assertAlmostEqual(page.locator(f"#{field}").bounding_box()["height"], 42, delta=.5)
+                    bounding_box_result = page.locator(f"#{field}").bounding_box()
+                    assert bounding_box_result is not None
+                    self.assertAlmostEqual(bounding_box_result["height"], 42, delta=.5)
                 self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= innerWidth"))
                 self.assertEqual(errors, [])
 

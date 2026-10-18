@@ -42,7 +42,7 @@ class GuangYaMagnetRecoveryTests(IsolatedDatabaseTestCase):
         )
         self.gy = FakeSelectionClient(RESOLVE_SUBFILES_FIXTURE)
         self.gy.create_dir = Mock(return_value="fixture-staging")
-        self.gy.close = Mock()
+        setattr(self.gy, "close", Mock())
         self.qb = Mock()
         self.qb.export_torrent.return_value = TORRENT
         self.qb_factory = Mock(return_value=self.qb)
@@ -94,12 +94,15 @@ class GuangYaMagnetRecoveryTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.gy.selection_calls[0]["target_dir_id"], "fixture-staging")
         self.assertEqual(self.gy.legacy_calls, [])
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["gy_status"], "submitted")
         self.assertEqual(row["gy_expected_file_count"], 1)
 
     def test_partial_failure_retry_uses_same_request_and_never_resubmits_qb(self):
         request_id = self.request()
-        before = dict(db.get_download_request(request_id))
+        get_download_request_result_6 = db.get_download_request(request_id)
+        assert get_download_request_result_6 is not None
+        before = dict(get_download_request_result_6)
         result = dispatcher.resubmit_download_request(request_id, "guangya")
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["request_id"], request_id)
@@ -108,6 +111,7 @@ class GuangYaMagnetRecoveryTests(IsolatedDatabaseTestCase):
         self.assert_recovered(request_id)
         after = db.get_download_request(request_id)
         for key in ("qb_status", "qb_task_id", "qb_content_path", "local_import_status", "request_key"):
+            assert after is not None
             self.assertEqual(after[key], before[key], key)
         with db.get_conn() as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM download_requests").fetchone()[0], 1)
@@ -128,10 +132,13 @@ class GuangYaMagnetRecoveryTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["created"])
         successor = db.get_download_request(result["request_id"])
+        assert successor is not None
         self.assertEqual(successor["kind"], "torrent")
         self.assertEqual(successor["torrent_data"], TORRENT)
         self.assertEqual(successor["qb_status"], "")
-        self.assertEqual(db.get_download_request(request_id)["qb_status"], "completed")
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["qb_status"], "completed")
         self.assert_recovered(result["request_id"])
 
     def test_base32_magnet_uses_canonical_btih_without_tracker_dependency(self):
@@ -171,7 +178,9 @@ class GuangYaMagnetRecoveryTests(IsolatedDatabaseTestCase):
                 result = dispatcher.resubmit_download_request(request_id, "guangya")
                 self.assertTrue(result["ok"], result)
                 self.assertEqual(self.gy.torrent_resolve_calls, [])
-                self.assertEqual(db.get_download_request(result["request_id"])["kind"], "magnet")
+                get_download_request_result_2 = db.get_download_request(result["request_id"])
+                assert get_download_request_result_2 is not None
+                self.assertEqual(get_download_request_result_2["kind"], "magnet")
                 # 清理的是当前隔离测试类的临时数据库，不碰开发/生产记录。
                 with db.get_conn() as conn:
                     conn.execute("DELETE FROM download_requests")
@@ -190,7 +199,9 @@ class GuangYaMagnetRecoveryTests(IsolatedDatabaseTestCase):
                 self.assertEqual(self.gy.torrent_resolve_calls, [])
                 self.assertEqual(self.gy.selection_calls, [])
                 self.gy.create_dir.assert_not_called()
-                self.assertEqual(db.get_download_request(request_id)["qb_status"], "downloading")
+                get_download_request_result_3 = db.get_download_request(request_id)
+                assert get_download_request_result_3 is not None
+                self.assertEqual(get_download_request_result_3["qb_status"], "downloading")
                 with db.get_conn() as conn:
                     conn.execute("DELETE FROM download_requests")
 
@@ -239,7 +250,9 @@ class GuangYaMagnetRecoveryTests(IsolatedDatabaseTestCase):
             first = future.result(timeout=5)
         self.assertTrue(first["ok"], first)
         self.assert_recovered(request_id)
-        self.assertEqual(db.get_download_request(request_id)["qb_status"], "completed")
+        get_download_request_result_4 = db.get_download_request(request_id)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["qb_status"], "completed")
 
     def test_cancelled_or_superseded_request_is_not_revived_between_capability_and_claim(self):
         for status in ("cancelled", "resubmitted"):
@@ -258,7 +271,9 @@ class GuangYaMagnetRecoveryTests(IsolatedDatabaseTestCase):
                 with patch.object(dispatcher, "dispatch_missing_targets", side_effect=stop_then_dispatch):
                     result = dispatcher.resubmit_download_request(request_id, "guangya")
                 self.assertFalse(result["ok"])
-                self.assertEqual(db.get_download_request(request_id)["status"], status)
+                get_download_request_result_5 = db.get_download_request(request_id)
+                assert get_download_request_result_5 is not None
+                self.assertEqual(get_download_request_result_5["status"], status)
                 self.qb_factory.assert_not_called()
                 self.gy.create_dir.assert_not_called()
                 self.assertEqual(self.gy.selection_calls, [])

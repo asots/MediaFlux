@@ -49,7 +49,9 @@ class TelegramDownloadResultBoundaryTests(unittest.TestCase):
         }) as backend:
             handlers._dispatch_download_callback(bot, "100", "1", request_id, "qb")
         backend.assert_called_once()
-        self.assertEqual(db.get_download_request(request_id)["qb_status"], "submitted")
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["qb_status"], "submitted")
         self.tracker.reload.assert_called_once()
         calls = bot.edit_message_text.call_args_list
         self.assertEqual(len(calls), 2)
@@ -94,6 +96,7 @@ class TelegramDownloadResultBoundaryTests(unittest.TestCase):
 
         backend.assert_called_once()
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["gy_status"], "failed")
         self.assertEqual(row["error"], "guangya: 文件违规")
         text = bot.edit_message_text.call_args.args[0]
@@ -120,6 +123,7 @@ class TelegramDownloadResultBoundaryTests(unittest.TestCase):
         qb_backend.assert_called_once()
         guangya_backend.assert_called_once()
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["qb_status"], "submitted")
         self.assertEqual(row["gy_status"], "failed")
         self.assertIn(private_url, row["error"])
@@ -194,7 +198,9 @@ class TelegramDownloadResultBoundaryTests(unittest.TestCase):
         backend.assert_called_once()
         self.tracker.reload.assert_called_once()
         self.assertEqual(bot.edit_message_text.call_count, 2)
-        self.assertEqual(db.get_download_request(request_id)["status"], "submitted")
+        get_download_request_result_2 = db.get_download_request(request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["status"], "submitted")
 
     def test_dispatch_exception_after_acceptance_is_unknown_not_rejected(self) -> None:
         request_id = self._request()
@@ -209,7 +215,9 @@ class TelegramDownloadResultBoundaryTests(unittest.TestCase):
         backend.assert_called_once()
         dispatch.assert_called_once()
         self.tracker.reload.assert_called_once()
-        self.assertEqual(db.get_download_request(request_id)["status"], "submitted")
+        get_download_request_result_3 = db.get_download_request(request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["status"], "submitted")
         text = bot.edit_message_text.call_args.args[0]
         self.assertIn("下载提交结果待核对", text)
         self.assertIn("勿直接重复提交", text)
@@ -256,6 +264,7 @@ class PendingPlanAtomicCleanupTests(unittest.IsolatedAsyncioTestCase):
             execute_confirmed=execute)
         pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=state, effect_store=effects)
         prepared = await pipeline.execute(tool.name, {}, context=context)
+        assert prepared.effect_plan is not None
         return state, context, pipeline, prepared.effect_plan.plan_id, clock, execute
 
     async def _pending(self, state, context):
@@ -281,6 +290,7 @@ class PendingPlanAtomicCleanupTests(unittest.IsolatedAsyncioTestCase):
                     if expired:
                         clock[0] += 61
                     new = await pipeline.execute("downloads.submit", {}, context=context)
+                    assert new.effect_plan is not None
                     new_id = new.effect_plan.plan_id
                     self.assertFalse(await pipeline.cancel_effect(old_id, lease=context.lease))
                     self.assertEqual(await self._pending(state, context), new_id)

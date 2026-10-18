@@ -256,6 +256,19 @@ class WorkspaceSearchDataTests(IsolatedDatabaseTestCase):
             "PRIVATE-SOURCE-ERROR", json.dumps(result.to_dict(), ensure_ascii=False)
         )
 
+    def test_missing_or_null_items_remain_unavailable_instead_of_empty(self):
+        for raw, expected_status in (({}, "unavailable"), ({"items": None}, "unavailable"),
+                                     ({"items": []}, "empty")):
+            with self.subTest(raw=raw), patch(
+                "app.agent.domains.workspace.actions.db.search_agent_workspace_rss",
+                return_value=raw,
+            ):
+                result = search_workspace(
+                    workspace_search_arguments({"query": "沙丘", "sections": ["rss"]})
+                )
+            self.assertEqual(result.data["sections"][0]["status"], expected_status)
+            self.assertEqual(result.data["sections"][0]["items"], [])
+
     def test_untrusted_titles_dates_years_and_hashes_are_redacted(self):
         malicious = (
             "沙丘 file://private/share",

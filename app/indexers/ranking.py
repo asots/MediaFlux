@@ -49,7 +49,7 @@ _LEADING_GROUP = re.compile(r"^\s*[\[【(（]([^\]】)）]{1,80})[\]】)）]")
 
 
 def _normalize(value: str) -> str:
-    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    text = unicodedata.normalize("NFKC", (value or "")).casefold()
     return " ".join(_SEPARATORS.sub(" ", text).split())
 
 
@@ -73,7 +73,7 @@ def _contains_evidence(raw_candidate: str, normalized_candidate: str, evidence: 
     if not (_HAN_ONLY.fullmatch(compact) and len(compact) <= 4):
         return True
 
-    raw = unicodedata.normalize("NFKC", str(raw_candidate or "")).casefold()
+    raw = unicodedata.normalize("NFKC", (raw_candidate or "")).casefold()
     for match in re.finditer(re.escape(compact), raw):
         left = raw[match.start() - 1] if match.start() else ""
         right = raw[match.end()] if match.end() < len(raw) else ""
@@ -204,7 +204,7 @@ def _meaningful_bracket(match: re.Match[str]) -> str:
 
 def _cluster_signature(title: str) -> str:
     position = parse_indexer_release_position(title)
-    normalized = unicodedata.normalize("NFKC", str(title or "")).casefold()
+    normalized = unicodedata.normalize("NFKC", (title or "")).casefold()
     leading = _LEADING_GROUP.match(normalized)
     if leading is not None:
         group = _normalize(leading.group(1))
@@ -273,8 +273,8 @@ def candidate_sort_key(
     site_index, provider_index, item = entry
     if sort_mode == "source_order":
         return site_index, provider_index
-    relevance = int(item.relevance_score or 0)
-    seeders = int(item.seeders if item.seeders is not None else -1)
+    relevance = (item.relevance_score or 0)
+    seeders = (item.seeders if item.seeders is not None else -1)
     size = item.size_bytes
     published_value = published_timestamp(item.published_at)
     position = parse_indexer_release_position(item.title)

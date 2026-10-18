@@ -25,6 +25,7 @@ def _runtime_import_graph(root: Path = AGENT_ROOT) -> dict[str, set[str]]:
             test = node.test
             negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
             if negated:
+                assert isinstance(test, ast.UnaryOp)
                 test = test.operand
             type_only = (
                 isinstance(test, ast.Name) and test.id == "TYPE_CHECKING"

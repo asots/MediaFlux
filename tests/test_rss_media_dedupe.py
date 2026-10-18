@@ -39,6 +39,7 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
             skip_existing_episodes=1,
         )
         row = db.get_rss_subscription(sid)
+        assert row is not None
         self.assertEqual(str(row["media_tmdb_id"]), "105556")
         self.assertEqual(int(row["media_default_season"]), 2)
         self.assertTrue(bool(row["skip_existing_episodes"]))
@@ -47,6 +48,7 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
             "media_tmdb_id": "", "skip_existing_episodes": 0,
         })
         cleared = db.get_rss_subscription(sid)
+        assert cleared is not None
         self.assertEqual(str(cleared["media_tmdb_id"]), "")
         self.assertFalse(bool(cleared["skip_existing_episodes"]))
 
@@ -74,6 +76,7 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
 
         zero = db.get_rss_subscription(zero_id)
         one = db.get_rss_subscription(one_id)
+        assert zero is not None
         self.assertEqual(int(zero["media_default_season"]), 0)
         self.assertNotEqual(
             rss_subscription_refresh_revision(zero),

@@ -103,6 +103,7 @@ def test_create_restore_then_cold_start_reinitializes_stable_fence(tmp_path):
         backup.create_backup(paths, output=archive)
         config.set_and_save({"AGENT_LLM_MODEL": "changed-after-backup"})
         old_runtime = bootstrap.get_agent_kernel_runtime()
+        assert old_runtime.creation_binding is not None
         old_fence = old_runtime.creation_binding.fence
 
         backup.restore_backup(paths, archive)
@@ -155,6 +156,7 @@ def test_interrupted_restore_rolls_back_database_and_env_together(tmp_path):
         })
         live_env = paths.env_file.read_bytes()
         live_runtime = bootstrap.get_agent_kernel_runtime()
+        assert live_runtime.creation_binding is not None
         live_fence = live_runtime.creation_binding.fence
 
         real_replace = backup.os.replace
@@ -201,6 +203,7 @@ def test_committed_restore_recovers_new_fence_and_env_together(tmp_path):
         archived_env = paths.env_file.read_bytes()
         config.set_and_save({"AGENT_LLM_MODEL": "live-before-commit"})
         old_runtime = bootstrap.get_agent_kernel_runtime()
+        assert old_runtime.creation_binding is not None
         old_fence = old_runtime.creation_binding.fence
 
         with patch.object(

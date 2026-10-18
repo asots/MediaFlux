@@ -115,8 +115,10 @@ class RuleAndPlaybackRestoreAuditTests(unittest.TestCase):
                     good["id"], lease["lease_token"], self.clock.isoformat()
                 )
             )
+            get_rule_result = rules.get_rule("restore-audit", broken["id"])
+            assert get_rule_result is not None
             self.assertTrue(
-                rules.get_rule("restore-audit", broken["id"])["settings_error"]
+                get_rule_result["settings_error"]
             )
             self.assertFalse(backup.recover_pending_restore(paths))
 

@@ -1,6 +1,11 @@
 """运行时安装、权限与依赖诊断。"""
 from __future__ import annotations
 
+from typing import Literal
+
+from typing import cast
+from app.modules.runtime_diagnostics import DiagnosticCheck
+
 import errno
 import io
 import json
@@ -70,12 +75,12 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
         self.assertIn(str(executable), check.message)
 
     def test_report_is_immutable_rejects_duplicate_or_unknown_keys_and_returns_copies(self) -> None:
-        from app.modules.runtime_diagnostics import DiagnosticCheck, DiagnosticReport
+        from app.modules.runtime_diagnostics import DiagnosticReport
 
         first = DiagnosticCheck("database_dir", "ok", "数据库目录可写")
         second = DiagnosticCheck("ffprobe", "warning", "未找到 ffprobe", "安装 FFmpeg")
         input_checks = [first, second]
-        report = DiagnosticReport(input_checks)
+        report = DiagnosticReport(cast(tuple[DiagnosticCheck, ...], input_checks))
         input_checks.clear()
 
         self.assertIs(report.check("database_dir"), first)
@@ -265,7 +270,7 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
 
     def test_cli_doctor_json_uses_runtime_paths_and_returns_error_exit_code(self) -> None:
         from app.cli import main
-        from app.modules.runtime_diagnostics import DiagnosticCheck, DiagnosticReport
+        from app.modules.runtime_diagnostics import DiagnosticReport
 
         report = DiagnosticReport(
             (
@@ -351,7 +356,7 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             checks = json.loads(completed.stdout)
-            self.assertIsInstance(checks, list)
+            assert isinstance(checks, list)
             self.assertTrue(checks)
             self.assertFalse((runtime_root / "config").exists())
             self.assertEqual(list(runtime_root.rglob(".mediaflux-diagnostic-*")), [])
@@ -536,7 +541,7 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
         available.close.assert_called_once()
 
     def test_diagnostic_models_validate_runtime_fields_and_report_elements(self) -> None:
-        from app.modules.runtime_diagnostics import DiagnosticCheck, DiagnosticReport
+        from app.modules.runtime_diagnostics import DiagnosticReport
 
         for arguments in (
             ("", "ok", "message"),
@@ -546,9 +551,9 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
         ):
             with self.subTest(arguments=arguments):
                 with self.assertRaises((TypeError, ValueError)):
-                    DiagnosticCheck(*arguments)
+                    DiagnosticCheck(*cast(tuple[str, Literal["ok", "warning", "error"], str], arguments))
         with self.assertRaises(TypeError):
-            DiagnosticReport((object(),))
+            DiagnosticReport(cast(tuple[DiagnosticCheck, ...], (object(),)))
 
 
 

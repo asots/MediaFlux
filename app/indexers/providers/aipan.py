@@ -97,7 +97,7 @@ class AipanAdapter(DirectResultAdapter):
         )
         return self._page(request, items, errors=errors)
 
-    async def _load_details(self, candidates: list[tuple[str, str]]) -> list[object]:
+    async def _load_details(self, candidates: list[tuple[str, str]]) -> list[list[IndexerItem] | BaseException]:
         semaphore = asyncio.Semaphore(_MAX_DETAIL_CANDIDATES)
 
         async def load(candidate: tuple[str, str]) -> list[IndexerItem]:

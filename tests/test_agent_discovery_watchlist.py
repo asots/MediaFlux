@@ -1,6 +1,8 @@
 """Agent 探索收藏、最近探索续句与确认边界回归。"""
 
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
 import json
 from contextlib import contextmanager
@@ -66,6 +68,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             "tmdb", external_id, media_type, title, "2026", "PRIVATE_POSTER_KEY"
         )
         row = db.get_media_watchlist("tmdb", external_id, media_type)
+        assert row is not None
         return int(row["id"])
 
     def test_read_summaries_only_expose_public_fields(self) -> None:
@@ -345,7 +348,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         for arguments in invalid_arguments:
             with self.subTest(arguments=arguments):
                 with self.assertRaises(AgentToolError):
-                    watchlist_summaries_arguments(arguments)
+                    watchlist_summaries_arguments(cast(dict[str, Any], arguments))
                 with self.assertRaises(ToolPipelineError) as error:
                     validate_json_schema(arguments, schema)
                 self.assertEqual(error.exception.code, "invalid_arguments")
@@ -369,7 +372,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             with self.subTest(arguments=arguments):
                 for validator in (watchlist_summary_arguments, remove_watchlist_arguments):
                     with self.subTest(validator=validator.__name__), self.assertRaises(AgentToolError):
-                        validator(arguments)
+                        validator(cast(dict[str, Any], arguments))
 
     def test_watchlist_statistics_empty_database(self) -> None:
         self.assertEqual(db.get_media_watchlist_statistics(), [])
@@ -594,7 +597,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             service.confirm(confirmation_id, owner="owner-b")
         confirmed = service.confirm(confirmation_id, owner="owner-a")
         self.assertEqual(confirmed["result"]["status"], "completed")
-        self.assertIsNotNone(db.get_media_watchlist("tmdb", "8801", "movie"))
+        assert (db.get_media_watchlist("tmdb", "8801", "movie")) is not None
         with self.assertRaises(AgentToolError):
             service.confirm(confirmation_id, owner="owner-a")
         serialized = json.dumps(
@@ -643,7 +646,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             )
         stale = service.confirm(prepared["action_plan"]["plan_id"], owner="owner")
         self.assertEqual(stale["result"]["status"], "conflict")
-        self.assertIsNotNone(db.get_media_watchlist_by_id(number))
+        assert (db.get_media_watchlist_by_id(number)) is not None
         reset_agent_service_for_tests()
         service = get_agent_service()
         with patch(

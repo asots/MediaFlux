@@ -110,7 +110,7 @@ class SQLiteMissingMediaWorkflowRepository:
     def capture_search(
         self, *, owner: str, tool_name: str, result: ToolResult
     ) -> str | None:
-        source_tool = str(tool_name or "").strip()
+        source_tool = (tool_name or "").strip()
         if source_tool not in _SOURCE_TOOLS:
             return None
         owner_digest = self._owner_digest(owner)
@@ -197,7 +197,7 @@ class SQLiteMissingMediaWorkflowRepository:
         owner_digest = self._owner_digest(owner)
         safe_verification = _verification_projection(verification)
         safe_candidate = _safe_text(candidate_title, 300)
-        safe_target = str(target or "").strip().lower()
+        safe_target = (target or "").strip().lower()
         if (
             safe_verification is None
             or not safe_candidate
@@ -290,8 +290,8 @@ class SQLiteMissingMediaWorkflowRepository:
 
     def finish_verification(self, *, request_id: int, status: str, result: str) -> bool:
         request = _positive_int(request_id, maximum=2_147_483_647)
-        safe_status = str(status or "").strip().lower()
-        safe_result = str(result or "").strip().lower()
+        safe_status = (status or "").strip().lower()
+        safe_result = (result or "").strip().lower()
         if request is None or safe_status not in {"visible", "attention"}:
             return False
         next_state = (
@@ -391,7 +391,7 @@ class SQLiteMissingMediaWorkflowRepository:
 
     def list_for_owner(self, *, owner: str, limit: int = 10) -> tuple[Any, ...]:
         owner_digest = self._owner_digest(owner)
-        safe_limit = max(1, min(int(limit), 30))
+        safe_limit = max(1, min(limit, 30))
         with db.get_conn() as conn:
             workflows = conn.execute(
                 "SELECT workflow_id FROM agent_missing_media_workflows "
@@ -463,10 +463,10 @@ class SQLiteMissingMediaWorkflowRepository:
         )
 
     def _owner_digest(self, owner: str) -> str:
-        normalized = str(owner or "").strip()
+        normalized = (owner or "").strip()
         if not normalized or len(normalized) > _MAX_OWNER_LENGTH:
             raise AgentToolError("无法确认当前 Agent 身份", code="identity_required")
-        secret = str(self._secret_provider() or "")
+        secret = (self._secret_provider() or "")
         if not secret:
             raise AgentToolError("Agent 身份隔离密钥不可用", code="identity_required")
         return hmac.new(
@@ -614,7 +614,7 @@ def verification_from_followup_context(value: Any) -> dict[str, Any] | None:
 
 
 def is_missing_workflow_status_message(message: str) -> bool:
-    normalized = "".join(str(message or "").strip().casefold().split())
+    normalized = "".join((message or "").strip().casefold().split())
     if not normalized:
         return False
     scope = any(
@@ -684,13 +684,11 @@ def _search_has_candidate(value: Any) -> bool:
     if isinstance(selected, dict) and _safe_text(selected.get("title"), 300):
         return True
     alternatives = recommendation.get("alternatives")
-    return bool(
-        isinstance(alternatives, list)
+    return (isinstance(alternatives, list)
         and any(
             isinstance(item, dict) and _safe_text(item.get("title"), 300)
             for item in alternatives
-        )
-    )
+        ))
 
 
 def _base_verification_projection(value: Any) -> dict[str, Any] | None:

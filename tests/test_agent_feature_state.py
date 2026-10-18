@@ -145,7 +145,9 @@ class FeatureStateUnitTests(unittest.TestCase):
         self.assertIs(checked.references, result.references)
         self.assertIs(checked.effect_metadata, result.effect_metadata)
         self.assertIn("已提交", checked.summary)
+        assert checked.error is not None
         self.assertIn("待核验", checked.error)
+        assert checked.error is not None
         self.assertIn("请先查看配置而非直接重试", checked.error)
         public = format_public_result(checked.to_dict())
         self.assertTrue(public.startswith("⚠️ "))

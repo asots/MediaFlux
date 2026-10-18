@@ -33,6 +33,7 @@ class RecognitionRepositoryTests(unittest.TestCase):
                 media_type="tv",
                 season=2,
             )
+            assert row is not None
             self.assertEqual(row["tmdb_id"], "42")
             self.assertEqual(row["season"], 2)
             self.assertIsNone(recognition.get_tmdb_lock(

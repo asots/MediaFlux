@@ -100,7 +100,7 @@ def _fold_runtime_lines(lines: Iterable[str], *, suppressed: bool = False) -> tu
 
 def _suppressed_before_offset(handle, offset: int) -> bool | None:
     """有界向前定位最近结构化日志头；找不到时返回未知。"""
-    position = max(0, int(offset))
+    position = max(0, offset)
     floor = max(0, position - _MAX_SUPPRESSION_LOOKBACK_BYTES)
     collected = b""
     while position > floor:
@@ -131,10 +131,10 @@ def _stream_id_from_stat(stat_result: os.stat_result) -> str:
     return f"{device:x}:0:{created_ns:x}"
 
 def _checkpoint_digest(offset: int, tail: bytes, head: bytes = b"") -> str:
-    if int(offset) <= 0:
+    if offset <= 0:
         return ""
     digest = hashlib.sha256()
-    digest.update(str(int(offset)).encode("ascii"))
+    digest.update(str(offset).encode("ascii"))
     digest.update(b":head:")
     digest.update(head[:_CURSOR_HEAD_CHECKPOINT_BYTES])
     digest.update(b":tail:")
@@ -144,25 +144,25 @@ def _checkpoint_digest(offset: int, tail: bytes, head: bytes = b"") -> str:
 
 def _head_sample(handle, offset: int) -> bytes:
     handle.seek(0)
-    return handle.read(min(max(0, int(offset)), _CURSOR_HEAD_CHECKPOINT_BYTES))
+    return handle.read(min(max(0, offset), _CURSOR_HEAD_CHECKPOINT_BYTES))
 
 
 def _tail_before_offset(handle, offset: int) -> bytes:
-    cursor = max(0, int(offset))
+    cursor = max(0, offset)
     start = max(0, cursor - _CURSOR_CHECKPOINT_BYTES)
     handle.seek(start)
     return handle.read(cursor - start)
 
 
 def _checkpoint_at(handle, offset: int) -> str:
-    cursor = max(0, int(offset))
+    cursor = max(0, offset)
     return _checkpoint_digest(
         cursor, _tail_before_offset(handle, cursor), _head_sample(handle, cursor)
     )
 
 
 def _decode_cursor_checkpoint(value: str) -> tuple[str, bool]:
-    checkpoint = str(value or "").strip().lower()
+    checkpoint = (value or "").strip().lower()
     if checkpoint.startswith(_DISCARDING_CHECKPOINT_PREFIX):
         return checkpoint[len(_DISCARDING_CHECKPOINT_PREFIX):], True
     return checkpoint, False
@@ -205,7 +205,7 @@ def log_identity() -> str:
 
 
 def read_last_lines(limit: int = 200) -> list[str]:
-    count = max(1, min(int(limit or 200), 1000))
+    count = max(1, min((limit or 200), 1000))
     if not APP_LOG.exists():
         return []
     result: deque[str] = deque(maxlen=count)
@@ -222,7 +222,7 @@ def log_snapshot() -> tuple[int, int]:
         stat = APP_LOG.stat()
     except OSError:
         return 0, 0
-    return int(stat.st_mtime_ns), int(stat.st_size)
+    return stat.st_mtime_ns, stat.st_size
 
 
 def read_stream_chunk(
@@ -236,20 +236,20 @@ def read_stream_chunk(
 ) -> RuntimeLogChunk:
     """读取完整日志行，并用代次、流身份、检查点和事件数限制 tail。"""
     generation = log_generation()
-    requested = max(0, int(offset or 0))
-    if expected_generation is not None and int(expected_generation) != generation:
+    requested = max(0, (offset or 0))
+    if expected_generation is not None and expected_generation != generation:
         requested = 0
         expected_stream_id = ""
         expected_checkpoint = ""
         generation_reset = True
     else:
         generation_reset = False
-    expected = str(expected_stream_id or "").strip()
+    expected = (expected_stream_id or "").strip()
     expected_cursor_checkpoint, discarding_truncated_line = _decode_cursor_checkpoint(
         expected_checkpoint
     )
-    limit = max(4096, min(int(max_bytes or _MAX_STREAM_READ_BYTES), 4 * 1024 * 1024))
-    event_limit = max(1, min(int(max_events or _MAX_STREAM_EVENTS), 8192))
+    limit = max(4096, min((max_bytes or _MAX_STREAM_READ_BYTES), 4 * 1024 * 1024))
+    event_limit = max(1, min((max_events or _MAX_STREAM_EVENTS), 8192))
 
     try:
         handle = APP_LOG.open("rb")
@@ -261,7 +261,7 @@ def read_stream_chunk(
 
     with handle:
         stat = os.fstat(handle.fileno())
-        size = int(stat.st_size)
+        size = stat.st_size
         stream_id = _stream_id_from_stat(stat)
         identity_changed = bool(expected and expected != stream_id)
         truncated = size < requested

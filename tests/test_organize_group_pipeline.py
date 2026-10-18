@@ -9,6 +9,14 @@
 """
 from __future__ import annotations
 
+from app.modules.process_lock import CrossProcessLock
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
+from app.modules.scraper import TMDBScraper
+from app.modules.media_variant import MediaVariant
+
 import json
 import socket
 import threading
@@ -63,10 +71,10 @@ class _TreeClient:
         self.list_dir_errors: dict[str, Exception] = {}
 
     def file_info(self, file_id: str):
-        return GuangYaFile(str(file_id), self.root_name, True, parent_id="0")
+        return GuangYaFile(file_id, self.root_name, True, parent_id="0")
 
     def list_dir(self, file_id: str):
-        key = str(file_id)
+        key = file_id
         self.calls.append(key)
         error = self.list_dir_errors.get(key)
         if error is not None:
@@ -463,13 +471,13 @@ class GroupStatsMergeTests(unittest.TestCase):
         self.assertEqual(aggregate["scan_elapsed_seconds"], 0.75)
 
     def test_changed_paths_dedupe_and_ignore_incomplete_rows(self):
-        changes = [
+        changes: list[dict] = cast(list[dict], [
             {"rel_dir": "剧集/A/Season 01", "name": "E01.mkv"},
             {"rel_dir": "剧集/A/Season 01/", "name": "E02.mkv"},
             {"rel_dir": "剧集/A/Season 01", "name": "E01.mkv"},
             {"action": "remove", "file_id": "x"},
             "not-a-dict",
-        ]
+        ])
 
         self.assertEqual(changed_target_dirs(changes), ["剧集/A/Season 01"])
         self.assertEqual(
@@ -492,7 +500,7 @@ class _PipelineHarness:
         }
         rules.update(rule_overrides)
         self.rules = OrganizeRules(**rules)
-        self.organizer = Organizer(client=client, scraper=object())
+        self.organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, object()))
         self.events: list[str] = []
         self.execute_hook = None
         self.plan_hook = None
@@ -681,7 +689,7 @@ class GroupPipelineExecutionTests(unittest.TestCase):
 
         def poison(_group, _stats):
             observed.append(len(harness.organizer._existing_variant_cache))
-            harness.organizer._existing_variant_cache["stale"] = []
+            harness.organizer._existing_variant_cache[cast(tuple[str, str, int, str], "stale")] = cast(MediaVariant, [])
 
         harness.plan_hook = poison
         harness.run()
@@ -697,7 +705,7 @@ class GroupPipelineExecutionTests(unittest.TestCase):
 
         original_build = harness._build_plans
 
-        def build_with_context(*args):
+        def build_with_context(*args, **_kwargs):
             # patch.object 会把纯函数当描述符绑定 organizer，参数取尾部五个。
             scan_result, context, rules, stats, performance_before = args[-5:]
             observed_cache_only.append(bool(context.probe_cache_only))
@@ -894,7 +902,7 @@ class TaskStateProjectionTests(unittest.TestCase):
             def release(self):
                 return None
 
-        manager._lock = _NoopLock()
+        manager._lock = cast(CrossProcessLock, _NoopLock())
         manager._wake_download_tracker = lambda *_args, **_kwargs: None
 
         class _FakeOrganizer:
@@ -917,6 +925,7 @@ class TaskStateProjectionTests(unittest.TestCase):
 
             def organize(self, *_args, **kwargs):
                 callback = kwargs.get("group_progress")
+                assert callback is not None
                 callback({
                     "progress": {
                         "total": 100,
@@ -1050,6 +1059,7 @@ class ProtectedStagingTaskTests(unittest.TestCase):
         self.assertEqual(task["result"]["sources"][0]["status"], "partial")
         self.assertNotIn("stage", client.calls)
         self.assertIn("stage", db.list_protected_guangya_staging_ids())
+        assert row is not None
         self.assertEqual(row["gy_staging_parent_dir"], "old-parent")
         self.assertEqual(row["gy_staging_cleanup_status"], "retained")
         self.assertEqual(row["organize_status"], "requires_manual")
@@ -1121,7 +1131,7 @@ class GroupPipelineRollbackTests(unittest.TestCase):
         client = _sample_tree()
         client.tree["nested-a"].append(_video("late", "A.S01E02.mkv", "nested-a"))
         harness = _PipelineHarness(client)
-        scraper = TMDBScraper("offline-fixture")
+        scraper = TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(scraper.close)
         harness.organizer.scraper = scraper
         frozen = frozenset({"group-a", "nested-a", "a-video", "group-b", "b-video"})

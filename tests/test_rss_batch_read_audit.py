@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from tests.support import assert_present
+
+from typing import cast
+
 import json
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -35,7 +39,7 @@ class RSSBatchReadAuditTests(InitializedWebTestCase):
                     {"torrent_url": f"magnet:?xt=urn:btih:{n + 1:040x}"}
                 ),
             )["id"]
-            self.assertIsNotNone(entry_id)
+            assert (entry_id) is not None
             ids.append(entry_id)
         return ids
 
@@ -97,7 +101,7 @@ class RSSBatchReadAuditTests(InitializedWebTestCase):
 
     def test_bulk_projection_matches_single_read_and_uses_bounded_sql(self):
         ids = self.entries(2)
-        expected = {entry_id: dict(db.get_rss_entry(entry_id)) for entry_id in ids}
+        expected = {entry_id: dict(assert_present(db.get_rss_entry(entry_id))) for entry_id in ids}
         requested = [ids[1], *range(1000, 1501), ids[0], ids[0]]
         with self.reads() as counts:
             actual = db.get_rss_entries_by_ids(iter(requested))
@@ -155,14 +159,18 @@ class RSSBatchReadAuditTests(InitializedWebTestCase):
             rows = db.get_rss_entries_by_ids([first, *range(1000, 1499), second])
         self.assertEqual(rows[first]["qb_save_path"], "/synthetic/downloads")
         self.assertEqual(rows[second]["qb_save_path"], "/synthetic/downloads")
-        self.assertEqual(db.get_rss_entry(second)["qb_save_path"], "/changed")
+        get_rss_entry_result = db.get_rss_entry(second)
+        assert get_rss_entry_result is not None
+        self.assertEqual(get_rss_entry_result["qb_save_path"], "/changed")
 
     def test_single_read_preserves_existing_sqlite_id_coercion(self):
         entry_id = self.entries(1)[0]
         for value in (entry_id, str(entry_id), float(entry_id)):
             with self.subTest(value=value):
-                self.assertEqual(db.get_rss_entry(value)["id"], entry_id)
-        self.assertIsNone(db.get_rss_entry(None))
+                get_rss_entry_result_2 = db.get_rss_entry(cast(int, value))
+                assert get_rss_entry_result_2 is not None
+                self.assertEqual(get_rss_entry_result_2["id"], entry_id)
+        self.assertIsNone(db.get_rss_entry(cast(int, None)))
         self.assertIsNone(db.get_rss_entry(-1))
 
     def test_web_entries_keep_unprocessed_first_and_filters_after_reload(self):
@@ -221,4 +229,6 @@ class RSSBatchReadAuditTests(InitializedWebTestCase):
                 self.assertEqual(repeated.status_code, 200)
                 self.assertEqual(qb.call_count, 1)
                 self.assertEqual(gy.call_count, 1)
-        self.assertEqual(db.get_rss_entry(cloud_entries[1])["failure_code"], "guangya_outcome_unknown")
+        get_rss_entry_result_3 = db.get_rss_entry(cloud_entries[1])
+        assert get_rss_entry_result_3 is not None
+        self.assertEqual(get_rss_entry_result_3["failure_code"], "guangya_outcome_unknown")

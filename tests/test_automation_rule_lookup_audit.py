@@ -100,7 +100,9 @@ class AutomationRuleLookupAuditTests(IsolatedDatabaseTestCase):
         _, token = follows.prepare_follow(self.arguments, self.context)
         result = follows.follow_confirmed(self.arguments, token, self.context)
         self.assertEqual(result.data["rule_id"], existing["id"])
-        self.assertEqual(rules.get_rule(self.owner, existing["id"])["revision"], 2)
+        get_rule_result = rules.get_rule(self.owner, existing["id"])
+        assert get_rule_result is not None
+        self.assertEqual(get_rule_result["revision"], 2)
         with self.assertRaises(AgentToolError):
             follows.follow_confirmed(self.arguments, token, self.context)
         with db.get_conn() as conn:

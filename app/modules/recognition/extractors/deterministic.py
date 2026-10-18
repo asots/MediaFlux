@@ -174,7 +174,7 @@ def _extract_number(pattern: re.Pattern, text: str) -> int | None:
 
 def _chinese_number(value: str) -> int | None:
     """解析常见中文季号（零至九十九）；无法确认时返回 ``None``。"""
-    text = str(value or "").strip().replace("两", "二").replace("〇", "零")
+    text = (value or "").strip().replace("两", "二").replace("〇", "零")
     digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
               "六": 6, "七": 7, "八": 8, "九": 9}
     if not text:
@@ -214,7 +214,7 @@ def _parse_release_x_position(
     该格式必须是完整 token，避免从 ``Title1x02``、分辨率或年份中截取。
     常见画面比例也失败关闭；标准 ``SxxEyy``/中文季集规则仍拥有更高优先级。
     """
-    for match in _RELEASE_X_POSITION.finditer(str(value or "")):
+    for match in _RELEASE_X_POSITION.finditer(value or ""):
         season = int(match.group(1))
         episode = int(match.group(2))
         if not (1 <= season <= 99 and 1 <= episode <= 999):
@@ -226,7 +226,7 @@ def _parse_release_x_position(
 
 def _has_unaccepted_release_x_position(value: str) -> bool:
     """阻止 GuessIt 把尺寸、年份或越界 ``NxM`` token 当成季集。"""
-    source = str(value or "")
+    source = (value or "")
     return bool(
         _RELEASE_X_NUMERIC_TOKEN.search(source)
         and _parse_release_x_position(source) is None
@@ -271,7 +271,7 @@ def _valid_unlabeled_episode(number: int) -> bool:
     长篇动画会出现四位集号，但四位年份与常见分辨率更常见。显式
     ``SxxEyyyy`` 不走这里，因此只对裸数字执行保守排除。
     """
-    return bool(
+    return (
         1 <= number <= 9999
         and not 1900 <= number <= 2099
         and number not in _UNLABELED_EPISODE_RESERVED_VALUES
@@ -286,7 +286,7 @@ def _extract_episode(
     保持普通自动识别对标题尾部数字的保守契约。
     """
     # 编码后的 5.1 / 7.1 属于音频规格，不能作为尾部裸集号参与解析。
-    text = _AUDIO_CODEC_TOKEN.sub(lambda match: ' ' * len(match.group(0)), str(text or ''))
+    text = _AUDIO_CODEC_TOKEN.sub(lambda match: ' ' * len(match.group(0)), (text or ''))
     # 小数集属于特别篇语义。若继续套用裸数字规则，``12.5`` 会被错误解析
     # 成第 5 集；其最终整数位置由特别篇统一分配器决定。
     if fractional_episode_position(text) is not None:
@@ -315,7 +315,7 @@ def _extract_episode(
     compact = _parse_release_x_position(text)
     if compact is not None:
         return compact[1]
-    source = str(text or "")
+    source = (text or "")
     angle = _ANGLE_EPISODE_TOKEN.search(source)
     if angle:
         number = int(angle.group(1))
@@ -352,7 +352,7 @@ def _extract_episode(
             plain = int(plain_match.group(1))
             if _valid_unlabeled_episode(plain):
                 return plain
-    for match in _BRACKET_EPISODE_TOKEN.finditer(str(text or "")):
+    for match in _BRACKET_EPISODE_TOKEN.finditer(text or ""):
         number = int(match.group(1))
         # 跳过年份和常见分辨率后继续检查后续括号，例如 ``[2026][04]``。
         if _valid_unlabeled_episode(number):

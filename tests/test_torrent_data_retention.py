@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.support import assert_present
+
 import unittest
 from unittest.mock import patch
 
@@ -33,7 +35,7 @@ class TorrentDataRetentionRepositoryTests(IsolatedDatabaseTestCase):
             torrent_data=f"torrent:{name}".encode(),
         )
         self.assertTrue(created)
-        modifier = f"-{max(0, int(age_days))} days"
+        modifier = f"-{max(0, age_days)} days"
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE download_requests SET status=?,qb_status=?,gy_status=?,"
@@ -52,8 +54,10 @@ class TorrentDataRetentionRepositoryTests(IsolatedDatabaseTestCase):
         )
 
         self.assertEqual(db.purge_expired_download_request_torrent_data(0), 0)
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
         self.assertEqual(
-            db.get_download_request(request_id)["torrent_data"],
+            get_download_request_result["torrent_data"],
             b"torrent:permanent",
         )
 
@@ -115,11 +119,13 @@ class TorrentDataRetentionRepositoryTests(IsolatedDatabaseTestCase):
 
         for request_id in clearable:
             row = db.get_download_request(request_id)
-            self.assertIsNotNone(row)
+            assert (row) is not None
             self.assertIsNone(row["torrent_data"])
             self.assertTrue(str(row["source_value"] or "").startswith("magnet:?"))
         for request_id in retained:
-            self.assertIsNotNone(db.get_download_request(request_id)["torrent_data"])
+            get_download_request_result_2 = db.get_download_request(request_id)
+            assert get_download_request_result_2 is not None
+            assert (get_download_request_result_2["torrent_data"]) is not None
         with db.get_conn() as conn:
             log_count = conn.execute(
                 "SELECT COUNT(*) FROM download_log WHERE request_id=?",
@@ -145,7 +151,7 @@ class TorrentDataRetentionRepositoryTests(IsolatedDatabaseTestCase):
         remaining = sum(
             1
             for request_id in request_ids
-            if db.get_download_request(request_id)["torrent_data"] is not None
+            if assert_present(db.get_download_request(request_id))["torrent_data"] is not None
         )
         self.assertEqual(remaining, 1)
         self.assertEqual(

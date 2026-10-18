@@ -59,10 +59,13 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
     def test_handoff_expires_old_card_and_reuses_existing_tracker_after_fresh_settle(self):
         self.assertEqual(self.resume(), [self.request])
         row = db.get_download_request(self.request)
+        assert row is not None
         self.assertEqual((row['gy_staging_parent_dir'], row['gy_requested_target_dir'], row['gy_requested_nsfw']), ('new', 'new', 1))
         self.assertEqual((row['organize_started'], row['organize_status'], row['gy_settle_stable_count'], row['gy_settle_snapshot']), (0, 'settling', 0, ''))
         self.assertIn('stage', db.list_protected_guangya_staging_ids())
-        self.assertEqual(db.get_organize_confirmation('old-card')['status'], 'expired')
+        get_organize_confirmation_result = db.get_organize_confirmation('old-card')
+        assert get_organize_confirmation_result is not None
+        self.assertEqual(get_organize_confirmation_result['status'], 'expired')
         with self.assertRaises(ValueError):
             db.claim_organize_confirmation('old-card', chat_id='test', selected_index=0)
         self.assertEqual(staging_confirmation_summary('stage')['pending'], 0)
@@ -78,7 +81,9 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
         self.assertFalse(db.claim_download_request_organize(self.request))
 
     def test_active_unknown_or_cancelled_request_cannot_be_taken_over(self):
-        original = dict(db.get_download_request(self.request))
+        get_download_request_result_4 = db.get_download_request(self.request)
+        assert get_download_request_result_4 is not None
+        original = dict(get_download_request_result_4)
         for fields in ({'gy_status': 'downloading'}, {'gy_status': 'manual_review'}, {'status': 'cancelled'},
                        {'organize_status': 'running'}, {'organize_started': -1},
                        {'gy_staging_cleanup_status': 'failed'}, {'attention_cleared_at': db.now()}):
@@ -86,7 +91,9 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
                 with db.get_conn() as conn:
                     conn.execute('UPDATE download_requests SET ' + ','.join(f'{key}=?' for key in fields) + ' WHERE id=?', [*fields.values(), self.request])
                 self.assertEqual(self.resume(), [])
-                self.assertEqual(db.get_organize_confirmation('old-card')['status'], 'pending')
+                get_organize_confirmation_result_2 = db.get_organize_confirmation('old-card')
+                assert get_organize_confirmation_result_2 is not None
+                self.assertEqual(get_organize_confirmation_result_2['status'], 'pending')
                 with db.get_conn() as conn:
                     conn.execute('UPDATE download_requests SET ' + ','.join(f'{key}=?' for key in fields) + ' WHERE id=?', [*(original[k] for k in fields), self.request])
 
@@ -95,7 +102,9 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
             with self.subTest(status=status):
                 db.update_organize_confirmation('old-card', status=status)
                 self.assertEqual(self.resume(), [])
-                self.assertEqual(db.get_download_request(self.request)['gy_staging_parent_dir'], 'old')
+                get_download_request_result = db.get_download_request(self.request)
+                assert get_download_request_result is not None
+                self.assertEqual(get_download_request_result['gy_staging_parent_dir'], 'old')
         db.update_organize_confirmation('old-card', status='pending')
         self.assertEqual(self.resume(), [self.request])
 
@@ -109,7 +118,9 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
         self.tree['new'] = []
         self.assertEqual(self.resume(), [])
         self.assertEqual(resume_relocated_staging(self.client, self.stats, source_ids={'elsewhere'}, nsfw_source_ids=set()), [])
-        self.assertEqual(db.get_organize_confirmation('old-card')['status'], 'pending')
+        get_organize_confirmation_result_3 = db.get_organize_confirmation('old-card')
+        assert get_organize_confirmation_result_3 is not None
+        self.assertEqual(get_organize_confirmation_result_3['status'], 'pending')
 
     def test_stale_snapshot_and_ambiguous_owner_do_not_expire_confirmation(self):
         expected = list_staging_cleanup_requests(source_id='stage')[0]
@@ -119,7 +130,9 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
         other, _ = db.create_download_request('ambiguous-fixture', 'magnet')
         db.update_download_request(other, gy_target_dir='stage', gy_isolated=1)
         self.assertEqual(self.resume(), [])
-        self.assertEqual(db.get_organize_confirmation('old-card')['status'], 'pending')
+        get_organize_confirmation_result_4 = db.get_organize_confirmation('old-card')
+        assert get_organize_confirmation_result_4 is not None
+        self.assertEqual(get_organize_confirmation_result_4['status'], 'pending')
 
     def test_ordinary_cancelled_card_is_not_hidden_by_relocation_resolution(self):
         db.update_organize_confirmation('old-card', status='cancelled', result_json=json.dumps({'resolution': 'cancelled'}))
@@ -130,8 +143,11 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
         with patch('app.repositories.download_requests._update_download_request_conn', side_effect=RuntimeError('fixture failure')):
             self.assertEqual(self.resume(), [])
         row = db.get_download_request(self.request)
+        assert row is not None
         self.assertEqual((row['gy_staging_parent_dir'], row['gy_settle_snapshot']), ('old', 'old-snapshot'))
-        self.assertEqual(db.get_organize_confirmation('old-card')['status'], 'pending')
+        get_organize_confirmation_result_5 = db.get_organize_confirmation('old-card')
+        assert get_organize_confirmation_result_5 is not None
+        self.assertEqual(get_organize_confirmation_result_5['status'], 'pending')
 
     def test_wrong_owner_or_malformed_card_never_becomes_retired(self):
         with db.get_conn() as conn:
@@ -140,7 +156,9 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
             with self.subTest(payload=payload), db.get_conn() as conn:
                 conn.execute("UPDATE organize_confirmations SET payload_json=? WHERE token='old-card'", (payload,))
             self.assertEqual(self.resume(), [])
-            self.assertEqual(db.get_organize_confirmation('old-card')['status'], 'pending')
+            get_organize_confirmation_result_6 = db.get_organize_confirmation('old-card')
+            assert get_organize_confirmation_result_6 is not None
+            self.assertEqual(get_organize_confirmation_result_6['status'], 'pending')
         with db.get_conn() as conn:
             conn.execute("UPDATE organize_confirmations SET payload_json=? WHERE token='old-card'", (original,))
         self.assertEqual(self.resume(), [self.request])
@@ -148,7 +166,9 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
     def test_relocation_does_not_wait_for_files_already_organized_from_original_pack(self):
         db.update_download_request(self.request, gy_expected_file_count=20)
         self.assertEqual(self.resume(), [self.request])
-        self.assertEqual(db.get_download_request(self.request)['gy_expected_file_count'], 0)
+        get_download_request_result_2 = db.get_download_request(self.request)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2['gy_expected_file_count'], 0)
         tracker = DownloadTracker()
         with patch('app.modules.download_tracker.GuangYaClient', return_value=self.client), patch.object(tracker, '_publish_lifecycle'):
             self.assertFalse(tracker._staging_ready_for_organize(db.get_download_request(self.request)))
@@ -159,19 +179,25 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
         db.create_organize_confirmation(token='new-card', fingerprint='old-card', chat_id='test',
             source_name='Fixture', directory_path='/', payload={'source_dir_id': 'stage'}, expires_at='2099-01-01 00:00:00')
         self.assertEqual(self.resume(), [])
-        self.assertEqual(db.get_organize_confirmation('new-card')['status'], 'pending')
+        get_organize_confirmation_result_7 = db.get_organize_confirmation('new-card')
+        assert get_organize_confirmation_result_7 is not None
+        self.assertEqual(get_organize_confirmation_result_7['status'], 'pending')
 
     def test_late_review_and_background_reconciliation_cannot_revive_retired_card(self):
         from app.repositories.download_staging_reconcile import reconcile_reorganized_confirmations
         db.update_organize_confirmation('old-card', review_status='running')
         self.assertEqual(self.resume(), [self.request])
-        self.assertEqual(db.get_organize_confirmation('old-card')['review_status'], 'cancelled')
+        get_organize_confirmation_result_8 = db.get_organize_confirmation('old-card')
+        assert get_organize_confirmation_result_8 is not None
+        self.assertEqual(get_organize_confirmation_result_8['review_status'], 'cancelled')
         with self.assertRaises(ValueError):
             db.claim_organize_confirmation('old-card', chat_id='test', selected_index=0, actor='agent')
         db.update_download_request(self.request, organize_status='completed', organize_started=1)
         with patch('app.repositories.download_staging_reconcile.requests_for_download_confirmation', side_effect=AssertionError('retired card selected')):
             self.assertEqual(reconcile_reorganized_confirmations(['stage']), [])
-        self.assertEqual(db.get_organize_confirmation('old-card')['status'], 'expired')
+        get_organize_confirmation_result_9 = db.get_organize_confirmation('old-card')
+        assert get_organize_confirmation_result_9 is not None
+        self.assertEqual(get_organize_confirmation_result_9['status'], 'expired')
 
     def test_real_manager_reports_resume_and_leaves_actual_organizing_to_tracker(self):
         from app.modules import organize_tasks
@@ -192,7 +218,9 @@ class StagingResumeTests(IsolatedDatabaseTestCase):
         self.assertEqual(result['result']['resumed_download_ids'], [self.request])
         self.assertIn('等待后台落稳核验', result['message'])
         self.assertEqual(result['stats']['total'], 0)
-        self.assertEqual(db.get_download_request(self.request)['organize_status'], 'settling')
+        get_download_request_result_3 = db.get_download_request(self.request)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3['organize_status'], 'settling')
         event = build_organize_lifecycle_event(result['stats'], source_name='Fixture', strm_status='未启用或无变更', media_refresh='未触发')
-        self.assertIn('无需重复下达指令', event.footer)
+        self.assertIn('无需重复下达指令', str(event.footer))
         self.assertIn('后台续接', str(event.fields))

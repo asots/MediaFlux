@@ -170,6 +170,7 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
         self.assertEqual(rules.claim_due_rules(self.clock), [])
         second = rules.claim_due_rules(self.clock + timedelta(minutes=6))
         self.assertEqual(len(second), 1)
+        assert row is not None
         self.assertFalse(
             rules.finish_rule(
                 row["id"], first[0]["lease_token"], self.clock.isoformat()
@@ -209,6 +210,7 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
             self.assertEqual(drain_automation_rules(now=self.clock), 0)
         self.assertEqual(publish.call_count, 1)
         self.assertFalse(publish.call_args.kwargs["deliver_now"])
+        assert row is not None
         self.assertIn(row["id"], publish.call_args.args[0])
         self.assertNotIn("LLM", publish.call_args.args[1].title)
 
@@ -410,6 +412,7 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
             worker.start()
             try:
                 self.assertTrue(reading.wait(2))
+                assert row is not None
                 self.assertTrue(
                     rules.delete_rule("owner", row["id"], expected_revision=1)
                 )
@@ -444,6 +447,7 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
 
         def cancel():
             cancelling.set()
+            assert row is not None
             rules.delete_rule("owner", row["id"], expected_revision=1)
             cancelled.set()
 

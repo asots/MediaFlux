@@ -1,6 +1,8 @@
 """Media Agent 功能状态摘要的投影、路由、安全与 API 契约。"""
 
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
 import json
 from unittest.mock import patch
@@ -18,7 +20,7 @@ class FeatureSummaryUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(feature_summary_arguments({}), {})
         for arguments in (None, {"feature": "discovery"}, {"debug": True}):
             with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
-                feature_summary_arguments(arguments)
+                feature_summary_arguments(cast(dict[str, Any], arguments))
 
     def test_summary_projects_dependency_state_without_values(self):
         values = {

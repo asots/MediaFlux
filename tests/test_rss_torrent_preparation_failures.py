@@ -1,6 +1,8 @@
 """RSS 种子准备失败专项回归：真实 prepare/repo/RSS，仅替换网络与下载提交边界。"""
 from __future__ import annotations
 
+from tests.support import assert_present
+
 import hashlib
 import json
 from unittest.mock import patch
@@ -74,14 +76,14 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
             sid, "Movie", f"preparation-{self.sequence}",
             payload=json.dumps({"torrent_url": url, "content_type": "application/x-bittorrent"}),
         )["id"]
-        self.assertIsNotNone(eid)
+        assert (eid) is not None
         return int(eid)
 
     def logs(self, eid):
         with db.get_conn() as conn:
             return [dict(row) for row in conn.execute(
                 "SELECT * FROM download_log WHERE rss_item_id=? ORDER BY id",
-                (db.get_rss_entry(eid)["rss_item_id"],),
+                (assert_present(db.get_rss_entry(eid))["rss_item_id"],),
             )]
 
     def assert_no_requests(self):
@@ -101,6 +103,7 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
             self.assertEqual(result["retryable"], retryable)
         self.assertEqual(bool(result.get("review_required")), review)
         row = db.get_rss_entry(eid)
+        assert row is not None
         self.assertEqual((row["status"], row["processed"]), ("failed", 0))
         self.assertEqual((row["failure_code"], row["failure_retryable"]), (code, int(retryable)))
         self.assertTrue(row["failed_at"])
@@ -124,7 +127,7 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
         error = offline.TorrentPreparationError(
             "安全错误", failure_code="torrent_invalid", stage="validate",
         )
-        self.assertIsInstance(error, ValueError)
+        assert isinstance(error, ValueError)
         self.assertEqual(str(error), "安全错误")
         self.assertEqual((error.failure_code, error.stage, error.retryable, error.http_status),
                          ("torrent_invalid", "validate", False, None))
@@ -193,6 +196,7 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["infohash"], _INFOHASH)
         self.assertEqual(result["request_id"], 0)
         row = db.get_rss_entry(eid)
+        assert row is not None
         self.assertEqual((row["download_request_key"], row["download_backend"], row["retry_count"]),
                          ("", "", 0))
         self.assertIn("stage=fetch", "\n".join(output))
@@ -205,10 +209,14 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
         eid = self.entry()
         self.fetch.side_effect = httpx.ReadTimeout(_URL)
         self.failure(eid, "torrent_fetch_timeout", True)
-        before = dict(db.get_rss_entry(eid))
+        get_rss_entry_result_8 = db.get_rss_entry(eid)
+        assert get_rss_entry_result_8 is not None
+        before = dict(get_rss_entry_result_8)
         self.assertNotIn(eid, self.retryable_ids())
         self.assertFalse(self.engine.download(eid)["ok"])
-        self.assertEqual(dict(db.get_rss_entry(eid)), before)
+        get_rss_entry_result_9 = db.get_rss_entry(eid)
+        assert get_rss_entry_result_9 is not None
+        self.assertEqual(dict(get_rss_entry_result_9), before)
         self.assertEqual(self.fetch.call_count, 1)
         self.assert_no_requests()
         self.age_failure(eid)
@@ -220,9 +228,11 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.fetch.call_count, 2)
         self.guangya.assert_called_once()
         row = db.get_rss_entry(eid)
+        assert row is not None
         self.assertEqual((row["status"], row["processed"], row["retry_count"]), ("downloaded", 1, 1))
         self.assertEqual((row["failure_code"], row["failure_retryable"]), ("", 0))
         request = db.get_download_request(result["request_id"])
+        assert request is not None
         self.assertEqual(request["torrent_data"], _TORRENT)
         self.assertEqual(request["gy_task_id"], "gy-task")
         self.assertEqual(row["download_request_key"], request["request_key"])
@@ -246,22 +256,32 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
                 self.fetch.side_effect = error
                 self.failure(eid, code, True)
                 self.age_failure(eid, 30)
-                before = dict(db.get_rss_entry(eid))
+                get_rss_entry_result_10 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_10 is not None
+                before = dict(get_rss_entry_result_10)
                 self.assertNotIn(eid, self.retryable_ids())
                 self.assertFalse(self.engine.download(eid)["ok"])
-                self.assertEqual(dict(db.get_rss_entry(eid)), before)
+                get_rss_entry_result_11 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_11 is not None
+                self.assertEqual(dict(get_rss_entry_result_11), before)
                 self.assertEqual(self.fetch.call_count, 1)
                 for retry in range(1, 6):
                     self.age_failure(eid)
                     self.assertIn(eid, self.retryable_ids())
                     self.failure(eid, code, True)
-                    self.assertEqual(db.get_rss_entry(eid)["retry_count"], retry)
+                    get_rss_entry_result = db.get_rss_entry(eid)
+                    assert get_rss_entry_result is not None
+                    self.assertEqual(get_rss_entry_result["retry_count"], retry)
                 self.age_failure(eid)
-                before = dict(db.get_rss_entry(eid))
+                get_rss_entry_result_12 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_12 is not None
+                before = dict(get_rss_entry_result_12)
                 self.assertNotIn(eid, self.retryable_ids())
                 self.assertFalse(self.engine.download(eid)["ok"])
                 self.assertFalse(db.claim_rss_entry(eid))
-                self.assertEqual(dict(db.get_rss_entry(eid)), before)
+                get_rss_entry_result_13 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_13 is not None
+                self.assertEqual(dict(get_rss_entry_result_13), before)
                 self.assertEqual(self.fetch.call_count, 6)
                 self.assert_no_requests()
 
@@ -273,7 +293,9 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
                 result, output = self.failure(eid, "torrent_http_error", retryable)
                 self.assertIn(str(status), result["error"])
                 self.assertIn(f"http_status={status}", "\n".join(output))
-                self.assertEqual(db.get_rss_entry(eid)["download_request_key"], "")
+                get_rss_entry_result_2 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_2 is not None
+                self.assertEqual(get_rss_entry_result_2["download_request_key"], "")
                 self.age_failure(eid)
                 self.assertEqual(eid in self.retryable_ids(), retryable)
                 self.assert_no_requests()
@@ -284,7 +306,9 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
                 eid = self.entry()
                 self.fetch.side_effect = error
                 self.failure(eid, "torrent_fetch_failed", True)
-                self.assertEqual(db.get_rss_entry(eid)["download_request_key"], "")
+                get_rss_entry_result_3 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_3 is not None
+                self.assertEqual(get_rss_entry_result_3["download_request_key"], "")
                 self.assert_no_requests()
 
     def test_rss_bad_content_and_hash_mismatch_never_become_retryable(self):
@@ -299,11 +323,15 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
                 _, output = self.failure(eid, code)
                 self.assertIn("stage=validate", "\n".join(output))
                 self.age_failure(eid)
-                before = dict(db.get_rss_entry(eid))
+                get_rss_entry_result_14 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_14 is not None
+                before = dict(get_rss_entry_result_14)
                 calls = self.fetch.call_count
                 self.assertNotIn(eid, self.retryable_ids())
                 self.assertFalse(self.engine.download(eid)["ok"])
-                self.assertEqual(dict(db.get_rss_entry(eid)), before)
+                get_rss_entry_result_15 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_15 is not None
+                self.assertEqual(dict(get_rss_entry_result_15), before)
                 self.assertEqual(self.fetch.call_count, calls)
                 self.assertEqual(before["download_request_key"], "")
                 self.assert_no_requests()
@@ -337,7 +365,9 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
                             "download_backend='guangya',failed_at='2026-10-01 00:00:00' WHERE id=?",
                             (status, processed, eid),
                         )
-                    winner.update(dict(db.get_rss_entry(eid)))
+                    get_rss_entry_result_16 = db.get_rss_entry(eid)
+                    assert get_rss_entry_result_16 is not None
+                    winner.update(dict(get_rss_entry_result_16))
                     return _TORRENT, {}
 
                 self.fetch.side_effect = fetch_and_change_state
@@ -351,7 +381,9 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
                 self.assertNotEqual(result.get("failure_code"), "invalid_payload")
                 bind.assert_called_once()
                 record.assert_not_called()
-                self.assertEqual(dict(db.get_rss_entry(eid)), winner)
+                get_rss_entry_result_17 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_17 is not None
+                self.assertEqual(dict(get_rss_entry_result_17), winner)
                 self.assertEqual(self.logs(eid), [])
                 self.assertNotIn(_TOKEN, json.dumps([result, captured.output]))
                 self.assert_no_requests()
@@ -369,15 +401,22 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
                 backend.assert_called_once()
                 request = db.get_download_request(result["request_id"])
                 backend_status = "gy_status" if method == "guangya" else "qb_status"
+                assert request is not None
                 self.assertEqual(request[backend_status], "outcome_unknown")
-                self.assertTrue(db.get_rss_entry(eid)["download_request_key"])
+                get_rss_entry_result_4 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_4 is not None
+                self.assertTrue(get_rss_entry_result_4["download_request_key"])
                 before_calls = backend.call_count
-                before = dict(db.get_rss_entry(eid))
+                get_rss_entry_result_18 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_18 is not None
+                before = dict(get_rss_entry_result_18)
                 repeated = self.engine.download(eid)
                 self.assertFalse(repeated["ok"])
                 self.assertTrue(rss.rss_entry_delivery(db.get_rss_entry(eid))["review_required"])
                 self.assertEqual(backend.call_count, before_calls)
-                self.assertEqual(dict(db.get_rss_entry(eid)), before)
+                get_rss_entry_result_19 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_19 is not None
+                self.assertEqual(dict(get_rss_entry_result_19), before)
                 self.assertEqual(db.update_rss_entries_processed([eid], False), 0)
                 self.assertNotIn(_TOKEN, json.dumps(repeated))
 
@@ -389,7 +428,9 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
                     result, output = self.failure(eid, f"{method}_outcome_unknown", review=True)
                 self.assertIn("stage=submit", "\n".join(output))
                 self.assertEqual(result["request_id"], 0)
-                self.assertTrue(db.get_rss_entry(eid)["download_request_key"])
+                get_rss_entry_result_5 = db.get_rss_entry(eid)
+                assert get_rss_entry_result_5 is not None
+                self.assertTrue(get_rss_entry_result_5["download_request_key"])
                 self.assert_no_requests()
 
     def test_qb_http_torrent_is_not_prefetched_and_only_submitted_once(self):
@@ -401,6 +442,7 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
         self.guangya.assert_not_called()
         self.fetch.assert_not_called()
         request = db.get_download_request(result["request_id"])
+        assert request is not None
         self.assertEqual((request["kind"], request["source_value"], request["torrent_data"]),
                          ("http", _URL, None))
         repeated = self.engine.download(eid)
@@ -415,16 +457,24 @@ class RSSTorrentPreparationFailureTests(IsolatedDatabaseTestCase):
         self.assertTrue(db.claim_rss_entry(eid))
         db.record_rss_entry_failure(eid, "invalid_payload", False)
         self.age_failure(eid)
-        before = dict(db.get_rss_entry(eid))
+        get_rss_entry_result_20 = db.get_rss_entry(eid)
+        assert get_rss_entry_result_20 is not None
+        before = dict(get_rss_entry_result_20)
         self.assertNotIn(eid, self.retryable_ids())
         self.assertFalse(self.engine.download(eid)["ok"])
         self.assertFalse(db.claim_rss_entry(eid))
-        self.assertEqual(dict(db.get_rss_entry(eid)), before)
+        get_rss_entry_result_21 = db.get_rss_entry(eid)
+        assert get_rss_entry_result_21 is not None
+        self.assertEqual(dict(get_rss_entry_result_21), before)
         self.fetch.assert_not_called()
         self.assert_no_requests()
         self.assertEqual(db.update_rss_entries_processed([eid], False), 1)
-        self.assertEqual(db.get_rss_entry(eid)["status"], "pending")
-        self.assertEqual(db.get_rss_entry(eid)["failure_code"], "")
+        get_rss_entry_result_6 = db.get_rss_entry(eid)
+        assert get_rss_entry_result_6 is not None
+        self.assertEqual(get_rss_entry_result_6["status"], "pending")
+        get_rss_entry_result_7 = db.get_rss_entry(eid)
+        assert get_rss_entry_result_7 is not None
+        self.assertEqual(get_rss_entry_result_7["failure_code"], "")
         result = self.engine.download(eid)
         self.assertTrue(result["ok"], result)
         self.guangya.assert_called_once()

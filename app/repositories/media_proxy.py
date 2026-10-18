@@ -39,10 +39,10 @@ def add_media_proxy_instance(
                 upstream_url,
                 api_key,
                 listen_host,
-                int(listen_port),
+                listen_port,
                 local_root,
                 1 if trust_forwarded_headers else 0,
-                str(trusted_proxy_cidrs_json or "[]"),
+                (trusted_proxy_cidrs_json or "[]"),
                 1 if enabled else 0,
                 "stopped",
                 "",
@@ -50,7 +50,8 @@ def add_media_proxy_instance(
                 timestamp,
             ),
         )
-        return int(cur.lastrowid)
+        assert cur.lastrowid is not None
+        return cur.lastrowid
 
 
 def list_media_proxy_instances() -> list[sqlite3.Row]:
@@ -64,7 +65,7 @@ def get_media_proxy_instance(instance_id: int) -> sqlite3.Row | None:
     with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_proxy_instances WHERE id=?",
-            (int(instance_id),),
+            (instance_id,),
         ).fetchone()
 
 
@@ -84,7 +85,7 @@ def update_media_proxy_instance(instance_id: int, fields: dict) -> bool:
     if not sets:
         return False
     sets.append("updated_at=?")
-    values.extend([db.now(), int(instance_id)])
+    values.extend([db.now(), instance_id])
     with db.get_conn() as conn:
         cur = conn.execute(
             f"UPDATE media_proxy_instances SET {', '.join(sets)} WHERE id=?",
@@ -94,7 +95,7 @@ def update_media_proxy_instance(instance_id: int, fields: dict) -> bool:
 
 
 def delete_media_proxy_instance(instance_id: int) -> bool:
-    normalized_id = int(instance_id)
+    normalized_id = instance_id
     with db.get_conn() as conn:
         conn.execute(
             "DELETE FROM media_proxy_playback_records WHERE instance_id=?",
@@ -129,7 +130,7 @@ def add_media_proxy_binding(
             "local_relative_path,enabled,created_at,updated_at"
             ") VALUES(?,?,?,?,?,?,?,?,?)",
             (
-                int(instance_id),
+                instance_id,
                 media_item_id,
                 media_source_id,
                 source_type,
@@ -140,7 +141,8 @@ def add_media_proxy_binding(
                 timestamp,
             ),
         )
-        return int(cur.lastrowid)
+        assert cur.lastrowid is not None
+        return cur.lastrowid
 
 
 def create_media_proxy_binding(
@@ -162,7 +164,7 @@ def create_media_proxy_binding(
             "local_relative_path,enabled,created_at,updated_at"
             ") VALUES(?,?,?,?,?,?,?,?,?)",
             (
-                int(instance_id),
+                instance_id,
                 media_item_id,
                 media_source_id,
                 source_type,
@@ -173,9 +175,10 @@ def create_media_proxy_binding(
                 timestamp,
             ),
         )
+        assert cur.lastrowid is not None
         row = conn.execute(
             "SELECT * FROM media_proxy_bindings WHERE id=?",
-            (int(cur.lastrowid),),
+            (cur.lastrowid,),
         ).fetchone()
         if row is None:  # pragma: no cover - 同事务内 INSERT 后必须可见
             raise RuntimeError("媒体绑定创建后无法回读")
@@ -186,7 +189,7 @@ def list_media_proxy_bindings(instance_id: int) -> list[sqlite3.Row]:
     with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_proxy_bindings WHERE instance_id=? ORDER BY id ASC",
-            (int(instance_id),),
+            (instance_id,),
         ).fetchall()
 
 
@@ -200,14 +203,14 @@ def get_media_proxy_binding(
             row = conn.execute(
                 "SELECT * FROM media_proxy_bindings WHERE instance_id=? "
                 "AND media_item_id=? AND media_source_id=? AND enabled=1",
-                (int(instance_id), media_item_id, media_source_id),
+                (instance_id, media_item_id, media_source_id),
             ).fetchone()
             if row:
                 return row
         return conn.execute(
             "SELECT * FROM media_proxy_bindings WHERE instance_id=? "
             "AND media_item_id=? AND enabled=1 ORDER BY id LIMIT 1",
-            (int(instance_id), media_item_id),
+            (instance_id, media_item_id),
         ).fetchone()
 
 
@@ -216,12 +219,12 @@ def delete_media_proxy_binding(binding_id: int, instance_id: int | None = None) 
         if instance_id is None:
             cur = conn.execute(
                 "DELETE FROM media_proxy_bindings WHERE id=?",
-                (int(binding_id),),
+                (binding_id,),
             )
         else:
             cur = conn.execute(
                 "DELETE FROM media_proxy_bindings WHERE id=? AND instance_id=?",
-                (int(binding_id), int(instance_id)),
+                (binding_id, instance_id),
             )
         return cur.rowcount > 0
 
@@ -243,14 +246,14 @@ _media_proxy_record_maintenance_lock = threading.RLock()
 
 
 def _redact_media_proxy_record_error(value: str) -> str:
-    text = str(value or "").replace("\r", " ").replace("\n", " ")[:4000]
+    text = (value or "").replace("\r", " ").replace("\n", " ")[:4000]
     text = _MEDIA_PROXY_ERROR_URL_RE.sub("[URL]", text)
     text = _MEDIA_PROXY_ERROR_SECRET_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
     return text[:1000]
 
 
 def _normalized_record_identity(value: str, limit: int = 255) -> str:
-    return str(value or "").strip()[:limit]
+    return (value or "").strip()[:limit]
 
 
 def _normalized_record_media_name(value: str, limit: int = 256) -> str:
@@ -318,7 +321,7 @@ def _upsert_media_proxy_playback_session(
         "guangya_file_id,started_at,last_request_at"
         ") VALUES(?,?,?,?,?,?,?,?)",
         (
-            int(instance_id), session_key, media_item_id, media_source_id,
+            instance_id, session_key, media_item_id, media_source_id,
             media_name, guangya_file_id, timestamp, timestamp,
         ),
     )
@@ -352,13 +355,13 @@ def _upsert_media_proxy_playback_session(
             upstream_latency_ms, total_latency_ms, total_latency_ms,
             route_class, source, status_code,
             failure_stage, failure_stage, error, error, timestamp,
-            int(instance_id), session_key,
+            instance_id, session_key,
         ),
     )
     row = conn.execute(
         "SELECT id FROM media_proxy_playback_sessions "
         "WHERE instance_id=? AND session_key=?",
-        (int(instance_id), session_key),
+        (instance_id, session_key),
     ).fetchone()
     if row is None:
         raise sqlite3.DatabaseError("播放会话摘要写入失败")
@@ -377,15 +380,15 @@ def record_media_proxy_playback_attempt(*, instance_id: int, route_class: str,
                                         media_source_id: str = "",
                                         guangya_file_id: str = "",
                                         media_name: str = "") -> int:
-    route = str(route_class or "unknown").strip()[:64] or "unknown"
-    normalized_method = str(method or "GET").strip().upper()[:12] or "GET"
-    normalized_source = str(source or "unknown").strip().lower()
+    route = (route_class or "unknown").strip()[:64] or "unknown"
+    normalized_method = (method or "GET").strip().upper()[:12] or "GET"
+    normalized_source = (source or "unknown").strip().lower()
     if normalized_source not in _MEDIA_PROXY_RECORD_SOURCES:
         normalized_source = "unknown"
-    status = max(0, min(int(status_code or 0), 999))
-    upstream_ms = max(0, min(int(upstream_latency_ms or 0), 86_400_000))
-    total_ms = max(0, min(int(total_latency_ms or 0), 86_400_000))
-    stage = str(failure_stage or "").strip()[:64]
+    status = max(0, min((status_code or 0), 999))
+    upstream_ms = max(0, min((upstream_latency_ms or 0), 86_400_000))
+    total_ms = max(0, min((total_latency_ms or 0), 86_400_000))
+    stage = (failure_stage or "").strip()[:64]
     safe_error = _redact_media_proxy_record_error(error)
     session_key = _normalized_record_identity(playback_session_key, 96)
     item_id = _normalized_record_identity(media_item_id)
@@ -401,7 +404,7 @@ def record_media_proxy_playback_attempt(*, instance_id: int, route_class: str,
         if session_key:
             session_id = _upsert_media_proxy_playback_session(
                 conn,
-                instance_id=int(instance_id),
+                instance_id=instance_id,
                 session_key=session_key,
                 media_item_id=item_id,
                 media_source_id=source_id,
@@ -410,7 +413,7 @@ def record_media_proxy_playback_attempt(*, instance_id: int, route_class: str,
                 route_class=route,
                 source=normalized_source,
                 status_code=status,
-                cache_hit=bool(cache_hit),
+                cache_hit=cache_hit,
                 upstream_latency_ms=upstream_ms,
                 total_latency_ms=total_ms,
                 failure_stage=stage,
@@ -423,12 +426,13 @@ def record_media_proxy_playback_attempt(*, instance_id: int, route_class: str,
             "upstream_latency_ms,total_latency_ms,failure_stage,error,created_at"
             ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                int(instance_id), session_id, route, normalized_method, status,
+                instance_id, session_id, route, normalized_method, status,
                 normalized_source, 1 if cache_hit else 0, upstream_ms, total_ms,
                 stage, safe_error, timestamp,
             ),
         )
-        record_id = int(cursor.lastrowid)
+        assert cursor.lastrowid is not None
+        record_id = cursor.lastrowid
         return record_id
 
 
@@ -439,8 +443,8 @@ def _playback_filter_clauses(*, instance_id: int | None, status: str,
     params: list = []
     if instance_id is not None:
         clauses.append("instance_id=?")
-        params.append(int(instance_id))
-    normalized_status = str(status or "").strip().lower()
+        params.append(instance_id)
+    normalized_status = (status or "").strip().lower()
     if normalized_status:
         if normalized_status == "success":
             clauses.append(f"{status_column} BETWEEN 200 AND 399")
@@ -451,7 +455,7 @@ def _playback_filter_clauses(*, instance_id: int | None, status: str,
             params.append(int(normalized_status))
         else:
             raise ValueError("播放记录状态筛选无效")
-    normalized_source = str(source or "").strip().lower()
+    normalized_source = (source or "").strip().lower()
     if normalized_source:
         if normalized_source not in _MEDIA_PROXY_RECORD_SOURCES:
             raise ValueError("播放记录来源筛选无效")
@@ -486,11 +490,11 @@ def list_media_proxy_playback_records(*, instance_id: int | None = None,
         raise ValueError("播放记录会话筛选冲突")
     if session_id is not None:
         clauses.append("session_id=?")
-        params.append(int(session_id))
+        params.append(session_id)
     elif unlinked:
         clauses.append("session_id IS NULL")
-    normalized_page = max(1, int(page or 1))
-    normalized_size = max(1, min(int(page_size or 50), 200))
+    normalized_page = max(1, (page or 1))
+    normalized_size = max(1, min((page_size or 50), 200))
     where = " AND ".join(clauses)
     with _playback_read_snapshot() as conn:
         total = int(conn.execute(
@@ -529,8 +533,8 @@ def list_media_proxy_playback_sessions(*, instance_id: int | None = None,
         status_column="last_status_code",
         source_column="last_source",
     )
-    normalized_page = max(1, int(page or 1))
-    normalized_size = max(1, min(int(page_size or 20), 100))
+    normalized_page = max(1, (page or 1))
+    normalized_size = max(1, min((page_size or 20), 100))
     where = " AND ".join(clauses)
     legacy_clauses, legacy_params = _playback_filter_clauses(
         instance_id=instance_id,
@@ -635,20 +639,20 @@ def clear_media_proxy_playback_records(instance_id: int | None = None) -> int:
         else:
             cursor = conn.execute(
                 "DELETE FROM media_proxy_playback_records WHERE instance_id=?",
-                (int(instance_id),),
+                (instance_id,),
             )
             conn.execute(
                 "DELETE FROM media_proxy_playback_sessions WHERE instance_id=?",
-                (int(instance_id),),
+                (instance_id,),
             )
-        return int(cursor.rowcount)
+        return cursor.rowcount
 
 
 def get_media_proxy_playback_failure_summary(
     *, hours: int = 24, instance_id: int | None = None
 ) -> dict:
     """聚合固定时间窗内已记录的反代请求，不返回媒体身份或错误正文。"""
-    normalized_hours = int(hours)
+    normalized_hours = hours
     if normalized_hours not in {1, 6, 24, 72}:
         raise ValueError("播放故障摘要仅支持 1、6、24 或 72 小时")
     cutoff = (datetime.now() - timedelta(hours=normalized_hours)).strftime(
@@ -658,7 +662,7 @@ def get_media_proxy_playback_failure_summary(
     params: list = [cutoff]
     if instance_id is not None:
         clauses.append("instance_id=?")
-        params.append(int(instance_id))
+        params.append(instance_id)
     where = " AND ".join(clauses)
     with _playback_read_snapshot() as conn:
         totals = conn.execute(

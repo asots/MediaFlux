@@ -65,7 +65,7 @@ def notification_route_settings(owner: str) -> dict[str, str]:
         return {"notification_owner": owner, "notification_chat_id": route.chat_id}
     if not re.fullmatch(r"webk:v1:[0-9a-f]{64}", owner):
         raise AgentToolError("当前身份不支持持久主动通知", code="identity_required")
-    chat = str(config.get("TG_CHAT_ID", "") or "").strip()
+    chat = (config.get("TG_CHAT_ID", "") or "").strip()
     if not re.fullmatch(r"-?[1-9][0-9]*", chat):
         raise AgentToolError("请先配置 Telegram 通知目标", code="not_configured")
     return {"notification_owner": owner, "notification_chat_id": chat}
@@ -86,7 +86,7 @@ def _authorized_notification_chat(rule: dict[str, Any]) -> str:
         )
     if (
         re.fullmatch(r"webk:v1:[0-9a-f]{64}", owner)
-        and str(config.get("TG_CHAT_ID", "") or "").strip() == chat
+        and (config.get("TG_CHAT_ID", "") or "").strip() == chat
     ):
         return chat
     return ""
@@ -233,7 +233,7 @@ def drain_automation_rules(*, now: datetime | None = None, limit: int = 20) -> i
                         chat_id=chat,
                         deliver_now=False,
                     )
-                    accepted = bool(outcome) or str(outcome.status) in {
+                    accepted = bool(outcome) or outcome.status in {
                         "disabled",
                         "suppressed",
                     }

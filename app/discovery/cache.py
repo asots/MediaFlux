@@ -8,7 +8,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Generator
 
 from app import database
 from app.discovery.models import redact_provider_message
@@ -47,10 +47,10 @@ class DiscoveryCache:
     ) -> str:
         canonical = json.dumps(
             {
-                "provider": str(provider).strip().lower(),
-                "category": str(category).strip().lower(),
-                "media_type": str(media_type).strip().lower(),
-                "page": int(page),
+                "provider": provider.strip().lower(),
+                "category": category.strip().lower(),
+                "media_type": media_type.strip().lower(),
+                "page": page,
                 "filters": filters or {},
             },
             ensure_ascii=False,
@@ -64,9 +64,9 @@ class DiscoveryCache:
     def make_detail_key(provider: str, media_type: str, external_id: str) -> str:
         canonical = json.dumps(
             [
-                str(provider or "").strip().lower(),
-                str(media_type or "").strip().lower(),
-                str(external_id or "").strip(),
+                (provider or "").strip().lower(),
+                (media_type or "").strip().lower(),
+                (external_id or "").strip(),
             ],
             ensure_ascii=False,
             separators=(",", ":"),
@@ -89,7 +89,7 @@ class DiscoveryCache:
                 parsed = json.loads(row["payload"] or "{}")
                 if isinstance(parsed, dict):
                     metadata = parsed
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 metadata = {}
             if expires_at > now:
                 try:
@@ -107,7 +107,7 @@ class DiscoveryCache:
             payload = json.loads(row["payload"] or "")
             if not isinstance(payload, dict):
                 return CacheLookup("miss")
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             return CacheLookup("miss")
         if expires_at > now:
             return CacheLookup("fresh", payload, row["last_error"] or "")
@@ -123,13 +123,13 @@ class DiscoveryCache:
     ) -> dict[tuple[str, str, str], dict[str, str]]:
         """按 provider/type/id 批量取可复用的详情日期字段。"""
         normalized = list(dict.fromkeys(
-            (str(provider or "").strip().lower(),
-             str(media_type or "").strip().lower(),
-             str(external_id or "").strip())
+            ((provider or "").strip().lower(),
+             (media_type or "").strip().lower(),
+             (external_id or "").strip())
             for provider, media_type, external_id in identities
-            if str(provider or "").strip()
-            and str(media_type or "").strip()
-            and str(external_id or "").strip()
+            if (provider or "").strip()
+            and (media_type or "").strip()
+            and (external_id or "").strip()
         ))
         if not normalized:
             return {}
@@ -168,9 +168,9 @@ class DiscoveryCache:
         stale_seconds: int,
     ) -> None:
         identity = (
-            str(provider or "").strip().lower(),
-            str(media_type or "").strip().lower(),
-            str(external_id or "").strip(),
+            (provider or "").strip().lower(),
+            (media_type or "").strip().lower(),
+            (external_id or "").strip(),
         )
         if not all(identity) or not (year or release_date):
             return
@@ -179,8 +179,8 @@ class DiscoveryCache:
             identity[0],
             {
                 "identity": list(identity),
-                "year": str(year or ""),
-                "release_date": str(release_date or ""),
+                "year": (year or ""),
+                "release_date": (release_date or ""),
             },
             ttl_seconds=ttl_seconds,
             stale_seconds=stale_seconds,
@@ -213,8 +213,8 @@ class DiscoveryCache:
         stale_seconds: int,
     ) -> None:
         now = self._clock()
-        ttl = max(1, int(ttl_seconds))
-        stale = max(ttl, int(stale_seconds))
+        ttl = max(1, ttl_seconds)
+        stale = max(ttl, stale_seconds)
         database.upsert_discovery_cache(
             key,
             provider,
@@ -243,14 +243,14 @@ class DiscoveryCache:
                 database.update_discovery_cache_error(key, redact_provider_message(error))
                 self._maybe_maintain(now)
                 return
-        ttl = max(1, int(ttl_seconds))
+        ttl = max(1, ttl_seconds)
         database.upsert_discovery_cache(
             key,
             provider,
             json.dumps({
-                "code": str(code or "unavailable"),
-                "status_code": int(status_code or 503),
-                "retry_after": max(0, int(retry_after or 0)),
+                "code": (code or "unavailable"),
+                "status_code": (status_code or 503),
+                "retry_after": max(0, (retry_after or 0)),
             }, separators=(",", ":")),
             now.strftime(_TIMESTAMP),
             (now + timedelta(seconds=ttl)).strftime(_TIMESTAMP),
@@ -261,7 +261,7 @@ class DiscoveryCache:
         self._maybe_maintain(now)
 
     @contextmanager
-    def singleflight(self, key: str) -> Iterator[None]:
+    def singleflight(self, key: str) -> Generator[None, None, None]:
         with self._locks_guard:
             lock = self._locks.setdefault(key, threading.Lock())
             self._lock_users[key] = self._lock_users.get(key, 0) + 1

@@ -32,4 +32,7 @@ def run_awaitable_sync(awaitable: Awaitable[_T]) -> _T:
         if callable(close):
             close()
         raise
-    return asyncio.run(awaitable)
+    async def resolve() -> _T:
+        return await awaitable
+
+    return asyncio.run(resolve())

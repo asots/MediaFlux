@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import hashlib
 import tempfile
 import uuid
@@ -49,7 +52,7 @@ class _IncrementalClient(PagedDirectoryTestMixin):
             raise AssertionError("小批量精准增量不应扫描目录")
         return [
             file for file in (self.listed_files or self.files).values()
-            if str(file.parent_id or "") == str(file_id)
+            if (file.parent_id or "") == file_id
         ]
 
     def get_download_url(self, _file_id: str) -> str:
@@ -176,10 +179,10 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
         }
         with tempfile.TemporaryDirectory() as root:
             first = sync_strm_incremental(
-                source_id, [change], "http://media.invalid", root, client=client,
+                source_id, [change], "http://media.invalid", root, client=cast(GuangYaClient, client),
             )
             second = sync_strm_incremental(
-                source_id, [change], "http://media.invalid", root, client=client,
+                source_id, [change], "http://media.invalid", root, client=cast(GuangYaClient, client),
             )
             updated_video = GuangYaFile(
                 video.file_id, video.name, False, video.size, "etag-2", video.parent_id
@@ -187,7 +190,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
             client.files[video.file_id] = updated_video
             updated_change = {**change, "etag": updated_video.etag}
             third = sync_strm_incremental(
-                source_id, [updated_change], "http://media.invalid", root, client=client,
+                source_id, [updated_change], "http://media.invalid", root, client=cast(GuangYaClient, client),
             )
             generated = list((Path(root) / STRM_SUBDIR).rglob("*.strm"))
 
@@ -222,7 +225,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             first = sync_strm_incremental(
                 source_id, [change], "http://media.invalid", root,
-                client=client, skip_threshold_mb=10,
+                client=cast(GuangYaClient, client), skip_threshold_mb=10,
             )
             old_path = Path(root) / STRM_SUBDIR / "剧集" / "Season 01" / "Movie.strm"
             self.assertTrue(old_path.exists())
@@ -242,7 +245,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                 source_id,
                 [{**change, "etag": small.etag, "size": small.size}],
                 "http://media.invalid", root,
-                client=client, skip_threshold_mb=10,
+                client=cast(GuangYaClient, client), skip_threshold_mb=10,
             )
 
             self.assertFalse(old_path.exists())
@@ -274,11 +277,11 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             first = sync_strm_incremental(
                 source_id, [change], "http://media.invalid", root,
-                client=client, skip_threshold_mb=10,
+                client=cast(GuangYaClient, client), skip_threshold_mb=10,
             )
             second = sync_strm_incremental(
                 source_id, [change], "http://media.invalid", root,
-                client=client, skip_threshold_mb=10,
+                client=cast(GuangYaClient, client), skip_threshold_mb=10,
             )
             generated = list((Path(root) / STRM_SUBDIR).rglob("*.strm"))
 
@@ -310,7 +313,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             sync_strm_incremental(
                 source_id, [change], "http://media.invalid", root,
-                client=client, skip_threshold_mb=10,
+                client=cast(GuangYaClient, client), skip_threshold_mb=10,
             )
             old_path = Path(root) / STRM_SUBDIR / "剧集" / "Season 01" / "Movie.strm"
             old_content = old_path.read_text(encoding="utf-8")
@@ -330,7 +333,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                     source_id,
                     [{**change, "etag": small.etag, "size": small.size}],
                     "http://media.invalid", root,
-                    client=client, skip_threshold_mb=10,
+                    client=cast(GuangYaClient, client), skip_threshold_mb=10,
                 )
 
             rows = db.list_strm_index(source_key)
@@ -377,7 +380,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                 changes,
                 "http://media.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
             )
 
         self.assertFalse(stats["fallback_required"])
@@ -422,7 +425,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                 changes,
                 "http://media.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
             )
 
         self.assertFalse(stats["fallback_required"])
@@ -472,7 +475,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                 changes,
                 "http://media.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
             )
 
         self.assertFalse(stats["fallback_required"])
@@ -515,7 +518,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                 changes,
                 "http://media.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
             )
 
         self.assertTrue(stats["fallback_required"])
@@ -554,7 +557,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                     "name": video.name, "etag": video.etag, "size": video.size,
                     "parent_id": video.parent_id,
                 }],
-                "http://media.invalid", root, client=client,
+                "http://media.invalid", root, client=cast(GuangYaClient, client),
             )
             row = db.list_strm_index(source_key)[0]
             old_exists = old_path.exists()
@@ -596,7 +599,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                         "file_id": old.file_id,
                     },
                 ],
-                "http://media.invalid", root, client=client,
+                "http://media.invalid", root, client=cast(GuangYaClient, client),
             )
             rows = db.list_strm_index(source_key)
             new_files = list((Path(root) / STRM_SUBDIR).rglob("New.strm"))
@@ -623,7 +626,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
             )
 
             stats = sync_strm(
-                source_id, "http://media.invalid", root, client=client,
+                source_id, "http://media.invalid", root, client=cast(GuangYaClient, client),
                 clean_empty_dirs=False,
             )
             new_files = list((Path(root) / STRM_SUBDIR).rglob("New.strm"))
@@ -649,7 +652,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                     "name": "Original.mkv", "etag": "old", "size": 100,
                     "parent_id": "target",
                 }],
-                "http://media.invalid", root, client=client,
+                "http://media.invalid", root, client=cast(GuangYaClient, client),
             )
 
         self.assertTrue(stats["fallback_required"])
@@ -671,7 +674,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                 )
             stats = sync_strm(
                 source_id, "http://media.invalid", root,
-                client=_TreeClient({source_id: [winner]}),
+                client=cast(GuangYaClient, _TreeClient({source_id: [winner]})),
             )
             rows = db.list_strm_index(source_key)
 
@@ -808,7 +811,9 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["stats"]["read_wait_count"], 3)
         incremental.assert_called_once()
         full.assert_called_once()
-        self.assertEqual(db.get_last_task_run("strm_sync")["status"], "success")
+        get_last_task_run_result = db.get_last_task_run("strm_sync")
+        assert get_last_task_run_result is not None
+        self.assertEqual(get_last_task_run_result["status"], "success")
 
     def test_full_schedule_persists_missing_managed_strm_refresh_with_zero_deletes(self):
         source_id = f"missing-refresh-{uuid.uuid4().hex}"
@@ -824,7 +829,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
 
             def scan(**kwargs):
                 return sync_strm(
-                    client=_TreeClient({source_id: []}), **kwargs,
+                    client=cast(GuangYaClient, _TreeClient({source_id: []})), **kwargs,
                 )
 
             result = self._run_full_schedule(root, source, scan)
@@ -851,7 +856,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
             db.enqueue_strm_retired_source(retired_id, "已移除来源", root)
 
             def scan(**kwargs):
-                return sync_strm(client=_TreeClient({active_id: []}), **kwargs)
+                return sync_strm(client=cast(GuangYaClient, _TreeClient({active_id: []})), **kwargs)
 
             result = self._run_full_schedule(
                 root, source, scan, process_retirements=True,
@@ -940,7 +945,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             first = sync_strm(
                 source_id, "http://media.invalid", root,
-                client=client, clean_invalid=False, scan_workers=1,
+                client=cast(GuangYaClient, client), clean_invalid=False, scan_workers=1,
             )
             row = db.list_strm_index(source_key)[0]
             db.upsert_strm_index(
@@ -961,7 +966,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
             ):
                 second = sync_strm(
                     source_id, "http://media.invalid", root,
-                    client=client, clean_invalid=False, scan_workers=1,
+                    client=cast(GuangYaClient, client), clean_invalid=False, scan_workers=1,
                 )
 
             persisted = db.list_strm_index(source_key)[0]
@@ -993,7 +998,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                 first.name, str(target), "",
             )
             stats = sync_strm_incremental(
-                source_id, changes, "http://media.invalid", root, client=client,
+                source_id, changes, "http://media.invalid", root, client=cast(GuangYaClient, client),
             )
             rows = db.list_strm_index(source_key)
             fingerprint = self._fingerprint(target)
@@ -1038,7 +1043,7 @@ class StrmP2IncrementalTests(IsolatedDatabaseTestCase):
                 side_effect=AssertionError("稳定文件不应重复计算指纹"),
             ):
                 stats = sync_strm_incremental(
-                    source_id, changes, "http://media.invalid", root, client=client,
+                    source_id, changes, "http://media.invalid", root, client=cast(GuangYaClient, client),
                 )
 
         self.assertEqual(stats["failed"], 0)

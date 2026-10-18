@@ -71,8 +71,8 @@ class GCIDImportPreviewStore:
         max_entries: int = 128,
         clock: Callable[[], float] = time,
     ) -> None:
-        self.ttl_seconds = max(60, min(int(ttl_seconds), 7200))
-        self.max_entries = max(1, min(int(max_entries), 1024))
+        self.ttl_seconds = max(60, min(ttl_seconds, 7200))
+        self.max_entries = max(1, min(max_entries, 1024))
         self._clock = clock
         self._lock = threading.RLock()
         self._items: OrderedDict[str, GCIDImportPreview] = OrderedDict()
@@ -90,8 +90,8 @@ class GCIDImportPreviewStore:
         owner_id: str = "",
     ) -> str:
         normalized = manifest if isinstance(manifest, GCIDManifest) else normalize_manifest_v2(manifest)
-        target = str(target_dir_id or "").strip()
-        owner = str(owner_id or "").strip()
+        target = (target_dir_id or "").strip()
+        owner = (owner_id or "").strip()
         if not target:
             raise PreviewBindingError("缺少目标目录")
         now = self._clock()
@@ -121,18 +121,18 @@ class GCIDImportPreviewStore:
         owner_id: str = "",
         manifest_digest: str = "",
     ) -> GCIDImportPreview:
-        key = str(preview_id or "").strip()
+        key = (preview_id or "").strip()
         now = self._clock()
         with self._lock:
             self._purge_expired(now)
             snapshot = self._items.get(key)
             if snapshot is None:
                 raise PreviewBindingError("预览不存在或已过期")
-            if snapshot.target_dir_id != str(target_dir_id or "").strip():
+            if snapshot.target_dir_id != (target_dir_id or "").strip():
                 raise PreviewBindingError("目标目录已变化，请重新预览")
-            if snapshot.owner_id != str(owner_id or "").strip():
+            if snapshot.owner_id != (owner_id or "").strip():
                 raise PreviewBindingError("预览不属于当前用户")
-            digest = str(manifest_digest or "").strip().lower()
+            digest = (manifest_digest or "").strip().lower()
             if digest and digest != snapshot.manifest_digest:
                 raise PreviewBindingError("清单摘要已变化，请重新预览")
             self._items.move_to_end(key)
@@ -321,7 +321,7 @@ def _claim_task_for_run(task_id: int, *, retry_token: str = "") -> bool:
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         replays = _read_retry_replays(conn) if retry_token else OrderedDict()
-        key = (int(task_id), retry_token)
+        key = (task_id, retry_token)
         if retry_token and key in replays:
             return False
         condition = (
@@ -332,7 +332,7 @@ def _claim_task_for_run(task_id: int, *, retry_token: str = "") -> bool:
         cursor = conn.execute(
             "UPDATE gcid_import_tasks SET status='running',updated_at=? "
             f"WHERE id=? AND {condition}",
-            (db.now(), int(task_id)),
+            (db.now(), task_id),
         )
         if cursor.rowcount != 1:
             return False
@@ -349,7 +349,7 @@ def _update_item(
         conn.execute(
             "UPDATE gcid_import_items SET status=?,remote_file_id=?,error=?,updated_at=? "
             "WHERE id=?",
-            (status, remote_file_id, error[:1000], db.now(), int(item_id)),
+            (status, remote_file_id, error[:1000], db.now(), item_id),
         )
 
 
@@ -403,7 +403,7 @@ def _finish_task(task_id: int) -> dict[str, Any]:
         counts = conn.execute(
             "SELECT COUNT(*) AS total,SUM(status='success') AS succeeded,"
             "SUM(status='failed') AS failed FROM gcid_import_items WHERE task_id=?",
-            (int(task_id),),
+            (task_id,),
         ).fetchone()
     success_count = int(counts["succeeded"] or 0)
     failed_count = int(counts["failed"] or 0)
@@ -478,7 +478,7 @@ def _execute_items(
 
 
 def _validate_operation_token(value: str) -> str:
-    token = str(value or "").strip()
+    token = (value or "").strip()
     if not token or len(token) > 256:
         raise ValueError("operation_token 无效")
     return token
@@ -493,7 +493,7 @@ def run_preview(
     operation_token: str,
 ) -> tuple[dict[str, Any], bool]:
     token = _validate_operation_token(operation_token)
-    digest = str(manifest_digest or "").strip().lower()
+    digest = (manifest_digest or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise PreviewBindingError("缺少有效的清单摘要，请重新预览")
     snapshot = _preview_store.consume(
@@ -550,7 +550,7 @@ def retry_task(
     task_id: int, *, operation_token: str
 ) -> tuple[dict[str, Any], bool]:
     token = _validate_operation_token(operation_token)
-    normalized_task_id = int(task_id)
+    normalized_task_id = task_id
     with _operation_lock:
         row = db.get_gcid_import_task(normalized_task_id)
         if row is None:

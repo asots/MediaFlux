@@ -108,10 +108,14 @@ class AutomationRuleClockAuditTests(IsolatedDatabaseTestCase):
         db.init_db()
         result = repository.claim_due_rules(self.clock)
         self.assertEqual([row["id"] for row in result], [good["id"]])
+        get_rule_result = repository.get_rule("clock-audit", good["id"])
+        assert get_rule_result is not None
         self.assertEqual(
-            repository.get_rule("clock-audit", good["id"])["next_run_at"], old_spelling
+            get_rule_result["next_run_at"], old_spelling
         )
+        get_rule_result_2 = repository.get_rule("clock-audit", broken["id"])
+        assert get_rule_result_2 is not None
         self.assertEqual(
-            repository.get_rule("clock-audit", broken["id"])["next_run_at"],
+            get_rule_result_2["next_run_at"],
             "not-a-date",
         )

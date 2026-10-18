@@ -8,13 +8,12 @@ from unittest.mock import patch
 from app.clients.emby import EmbyClient
 from app.clients.jellyfin import JellyfinClient
 
-
 _ITEM_ID = "a" * 32
 
 
 class MediaServerSearchTests(unittest.TestCase):
     @staticmethod
-    def _payload():
+    def _payload() -> dict:
         return {
             "Items": [{
                 "Id": _ITEM_ID,
@@ -34,7 +33,7 @@ class MediaServerSearchTests(unittest.TestCase):
         client = JellyfinClient("http://jellyfin.example", "token")
         client._cached_user_id = "user-1"
         method = getattr(client, "search_media", None)
-        self.assertIsNotNone(method, "JellyfinClient 缺少 search_media")
+        assert (method) is not None, "JellyfinClient 缺少 search_media"
         with patch.object(client, "_request", return_value=self._payload()) as request:
             items = method("Dune", limit=8).items
 
@@ -116,7 +115,7 @@ class MediaServerSearchTests(unittest.TestCase):
         client = EmbyClient("http://emby.example", "token")
         client._cached_user_id = "user-1"
         method = getattr(client, "search_media", None)
-        self.assertIsNotNone(method, "EmbyClient 缺少 search_media")
+        assert (method) is not None, "EmbyClient 缺少 search_media"
         with patch.object(client, "_request", return_value=self._payload()) as request:
             items = method("Dune", limit=6).items
 
@@ -227,7 +226,7 @@ class MediaServerSearchTests(unittest.TestCase):
         ):
             client._cached_user_id = "user-1"
             method = getattr(client, "recent_media", None)
-            self.assertIsNotNone(method, f"{type(client).__name__} 缺少 recent_media")
+            assert (method) is not None, f"{type(client).__name__} 缺少 recent_media"
             with patch.object(client, "_request", return_value=self._payload()) as request:
                 items = method(limit=24)
             self.assertEqual(len(items), 1)

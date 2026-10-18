@@ -76,7 +76,7 @@ def _response(url: str, body: str, *, status=200, content_type="text/html; chars
     )
 
 
-def _adapter(site_id: str, http: _EmpireHttp) -> EmpireAdapter:
+def _adapter(site_id: str, http: _EmpireHttp | None) -> EmpireAdapter:
     if site_id == "dygang":
         return EmpireAdapter(
             site_id="dygang", site_name="电影港", base_url="https://www.dygang.tv/", http=http,
@@ -139,7 +139,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.indexers.providers.empire._SEARCH_INTERVAL_SECONDS", 0):
             result = await asyncio.wait_for(adapter.search(IndexerSearchRequest.create("剧集")), 1)
         self.assertEqual(result.items, [])
-        self.assertIsNotNone(adapter._search_finished)
+        assert (adapter._search_finished) is not None
 
     async def test_unacceptable_keywords_are_rejected_without_http(self):
         for site_id in ("dygang", "ys5266"):
@@ -350,7 +350,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             f'<a class="classlinkclass" href="{path}">电影 {index}</a>'
             for index, path in enumerate(paths, start=1)
         )
-        details = {
+        details: dict = {
             f"https://www.dygang.tv{path}": _response(
                 f"https://www.dygang.tv{path}",
                 f'<a href="magnet:?xt=urn:btih:{_VALID_HASH}&amp;dn=同一资源 S01E01">资源</a>',
@@ -373,7 +373,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             f'<a class="classlinkclass" href="{path}">电影 {index}</a>'
             for index, path in enumerate(paths, start=1)
         )
-        details = {
+        details: dict = {
             f"https://www.dygang.tv{path}": _response(
                 f"https://www.dygang.tv{path}",
                 (
@@ -401,7 +401,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             f'<a class="classlinkclass" href="{path}">电影 {index}</a>'
             for index, path in enumerate(paths, start=1)
         )
-        details = {
+        details: dict = {
             f"https://www.dygang.tv{path}": _response(
                 f"https://www.dygang.tv{path}",
                 (
@@ -426,7 +426,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             f'<a class="classlinkclass" href="{path}">电影 {index}</a>'
             for index, path in enumerate(paths, start=1)
         )
-        details = {
+        details: dict = {
             f"https://www.dygang.tv{path}": _response(
                 f"https://www.dygang.tv{path}", f"<html><body>第 {index} 个详情</body></html>",
             )
@@ -477,7 +477,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             f'<a class="classlinkclass" href="{path}">电影 {index}</a>'
             for index, path in enumerate(paths, start=1)
         )
-        details = {
+        details: dict = {
             f"https://www.dygang.tv{path}": _response(
                 f"https://www.dygang.tv{path}", f"<html><body>第 {index} 个详情</body></html>",
             )
@@ -503,7 +503,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             (_response("unused", "<html><body>Just a moment... verify you are human</body></html>"), "challenge_required"),
         ):
             with self.subTest(expected_code=expected_code):
-                details = {
+                details: dict = {
                     f"https://www.dygang.tv{path}": _response(
                         f"https://www.dygang.tv{path}", "<html><body>无磁力详情</body></html>",
                     )
@@ -524,7 +524,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             f'<a class="classlinkclass" href="{path}">电影 {index}</a>'
             for index, path in enumerate(paths, start=1)
         )
-        details = {
+        details: dict = {
             f"https://www.dygang.tv{path}": _response(
                 f"https://www.dygang.tv{path}", "<html><body>无磁力详情</body></html>",
             )
@@ -556,7 +556,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             f'<a class="classlinkclass" href="{path}">电影 {index}</a>'
             for index, path in enumerate(paths, start=1)
         )
-        details = {
+        details: dict = {
             f"https://www.dygang.tv{path}": _response(
                 f"https://www.dygang.tv{path}", "<html><body>unused</body></html>",
             )

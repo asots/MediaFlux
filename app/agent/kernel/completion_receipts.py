@@ -43,7 +43,7 @@ def effect_active(row):
 def _completion_cipher() -> Fernet:
     from app.modules.web_secret import get_web_secret
 
-    secret = str(get_web_secret() or "")
+    secret = (get_web_secret() or "")
     if not secret:
         raise ValueError("Agent 回执持久化密钥不可用")
     key = hashlib.sha256(b"mediaflux-agent-effect-wait:v1\0" + secret.encode()).digest()

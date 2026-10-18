@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ def _fingerprint(value: Any) -> str:
 
 
 def _object(
-    arguments: Any, allowed: set[str], required: set[str] = frozenset()
+    arguments: Any, allowed: set[str], required: AbstractSet[str] = frozenset()
 ) -> dict[str, Any]:
     if (
         not isinstance(arguments, dict)

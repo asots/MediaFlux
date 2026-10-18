@@ -76,16 +76,16 @@ class BangumiProvider(DiscoveryProvider):
         calendar_clock: Callable[[], float] | None = None,
         config: Mapping[str, Any] | None = None,
     ):
-        self.base_url = str(base_url or "https://api.bgm.tv").rstrip("/")
+        self.base_url = (base_url or "https://api.bgm.tv").rstrip("/")
         configured_agent = (
             str(config.get("BANGUMI_USER_AGENT", "")) if config is not None
             else app_config.get("BANGUMI_USER_AGENT", "")
         )
-        self.user_agent = str(user_agent or configured_agent or "MediaFlux/1.0").strip()
+        self.user_agent = (user_agent or configured_agent or "MediaFlux/1.0").strip()
         self.session = session or requests.Session()
         self.clock = clock or datetime.now
         self.timeout = timeout
-        self.page_size = max(1, min(int(page_size), 100))
+        self.page_size = max(1, min(page_size, 100))
         configured_ttl = (
             config.get("BANGUMI_CALENDAR_CACHE_TTL_SECONDS") if config is not None
             else app_config.get("BANGUMI_CALENDAR_CACHE_TTL_SECONDS", "")
@@ -95,9 +95,9 @@ class BangumiProvider(DiscoveryProvider):
         except (TypeError, ValueError):
             default_ttl = 21600
         self.calendar_ttl_seconds = max(
-            300, int(calendar_ttl_seconds if calendar_ttl_seconds is not None else default_ttl)
+            300, (calendar_ttl_seconds if calendar_ttl_seconds is not None else default_ttl)
         )
-        self.calendar_attempts = max(1, min(int(calendar_attempts), 2))
+        self.calendar_attempts = max(1, min(calendar_attempts, 2))
         self.calendar_retry_seconds = max(30, min(300, self.calendar_ttl_seconds))
         self._calendar_clock = calendar_clock or time.monotonic
         self._calendar_lock = threading.Lock()
@@ -188,12 +188,12 @@ class BangumiProvider(DiscoveryProvider):
         filters: dict[str, Any] | None,
     ) -> DiscoveryPage:
         self._ensure_open()
-        category = str(category or "").strip().lower()
+        category = (category or "").strip().lower()
         if category not in {"weekly", "calendar", "today"}:
             raise ProviderInvalidResponse("不支持的 Bangumi 分类")
         if media_type not in {"tv", "all"}:
             raise ProviderInvalidResponse("Bangumi 仅支持动画条目")
-        page = max(1, int(page))
+        page = max(1, page)
         calendar, calendar_stale = self._calendar()
 
         selected_weekday: int | None = None
@@ -216,8 +216,11 @@ class BangumiProvider(DiscoveryProvider):
             items = group.get("items")
             if not isinstance(weekday_data, dict) or not isinstance(items, list):
                 raise ProviderInvalidResponse("Bangumi Calendar 响应结构无效")
+            weekday_id = weekday_data.get("id")
+            if weekday_id is None:
+                raise ProviderInvalidResponse("Bangumi weekday 响应无效")
             try:
-                upstream_weekday = int(weekday_data.get("id"))
+                upstream_weekday = int(weekday_id)
             except (TypeError, ValueError) as exc:
                 raise ProviderInvalidResponse("Bangumi weekday 响应无效") from exc
             weekday = 7 if upstream_weekday == 0 else upstream_weekday
@@ -234,7 +237,7 @@ class BangumiProvider(DiscoveryProvider):
         start = (page - 1) * self.page_size
         end = start + self.page_size
         return DiscoveryPage(
-            items=flattened[start:end],
+            items=tuple(flattened[start:end]),
             page=page,
             has_more=end < len(flattened),
             provider=ProviderHealth(
@@ -247,7 +250,7 @@ class BangumiProvider(DiscoveryProvider):
     def get_detail(self, external_id: str, media_type: str) -> MediaCard:
         if media_type not in {"tv", "all"}:
             raise ProviderInvalidResponse("Bangumi 仅支持动画条目")
-        payload = self._get(f"/v0/subjects/{str(external_id or '').strip()}", expected_type=dict)
+        payload = self._get(f"/v0/subjects/{(external_id or '').strip()}", expected_type=dict)
         card = self._card(payload, None)
         if card is None:
             raise ProviderInvalidResponse("Bangumi 详情响应结构无效")

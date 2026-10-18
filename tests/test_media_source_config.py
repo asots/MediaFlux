@@ -7,13 +7,17 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+from app.modules.organize_scheduler import OrganizeScheduler
 from app.modules.organize_sources import (
     normalize_organize_source_ids,
     normalize_organize_sources,
 )
-from app.modules.organize_scheduler import OrganizeScheduler
 from app.modules.strm import parse_strm_sources
 
 
@@ -96,6 +100,7 @@ class MediaConfigSaveTests(unittest.TestCase):
     def initialize_publisher(self):
         import tempfile
         from pathlib import Path
+
         from app import config
         from app.agent.feature_gate import initialize_runtime_fence
         from tests.support import isolated_test_database
@@ -130,7 +135,7 @@ class MediaConfigSaveTests(unittest.TestCase):
             "app.database.reconcile_strm_retired_sources_transaction",
             reconcile,
         ):
-            result = self.api.save_config(self.request, payload)
+            result = self.api.save_config(cast(Request, self.request), payload)
         return result, save, strm_scheduler, organize_scheduler
 
     def test_source_arrays_are_normalized(self):
@@ -206,10 +211,11 @@ class MediaConfigSaveTests(unittest.TestCase):
             side_effect=fail_after_publish,
         ):
             result = self.api.save_config(
-                self.request,
+                cast(Request, self.request),
                 {"GY_STRM_SOURCE_DIRS": "[]"},
             )
 
+        assert isinstance(result, JSONResponse)
         self.assertEqual(result.status_code, 500)
         self.assertEqual(save.call_count, 2)
         self.assertEqual(save.call_args_list[1].args[0], {
@@ -235,8 +241,9 @@ class MediaConfigSaveTests(unittest.TestCase):
             "JELLYFIN_PATH_MAPPINGS": '[{"local":"relative","server":"/media"}]',
         })
 
+        assert isinstance(result, JSONResponse)
         self.assertEqual(result.status_code, 400)
-        self.assertIn("路径映射无效", result.body.decode("utf-8"))
+        self.assertIn("路径映射无效", bytes(result.body).decode("utf-8"))
         save.assert_not_called()
 
     def test_invalid_sources_cron_and_numeric_limits_are_rejected(self):
@@ -251,8 +258,9 @@ class MediaConfigSaveTests(unittest.TestCase):
         for payload, expected in cases:
             with self.subTest(payload=payload):
                 result, save, _, _ = self._save(payload)
+                assert isinstance(result, JSONResponse)
                 self.assertEqual(result.status_code, 400)
-                self.assertIn(expected, result.body.decode("utf-8"))
+                self.assertIn(expected, bytes(result.body).decode("utf-8"))
                 save.assert_not_called()
 
 

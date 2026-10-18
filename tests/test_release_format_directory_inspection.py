@@ -1,6 +1,10 @@
 """发布格式教学在光鸭目录检查阶段的父目录上下文回归。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
+
 from app import database as db
 from app.clients.guangya import GuangYaFile
 from app.modules.directory_media import DirectoryMediaInspector
@@ -46,7 +50,7 @@ class _TreeClient:
 
 class _RecordingScraper:
     def __init__(self) -> None:
-        self.inner = TMDBScraper("offline-fixture")
+        self.inner = TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.parse_calls: list[tuple[str, str]] = []
 
     def close(self) -> None:
@@ -109,9 +113,9 @@ class ReleaseFormatDirectoryInspectionTests(IsolatedDatabaseTestCase):
             "source": _dir("source", ROOT_NAME), "episode-15": episode,
             "archive": _dir("archive", "媒体库"),
         })
-        scraper = TMDBScraper("offline-fixture")
+        scraper = TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(scraper.close)
-        inspector = DirectoryMediaInspector(client=client, scraper=scraper)
+        inspector = DirectoryMediaInspector(client=cast(GuangYaClient, client), scraper=scraper)
         rules = OrganizeRules(target_dir_id="archive", small_file_mb=0)
         with self.assertRaisesRegex(DirectoryScrapeConflictError, "发布格式存在冲突"):
             inspector.inspect("source", rules)
@@ -119,7 +123,7 @@ class ReleaseFormatDirectoryInspectionTests(IsolatedDatabaseTestCase):
             inspector.inspect_file("episode-15", rules)
 
     def test_filename_evidence_does_not_inherit_folder_fields_without_teaching(self):
-        scraper = TMDBScraper("offline-fixture")
+        scraper = TMDBScraper(cast(TMDBClient, "offline-fixture"))
         self.addCleanup(scraper.close)
         for name, parent in (("04.mkv", "Show Season 2"), ("Movie.2020.mkv", "Other {tmdb-123}"),
                              ("Show - 03.mkv", "Show 2nd Attack")):
@@ -143,7 +147,7 @@ class ReleaseFormatDirectoryInspectionTests(IsolatedDatabaseTestCase):
         self.addCleanup(scraper.close)
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=scraper,
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=cast(TMDBScraper, scraper),
         ).inspect(
             "source",
             OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -174,7 +178,7 @@ class ReleaseFormatDirectoryInspectionTests(IsolatedDatabaseTestCase):
         scraper = _RecordingScraper()
         self.addCleanup(scraper.close)
         inspector = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=scraper,
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=cast(TMDBScraper, scraper),
         )
         rules = OrganizeRules(target_dir_id="archive", small_file_mb=0)
 
@@ -200,7 +204,7 @@ class ReleaseFormatDirectoryInspectionTests(IsolatedDatabaseTestCase):
         self.addCleanup(scraper.close)
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=scraper,
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=cast(TMDBScraper, scraper),
         ).inspect_file(
             "episode-15",
             OrganizeRules(target_dir_id="archive", small_file_mb=0),

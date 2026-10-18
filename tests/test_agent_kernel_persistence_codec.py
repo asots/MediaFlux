@@ -1,4 +1,6 @@
 """Baseline-characterized canonical JSON, crypto and transaction contracts."""
+from typing import cast
+from cryptography.fernet import Fernet
 import asyncio
 import hashlib
 import hmac
@@ -192,7 +194,7 @@ def test_secret_cipher_injection_order_is_stable():
     class Injected(SQLiteKernelStore):
         def _reference_cipher(self):
             trace.append("cipher")
-            return Cipher()
+            return cast(Fernet, Cipher())
 
         def _encode(self, value, *, domain, maximum):
             raise AssertionError("References must not route through overridable _encode")

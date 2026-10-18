@@ -1,4 +1,6 @@
 from __future__ import annotations
+from app.agent.provider_gateway import ProviderTransport
+from typing import cast
 
 import pytest
 
@@ -134,7 +136,7 @@ def test_policy_rejects_extra_network_and_credential_arguments():
 
 def test_gateway_projects_sensitive_fields_and_issues_owner_scoped_refs():
     transport = _FakeTransport()
-    gateway = ProviderGateway(catalog=_catalog(), transports=[transport])
+    gateway = ProviderGateway(catalog=_catalog(), transports=cast(list[ProviderTransport], [transport]))
     context = ToolContext(owner="owner-a", session_id="session-a")
 
     result = gateway.query(

@@ -14,16 +14,19 @@ import threading
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, overload
 
 import requests
 
 from app.config import get
 from app.logger import configure_telebot_logging, get_logger, log_throttled
 
+if TYPE_CHECKING:
+    from telebot import TeleBot
+
 logger = get_logger(__name__)
 
-_bot = None
+_bot: TeleBot | None = None
 _chat_id: Optional[str] = None
 _init_lock = threading.Lock()
 _initialized = False
@@ -48,7 +51,7 @@ def telegram_text_length(value: object) -> int:
 
 def truncate_telegram_text(value: object, limit: int) -> str:
     """在不拆分 Unicode code point 的前提下截断到 Telegram 文本边界。"""
-    maximum = max(0, int(limit or 0))
+    maximum = max(0, (limit or 0))
     text = str(value or "")
     if not text or maximum <= 0:
         return ""
@@ -275,19 +278,17 @@ class TelegramSendResult:
             not self.ok
             and (
                 self.partially_delivered
-                or int(self.status_code or 0) in {0, 408}
+                or (self.status_code or 0) in {0, 408}
             )
         )
 
     @property
     def retryable(self) -> bool:
         """明确未送达且适合自动重试；结果未知永远不能盲目重放。"""
-        status = int(self.status_code or 0)
-        return bool(
-            not self.ok
+        status = (self.status_code or 0)
+        return (not self.ok
             and not self.outcome_unknown
-            and (status == 429 or status >= 500)
-        )
+            and (status == 429 or status >= 500))
 
 
 
@@ -323,7 +324,15 @@ def _first_value(items: Sequence[object], key: str, default=""):
     return default
 
 
-def safe_int(value: object, default=0, *, minimum: int | None = None):
+@overload
+def safe_int(value: Any, default: int = 0, *, minimum: int | None = None) -> int: ...
+
+
+@overload
+def safe_int(value: Any, default: None, *, minimum: int | None = None) -> int | None: ...
+
+
+def safe_int(value: Any, default: int | None = 0, *, minimum: int | None = None) -> int | None:
     """把外部动态数值安全转换为整数，失败时返回默认值。"""
     try:
         result = int(float(value))
@@ -426,10 +435,10 @@ def build_stats_event(title: object, stats: Mapping[object, object], *,
                       footer: object = "", image_url: str = "") -> NotificationEvent:
     """构造数据不足时使用的结构化统计卡片。"""
     return NotificationEvent(
-        title=title,
+        title=str(title or ""),
         fields=tuple((label, value) for label, value in stats.items() if value not in (None, "")),
         image_url=image_url,
-        footer=footer,
+        footer="" if footer is None else str(footer),
     )
 
 
@@ -548,7 +557,7 @@ def build_media_events(
     return events
 
 def _env_enabled(name: str) -> bool:
-    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _init() -> None:
@@ -592,12 +601,12 @@ def get_bot():
 def notification_target_chat_id(chat_id: Optional[str] = None) -> str:
     """解析主动通知的实际目标会话，不暴露配置读取细节给业务模块。"""
     _init()
-    return str(chat_id or _chat_id or "").strip()
+    return (chat_id or _chat_id or "").strip()
 
 
 def render_event(event: NotificationEvent) -> str:
     """把结构化事件渲染为 Telegram HTML，并转义全部动态内容。"""
-    layout = str(event.layout or "default")
+    layout = (event.layout or "default")
     compact_report = layout == "compact_report"
     relaxed = layout in {"relaxed", "compact_report"}
     body = [f"<b>{html.escape(decorate_title(event.title))}</b>"]
@@ -753,7 +762,7 @@ def split_message(text: str, limit: int = _MESSAGE_LIMIT) -> list[str]:
     """优先按自然行分段，超长单行按 HTML 安全边界继续拆分。"""
     if limit <= 0:
         raise ValueError("limit 必须大于 0")
-    text = str(text or "")
+    text = (text or "")
     if _has_oversized_html_tag(text, limit):
         text = html.escape(text)
     if telegram_text_length(text) <= limit:
@@ -789,7 +798,7 @@ def _event_markup(event: NotificationEvent):
         markup = types.InlineKeyboardMarkup(row_width=1)
         for action in actions:
             label = truncate_telegram_text(str(action.label or "").strip(), 64)
-            callback_data = str(action.callback_data or "").strip()
+            callback_data = (action.callback_data or "").strip()
             if (
                 not label
                 or not callback_data
@@ -815,7 +824,7 @@ def _partial_delivery(
         error=result.error,
         status_code=result.status_code,
         partially_delivered=True,
-        message_id=int(message_id or result.message_id or 0),
+        message_id=(message_id or result.message_id or 0),
     )
 
 
@@ -824,11 +833,11 @@ def _send_text_result(
     message_thread_id: int | None = None,
 ) -> TelegramSendResult:
     chunks = split_message(text)
-    sent = 0
+    sent: int = 0
     last_message_id = 0
     try:
         for index, chunk in enumerate(chunks):
-            kwargs = {
+            kwargs: dict[str, Any] = {
                 "reply_markup": reply_markup
             } if reply_markup is not None and index == len(chunks) - 1 else {}
             if message_thread_id is not None:
@@ -861,7 +870,7 @@ def _telegram_send_error(exc: Exception) -> TelegramSendResult:
     parameters = payload.get("parameters")
     parameters = parameters if isinstance(parameters, Mapping) else {}
 
-    def positive_int(value: object) -> int:
+    def positive_int(value: Any) -> int:
         try:
             return max(0, int(value or 0))
         except (TypeError, ValueError):
@@ -898,7 +907,7 @@ def _telegram_send_error(exc: Exception) -> TelegramSendResult:
 
 def _photo_failure_allows_text_fallback(result: TelegramSendResult) -> bool:
     """仅在 Telegram 明确拒绝图片请求时回退文本，避免未知结果重复通知。"""
-    status = int(result.status_code or 0)
+    status = (result.status_code or 0)
     return 400 <= status < 500 and status not in {408, 429}
 
 
@@ -910,13 +919,13 @@ def send_result(
 ) -> TelegramSendResult:
     """发送兼容 HTML 结果，可选封面并保留 429 等可重试信息。"""
     bot = get_bot()
-    target = str(chat_id or _chat_id or "").strip()
+    target = (chat_id or _chat_id or "").strip()
     if not bot or not target:
         _log_notification_fallback(text)
         return TelegramSendResult(
             ok=False, error="Telegram Bot 或 Chat ID 未配置", status_code=503,
         )
-    image = str(image_url or "").strip()
+    image = (image_url or "").strip()
     if not image:
         result = _send_text_result(bot, target, text)
         if not result.ok:
@@ -995,7 +1004,7 @@ def call_telegram_delivery(
     ReadTimeout 等结果未知不得继续发送第二条消息。
     """
     try:
-        resolved_message_id = max(0, int(message_id or 0))
+        resolved_message_id = max(0, (message_id or 0))
     except (TypeError, ValueError):
         resolved_message_id = 0
     try:
@@ -1012,7 +1021,7 @@ def call_telegram_delivery(
             error=result.error,
             status_code=result.status_code,
             partially_delivered=result.partially_delivered,
-            message_id=resolved_message_id if edit else int(result.message_id or 0),
+            message_id=resolved_message_id if edit else (result.message_id or 0),
         ), None
 
     delivered_message_id = resolved_message_id
@@ -1029,9 +1038,9 @@ def call_telegram_delivery(
 
 def telegram_edit_fallback_allowed(result: TelegramSendResult) -> bool:
     """仅在 Telegram 明确拒绝编辑时允许改发新消息。"""
-    if result.ok or result.outcome_unknown or int(result.status_code or 0) != 400:
+    if result.ok or result.outcome_unknown or (result.status_code or 0) != 400:
         return False
-    description = str(result.error or "").casefold()
+    description = (result.error or "").casefold()
     return any(marker in description for marker in (
         "message to edit not found",
         "message can't be edited",
@@ -1049,7 +1058,7 @@ def edit_event_result(
 ) -> TelegramSendResult:
     """原位更新结构化消息，并保留限流、结果未知与消息身份语义。"""
     bot = get_bot()
-    target = str(chat_id or "").strip()
+    target = (chat_id or "").strip()
     try:
         resolved_message_id = int(message_id)
     except (TypeError, ValueError):
@@ -1088,7 +1097,7 @@ def send_event_result(
 ) -> TelegramSendResult:
     """发送结构化事件，并保留可重试/结果未知语义。"""
     bot = get_bot()
-    target = str(chat_id or _chat_id or "").strip()
+    target = (chat_id or _chat_id or "").strip()
     text = render_event(event)
     if not bot or not target:
         _log_notification_fallback(text)
@@ -1097,7 +1106,7 @@ def send_event_result(
             error="Telegram Bot 或 Chat ID 未配置",
             status_code=503,
         )
-    image_url = str(event.image_url or "").strip()
+    image_url = (event.image_url or "").strip()
     reply_markup = _event_markup(event)
     if not image_url:
         result = _send_text_result(
@@ -1114,7 +1123,7 @@ def send_event_result(
 
     caption_chunks = split_message(text, _CAPTION_LIMIT)
     try:
-        photo_kwargs = {
+        photo_kwargs: dict[str, Any] = {
             "reply_markup": reply_markup
         } if reply_markup is not None and len(caption_chunks) == 1 else {}
         if message_thread_id is not None:
@@ -1150,7 +1159,7 @@ def send_event_result(
         return result
     try:
         for index, chunk in enumerate(caption_chunks[1:]):
-            kwargs = {
+            kwargs: dict[str, Any] = {
                 "reply_markup": reply_markup
             } if reply_markup is not None and index == len(caption_chunks) - 2 else {}
             if message_thread_id is not None:
@@ -1178,17 +1187,18 @@ def notify_gcid_import_started(*, task_id: int, file_count: int, total_size: int
     """登记 GCID 导入事务；终态会原位更新同一条消息。"""
     from app.modules.telegram_notification_center import publish_notification_thread
     from app.modules.telegram_notification_policy import (
-        NotificationImportance, NotificationTopic,
+        NotificationImportance,
+        NotificationTopic,
     )
 
     publish_notification_thread(
-        f"gcid:{int(task_id)}",
+        f"gcid:{task_id}",
         NotificationEvent(
             "GCID 重试进行中" if retry else "GCID 导入进行中",
             fields=(
-                ("任务", f"#{int(task_id)}"),
-                ("文件", f"{max(0, int(file_count))} 个"),
-                ("体积", _format_size(max(0, int(total_size)))),
+                ("任务", f"#{task_id}"),
+                ("文件", f"{max(0, file_count)} 个"),
+                ("体积", _format_size(max(0, total_size))),
                 NOTIFICATION_SECTION_BREAK,
                 ("状态", "正在导入"),
             ),
@@ -1204,7 +1214,7 @@ def notify_gcid_import_finished(*, task_id: int, status: str, success_count: int
                                 failed_count: int, failed_samples: Sequence[object] = (),
                                 retry: bool = False) -> None:
     """发送安全的 GCID 导入结果；失败样本最多三条且只含路径和通用错误。"""
-    normalized = str(status or "failed")
+    normalized = (status or "failed")
     if normalized == "success":
         title = "GCID 重试成功" if retry else "GCID 导入成功"
     elif normalized == "partial_success":
@@ -1219,17 +1229,18 @@ def notify_gcid_import_finished(*, task_id: int, status: str, success_count: int
             lines.append(f"{safe_name}：导入失败")
     from app.modules.telegram_notification_center import publish_notification_thread
     from app.modules.telegram_notification_policy import (
-        NotificationImportance, NotificationTopic,
+        NotificationImportance,
+        NotificationTopic,
     )
 
     publish_notification_thread(
-        f"gcid:{int(task_id)}",
+        f"gcid:{task_id}",
         NotificationEvent(
             title,
             fields=(
-                ("任务", f"#{int(task_id)}"),
-                ("成功", f"{max(0, int(success_count))} 个"),
-                ("失败", f"{max(0, int(failed_count))} 个"),
+                ("任务", f"#{task_id}"),
+                ("成功", f"{max(0, success_count)} 个"),
+                ("失败", f"{max(0, failed_count)} 个"),
             ),
             lines=tuple(lines),
             layout="relaxed",

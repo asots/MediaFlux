@@ -96,7 +96,7 @@ class ScissorSevenOverflowSpecialMappingTests(unittest.TestCase):
                     mapping = infer_overflow_tmdb_special_mapping(
                         **_overflow_kwargs(episodes, source_episode=source_episode)
                     )
-                    self.assertIsNotNone(mapping)
+                    assert (mapping) is not None
                     self.assertEqual(
                         (mapping.source_season, mapping.source_episode),
                         (1, source_episode),
@@ -120,7 +120,7 @@ class ScissorSevenOverflowSpecialMappingTests(unittest.TestCase):
                     row["episode_number"] = number
                 rows[:] = [rows[2], rows[0], rows[3], rows[1]]
                 mapping = infer_overflow_tmdb_special_mapping(**kwargs)
-                self.assertIsNotNone(mapping)
+                assert (mapping) is not None
                 self.assertEqual(
                     (mapping.target_season, mapping.target_episode), (0, target_episode)
                 )

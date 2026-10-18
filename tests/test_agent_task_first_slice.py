@@ -1,4 +1,5 @@
 """Explicit task lifecycle through real native wire, domain tools and SQLite."""
+from typing import cast
 
 import asyncio
 import json
@@ -271,7 +272,7 @@ def test_observe_checkpoint_prune_reopen_continue(tmp_path, budget):
         with patch.object(agent_api, "get_agent_kernel_runtime", return_value=runtime2):
             response = await agent_api.get_session(request, "task-session-0001")
         assert response.status_code == 200
-        api = json.loads(response.body)
+        api = json.loads(cast(bytearray | bytes | str, response.body))
         assert api["task"] == events2[-1].payload["task"]
         assert api["turn_status"] == events2[-1].payload["turn_status"]
         (tmp_path / "vertical.json").write_text(

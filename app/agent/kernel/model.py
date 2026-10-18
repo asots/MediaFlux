@@ -133,15 +133,22 @@ class ModelMessage:
         calls: list[ModelToolCall] = []
         for raw in value.get("tool_calls") or ():
             if isinstance(raw, Mapping):
+                argument_error = raw.get("argument_error")
+                call_id = raw.get("call_id")
+                name = raw.get("name")
+                arguments = raw.get("arguments")
+                if argument_error is None:
+                    call_id = str(call_id or "")
+                    name = str(name or "")
+                    arguments = dict(arguments or {})
+                elif not isinstance(call_id, str) or not isinstance(name, str):
+                    raise ValueError("Invalid tool arguments state")
                 calls.append(
                     ModelToolCall(
-                        call_id=str(raw.get("call_id") or "")
-                        if raw.get("argument_error") is None else raw.get("call_id"),
-                        name=str(raw.get("name") or "")
-                        if raw.get("argument_error") is None else raw.get("name"),
-                        arguments=dict(raw.get("arguments") or {})
-                        if raw.get("argument_error") is None else raw.get("arguments"),
-                        argument_error=raw.get("argument_error"),
+                        call_id=call_id,
+                        name=name,
+                        arguments=arguments,
+                        argument_error=argument_error,
                         raw_arguments=raw.get("raw_arguments"),
                     )
                 )
@@ -171,7 +178,7 @@ class ModelRequest:
 
 
 class ModelAdapter(Protocol):
-    async def stream(
+    def stream(
         self,
         request: ModelRequest,
         *,

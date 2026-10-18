@@ -1,5 +1,7 @@
 """Agent 下载后媒体库复核通知的安全投影测试。"""
 from __future__ import annotations
+from starlette.requests import Request
+from typing import cast
 
 import os
 import unittest
@@ -223,7 +225,7 @@ class DownloadVerificationNotificationTests(unittest.TestCase):
             "app.routes.api.config.set_and_save"
         ) as persist, patch("app.services.clear_dashboard_cache"):
             response = save_config(
-                request,
+                cast(Request, request),
                 {"AGENT_DOWNLOAD_VERIFICATION_NOTIFY_ENABLED": "0"},
             )
 

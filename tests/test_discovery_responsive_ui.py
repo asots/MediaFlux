@@ -1,6 +1,6 @@
+import re
 import unittest
 from pathlib import Path
-import re
 
 
 class DiscoveryResponsiveUITests(unittest.TestCase):
@@ -21,101 +21,71 @@ class DiscoveryResponsiveUITests(unittest.TestCase):
 
         # 2. 验证 @media (max-width: 1160px) 平板与中等屏幕规则
         # 探索工具栏在平板/中等屏幕第一行为搜索输入框 + 状态指示灯与刷新按钮；第二行为筛选器
-        self.assertIsNotNone(
-            re.search(
+        assert (re.search(
                 r"@media\s*\(max-width:\s*1160px\)\s*\{[\s\S]*?\.discovery-toolbar\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)\s+auto",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*1160px\)\s*\{[\s\S]*?\.discovery-search-form\s*\{[^}]*grid-column:\s*1[^}]*grid-row:\s*1",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*1160px\)\s*\{[\s\S]*?\.discovery-toolbar-meta\s*\{[^}]*grid-column:\s*2[^}]*grid-row:\s*1",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*1160px\)\s*\{[\s\S]*?\.discovery-filter-region\s*\{[^}]*grid-column:\s*1\s*/\s*-1[^}]*grid-row:\s*2",
                 css,
-            )
-        )
+            )) is not None
 
         # 3. 验证 @media (max-width: 900px) 移动端规则
         # 探索工具栏在移动端第一行为搜索输入框 + 状态指示灯与刷新按钮；第二行为筛选器（若有）
-        self.assertIsNotNone(
-            re.search(
+        assert (re.search(
                 r"@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.discovery-toolbar\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)\s+auto",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.discovery-search-form\s*\{[^}]*grid-column:\s*1[^}]*grid-row:\s*1",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.discovery-toolbar-meta\s*\{[^}]*grid-column:\s*2[^}]*grid-row:\s*1",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.discovery-filter-region\s*\{[^}]*grid-column:\s*1\s*/\s*-1[^}]*grid-row:\s*2",
                 css,
-            )
-        )
+            )) is not None
 
         # 4. 验证 @media (max-width: 560px) 紧凑移动端规则
-        self.assertIsNotNone(
-            re.search(
+        assert (re.search(
                 r"@media\s*\(max-width:\s*560px\)\s*\{[\s\S]*?\.discovery-toolbar\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)\s+auto",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*560px\)\s*\{[\s\S]*?\.discovery-search-form\s*\{[^}]*grid-column:\s*1[^}]*grid-row:\s*1",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*560px\)\s*\{[\s\S]*?\.discovery-toolbar-meta\s*\{[^}]*grid-column:\s*2[^}]*grid-row:\s*1",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*560px\)\s*\{[\s\S]*?\.discovery-filter-region\s*\{[^}]*grid-column:\s*1\s*/\s*-1[^}]*grid-row:\s*2",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*560px\)\s*\{[\s\S]*?\.discovery-filter-control\s*\{[^}]*flex:\s*1\s+1\s+0",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*560px\)\s*\{[\s\S]*?\.discovery-dialog\s*\{[^}]*100dvh",
                 css,
-            )
-        )
-        self.assertIsNotNone(
-            re.search(
+            )) is not None
+        assert (re.search(
                 r"@media\s*\(max-width:\s*560px\)\s*\{[\s\S]*?\.discovery-resource-bulk\s*\{[^}]*env\(safe-area-inset-bottom",
                 css,
-            )
-        )
+            )) is not None
 
     def test_discovery_js_tab_switch_restores_cached_view_before_cold_cleanup(self):
         js_path = Path("app/static/js/discovery.js")
@@ -126,7 +96,7 @@ class DiscoveryResponsiveUITests(unittest.TestCase):
             r"\n    \}\n\n    elements\.tabs\.addEventListener\('click'",
             js,
         )
-        self.assertIsNotNone(match)
+        assert (match) is not None
         body = match.group("body")
 
         self.assertIn("saveCurrentViewSnapshot();", body)

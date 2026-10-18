@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import tests  # noqa: F401
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -57,7 +61,7 @@ class ReleaseChainNamingTests(IsolatedDatabaseTestCase):
                             confidence=1.0,
                         )
                     )
-                    service = LocalMediaService(scraper=scraper)
+                    service = LocalMediaService(scraper=cast(TMDBScraper, scraper))
                     rules = OrganizeRules(
                         region_split=False,
                         year_split=False,
@@ -108,7 +112,7 @@ class ReleaseChainNamingTests(IsolatedDatabaseTestCase):
                         service.close()
 
     def test_long_tv_name_with_variant_tags_keeps_season_and_extension(self):
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         match = MatchResult(
             tmdb_id="123", title="长标题" * 100, year="2025", media_type="tv"
         )

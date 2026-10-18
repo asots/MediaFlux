@@ -13,6 +13,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, quote, urlsplit
 
 import requests
+from requests.structures import CaseInsensitiveDict
 
 from app.clients.douban_frodo import DoubanFrodoClient
 from app.discovery.models import (
@@ -91,11 +92,11 @@ class CapturingSession(requests.Session):
         self.prepared_requests.append(request)
         response = requests.Response()
         response.status_code = 200
-        response.headers = {"Content-Type": "application/json; charset=utf-8"}
+        response.headers = CaseInsensitiveDict({"Content-Type": "application/json; charset=utf-8"})
         response.url = request.url
         response.request = request
         response._content = json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
-        response._content_consumed = True
+        setattr(response, "_content_consumed", True)
         return response
 
 
@@ -307,9 +308,8 @@ class DoubanFrodoClientTests(unittest.TestCase):
             "MediaFlux\x7fFrodo Client/1.0",
         ):
             with self.subTest(user_agent=repr(invalid)):
-                with self.assertRaises(ValueError):
-                    DoubanFrodoClient(
-                        api_key=self.API_KEY,
+                self.assertRaises(
+                        ValueError, DoubanFrodoClient, api_key=self.API_KEY,
                         api_secret=self.API_SECRET,
                         session=FakeSession(),
                         user_agent=invalid,
@@ -372,7 +372,7 @@ class DoubanFrodoClientTests(unittest.TestCase):
 
         page = client.list_items("movie_showing", "movie", 1, {})
 
-        self.assertIsInstance(page.items, tuple)
+        assert isinstance(page.items, tuple)
         self.assertEqual(page.source, "frodo")
         self.assertEqual(len(page.items), 2)
         self.assertEqual(
@@ -515,9 +515,8 @@ class DoubanFrodoClientTests(unittest.TestCase):
 
         for invalid_timeout in (0, -1, math.inf, (2, 0), (2, math.inf), None):
             with self.subTest(timeout=invalid_timeout):
-                with self.assertRaises(ValueError):
-                    DoubanFrodoClient(
-                        api_key=self.API_KEY,
+                self.assertRaises(
+                        ValueError, DoubanFrodoClient, api_key=self.API_KEY,
                         api_secret=self.API_SECRET,
                         session=FakeSession(),
                         timeout=invalid_timeout,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from pathlib import Path
+from typing import cast
 
 import httpx
 
@@ -15,6 +16,7 @@ from app.clients.http import (
 )
 from app.indexers.errors import IndexerResultExpired, IndexerUnavailable
 from app.indexers.models import IndexerItem, IndexerSearchRequest
+from app.indexers.providers.base import IndexerAdapter
 from app.indexers.providers.btbtla import BTBtlaAdapter
 from app.indexers.providers.mikan import MikanAdapter
 from app.indexers.providers.nyaa import NyaaAdapter
@@ -96,6 +98,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.size_bytes, 2147483648)
         self.assertEqual(item.seeders, 50)
         self.assertEqual(item.leechers, 3)
+        assert item.magnet is not None
         self.assertIn("urn:btih:0123456789abcdef0123456789abcdef01234567", item.magnet)
         self.assertIn("dn=Frieren%20S01%201080p", item.magnet)
         self.assertIn("tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce", item.magnet)
@@ -281,7 +284,9 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.size_bytes, 1288490188)
         self.assertEqual(item.download_state, "ready")
         self.assertEqual(item.download_kinds, ("magnet", "torrent"))
+        assert item.detail_url is not None
         self.assertTrue(item.detail_url.endswith("/view/123"))
+        assert item.torrent_url is not None
         self.assertTrue(item.torrent_url.endswith("/download/123.torrent"))
         self.assertEqual(http.calls[0]["params"]["p"], "1")
         self.assertEqual(http.calls[0]["params"]["q"], "Frieren")
@@ -514,7 +519,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.leechers, 3)
         self.assertEqual(item.downloads, 120)
         self.assertEqual(item.size_text, "700 MiB")
-        self.assertIsNotNone(item.published_at)
+        assert (item.published_at) is not None
         self.assertEqual(item.detail_url, "https://nyaa.net/view/456")
 
     async def test_nyaa_prefers_media_category_and_falls_back_to_all(self):
@@ -584,7 +589,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first.size_text, "1.15 GB")
         self.assertEqual(first.size_bytes, 1_150_000_000)
-        self.assertIsNotNone(first.published_at)
+        assert (first.published_at) is not None
         self.assertEqual(page.items[1].size_bytes, 848_300_000)
 
     async def test_mikan_keeps_torrent_only_rows_downloadable(self):
@@ -665,6 +670,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
         item = page.items[0]
         self.assertIn("Frieren S02E01", item.title)
         self.assertEqual(item.category, "动漫")
+        assert item.detail_url is not None
         self.assertTrue(item.detail_url.endswith("/tdown/900101.html"))
         self.assertEqual(item.download_kinds, ("magnet", "torrent"))
 
@@ -976,7 +982,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
 
         first_http = ClosableHttpClient(b"first")
         second_http = ClosableHttpClient(b"second")
-        registry = IndexerRegistry({"fake": FakeAdapter((first_http, second_http))})
+        registry = IndexerRegistry(cast(dict[str, IndexerAdapter], {"fake": FakeAdapter((first_http, second_http))}))
 
         await registry.aclose()
 
@@ -987,20 +993,27 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
         registry = build_default_registry()
 
         btbtla = registry.get("btbtla")
+        assert isinstance(btbtla, BTBtlaAdapter)
         self.assertEqual(btbtla.site_name, "综合")
         for site in ("aipan", "dygang", "ys5266"):
             self.assertEqual(registry.get(site).site_id, site)
-        self.assertIsInstance(btbtla.http, BrowserImpersonatingHttpClient)
+        assert isinstance(btbtla.http, BrowserImpersonatingHttpClient)
         self.assertEqual(btbtla.base_url, "https://www.btbtlb.com/")
         self.assertEqual(btbtla.mirror_base_urls, ("https://btbtlb.com/",))
         self.assertEqual(btbtla.http.sni_host, "btbtlb.com")
         self.assertIn("www.btbtlb.com", btbtla.http.allowed_hosts)
         self.assertIn("btbtlb.com", btbtla.http.allowed_hosts)
-        self.assertEqual(registry.get("mikan").mirror_base_urls, ("https://mikanime.tv/",))
-        self.assertIn("mikanime.tv", registry.get("mikan").http.allowed_hosts)
-        self.assertTrue(registry.get("nyaa").http.pin_resolved_address)
-        self.assertTrue(registry.get("mikan").http.pin_resolved_address)
-        self.assertTrue(registry.get("tpb").http.pin_resolved_address)
+        mikan = registry.get("mikan")
+        nyaa = registry.get("nyaa")
+        piratebay = registry.get("tpb")
+        assert isinstance(mikan, MikanAdapter)
+        assert isinstance(nyaa, NyaaAdapter)
+        assert isinstance(piratebay, PirateBayAdapter)
+        self.assertEqual(mikan.mirror_base_urls, ("https://mikanime.tv/",))
+        self.assertIn("mikanime.tv", mikan.http.allowed_hosts)
+        self.assertTrue(nyaa.http.pin_resolved_address)
+        self.assertTrue(mikan.http.pin_resolved_address)
+        self.assertTrue(piratebay.http.pin_resolved_address)
 
     def test_default_registry_contains_supported_sites_and_disabled_sukebei(self):
         clients = {

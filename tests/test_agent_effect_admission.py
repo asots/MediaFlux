@@ -5,6 +5,8 @@
 可单独运行：python -B -m unittest tests.test_agent_effect_admission -v
 """
 from __future__ import annotations
+from app.clients.guangya import GuangYaClient
+from typing import cast
 
 import asyncio
 import json
@@ -16,6 +18,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+from app.modules.process_lock import CrossProcessLock
+from app.modules.scraper import TMDBScraper
 import unittest
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
@@ -88,9 +92,13 @@ def _deny_network(*_args, **_kwargs):
     raise AssertionError("effect admission 回归禁止外联")
 
 
+class _DomainActionStack(ExitStack):
+    domain_actions: DomainActions
+
+
 @contextmanager
 def _offline_runtime(root: Path, client: FakeGatewayClient):
-    with ExitStack() as stack:
+    with _DomainActionStack() as stack:
         stack.domain_actions = DomainActions()
         for method in ("connect", "connect_ex", "sendto"):
             stack.enter_context(patch.object(socket.socket, method, _deny_network))
@@ -107,7 +115,7 @@ def _offline_runtime(root: Path, client: FakeGatewayClient):
             stack.enter_context(patch.object(module, "GuangYaClient", lambda: client))
         stack.enter_context(patch.object(
             fs_actions, "execute_fs_change_plan",
-            partial(fs.execute_fs_change_plan, client_factory=lambda: client),
+            partial(fs.execute_fs_change_plan, client_factory=lambda: cast(GuangYaClient, client)),
         ))
         yield stack
 
@@ -116,7 +124,8 @@ def _offline_runtime(root: Path, client: FakeGatewayClient):
 def _paused_manager():
     manager = organize_tasks.OrganizeTaskManager()
     # 只控制调度：真正的 start_durable_operation / repo 事务照常运行。
-    manager._lock = threading.Lock()
+    worker_lock = threading.Lock()
+    manager._lock = cast(CrossProcessLock, worker_lock)
     manager._lock.acquire()
     try:
         with patch.object(manager, "_ensure_operation_dispatcher", lambda: None), patch.object(
@@ -234,7 +243,7 @@ def _domain_arguments(domain, client, context, stack, *, new_name="admitted.mp4"
         clean_empty=False, link_strm=False, notify_enabled=False,
     )
     service = DirectoryScrapeService(
-        client=client, scraper=_DirectoryScrapeTMDB(), store=DirectoryScrapeStore(), rules_loader=lambda: rules,
+        client=client, scraper=cast(TMDBScraper, _DirectoryScrapeTMDB()), store=DirectoryScrapeStore(), rules_loader=lambda: rules,
     )
     stack.enter_context(patch.object(scrape_actions, "get_directory_scrape_service", lambda: service))
     stack.domain_actions.directory_scrape.inspect_directory_scrape({"directory_id": "source"}, context)
@@ -274,9 +283,10 @@ async def _kernel_plan(domain, store, client, stack, *, owner=_OWNER, session_id
 
 def _run_real_worker(row):
     manager = organize_tasks.OrganizeTaskManager()
-    manager._lock = threading.Lock()
+    worker_lock = threading.Lock()
+    manager._lock = cast(CrossProcessLock, worker_lock)
     manager._lock.acquire()
-    manager._worker = object()
+    manager._worker = cast(threading.Thread, object())
     manager._task = {
         "id": row["job_id"], "status": "running", "durable": True,
         "owner_digest": row["owner_digest"], "stats": {},
@@ -284,7 +294,7 @@ def _run_real_worker(row):
     # 原 worker 的签名验证、lease/cancel guard、领域 dispatch、逐项写后核验全部执行。
     manager._run_durable_operation(dict(row))
     assert manager._worker is None
-    assert not manager._lock.locked()
+    assert not worker_lock.locked()
     return manager
 
 
@@ -344,8 +354,8 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
         def admit(conn, row, replayed):
             order.append("admission")
-            self.assertIsInstance(conn, sqlite3.Connection)
-            self.assertIsInstance(row, sqlite3.Row)
+            assert isinstance(conn, sqlite3.Connection)
+            assert isinstance(row, sqlite3.Row)
             self.assertTrue(conn.in_transaction)
             self.assertIs(replayed, False)
             self.assertEqual(conn.execute(
@@ -408,7 +418,9 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         ) as bind:
             with self.assertRaises(jobs.OrganizeOperationAdmissionError) as raised:
                 self.manager.start_durable_operation(
-                    arguments.pop("operation"), arguments.pop("reference"), **arguments,
+                    arguments["operation"], arguments["reference"],
+                    job_kind=arguments["job_kind"], owner=arguments["owner"],
+                    payload=arguments["payload"], dedupe_key=arguments["dedupe_key"],
                     on_admitted=_admission(scope),
                 )
         self.assertIs(raised.exception.__cause__, failure)
@@ -431,7 +443,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(jobs, "_bind_fs_change_plan_to_job", wraps=jobs._bind_fs_change_plan_to_job) as bind:
             with self.assertRaises(jobs.OrganizeOperationAdmissionError) as raised:
                 jobs.enqueue_organize_operation_job(**_enqueue_arguments(plan), on_admitted=_admission(scope))
-        self.assertIsInstance(raised.exception.__cause__, ValueError)
+        assert isinstance(raised.exception.__cause__, ValueError)
         self.assertIn("持久化上限", str(raised.exception.__cause__))
         bind.assert_not_called()
         self.assertEqual(self._job_count(), 0)
@@ -480,6 +492,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
                         result = await pipeline.execute_confirmed(plan_id, context=context)
                     self.assertEqual(len(observations), 1)
                     row = jobs.get_organize_operation_job(observations[0]["job_id"])
+                    assert row is not None
                     self.assertEqual(row["status"], "pending")
                     self.assertTrue(jobs.verify_organize_operation_payload(row))
                     self.assertEqual(verified, [jobs.organize_operation_public_ref(row["job_id"])])
@@ -512,6 +525,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         bind.assert_not_called()
         self.assertEqual(self._job_count(), 0)
         self.assertFalse((await memory.load(owner=_OWNER, session_id=_SESSION)).metadata.get("effect_waits"))
+        assert flow is not None
         stored = fs.load_fs_change_plan(flow.plan_id, owner=_OWNER, expected_fingerprint=flow.fingerprint)
         self.assertEqual(stored["status"], "confirmed")
         self.assertFalse(stored.get("job_id"))
@@ -528,7 +542,9 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "accepted")
         self.assertEqual(self._job_count(), 1)
         job_id = jobs.organize_operation_job_id_from_public_ref(result.data["operation_ref"])
-        self.assertEqual(jobs.get_organize_operation_job(job_id)["status"], "pending")
+        get_organize_operation_job_result = jobs.get_organize_operation_job(job_id)
+        assert get_organize_operation_job_result is not None
+        self.assertEqual(get_organize_operation_job_result["status"], "pending")
         with db.get_conn() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM agent_kernel_sessions").fetchone()[0], 0)
 
@@ -539,12 +555,14 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
             effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
         )
         original_flow = self.runtime.domain_actions.fs_change._flow(_OWNER)
-        self.assertIsNotNone(original_flow)
+        assert (original_flow) is not None
         original = fs.load_fs_change_plan(original_flow.plan_id, owner=_OWNER)
         self.assertEqual(original["status"], "previewed")
         self.assertEqual(current.arguments["operations"][0]["new_name"], "admitted.mp4")
         self.assertEqual(self._job_count(), 0)
-        self.assertEqual(self.client.file_info("rename").name, "广告-ABC.mp4")
+        file_info_result = self.client.file_info("rename")
+        assert file_info_result is not None
+        self.assertEqual(file_info_result.name, "广告-ABC.mp4")
 
         # 仅模拟升级前的持久合同：复用真实 prepare 的快照/来源，旧卡 arguments={}。
         legacy = pipeline.effect_store.freeze(
@@ -576,12 +594,13 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
             effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
         )
         pending = await restored.get_pending_plan(owner=_OWNER, session_id=_SESSION)
-        self.assertIsNotNone(pending)
+        assert (pending) is not None
         self.assertEqual(pending.plan_id, legacy.plan_id)
         self.assertEqual(pending.arguments, {})
         self.assertEqual(pending.snapshot_fingerprint, current.snapshot_fingerprint)
         self.assertEqual(pending.metadata, current.metadata)
         cold_flow = cold_actions.fs_change._flow(_OWNER)
+        assert cold_flow is not None
         self.assertEqual((cold_flow.plan_id, cold_flow.fingerprint),
                          (original_flow.plan_id, original_flow.fingerprint))
         self.assertEqual(fs.load_fs_change_plan(cold_flow.plan_id, owner=_OWNER), original)
@@ -590,7 +609,9 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(accepted.outcome.public_content["ok"])
         forbidden_prepare.assert_not_called()
         self.assertEqual(self._job_count(), 1)
-        self.assertEqual(self.client.file_info("rename").name, "广告-ABC.mp4")
+        file_info_result_2 = self.client.file_info("rename")
+        assert file_info_result_2 is not None
+        self.assertEqual(file_info_result_2.name, "广告-ABC.mp4")
         frozen = fs.load_fs_change_plan(original_flow.plan_id, owner=_OWNER)
         self.assertEqual(frozen["status"], "queued")
         self.assertEqual(frozen["operations"], original["operations"])
@@ -602,10 +623,18 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repeated.exception.code, "confirmation_invalid")
         self.assertEqual(self._job_count(), 1)
         _run_real_worker(jobs.claim_organize_operation_job(frozen["job_id"]))
-        self.assertEqual(self.client.file_info("rename").name, "admitted.mp4")
-        self.assertEqual(jobs.get_organize_operation_job(frozen["job_id"])["status"], "completed")
-        self.assertEqual(self.client.file_info("move").name, "Move.mp4")
-        self.assertEqual(self.client.file_info("source").parent_id, "0")
+        file_info_result_3 = self.client.file_info("rename")
+        assert file_info_result_3 is not None
+        self.assertEqual(file_info_result_3.name, "admitted.mp4")
+        get_organize_operation_job_result_2 = jobs.get_organize_operation_job(frozen["job_id"])
+        assert get_organize_operation_job_result_2 is not None
+        self.assertEqual(get_organize_operation_job_result_2["status"], "completed")
+        file_info_result_4 = self.client.file_info("move")
+        assert file_info_result_4 is not None
+        self.assertEqual(file_info_result_4.name, "Move.mp4")
+        file_info_result_5 = self.client.file_info("source")
+        assert file_info_result_5 is not None
+        self.assertEqual(file_info_result_5.parent_id, "0")
         self.assertEqual(self._job_count(), 1)
         forbidden_prepare.assert_not_called()
 
@@ -617,7 +646,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         plan = _signed_fs_plan(self.client)
         with self.assertRaises(jobs.OrganizeOperationAdmissionError) as raised:
             jobs.enqueue_organize_operation_job(**_enqueue_arguments(plan), on_admitted=_admission(scope))
-        self.assertIsInstance(raised.exception.__cause__, StalePublicationError)
+        assert isinstance(raised.exception.__cause__, StalePublicationError)
         self.assertEqual(self._job_count(), 0)
         self.assertEqual(_read_state(self.store), before)
         self.assertEqual(before.pending_effect_plan_id, "new-pending")
@@ -636,7 +665,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
                 before = _read_state(self.store)
                 with self.assertRaises(jobs.OrganizeOperationAdmissionError) as raised:
                     jobs.enqueue_organize_operation_job(**_enqueue_arguments(plan), on_admitted=_admission(invalid))
-                self.assertIsInstance(raised.exception.__cause__, StalePublicationError)
+                assert isinstance(raised.exception.__cause__, StalePublicationError)
                 self.assertEqual(self._job_count(), 0)
                 self.assertEqual(_read_state(self.store), before)
                 self._assert_unbound(plan)
@@ -707,7 +736,9 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
             jobs.enqueue_organize_operation_job(**_enqueue_arguments(other_plan), on_admitted=_admission(scope))
         self.assertEqual(self._job_count(), 1)
         self.assertEqual(_read_state(self.store), before)
-        self.assertEqual(jobs.get_organize_operation_job(first["job_id"])["status"], "pending")
+        get_organize_operation_job_result_3 = jobs.get_organize_operation_job(first["job_id"])
+        assert get_organize_operation_job_result_3 is not None
+        self.assertEqual(get_organize_operation_job_result_3["status"], "pending")
         self._assert_unbound(other_plan)
 
     async def test_same_dedupe_cannot_be_claimed_by_different_confirmed_plan(self):
@@ -741,7 +772,9 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(jobs.OrganizeOperationAdmissionError):
             jobs.enqueue_organize_operation_job(**_enqueue_arguments(plan), on_admitted=_admission(other))
         self.assertEqual(self._job_count(), 1)
-        self.assertEqual(jobs.get_organize_operation_job(first["job_id"])["status"], "pending")
+        get_organize_operation_job_result_4 = jobs.get_organize_operation_job(first["job_id"])
+        assert get_organize_operation_job_result_4 is not None
+        self.assertEqual(get_organize_operation_job_result_4["status"], "pending")
         self.assertEqual(_read_state(self.store), old_before)
         self.assertEqual(_read_state(self.store, session_id="another-session"), other_before)
 
@@ -768,7 +801,9 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         bind.assert_not_called()
         self.assertEqual(_read_state(self.store), before)
         self.assertEqual(self._job_count(), 1)
-        self.assertEqual(jobs.get_organize_operation_job(legacy["job_id"])["status"], "pending")
+        get_organize_operation_job_result_5 = jobs.get_organize_operation_job(legacy["job_id"])
+        assert get_organize_operation_job_result_5 is not None
+        self.assertEqual(get_organize_operation_job_result_5["status"], "pending")
 
     async def test_replay_seed_identity_cannot_change_request_channel_or_tool(self):
         scope = await _confirmed_scope(self.store)
@@ -794,6 +829,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         reference = jobs.organize_operation_public_ref(legacy["job_id"])
         result = ToolResult(True, "accepted", "已提交", data={"operation_ref": reference})
         tracker = observers._completion_tracker(result)
+        assert tracker is not None
         self.assertEqual(tracker.kind, "guangya_operation")
         before = _read_state(self.store)
         with self.assertRaises(StalePublicationError):
@@ -809,7 +845,9 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         result = ToolResult(True, "accepted", "领域细节", data={
             "operation_ref": jobs.organize_operation_public_ref(row["job_id"]), "rename_count": 1,
         })
-        await effects._register_effect_wait(result, observers._completion_tracker(result), _FS_TOOL, scope)
+        tracker = observers._completion_tracker(result)
+        assert tracker is not None
+        await effects._register_effect_wait(result, tracker, _FS_TOOL, scope)
         state = _read_state(self.store)
         after = state.metadata["effect_waits"][scope.plan_id]
         self.assertEqual({key: value for key, value in before.items() if key != "sealed"},
@@ -818,7 +856,9 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         mismatch = ToolResult(True, "accepted", "别的 job", data={"operation_ref": jobs.organize_operation_public_ref(uuid4().hex)})
         before_state = _read_state(self.store)
         with self.assertRaises(StalePublicationError):
-            await effects._register_effect_wait(mismatch, observers._completion_tracker(mismatch), _FS_TOOL, scope)
+            tracker = observers._completion_tracker(mismatch)
+            assert tracker is not None
+            await effects._register_effect_wait(mismatch, tracker, _FS_TOOL, scope)
         self.assertEqual(_read_state(self.store), before_state)
 
     async def test_admission_rejection_is_not_reported_as_provider_failure(self):
@@ -994,6 +1034,7 @@ async def _child_process(mode: str, root: Path):
         row = jobs.get_organize_operation_job(boundary["job_id"])
         if mode == "finish":
             terminal = json.loads((root / "completed.json").read_text())
+            assert row is not None
             assert row["status"] == "completed" and terminal["job_id"] == row["job_id"]
             assert terminal["rename_verified"] and terminal["receipt_count"] == 0
             before = protected = await store.load(owner=_OWNER, session_id=_SESSION)
@@ -1002,6 +1043,7 @@ async def _child_process(mode: str, root: Path):
             # 这次冷恢复仅允许读取持久结果，任何重复 Provider 写入都使测试失败。
             runtime.enter_context(patch.object(client, "rename", side_effect=AssertionError("must not replay completed write")))
         else:
+            assert row is not None
             assert row["status"] == "pending"
             assert jobs.verify_organize_operation_payload(row)
             before = await store.load(owner=_OWNER, session_id=_SESSION)
@@ -1021,9 +1063,13 @@ async def _child_process(mode: str, root: Path):
             assert claimed is not None
             manager = _run_real_worker(claimed)
             done = jobs.get_organize_operation_job(row["job_id"])
+            assert done is not None
             assert done["status"] == "completed", dict(done)
-            assert client.file_info("rename").name == "admitted.mp4"
+            file_info_result_6 = client.file_info("rename")
+            assert file_info_result_6 is not None
+            assert file_info_result_6.name == "admitted.mp4"
             if mode == "complete":
+                assert done is not None
                 (root / "completed.json").write_text(json.dumps({
                     "job_id": done["job_id"], "rename_verified": True,
                     "receipt_count": sum(bool(item.get("completion_receipt_id")) for item in protected.conversation),
@@ -1057,6 +1103,7 @@ async def _child_process(mode: str, root: Path):
         for key in ("pending_effect_binding", "pending_effect_goal", "confirmed_publication", "active_publication", "task", "read_wait"):
             assert final.metadata.get(key) == protected.metadata.get(key), key
         assert final.metadata["effect_waits"][boundary["plan_id"]]["delivered"] is True
+        assert done is not None
         report = {
             "seed_count_before_resume": len(before.metadata["effect_waits"]),
             "queue_status": done["status"], "rename_verified": terminal["rename_verified"],

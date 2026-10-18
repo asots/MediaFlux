@@ -39,8 +39,8 @@ class _ProviderArtifact:
 
 class ProviderArtifactStore:
     def __init__(self, *, ttl_seconds: int = 900, max_entries: int = 512) -> None:
-        self.ttl_seconds = max(60, min(int(ttl_seconds), 3600))
-        self.max_entries = max(32, min(int(max_entries), 4096))
+        self.ttl_seconds = max(60, min(ttl_seconds, 3600))
+        self.max_entries = max(32, min(max_entries, 4096))
         self._items: dict[str, _ProviderArtifact] = {}
         self._lock = threading.RLock()
 
@@ -54,7 +54,7 @@ class ProviderArtifactStore:
 
     def clear_owner(self, *, owner: str) -> int:
         """清除 owner 的全部短期对象引用。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return 0
         with self._lock:
@@ -68,8 +68,8 @@ class ProviderArtifactStore:
 
     def clear_session(self, *, owner: str, session_id: str) -> int:
         """仅清除指定 owner/session 的短期对象引用。"""
-        owner_key = str(owner or "").strip()
-        session_key = str(session_id or "").strip()
+        owner_key = (owner or "").strip()
+        session_key = (session_id or "").strip()
         if not owner_key or not session_key:
             return 0
         with self._lock:
@@ -108,9 +108,9 @@ class ProviderArtifactStore:
         now = time.monotonic()
         artifact_ref = self._ref("PA")
         objects: dict[str, _ProviderObject] = {}
-        allow_open_url = str(provider or "").strip().casefold() == "media"
+        allow_open_url = (provider or "").strip().casefold() == "media"
 
-        item_limit = max(1, min(int(max_items), 500))
+        item_limit = max(1, min(max_items, 500))
         projection_truncated = False
 
         def visit(value: Any, depth: int = 0) -> Any:
@@ -175,7 +175,7 @@ class ProviderArtifactStore:
         item = _ProviderArtifact(
             artifact_ref=artifact_ref,
             owner=owner,
-            session_id=str(session_id or ""),
+            session_id=(session_id or ""),
             provider=provider,
             profile_ref=profile_ref,
             operation=operation,
@@ -199,7 +199,7 @@ class ProviderArtifactStore:
         profile_ref: str,
         expected_kind: str,
     ) -> tuple[str, dict[str, Any]]:
-        normalized = str(object_ref or "").strip().upper()
+        normalized = (object_ref or "").strip().upper()
         now = time.monotonic()
         with self._lock:
             self._prune_locked(now)
@@ -207,7 +207,7 @@ class ProviderArtifactStore:
                 candidate = artifact.objects.get(normalized)
                 if candidate is None:
                     continue
-                if artifact.owner != owner or artifact.session_id != str(session_id or ""):
+                if artifact.owner != owner or artifact.session_id != (session_id or ""):
                     break
                 if candidate.provider != provider or candidate.profile_ref != profile_ref:
                     break

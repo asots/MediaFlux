@@ -43,7 +43,7 @@ class LibrarySeriesSourceTests(unittest.TestCase):
         for call in client.list_series_episode_inventory.call_args_list:
             self.assertEqual(call.kwargs["max_episodes"], 2000)
             self.assertEqual(call.kwargs["page_size"], 200)
-            self.assertIsNotNone(call.kwargs["deadline_at"])
+            assert (call.kwargs["deadline_at"]) is not None
         client.list_library_series.assert_called_once_with(
             max_series=10,
             page_size=100,

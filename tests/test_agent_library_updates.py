@@ -519,7 +519,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
         self.assertTrue(result.ok, "只要至少一个单项可判定，批量 ok 应取 any(single.ok)")
         self.assertEqual(result.status, "partial")
         self.assertEqual(result.data["as_of"], "2026-08-01")
-        self.assertIsInstance(result.data["checked_at"], str)
+        assert isinstance(result.data["checked_at"], str)
         self.assertTrue(result.data["checked_at"])
         self.assertEqual(
             result.data["check_definition"],

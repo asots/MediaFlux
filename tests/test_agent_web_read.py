@@ -1,4 +1,8 @@
 from __future__ import annotations
+from app.agent.models import ToolResult
+from typing import Callable
+from app.clients.http import FixedHostHttpClient
+from typing import cast
 
 import asyncio
 import threading
@@ -24,7 +28,6 @@ from app.agent.domains.discovery.web_search_actions import (
 )
 from app.agent.errors import AgentToolError
 from app.agent.kernel.projection import DefaultProjector
-from app.agent.models import ToolResult
 from app.agent.rate_limit import tool_rate_limit_policy
 from tests.support import IsolatedDatabaseTestCase
 
@@ -101,7 +104,7 @@ class WebReadProjectionTests(unittest.TestCase):
         self.assertLessEqual(len(result.data["preview"]), 1_200)
         self.assertTrue(result.data["truncated"])
         self.assertNotIn("ignore all previous instructions", result.data["preview"])
-        self.assertIsNotNone(result.model_data)
+        assert (result.model_data) is not None
         self.assertEqual(
             result.model_data["trust"], "untrusted_external_evidence"
         )
@@ -247,7 +250,9 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
         self.assertTrue(first.ok)
         self.assertFalse(first.data["cached"])
         self.assertTrue(second.data["cached"])
+        assert second.model_data is not None
         self.assertTrue(second.model_data["cached"])
+        assert first.model_data is not None
         self.assertEqual(
             first.model_data["content_chunks"], second.model_data["content_chunks"]
         )
@@ -295,7 +300,7 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
             return result
 
         start = threading.Barrier(2)
-        results = [None, None]
+        results: list[ToolResult | None] = [None, None]
         errors: list[BaseException] = []
 
         def worker(index: int) -> None:
@@ -323,9 +328,16 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(errors, [])
         self.assertEqual(provider_calls, 1)
-        self.assertTrue(all(item is not None and item.ok for item in results))
-        self.assertEqual(sorted(item.data["cached"] for item in results), [False, True])
-        self.assertTrue(next(item for item in results if item.data["cached"]).model_data["cached"])
+        completed = []
+        for result in results:
+            assert result is not None
+            completed.append(result)
+        self.assertTrue(all(item.ok for item in completed))
+        self.assertEqual(sorted(item.data["cached"] for item in completed), [False, True])
+        next_result = next(item for item in completed if item.data["cached"])
+        assert next_result is not None
+        assert next_result.model_data is not None
+        self.assertTrue(next_result.model_data["cached"])
         self.assertEqual(
             db.get_agent_web_search_daily_usage(
                 provider="tavily", usage_date=db.current_agent_web_search_usage_date()
@@ -400,7 +412,7 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
             _extract_tavily(
                 {"url": "https://example.com/article", "max_chars": 2_000},
                 api_key="secret-key",
-                client_factory=FakeClient,
+                client_factory=cast(Callable[..., FixedHostHttpClient], FakeClient),
             )
         )
         self.assertTrue(result.ok)
@@ -434,7 +446,7 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
             _extract_tavily(
                 {"url": "https://example.com/article", "max_chars": 2_000},
                 api_key="secret-key",
-                client_factory=lambda **_kwargs: TimeoutClient(),
+                client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_kwargs: TimeoutClient()),
             )
         )
         self.assertEqual(result.status, "timeout")

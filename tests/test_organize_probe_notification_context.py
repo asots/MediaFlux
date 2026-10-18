@@ -1,6 +1,9 @@
 """probe 补全的通知身份、收件范围和持久交接回归；全程隔离 DB / fake I/O。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import inspect
 import json
 from unittest.mock import Mock, patch
@@ -252,6 +255,7 @@ class ProbeNotificationDeliveryTests(IsolatedDatabaseTestCase):
         self.assertTrue(scheduler.trigger("organize", organize_changes=[{**change, "file_id": "foreground"}], chat_id="chat-foreground", notify_override=True)["ok"])
         self.assertTrue(scheduler.trigger("organize", organize_changes=[{**change, "file_id": "linked"}], chat_id="chat-linked", notification_threads=linked["notification_threads"], notify_override=True)["ok"])
         options = scheduler._pending_organize_options
+        assert options is not None
         self.assertEqual(len(options["notification_scopes"]), 3)
         _publish_linked_notification_threads(options, strm_status="完成", media_refresh="完成")
         with patch.object(scheduler, "_notify_success") as summary, patch.object(scheduler, "_notify_details"), patch.object(scheduler, "_notify_failure") as failure:
@@ -440,7 +444,7 @@ class ProbeNotificationDeliveryTests(IsolatedDatabaseTestCase):
             old_path = generate_strm(old, "season", "http://example.invalid", root)
             db.upsert_strm_index("guangya:s", old.file_id, old.etag, old.size, old.name, str(old_path), "sha256:" + hashlib.sha256(old_path.read_bytes()).hexdigest())
             client = _IncrementalClient({new.file_id: new})
-            stats = sync_strm_incremental("s", target["changes"], "http://example.invalid", root, client=client)
+            stats = sync_strm_incremental("s", target["changes"], "http://example.invalid", root, client=cast(GuangYaClient, client))
             self.assertFalse(stats["fallback_required"])
             self.assertFalse(old_path.exists())
             self.assertEqual(len(list(Path(root).rglob("New.strm"))), 1)

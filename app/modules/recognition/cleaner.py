@@ -21,7 +21,7 @@ _MEDIA_FILE_SUFFIX = re.compile(
 
 def strip_media_file_suffix(value: str) -> str:
     """只剥离已知媒体或伴随文件扩展名，保留目录名中的普通点号。"""
-    return _MEDIA_FILE_SUFFIX.sub("", str(value or ""))
+    return _MEDIA_FILE_SUFFIX.sub("", (value or ""))
 
 
 def normalize_release_text(value: object, *, strip_chars: str = " ._-·") -> str:
@@ -42,7 +42,7 @@ def _unique_text(values) -> list[str]:
 
 
 def _comparison_key(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = unicodedata.normalize("NFKD", (value or ""))
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     # 保留汉字、日文假名与韩文/Jamo。只保留汉字会把日文标题压缩成少量
     # 共同汉字，造成不同作品在宽松模式下被误判为高度相似。
@@ -72,7 +72,7 @@ def _is_informative_slash_title_part(value: str) -> bool:
 
 
 def _split_title_variants(title: str) -> list[str]:
-    title = re.sub(r"\s+", " ", str(title or "")).strip()
+    title = re.sub(r"\s+", " ", (title or "")).strip()
     if not title:
         return []
     pipe_parts = [

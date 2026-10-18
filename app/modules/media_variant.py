@@ -48,7 +48,7 @@ def _profile_text(profile: Any) -> str:
 
 def classify_variant(name: str, profile: Any = None) -> MediaVariant:
     """只依据明确文件名/探测信息分类，不把缺失信息猜成标准版本。"""
-    text = " ".join((str(name or ""), _profile_text(profile)))
+    text = " ".join(((name or ""), _profile_text(profile)))
     compact = re.sub(r"[^a-z0-9+]", "", text.lower())
     if isinstance(profile, dict):
         probed_dolby_vision = profile.get("dolby_vision")

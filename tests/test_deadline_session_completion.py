@@ -1,4 +1,8 @@
 """Session discovery budgets at the real native request boundary."""
+
+from typing import cast
+from collections.abc import Callable
+from app.clients.http import FixedHostHttpClient
 import asyncio
 import json
 from contextlib import asynccontextmanager
@@ -51,7 +55,7 @@ def run_native(batches, *, rounds=6):
 
         session.model = OpenAICompatibleModelAdapter(
             ProviderSettings(api_url="https://offline.invalid/v1", model="fixture", protocol="chat_completions"),
-            client_factory=lambda **_: Client(),
+            client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: Client()),
         )
         events = await collect(session.run(request()))
         return seen, executed, events

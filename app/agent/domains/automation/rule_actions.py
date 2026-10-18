@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Set as AbstractSet
 from datetime import datetime
 from typing import Any
 
@@ -35,7 +36,7 @@ def _encode(value: Any) -> str:
 
 
 def _strict_args(
-    arguments: dict[str, Any], allowed: set[str], required: set[str] = frozenset()
+    arguments: dict[str, Any], allowed: set[str], required: AbstractSet[str] = frozenset()
 ) -> None:
     if (
         not isinstance(arguments, dict)

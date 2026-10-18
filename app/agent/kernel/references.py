@@ -61,7 +61,7 @@ class ReferenceStore(Protocol):
 class InMemoryReferenceStore:
     def __init__(self, *, clock=time.monotonic, max_entries: int = 2048) -> None:
         self._clock = clock
-        self._max_entries = max(32, int(max_entries))
+        self._max_entries = max(32, max_entries)
         self._lock = CrossLoopAsyncLock()
         self._records: dict[str, _ReferenceRecord] = {}
 
@@ -74,13 +74,13 @@ class InMemoryReferenceStore:
         value: Any,
         ttl_seconds: int = 900,
     ) -> OpaqueReference:
-        owner_key = str(owner or "").strip()
-        session_key = str(session_id or "").strip()
-        kind_key = str(kind or "").strip().casefold()
+        owner_key = (owner or "").strip()
+        session_key = (session_id or "").strip()
+        kind_key = (kind or "").strip().casefold()
         if not owner_key or not session_key or not kind_key:
             raise ReferenceError("reference owner/session/kind is required")
         now = self._clock()
-        expires_at = now + max(1, min(int(ttl_seconds), 86_400))
+        expires_at = now + max(1, min(ttl_seconds, 86_400))
         async with self._lock:
             self._prune(now)
             while len(self._records) >= self._max_entries:
@@ -120,7 +120,7 @@ class InMemoryReferenceStore:
     async def _read(
         self, ref: str, *, owner: str, session_id: str, expected_kind: str,
     ) -> tuple[Any, float]:
-        token = str(ref or "").strip()
+        token = (ref or "").strip()
         if not token.startswith("ref_") or len(token) > 200:
             raise ReferenceError("reference is invalid")
         async with self._lock:
@@ -130,13 +130,13 @@ class InMemoryReferenceStore:
             record = self._records.get(token)
             if record is None:
                 raise ReferenceError("reference is missing or expired")
-            if not secrets.compare_digest(record.owner, str(owner or "").strip()):
+            if not secrets.compare_digest(record.owner, (owner or "").strip()):
                 raise ReferenceError("reference owner mismatch")
             if not secrets.compare_digest(
-                record.session_id, str(session_id or "").strip()
+                record.session_id, (session_id or "").strip()
             ):
                 raise ReferenceError("reference session mismatch")
-            kind = str(expected_kind or "").strip().casefold()
+            kind = (expected_kind or "").strip().casefold()
             if kind and record.kind != kind:
                 raise ReferenceError("reference type mismatch")
             return deepcopy(record.value), observed_at + (record.expires_at - now)

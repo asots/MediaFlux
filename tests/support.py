@@ -7,10 +7,11 @@ import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Generator, NotRequired, TypedDict, TypeVar
 from unittest.mock import patch
 
 from app import database as db
+from app.clients.guangya import GuangYaFile
 
 _TEST_DATABASE_LOCK = threading.RLock()
 
@@ -25,12 +26,12 @@ def seed_rss_entry_state(entry_id: int, status: str) -> None:
             "failed_at=?,failure_code='',failure_retryable=0 WHERE id=?",
             (status, int(processed), timestamp if processed else None,
              timestamp if status in {"submitting", "downloaded", "failed"} else None,
-             timestamp if status == "failed" else None, int(entry_id)),
+             timestamp if status == "failed" else None, entry_id),
         )
 
 
 @contextmanager
-def isolated_test_database(filename: str = "test.db") -> Iterator[Path]:
+def isolated_test_database(filename: str = "test.db") -> Generator[Path, None, None]:
     """初始化临时 SQLite，并在退出时恢复此前的数据库配置。"""
     with _TEST_DATABASE_LOCK:
         previous_path = db.DB_PATH
@@ -137,8 +138,17 @@ class IsolatedDatabaseTestCase(InitializedWebTestCase):
             super().tearDownClass()
 
 
+class ReleaseParseFields(TypedDict):
+    title: str
+    year: str
+    type: str
+    season: int | None
+    episode: int | None
+    tmdb_id: NotRequired[str]
+
+
 def release_parse_result(
-    fields: dict[str, object] | None = None,
+    fields: dict[str, Any] | None = None,
     *,
     filename: str = "",
     parent_path: str = "",
@@ -183,9 +193,9 @@ def release_parse_result(
     )
 
 
-def release_parse_fields(result) -> dict[str, object]:
+def release_parse_fields(result) -> ReleaseParseFields:
     """把正式识别结果转为仅供测试断言使用的字段快照。"""
-    payload: dict[str, object] = {
+    payload: ReleaseParseFields = {
         "title": result.title,
         "year": result.year,
         "type": result.media_type,
@@ -200,6 +210,9 @@ def release_parse_fields(result) -> dict[str, object]:
 class PagedDirectoryTestMixin:
     """让内存目录替身显式实现正式分页协议；兼容适配只存在于测试端。"""
 
+    def list_dir(self, directory_id: str, /) -> list[GuangYaFile]:
+        raise NotImplementedError
+
     def iter_dir(self, directory_id: str, *, should_stop=None, max_items=None):
         if should_stop and should_stop():
             return
@@ -211,3 +224,11 @@ class PagedDirectoryTestMixin:
             if max_items is not None and index >= max_items:
                 raise DirectoryEntryLimitError("测试目录超过调用方条目预算")
             yield item
+
+
+_ReceiptT = TypeVar("_ReceiptT")
+
+def assert_present(value: _ReceiptT | None) -> _ReceiptT:
+    """验证正向测试中的回执存在，允许在推导式中保留这一断言。"""
+    assert value is not None
+    return value

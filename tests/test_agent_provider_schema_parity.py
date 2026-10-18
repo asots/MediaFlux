@@ -1,5 +1,7 @@
 """Provider discovery/admission contracts with an isolated transport boundary."""
 from __future__ import annotations
+from app.agent.provider_gateway import ProviderTransport
+from typing import cast
 
 import asyncio
 
@@ -47,7 +49,7 @@ def gateway(schema=None, *, write=False):
             description="offline probe", risk=RiskLevel.WRITE if write else RiskLevel.READ,
             parameters=schema, result_kind="offline"))
     transport = Transport()
-    return ProviderGateway(catalog=catalog, transports=[transport]), transport
+    return ProviderGateway(catalog=catalog, transports=cast(list[ProviderTransport], [transport])), transport
 
 
 def call(gw, arguments, operation="media.offline.probe", *, write=False, context=None):
@@ -225,6 +227,7 @@ def test_failed_provider_normalization_retains_registered_schema_without_changin
     with pytest.raises(ProviderGatewayError) as failure:
         validate_provider_arguments(schema, invalid)
     assert schema == original
+    assert failure.value.argument_schemas is not None
     effective = failure.value.argument_schemas["arguments"]
     assert effective is not None
     assert effective['properties']['nested']['additionalProperties'] is False
@@ -322,6 +325,7 @@ def test_query_retry_changes_optional_filters_but_keeps_real_profile_validation(
         initial = {"profile_ref": " configured:media ", "operation": "unknown", "arguments": {"limit": 5}}
         with pytest.raises(ToolPipelineError) as caught:
             await pipeline.execute("provider.query", initial, context=context)
+        assert caught.value.argument_schemas is not None
         assert set(caught.value.argument_schemas) == {"operation"}, "已规范化且有效的profile不能解锁"
         assert not caught.value.repair_ticket and not context.schema_replacements
         corrected = {**initial, "operation": "media.items.recent_added"}

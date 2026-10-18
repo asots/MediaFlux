@@ -44,7 +44,7 @@ class OrganizeTaskRuntime:
 
     @staticmethod
     def target_path_key(root_id: str, target_path: str) -> tuple[str, str]:
-        return str(root_id or ""), str(target_path or "").strip("/")
+        return (root_id or ""), (target_path or "").strip("/")
 
     def remember_target_path(
         self, root_id: str, target_path: str, target_id: str | None,
@@ -53,18 +53,18 @@ class OrganizeTaskRuntime:
         with self.inventory_lock:
             # 空值不长期缓存：目录可能在稍后的执行阶段被本任务或外部操作创建。
             if target_id:
-                self.target_path_ids[key] = str(target_id)
+                self.target_path_ids[key] = target_id
             else:
                 self.target_path_ids.pop(key, None)
 
     def target_id_for_path(self, root_id: str, target_path: str) -> str:
         key = self.target_path_key(root_id, target_path)
         with self.inventory_lock:
-            return str(self.target_path_ids.get(key) or "")
+            return (self.target_path_ids.get(key) or "")
 
     def get_inventory(self, target_id: str) -> TargetInventorySnapshot | None:
         with self.inventory_lock:
-            snapshot = self.target_inventories.get(str(target_id or ""))
+            snapshot = self.target_inventories.get(target_id or "")
             if snapshot is None or not snapshot.valid:
                 return None
             return snapshot
@@ -96,31 +96,31 @@ class OrganizeTaskRuntime:
             revision=revision,
         )
         with self.inventory_lock:
-            self.target_inventories[str(target_id or "")] = snapshot
+            self.target_inventories[(target_id or "")] = snapshot
         return snapshot
 
     def set_inventory_revision(
         self, target_id: str, revision: tuple[str, int] | None,
     ) -> None:
         with self.inventory_lock:
-            snapshot = self.target_inventories.get(str(target_id or ""))
+            snapshot = self.target_inventories.get(target_id or "")
             if snapshot is not None:
                 snapshot.revision = revision
 
     def invalidate_inventory(self, target_id: str) -> None:
         with self.inventory_lock:
-            snapshot = self.target_inventories.get(str(target_id or ""))
+            snapshot = self.target_inventories.get(target_id or "")
             if snapshot is not None:
                 snapshot.valid = False
             for key in [
                 item for item in self.target_episode_inventory_cache
-                if item[0] == str(target_id or "")
+                if item[0] == (target_id or "")
             ]:
                 self.target_episode_inventory_cache.pop(key, None)
 
     def note_inventory_write(self, target_id: str) -> None:
         with self.inventory_lock:
-            snapshot = self.target_inventories.get(str(target_id or ""))
+            snapshot = self.target_inventories.get(target_id or "")
             if snapshot is not None:
                 snapshot.writes_since_refresh += 1
 
@@ -160,7 +160,7 @@ class OrganizeTaskRuntime:
         # “一个失败结果让同组查询逐个串行”的隐性性能退化。
         try:
             result = loader()
-            bound = bool(result is not None and cacheable(result))
+            bound = (result is not None and cacheable(result))
             cached_result = neutralize(result) if bound else None
             with self._recognition_condition:
                 if bound:
@@ -192,7 +192,7 @@ class OrganizeTaskRuntime:
         snapshot = self.get_inventory(target_id)
         current_revision = None
         revision_checked = False
-        stale = bool(
+        stale = (
             snapshot is not None
             and (
                 snapshot.writes_since_refresh >= 32

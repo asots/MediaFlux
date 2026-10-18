@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Any
 
 from app.agent.domains.configuration.management_actions import (
     execute_knowledge,
@@ -177,7 +178,7 @@ def register_specs(registry) -> None:
         "disabled": {"type": "boolean"},
     }
     for operation in ("create", "update", "delete"):
-        properties = {} if operation == "delete" else dict(fields)
+        properties: dict[str, Any] = {} if operation == "delete" else dict(fields)
         if operation != "create":
             properties["entry_number"] = {"type": "integer", "minimum": 1}
         registry.register(
@@ -218,7 +219,7 @@ def register_specs(registry) -> None:
         "mode": {"type": "string", "enum": ["move", "preview_only"]},
     }
     for operation in ("create", "update", "delete"):
-        properties = {} if operation == "delete" else dict(fields)
+        properties: dict[str, Any] = {} if operation == "delete" else dict(fields)
         if operation != "create":
             properties["source_number"] = {"type": "integer", "minimum": 1}
         registry.register(
@@ -278,7 +279,7 @@ def register_specs(registry) -> None:
         )
     )
     for operation in ("create", "update", "delete"):
-        properties = {"provider": {"type": "string", "enum": ["jellyfin", "emby"]}}
+        properties: dict[str, Any] = {"provider": {"type": "string", "enum": ["jellyfin", "emby"]}}
         required = ["provider"]
         if operation != "create":
             properties["mapping_number"] = {"type": "integer", "minimum": 1}

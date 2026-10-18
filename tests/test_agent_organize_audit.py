@@ -1,6 +1,8 @@
 """Media Agent 整理记录摘要的聚合、脱敏、路由与 API 契约。"""
 
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
 import json
 from unittest.mock import patch
@@ -114,7 +116,7 @@ class OrganizeAuditUnitTests(IsolatedDatabaseTestCase):
             {"limit": "10"},
         ):
             with self.subTest(invalid=invalid), self.assertRaises(AgentToolError):
-                organize_audit_arguments(invalid)
+                organize_audit_arguments(cast(dict[str, Any], invalid))
 
     def test_database_projection_maps_filters_and_owner_scope(self):
         self._guangya("success", title="云端电影", stamp="2026-08-10 09:00:00")

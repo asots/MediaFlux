@@ -6,6 +6,10 @@ import os
 import time
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser
 
 from tests import test_agent_kernel_browser as harness
 
@@ -88,6 +92,9 @@ def active_turn(request_id: str, turn_id: str, *, status: str = 'running',
 
 @unittest.skipIf(harness.sync_playwright is None, '系统环境未安装 Playwright')
 class AgentUXBrowserTests(unittest.TestCase):
+    browser: Browser
+    source: str
+    styles: str
     @classmethod
     def setUpClass(cls):
         harness.AgentKernelBrowserTests.setUpClass.__func__(cls)
@@ -130,9 +137,12 @@ class AgentUXBrowserTests(unittest.TestCase):
                 before = page.locator('#agentComposer').bounding_box()
                 page.wait_for_function("() => document.querySelectorAll('[data-agent-draft]').length === 3")
                 after = page.locator('#agentComposer').bounding_box()
+                assert after is not None
+                assert before is not None
                 self.assertLessEqual(abs(before['y'] - after['y']), 0.5)
                 self.assertLessEqual(abs(before['height'] - after['height']), 0.5)
                 console = page.locator('.agent-workbench').bounding_box()
+                assert console is not None
                 self.assertLessEqual(abs(after['y'] + after['height'] / 2 - console['y'] - console['height'] / 2), 0.5)
                 self.assertTrue(page.locator('#agentStartActions').get_attribute('aria-busy') == 'false')
                 page.locator('[data-agent-draft]').first.click()
@@ -154,10 +164,13 @@ class AgentUXBrowserTests(unittest.TestCase):
                 resume_box = resume.bounding_box()
                 status_box = page.locator('#agentStartActionsStatus').bounding_box()
                 composer_box = page.locator('#agentComposer').bounding_box()
-                self.assertIsNotNone(resume_box)
+                assert (resume_box) is not None
                 console = page.locator('.agent-workbench').bounding_box()
+                assert composer_box is not None
+                assert console is not None
                 self.assertLessEqual(abs(composer_box['y'] + composer_box['height'] / 2 - console['y'] - console['height'] / 2), 0.5)
                 self.assertGreaterEqual(resume_box['y'], composer_box['y'] + composer_box['height'])
+                assert status_box is not None
                 self.assertLessEqual(resume_box['y'] + resume_box['height'] + 4, status_box['y'])
                 self.assertLessEqual(composer_box['y'] + composer_box['height'], viewport['height'])
                 self.snapshot(page, f'feedback-empty-with-history-{viewport["width"]}-{viewport["height"]}')
@@ -373,6 +386,8 @@ class AgentUXBrowserTests(unittest.TestCase):
         self.assertTrue(page.locator('[data-candidate-position="1"]').is_disabled())
         self.assertEqual(page.locator('.agent-message').count(), messages_before)
         after = page.locator('.agent-candidate-select').bounding_box()
+        assert after is not None
+        assert before is not None
         self.assertEqual((before['width'], before['height']), (after['width'], after['height']))
         self.snapshot(page, 'candidates-desktop')
 
@@ -498,7 +513,10 @@ class AgentUXBrowserTests(unittest.TestCase):
         before = page.locator('#agentComposer').bounding_box()
         page.wait_for_timeout(3700)
         self.assertTrue(page.evaluate("window.__resumeNode === document.querySelector('.agent-message-assistant')"))
-        self.assertLessEqual(abs(page.locator('#agentComposer').bounding_box()['y'] - before['y']), 0.5)
+        assert before is not None
+        bounding_box_result = page.locator('#agentComposer').bounding_box()
+        assert bounding_box_result is not None
+        self.assertLessEqual(abs(bounding_box_result['y'] - before['y']), 0.5)
         page.evaluate("""({id, turn}) => { window.__kernelConfig.sessionDetails[id] = {
             generation: 2, messages: [{role: 'user', content: '原请求'}, {role: 'assistant', content: '恢复后仅一次完成'}],
             active_turn: null, last_turn: {...turn, status: 'completed', message: '完成'},
@@ -873,6 +891,7 @@ class AgentUXBrowserTests(unittest.TestCase):
                 self.assertIn('另有 12 项', summary_text)
                 summary_box = summary.bounding_box()
                 collapsed_box = card.bounding_box()
+                assert summary_box is not None
                 self.assertGreaterEqual(summary_box['height'], 44)
 
                 summary.focus()
@@ -884,6 +903,8 @@ class AgentUXBrowserTests(unittest.TestCase):
                 self.assertEqual(summary.inner_text(), summary_text)
                 expanded_summary_box = summary.bounding_box()
                 for dimension in ('width', 'height'):
+                    assert expanded_summary_box is not None
+                    assert summary_box is not None
                     self.assertLessEqual(abs(expanded_summary_box[dimension] - summary_box[dimension]), 0.5)
                 self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
 
@@ -896,6 +917,8 @@ class AgentUXBrowserTests(unittest.TestCase):
                 self.assertEqual(summary.inner_text(), summary_text)
                 restored_box = card.bounding_box()
                 for dimension in ('width', 'height'):
+                    assert collapsed_box is not None
+                    assert restored_box is not None
                     self.assertLessEqual(abs(restored_box[dimension] - collapsed_box[dimension]), 0.5)
                 self.assertEqual(scope.locator('li').count(), 20)
                 self.assertEqual(page.evaluate("window.__kernelCalls.filter(call => call.method === 'POST').map(call => call.url)"), ['/api/agent/query'])
@@ -913,7 +936,7 @@ class AgentUXBrowserTests(unittest.TestCase):
         for count in (0, 1, 8):
             with self.subTest(count=count):
                 resources = [{'position': index, 'title': f'冻结剧集 {index:02d}'} for index in range(1, count + 1)]
-                data = {'count': count, 'target': 'qb'}
+                data: dict = {'count': count, 'target': 'qb'}
                 data.update({'resource': resources[0]} if count == 1 else {'resources': resources})
                 approval = {
                     'plan_id': f'plan_frozen_small_{count:05d}', 'effect': 'WRITE',
@@ -971,6 +994,8 @@ class AgentUXBrowserTests(unittest.TestCase):
             "() => document.querySelector('.agent-stream-head')?.textContent.includes('已安全排队，等待实际状态回执')"
         )
         during = page.locator('.agent-submit-slot').bounding_box()
+        assert before is not None
+        assert during is not None
         self.assertAlmostEqual(before['width'], during['width'], delta=0.5)
         self.assertAlmostEqual(before['height'], during['height'], delta=0.5)
         self.assertTrue(page.locator('#agentStopSession').is_visible())
@@ -1216,7 +1241,9 @@ class AgentUXBrowserTests(unittest.TestCase):
         self.assertNotIn('✅', text)
         effect_step = page.locator('.agent-tool-trace .agent-stream-step[data-step-key^="effect:"]')
         self.assertEqual(effect_step.count(), 1)
-        self.assertIn('执行状态未知', effect_step.text_content())
+        text_content = effect_step.text_content()
+        assert text_content is not None
+        self.assertIn('执行状态未知', text_content)
         self.assertEqual(effect_step.locator('[data-lucide="check"]').count(), 0)
 
     def test_confirmation_rejects_stop_while_protected_job_stream_waits(self):

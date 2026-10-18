@@ -1,6 +1,8 @@
 """光鸭 SDK P1-P3 能力的领域动作、确认边界与持久任务测试。"""
 
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
 import tempfile
 import unittest
@@ -206,7 +208,7 @@ class GuangYaLocalUploadTests(unittest.TestCase):
                     raw = self.make_raw()
                     payload = {"canFlashUpload": can_flash}
                     raw.check_can_flash_upload.return_value = {"msg": "success", **({"data": payload} if wrapped else payload)}
-                    result = _Client(raw).upload_local_file(self.path)
+                    result = _Client(cast(_RawSdk, raw)).upload_local_file(self.path)
                     self.assertEqual(result, raw.upload_info.return_value)
                     raw.upload_token.assert_called_once_with(self.path.name, 1024 * 1024, None)
                     raw.check_can_flash_upload.assert_called_once_with("upload-task", self.path)
@@ -238,7 +240,7 @@ class GuangYaLocalUploadTests(unittest.TestCase):
         # probe-upload-shape.log 的真实 flash 响应：成功不等于已完成秒传。
         raw = self.make_raw()
         raw.check_can_flash_upload.return_value = {"msg": "success"}
-        result = _Client(raw).upload_local_file(self.path)
+        result = _Client(cast(_RawSdk, raw)).upload_local_file(self.path)
         self.assertEqual(result, raw.upload_info.return_value)
         raw.upload_token.assert_called_once()
         raw.cdn_upload.assert_called_once_with(
@@ -335,7 +337,7 @@ class GuangYaLocalUploadTests(unittest.TestCase):
                 self.sleep.reset_mock()
                 ready = raw.upload_info.return_value
                 raw.upload_info.side_effect = [pending, ready] if finish else [pending] * 4
-                result = _Client(raw).upload_local_file(self.path)
+                result = _Client(cast(_RawSdk, raw)).upload_local_file(self.path)
                 self.assertEqual(result, ready if finish else pending)
                 self.assertEqual(raw.upload_info.call_count, 2 if finish else 4)
                 self.assertEqual(self.sleep.call_args_list, [mock.call(2)] * (1 if finish else 3))
@@ -420,7 +422,7 @@ class GuangYaLocalUploadTests(unittest.TestCase):
         raw.close()
         raw._client = httpx.Client(transport=httpx.MockTransport(handle))
         self.addCleanup(raw.close)
-        result = _Client(raw).upload_local_file(
+        result = _Client(cast(_RawSdk, raw)).upload_local_file(
             self.path, name="renamed.mkv", parent_id="synthetic-target", chunk_size=1024 * 1024,
         )
         self.assertEqual(result["data"]["fileId"], "uploaded")
@@ -591,7 +593,7 @@ class _ShareClient:
         self.file = GuangYaFile(
             "file-1", "动画", True, parent_id="0", etag="etag-1"
         )
-        self.create_response = {
+        self.create_response: dict[str, Any] = {
             "code": 200,
             "data": {"shareId": "created-share", "accessCode": "AB12"},
         }
@@ -624,12 +626,12 @@ class GuangYaShareActionTests(unittest.TestCase):
 
     def test_share_snapshot_requires_management_record_id_not_public_link_id(self) -> None:
         client = _ShareClient()
-        snapshot = share_actions._load_share_snapshots(client)[0]
+        snapshot = share_actions._load_share_snapshots(cast(GuangYaClient, client))[0]
         self.assertEqual(snapshot["share_id"], "10001")
         self.assertEqual(share_actions._public_share({**snapshot, "title": "Test_Share.01"}, index=1)["title"], "Test_Share.01")
         del client.shares[0]["id"]
         with self.assertRaises(AgentToolError):
-            share_actions._load_share_snapshots(client)
+            share_actions._load_share_snapshots(cast(GuangYaClient, client))
 
     def test_create_returns_link_only_to_public_result_and_revoke_revalidates(self) -> None:
         client = _ShareClient()
@@ -675,6 +677,7 @@ class GuangYaShareActionTests(unittest.TestCase):
             self.assertEqual(created.data["access_code"], "AB12")
             self.assertNotEqual(created.data["access_code"], "200")
             self.assertIn("created-share", created.data["share_url"])
+            assert created.model_data is not None
             self.assertNotIn("share_url", created.model_data)
 
             listed = share_actions.list_guangya_user_shares(
@@ -782,6 +785,7 @@ class GuangYaShareActionTests(unittest.TestCase):
 
         self.assertEqual(created.status, "accepted")
         self.assertTrue(created.data["verification_pending"])
+        assert created.model_data is not None
         self.assertFalse(created.model_data["share_created"])
 
 

@@ -32,8 +32,7 @@ def test_agent_runtime_shutdown_is_included_in_overall_safety(outcome, expected)
             'app.modules.telegram_notification_center.stop_telegram_notification_dispatcher',
         ):
             stack.enter_context(patch(name, return_value=True))
-        kwargs = {'side_effect':outcome} if isinstance(outcome, Exception) else {'return_value':outcome}
-        stop = stack.enter_context(patch('app.modules.agent_runtime.shutdown_agent_runtime', **kwargs))
+        stop = stack.enter_context(patch('app.modules.agent_runtime.shutdown_agent_runtime', side_effect=outcome)) if isinstance(outcome, Exception) else stack.enter_context(patch('app.modules.agent_runtime.shutdown_agent_runtime', return_value=outcome))
         safe = main.stop_background_services()
         stop.assert_called_once_with()
         assert safe is expected

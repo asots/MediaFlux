@@ -15,7 +15,10 @@ import uuid
 from app import database as db
 from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.logger import get_logger
-from app.modules.guangya_compensation import GuangYaCompensationError, restore_guangya_file
+from app.modules.guangya_compensation import (
+    GuangYaCompensationError,
+    restore_guangya_file,
+)
 from app.modules.organize_postprocess import companion_target_name
 from app.modules.process_lock import CrossProcessLock
 
@@ -92,7 +95,7 @@ class OrganizeProbeWorker:
         return {
             **db.count_organize_probe_jobs(),
             "worker_running": bool(self._thread and self._thread.is_alive()),
-            "current_job_id": int(self._current_job_id),
+            "current_job_id": self._current_job_id,
         }
 
     def _runtime_client(self) -> GuangYaClient:
@@ -137,19 +140,19 @@ class OrganizeProbeWorker:
         label = str(item.get("current_name") or item.get("file_id") or "文件")
         if remote is None:
             raise _ProbeCompletionUnavailable(f"暂时无法读取云端文件详情: {label}")
-        if str(remote.file_id or "") != str(item.get("file_id") or ""):
+        if (remote.file_id or "") != str(item.get("file_id") or ""):
             raise _ProbeCompletionCancelled(f"云端文件身份不一致: {label}")
         expected_parent = str(item.get("current_parent_id") or "")
         expected_name = str(item.get("current_name") or "")
-        if expected_parent and str(remote.parent_id or "") != expected_parent:
+        if expected_parent and (remote.parent_id or "") != expected_parent:
             raise _ProbeCompletionCancelled(f"文件位置已被外部修改: {label}")
-        if expected_name and str(remote.name or "") != expected_name:
+        if expected_name and (remote.name or "") != expected_name:
             raise _ProbeCompletionCancelled(f"文件名已被外部修改: {label}")
         expected_size = int(item.get("size") or 0)
-        if expected_size and int(remote.size or 0) and int(remote.size or 0) != expected_size:
+        if expected_size and (remote.size or 0) and (remote.size or 0) != expected_size:
             raise _ProbeCompletionCancelled(f"文件大小已变化: {label}")
         expected_etag = str(item.get("etag") or "")
-        if expected_etag and str(remote.etag or "") and str(remote.etag) != expected_etag:
+        if expected_etag and (remote.etag or "") and remote.etag != expected_etag:
             raise _ProbeCompletionCancelled(f"文件校验值已变化: {label}")
         return remote
 
@@ -159,7 +162,7 @@ class OrganizeProbeWorker:
 
         try:
             raw = json.loads(str(job.get("rules_json") or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             raw = {}
         return restore_organize_rules_snapshot(raw)
 
@@ -194,7 +197,7 @@ class OrganizeProbeWorker:
             target_path=str(job.get("rel_dir") or ""),
             action="move",
         )
-        organizer = Organizer(client=self._runtime_client(), scraper=object())
+        organizer = Organizer(client=self._runtime_client(), recognition_enabled=False)
         rules = self._rules_from_job(job)
         # 前台已将 part/CD 统一为归档名中的 CDn；仅恢复已验证的视频名
         # 中的身份，不重新识别标题，也不让规格补全吞掉分片。
@@ -260,9 +263,9 @@ class OrganizeProbeWorker:
             parent_id = str(video.get("current_parent_id") or "")
             allowed_ids = set(targets)
             for entry in client.list_dir(parent_id):
-                if entry.is_dir or str(entry.file_id) in allowed_ids:
+                if entry.is_dir or entry.file_id in allowed_ids:
                     continue
-                if str(entry.name or "").casefold() in set(target_names):
+                if (entry.name or "").casefold() in set(target_names):
                     raise _ProbeCompletionCancelled(
                         f"目标目录已有同名文件，已停止后台补全: {entry.name}"
                     )
@@ -371,9 +374,9 @@ class OrganizeProbeWorker:
             if not changes:
                 return False
             from app.modules.organize import Organizer
-
             from app.modules.organize_probe_notifications import (
-                normalize_notification_context, tag_probe_changes,
+                normalize_notification_context,
+                tag_probe_changes,
             )
 
             rules = self._rules_from_job(job)
@@ -499,12 +502,12 @@ class OrganizeProbeWorker:
             raise _ProbeCompletionUnavailable("媒体规格仍不可用")
 
         _organizer, rules, plan = self._desired_plan(job, log, video, remote, profile)
-        desired_name = str(plan.new_name or remote.name)
+        desired_name = (plan.new_name or remote.name)
         if desired_name == str(video.get("current_name") or ""):
             return False
         self._apply_remote_rename(
             job=job, log=log, items=items, video=video, desired_name=desired_name,
-            link_strm=bool(rules.link_strm),
+            link_strm=rules.link_strm,
         )
         handoff_completed = self._handoff_pending(job)
         logger.debug(
@@ -532,7 +535,9 @@ class OrganizeProbeWorker:
                 raise _ProbeHandoffUnavailable("任务 lease 已变化，未确认规格补全完成")
             # noop 也是本批次的已提交终态，不能仅在发生 STRM 交接时收尾。
             try:
-                from app.modules.organize_probe_notifications import publish_probe_acknowledged
+                from app.modules.organize_probe_notifications import (
+                    publish_probe_acknowledged,
+                )
 
                 publish_probe_acknowledged(job)
             except Exception as exc:
@@ -586,7 +591,8 @@ class OrganizeProbeWorker:
             if notification_error:
                 try:
                     from app.modules.organize_probe_notifications import (
-                        normalize_notification_context, publish_probe_scope,
+                        normalize_notification_context,
+                        publish_probe_scope,
                     )
 
                     publish_probe_scope(

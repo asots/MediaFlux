@@ -69,9 +69,9 @@ class TelegramResourceSearchStore:
     ):
         if ttl_seconds <= 0 or max_sessions <= 0 or max_actions <= 0:
             raise ValueError("store limits must be positive")
-        self.ttl_seconds = int(ttl_seconds)
-        self.max_sessions = int(max_sessions)
-        self.max_actions = int(max_actions)
+        self.ttl_seconds = ttl_seconds
+        self.max_sessions = max_sessions
+        self.max_actions = max_actions
         self._clock = clock or time.monotonic
         self._sessions: dict[str, _Session] = {}
         self._actions: dict[str, _Action] = {}
@@ -80,8 +80,8 @@ class TelegramResourceSearchStore:
     def create_session(
         self,
         *,
-        chat_id: str,
-        user_id: str,
+        chat_id: str | int,
+        user_id: str | int,
         query: str,
         items: list[dict[str, Any]],
         sites: list[dict[str, Any]],
@@ -97,7 +97,7 @@ class TelegramResourceSearchStore:
                 session_id=session_id,
                 chat_id=str(chat_id),
                 user_id=str(user_id),
-                query=str(query),
+                query=query,
                 items=tuple(dict(item) for item in items),
                 sites=tuple(dict(site) for site in sites),
                 created_at=now,
@@ -105,11 +105,11 @@ class TelegramResourceSearchStore:
             )
             return session_id
 
-    def snapshot(self, session_id: str, chat_id: str, user_id: str) -> dict[str, Any]:
+    def snapshot(self, session_id: str, chat_id: str | int, user_id: str | int) -> dict[str, Any]:
         now = self._clock()
         with self._lock:
             self._prune(now)
-            session = self._sessions.get(str(session_id))
+            session = self._sessions.get(session_id)
             if session is None:
                 raise TelegramResourceSearchError("搜索结果已过期，请重新搜索")
             self._validate_owner(session.chat_id, session.user_id, chat_id, user_id)
@@ -123,15 +123,15 @@ class TelegramResourceSearchStore:
     def create_action(
         self,
         session_id: str,
-        chat_id: str,
-        user_id: str,
+        chat_id: str | int,
+        user_id: str | int,
         kind: str,
         value: Any = None,
     ) -> str:
         now = self._clock()
         with self._lock:
             self._prune(now)
-            session = self._sessions.get(str(session_id))
+            session = self._sessions.get(session_id)
             if session is None:
                 raise TelegramResourceSearchError("搜索结果已过期，请重新搜索")
             self._validate_owner(session.chat_id, session.user_id, chat_id, user_id)
@@ -146,22 +146,22 @@ class TelegramResourceSearchStore:
                 session_id=session.session_id,
                 chat_id=session.chat_id,
                 user_id=session.user_id,
-                kind=str(kind),
+                kind=kind,
                 value=value,
                 expires_at=session.expires_at,
             )
             return action_id
 
-    def resolve_action(self, action_id: str, chat_id: str, user_id: str) -> dict[str, Any]:
+    def resolve_action(self, action_id: str, chat_id: str | int, user_id: str | int) -> dict[str, Any]:
         now = self._clock()
         with self._lock:
             self._prune(now)
-            action = self._actions.get(str(action_id))
+            action = self._actions.get(action_id)
             if action is None:
                 raise TelegramResourceSearchError("操作已过期，请重新搜索")
             self._validate_owner(action.chat_id, action.user_id, chat_id, user_id)
             if action.kind == "download":
-                self._actions.pop(str(action_id), None)
+                self._actions.pop(action_id, None)
             return {
                 "session_id": action.session_id,
                 "kind": action.kind,
@@ -170,7 +170,7 @@ class TelegramResourceSearchStore:
 
     @staticmethod
     def _validate_owner(
-        expected_chat: str, expected_user: str, chat_id: str, user_id: str
+        expected_chat: str, expected_user: str, chat_id: str | int, user_id: str | int
     ) -> None:
         if str(chat_id) != expected_chat or str(user_id) != expected_user:
             raise TelegramResourceSearchError("该操作不属于当前会话")
@@ -234,8 +234,8 @@ class TelegramIndexerWorker:
         result_id: str,
         target: str,
         *,
-        chat_id: str = "",
-        user_id: str = "",
+        chat_id: str | int = "",
+        user_id: str | int = "",
         message_id: str = "",
     ) -> dict[str, Any]:
         async def run(service):
@@ -243,8 +243,8 @@ class TelegramIndexerWorker:
                 service,
                 result_id,
                 target,
-                chat_id=chat_id,
-                user_id=user_id,
+                chat_id=str(chat_id),
+                user_id=str(user_id),
                 message_id=message_id,
             )
 

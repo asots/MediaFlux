@@ -78,7 +78,7 @@ class OrganizeResultSchemaTests(unittest.TestCase):
         )
 
         self.assertEqual(event.state, "partial")
-        self.assertIn("部分完成", event.title)
+        self.assertIn("部分完成", str(event.title))
 
     def test_protected_downloads_allow_only_confirmed_incremental_postprocessing(self):
         from unittest.mock import patch
@@ -99,6 +99,7 @@ class OrganizeResultSchemaTests(unittest.TestCase):
                     self.assertTrue(link.call_args.kwargs["force_incremental"])
                 else:
                     link.assert_not_called()
+                    assert isinstance(stats['strm'], dict)
                     self.assertTrue(stats["strm"]["skipped"])
 
     def test_legacy_stats_payload_is_still_readable(self):

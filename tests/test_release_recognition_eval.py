@@ -153,6 +153,7 @@ class ReleaseRecognitionEvaluationTests(unittest.TestCase):
                 continue
             with self.subTest(case_id=case.case_id):
                 parsed = parser.parse_media(case.filename, case.parent_path)
+                assert isinstance(case.expected["title"], str)
                 self.assertEqual(_comparison_key(parsed.title), _comparison_key(case.expected["title"]))
                 self.assertEqual(parsed.context.normalized_title, case.expected["title"])
                 self.assertEqual(parsed.year, case.expected["year"])
@@ -177,7 +178,7 @@ class ReleaseRecognitionEvaluationTests(unittest.TestCase):
             # 统一识别结果同时保留文件名投影；目录级样本允许由 parent_path 补全标题与季号。
             if not case.parent_path:
                 parsed = release_parse_fields(parser.parse_media(case.filename))
-                if not str(parsed["title"] or "").strip():
+                if not (parsed["title"] or "").strip():
                     # 显式 TMDB 标记的旧投影允许留空标题，由后续详情补全。
                     self.assertTrue(context.normalized_title)
                 if "legacy-divergence" not in case.tags:

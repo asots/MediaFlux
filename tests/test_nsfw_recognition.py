@@ -1,11 +1,19 @@
 """成人内容番号识别与 MetaTube 整理链路聚焦回归测试。"""
 from __future__ import annotations
 
+from tests.support import assert_present
+
+from requests import Session
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import tempfile
 import threading
 import time
 import unittest
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -64,9 +72,7 @@ class OrganizeRulesSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(restored.nsfw_metatube_token, "server-secret")
         self.assertTrue(organize_rules_snapshot_matches(legacy_or_tampered, rules))
-        changed = OrganizeRules(**{
-            **rules.__dict__, "nsfw_category_name": "其他成人分类",
-        })
+        changed = replace(rules, nsfw_category_name="其他成人分类")
         self.assertFalse(organize_rules_snapshot_matches(snapshot, changed))
 
 
@@ -127,7 +133,7 @@ class NsfwIdentifierTests(unittest.TestCase):
         for filename, expected in cases.items():
             with self.subTest(filename=filename):
                 identifier = extract_nsfw_identifier(filename)
-                self.assertIsNotNone(identifier)
+                assert (identifier) is not None
                 self.assertEqual(identifier.code, expected)
 
     def test_numeric_prefix_identifiers_feed_clean_title_candidates(self):
@@ -149,10 +155,10 @@ class NsfwIdentifierTests(unittest.TestCase):
         for value, expected in cases.items():
             with self.subTest(value=value):
                 identifier = extract_nsfw_identifier(value)
-                self.assertIsNotNone(identifier)
+                assert (identifier) is not None
                 self.assertEqual(identifier.code, expected)
                 candidate = build_clean_title_candidate(value.rsplit("/", 1)[-1])
-                self.assertIsNotNone(candidate)
+                assert (candidate) is not None
                 self.assertEqual(candidate["provider"], "clean_title")
                 self.assertEqual(candidate["external_id"], expected)
                 self.assertEqual(candidate["title"], expected)
@@ -178,7 +184,9 @@ class NsfwIdentifierTests(unittest.TestCase):
             "ads.example.tv/path SSIS-001 1080p", "ads.example.tv"
         )
         self.assertNotIn("example", cleaned.lower())
-        self.assertEqual(extract_nsfw_identifier(cleaned).code, "SSIS-001")
+        extract_nsfw_identifier_result = extract_nsfw_identifier(cleaned)
+        assert extract_nsfw_identifier_result is not None
+        self.assertEqual(extract_nsfw_identifier_result.code, "SSIS-001")
 
     def test_category_is_a_single_safe_path_segment(self):
         self.assertEqual(validate_category_name("成人内容"), "成人内容")
@@ -213,7 +221,7 @@ class MetaTubeClientTests(unittest.TestCase):
             self._item(), self._item(number="SSIS-002", item_id="ssis002"),
         ], "error": None}))
         client = MetaTubeClient(
-            "http://127.0.0.1:8080/", "secret", timeout=7, session=session
+            "http://127.0.0.1:8080/", "secret", timeout=7, session=cast(Session, session)
         )
         result = client.search_exact("ssis 001")
 
@@ -226,30 +234,32 @@ class MetaTubeClientTests(unittest.TestCase):
 
     def test_timeout_and_invalid_payload_are_recoverable_errors(self):
         timeout_client = MetaTubeClient(
-            "http://127.0.0.1:8080", session=FakeSession(requests.Timeout())
+            "http://127.0.0.1:8080", session=cast(Session, FakeSession(requests.Timeout()))
         )
         with self.assertRaisesRegex(MetaTubeError, "超时"):
             timeout_client.search_exact("SSIS-001")
 
         invalid_client = MetaTubeClient(
-            "http://127.0.0.1:8080", session=FakeSession(FakeResponse([]))
+            "http://127.0.0.1:8080", session=cast(Session, FakeSession(FakeResponse([])))
         )
         with self.assertRaisesRegex(MetaTubeError, "格式"):
             invalid_client.search_exact("SSIS-001")
 
         redirect_client = MetaTubeClient(
             "http://127.0.0.1:8080",
-            session=FakeSession(FakeResponse({}, status_code=302)),
+            session=cast(Session, FakeSession(FakeResponse({}, status_code=302))),
         )
         with self.assertRaisesRegex(MetaTubeError, "重定向"):
             redirect_client.search_exact("SSIS-001")
 
     def test_recognizer_cache_avoids_duplicate_requests(self):
         session = FakeSession(FakeResponse({"data": [self._item()], "error": None}))
-        recognizer = NsfwRecognizer("http://127.0.0.1:8080", session=session)
+        recognizer = NsfwRecognizer("http://127.0.0.1:8080", session=cast(Session, session))
         first = recognizer.match("SSIS-001.mp4")
         second = recognizer.match("SSIS-001.1080p.mp4")
+        assert first is not None
         self.assertEqual(first.external_id, "javbus:ssis001")
+        assert second is not None
         self.assertEqual(second.external_id, first.external_id)
         self.assertEqual(len(session.calls), 1)
 
@@ -258,7 +268,7 @@ class MetaTubeClientTests(unittest.TestCase):
         item.update({"score": "N/A", "actors": {"bad": "shape"}, "genres": "剧情"})
         client = MetaTubeClient(
             "http://127.0.0.1:8080",
-            session=FakeSession(FakeResponse({"data": [item], "error": None})),
+            session=cast(Session, FakeSession(FakeResponse({"data": [item], "error": None}))),
         )
         result = client.search_exact("SSIS-001")
         self.assertEqual(result[0].score, 0.0)
@@ -273,7 +283,7 @@ class MetaTubeClientTests(unittest.TestCase):
                 return FakeResponse({"data": [MetaTubeClientTests._item()], "error": None})
 
         session = SlowSession()
-        recognizer = NsfwRecognizer("http://127.0.0.1:8080", session=session)
+        recognizer = NsfwRecognizer("http://127.0.0.1:8080", session=cast(Session, session))
         barrier = threading.Barrier(4)
         results = []
 
@@ -324,9 +334,10 @@ class MetaTubeClientTests(unittest.TestCase):
         }))
 
         match = NsfwRecognizer(
-            "http://127.0.0.1:8080", session=session,
+            "http://127.0.0.1:8080", session=cast(Session, session),
         ).match("SKMJ-749.mp4")
 
+        assert match is not None
         self.assertFalse(match.need_confirm)
         self.assertEqual(match.status, "matched")
         self.assertEqual(len(match.candidates), 1)
@@ -344,9 +355,10 @@ class MetaTubeClientTests(unittest.TestCase):
         session = FakeSession(FakeResponse({"data": [first, second], "error": None}))
 
         match = NsfwRecognizer(
-            "http://127.0.0.1:8080", session=session,
+            "http://127.0.0.1:8080", session=cast(Session, session),
         ).match("SSIS-001.mp4")
 
+        assert match is not None
         self.assertFalse(match.need_confirm)
         self.assertEqual(match.status, "matched")
         self.assertEqual(len(match.candidates), 1)
@@ -394,9 +406,10 @@ class MetaTubeClientTests(unittest.TestCase):
         }))
 
         match = NsfwRecognizer(
-            "http://127.0.0.1:8080", session=session,
+            "http://127.0.0.1:8080", session=cast(Session, session),
         ).match("hhd800.com@FJIN-140.mp4")
 
+        assert match is not None
         self.assertFalse(match.need_confirm)
         self.assertEqual(match.status, "matched")
         self.assertEqual(len(match.candidates), 1)
@@ -411,9 +424,10 @@ class MetaTubeClientTests(unittest.TestCase):
         session = FakeSession(FakeResponse({"data": [first, second], "error": None}))
 
         match = NsfwRecognizer(
-            "http://127.0.0.1:8080", session=session,
+            "http://127.0.0.1:8080", session=cast(Session, session),
         ).match("SSIS-001.mp4")
 
+        assert match is not None
         self.assertTrue(match.need_confirm)
         self.assertEqual(len(match.candidates), 2)
 
@@ -421,10 +435,12 @@ class MetaTubeClientTests(unittest.TestCase):
 class NsfwMultipartAndFallbackTests(unittest.TestCase):
     def test_short_s_prefix_number_is_not_mistaken_for_episode_marker(self):
         identifier = extract_nsfw_identifier("SW-1047.mp4")
-        self.assertIsNotNone(identifier)
+        assert (identifier) is not None
         self.assertEqual(identifier.code, "SW-1047")
+        build_clean_title_candidate_result = build_clean_title_candidate("SW-1047.mp4")
+        assert build_clean_title_candidate_result is not None
         self.assertEqual(
-            build_clean_title_candidate("SW-1047.mp4")["external_id"],
+            build_clean_title_candidate_result["external_id"],
             "SW-1047",
         )
         self.assertIsNone(extract_nsfw_identifier("S-001.mp4"))
@@ -435,21 +451,25 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         labelled = extract_nsfw_multipart("FJIN-140.CD2.1080p.mkv")
         ambiguous = extract_nsfw_multipart("FJIN-140-A.mp4")
 
+        assert numeric is not None
         self.assertEqual(numeric.part_index, 1)
+        assert labelled is not None
         self.assertEqual(labelled.part_index, 2)
+        assert ambiguous is not None
         self.assertTrue(ambiguous.ambiguous)
         self.assertIsNone(ambiguous.part_index)
         self.assertEqual(extract_nsfw_part_index("FJIN-140.CD2.mkv"), 2)
 
     def test_numeric_prefix_multipart_and_cleaning_reuse_shared_chain(self):
         part = extract_nsfw_multipart("300MIUM-1474-CD2.mp4")
-        self.assertIsNotNone(part)
+        assert (part) is not None
         self.assertEqual(part.part_index, 2)
         self.assertEqual(
             clean_nsfw_archive_title("300MIUM-1474-CD2.1080p.mp4"),
             "300MIUM-1474",
         )
         candidate = build_clean_title_candidate("200GANA-3419-1.mp4")
+        assert candidate is not None
         self.assertEqual(candidate["external_id"], "200GANA-3419")
         self.assertEqual(candidate["title"], "200GANA-3419")
 
@@ -463,12 +483,13 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
             "SSIS-001",
         )
         candidate = build_clean_title_candidate("hhd800.com@ATID-675.mp4")
+        assert candidate is not None
         self.assertEqual(candidate["provider"], "clean_title")
         self.assertEqual(candidate["external_id"], "ATID-675")
         self.assertEqual(candidate["title"], "ATID-675")
 
     def test_adult_part_marker_is_inserted_without_affecting_tmdb(self):
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         file = GuangYaFile("f1", "FJIN-140-1.mp4", False, 1, "e", "p")
         rules = OrganizeRules(naming_scope="both")
         adult = MatchResult(
@@ -488,7 +509,7 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         ))
 
     def test_ambiguous_multipart_group_requires_manual_confirmation(self):
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         match = MatchResult(
             title="FJIN-140", media_type="movie", provider="metatube",
             external_id="javbus:FJIN-140",
@@ -505,14 +526,14 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         organizer._apply_nsfw_multipart_policy(plans, rules)
 
         self.assertTrue(all(plan.action == "skip" for plan in plans))
-        self.assertTrue(all(plan.match.need_confirm for plan in plans))
+        self.assertTrue(all(assert_present(plan.match).need_confirm for plan in plans))
         self.assertTrue(all(plan.multipart_ambiguous for plan in plans))
         self.assertTrue(all(
-            plan.match.metadata.get("nsfw_multipart_confirmation") for plan in plans
+            assert_present(plan.match).metadata.get("nsfw_multipart_confirmation") for plan in plans
         ))
 
     def test_explicit_multipart_group_keeps_automatic_plans(self):
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         plans = [
             OrganizePlan(
                 file_id=f"f{index}", original_name=f"FJIN-140-{index}.mp4",
@@ -531,7 +552,7 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         self.assertEqual([plan.multipart_index for plan in plans], [1, 2])
 
     def test_no_metadata_confirmation_group_gets_clean_title_candidate(self):
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         match = MatchResult(
             media_type="movie", provider="metatube", need_confirm=True,
             error="MetaTube 没有返回完全一致的结果",
@@ -554,7 +575,7 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         self.assertEqual(actionable, 1)
 
     def test_numeric_prefix_no_metadata_confirmation_group_gets_clean_title_candidate(self):
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         plan = OrganizePlan(
             file_id="numeric-f1", original_name="200GANA-3419.mp4",
             original_path="200GANA-3419", original_parent_id="p",
@@ -574,7 +595,7 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         self.assertEqual(groups[0]["candidates"][0]["title"], "200GANA-3419")
 
     def test_sw_number_confirmation_group_offers_clean_title_instead_of_skip_only(self):
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         plan = OrganizePlan(
             file_id="sw-video", original_name="SW-1047.mp4",
             original_path="SW-1047", original_parent_id="adult-parent",
@@ -615,8 +636,8 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
             locked=True,
         )
         organizer = Organizer(
-            client=object(),
-            scraper=FixedMatchScraper(TMDBScraper(), match, match.metadata),
+            client=cast(GuangYaClient, object()),
+            scraper=cast(TMDBScraper, FixedMatchScraper(TMDBScraper(), match, match.metadata)),
         )
         file = GuangYaFile("f1", "hhd800.com@ATID-675.mp4", False, 100, "etag")
 
@@ -631,7 +652,7 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
             recognition_work_cache_key=None,
         )
 
-        self.assertIsNotNone(resolved)
+        assert (resolved) is not None
         self.assertEqual(resolved.provider, "clean_title")
         self.assertEqual(resolved.external_id, "ATID-675")
 
@@ -642,7 +663,7 @@ class NsfwMultipartAndFallbackTests(unittest.TestCase):
         )
 
     def test_different_numbers_in_same_directory_create_separate_groups(self):
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         plans = []
         for index, code in enumerate(("ATID-675", "FJIN-140"), 1):
             plans.append(OrganizePlan(
@@ -693,7 +714,7 @@ class NsfwOrganizerTests(unittest.TestCase):
     def test_exclusive_source_does_not_fall_back_to_tmdb_when_metatube_has_no_match(self):
         scraper = TMDBScraper()
         scraper.match = MagicMock()
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         recognizer = MagicMock()
         recognizer.match.return_value = None
         rules = OrganizeRules(
@@ -716,6 +737,7 @@ class NsfwOrganizerTests(unittest.TestCase):
 
         recognizer.match.assert_called_once_with("SSIS-001.mp4", "成人源")
         scraper.match.assert_not_called()
+        assert match is not None
         self.assertEqual(match.provider, "metatube")
         self.assertTrue(match.need_confirm)
         self.assertIn("MetaTube", match.error)
@@ -741,9 +763,9 @@ class NsfwOrganizerTests(unittest.TestCase):
         self.assertFalse(ordinary.nsfw_exclusive)
 
     def test_metatube_match_keeps_identity_without_exposing_it_in_directory(self):
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         session = FakeSession(FakeResponse({"data": [MetaTubeClientTests._item()], "error": None}))
-        recognizer = NsfwRecognizer("http://127.0.0.1:8080", session=session)
+        recognizer = NsfwRecognizer("http://127.0.0.1:8080", session=cast(Session, session))
         match = recognizer.match("SSIS-001.1080p.mp4")
         rules = OrganizeRules(
             nsfw_enabled=True,
@@ -751,6 +773,7 @@ class NsfwOrganizerTests(unittest.TestCase):
             nsfw_category_name="成人内容",
         )
 
+        assert match is not None
         self.assertEqual(organizer.classify(match, rules), ("成人内容", "其他", "2024"))
         self.assertEqual(organizer.build_media_dir(match, rules), "SSIS-001 测试标题 (2024)")
         self.assertEqual(organizer._match_identity_key(match), "metatube:javbus:ssis001")
@@ -941,7 +964,9 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
         ):
             service.preview_reorganize(log_id, "", "movie", provider="clean_title", external_id="SSIS-001")
         client.create_dir.assert_not_called()
-        self.assertEqual(db.get_organize_log(log_id)["status"], "manual")
+        get_organize_log_result = db.get_organize_log(log_id)
+        assert get_organize_log_result is not None
+        self.assertEqual(get_organize_log_result["status"], "manual")
 
     def test_batch_nsfw_reorganize_rejects_foreign_target_identity(self):
         self.enterContext(isolated_test_database())
@@ -976,7 +1001,9 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
             with patch.object(service, "_verify_items"), self.assertRaisesRegex(ValueError, "属于其他媒体"):
                 service._execute_reorganize(log_id, "test-token", preview["version"], preview)
         client.create_dir.assert_not_called()
-        self.assertEqual(db.get_organize_log(log_id)["status"], "manual")
+        get_organize_log_result_2 = db.get_organize_log(log_id)
+        assert get_organize_log_result_2 is not None
+        self.assertEqual(get_organize_log_result_2["status"], "manual")
 
     def test_pending_adult_preview_rejects_different_number(self):
         log_id = self._pending_log()
@@ -1013,7 +1040,7 @@ class NsfwAuditIdentityTests(IsolatedDatabaseTestCase):
             provider="metatube", external_id="javbus:ssis001",
             original_parent_id="1", original_name="b.mkv", media_type="movie",
         )
-        organizer = Organizer(client=object(), scraper=TMDBScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=TMDBScraper())
         self.assertEqual(
             organizer._historical_root_identities("电影/测试 (2024)"),
             {("movie", "tmdb:123")},
@@ -1042,7 +1069,7 @@ class NsfwLocalIntegrationTests(IsolatedDatabaseTestCase):
             inspection = service.inspect_source("admin", source_id, source)
             recognizer = NsfwRecognizer(
                 "http://127.0.0.1:8080",
-                session=FakeSession(FakeResponse({"data": [MetaTubeClientTests._item()], "error": None})),
+                session=cast(Session, FakeSession(FakeResponse({"data": [MetaTubeClientTests._item()], "error": None}))),
             )
             rules = OrganizeRules(
                 naming_scope="both", region_split=False, year_split=False,
@@ -1112,7 +1139,7 @@ class DirectoryScrapeRecognizerLifecycleTests(unittest.TestCase):
         match_barrier = threading.Barrier(2)
         start_barrier = threading.Barrier(3)
         service = DirectoryScrapeService(
-            client=object(), scraper=MagicMock(), store=MagicMock(),
+            client=cast(GuangYaClient, object()), scraper=MagicMock(), store=MagicMock(),
         )
         rules = self._rules("http://metatube-one.invalid")
         results: list[MatchResult] = []
@@ -1154,7 +1181,7 @@ class DirectoryScrapeRecognizerLifecycleTests(unittest.TestCase):
         old_started = threading.Event()
         release_old = threading.Event()
         service = DirectoryScrapeService(
-            client=object(), scraper=MagicMock(), store=MagicMock(),
+            client=cast(GuangYaClient, object()), scraper=MagicMock(), store=MagicMock(),
         )
         old_rules = self._rules("http://metatube-old.invalid")
         new_rules = self._rules("http://metatube-new.invalid")
@@ -1200,7 +1227,7 @@ class DirectoryScrapeRecognizerLifecycleTests(unittest.TestCase):
 
     def test_directory_service_close_retries_failed_recognizer(self):
         service = DirectoryScrapeService(
-            client=object(), scraper=MagicMock(), store=MagicMock(),
+            client=cast(GuangYaClient, object()), scraper=MagicMock(), store=MagicMock(),
         )
         recognizer = MagicMock()
         recognizer.close.side_effect = [False, True]
@@ -1215,7 +1242,7 @@ class DirectoryScrapeRecognizerLifecycleTests(unittest.TestCase):
 
     def test_failed_retired_recognizer_blocks_unbounded_config_generations(self):
         service = DirectoryScrapeService(
-            client=object(), scraper=MagicMock(), store=MagicMock(),
+            client=cast(GuangYaClient, object()), scraper=MagicMock(), store=MagicMock(),
         )
         constructed = []
 
@@ -1256,7 +1283,7 @@ class DirectoryScrapeRecognizerLifecycleTests(unittest.TestCase):
 
     def test_active_retired_recognizer_blocks_a_third_generation(self):
         service = DirectoryScrapeService(
-            client=object(), scraper=MagicMock(), store=MagicMock(),
+            client=cast(GuangYaClient, object()), scraper=MagicMock(), store=MagicMock(),
         )
         constructed = []
 
@@ -1301,7 +1328,7 @@ class OrganizerRecognizerLifecycleTests(unittest.TestCase):
         )
 
     def test_hot_config_switch_keeps_only_current_and_leased_retired_recognizer(self):
-        organizer = Organizer(client=object(), scraper=MagicMock())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=MagicMock())
         old_rules = self._rules("http://metatube-old.invalid")
         new_rules = self._rules("http://metatube-new.invalid")
         old_started = threading.Event()
@@ -1341,7 +1368,7 @@ class OrganizerRecognizerLifecycleTests(unittest.TestCase):
         self.assertEqual(constructed[1].close_calls, 1)
 
     def test_failed_retired_recognizer_blocks_unbounded_config_generations(self):
-        organizer = Organizer(client=object(), scraper=MagicMock())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=MagicMock())
         constructed = []
 
         class FakeRecognizer:
@@ -1380,7 +1407,7 @@ class OrganizerRecognizerLifecycleTests(unittest.TestCase):
         self.assertTrue(organizer.close())
 
     def test_active_retired_recognizer_blocks_a_third_generation(self):
-        organizer = Organizer(client=object(), scraper=MagicMock())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=MagicMock())
         constructed = []
 
         class FakeRecognizer:
@@ -1534,7 +1561,7 @@ class NsfwDownloadSourceTests(IsolatedDatabaseTestCase):
         rules = self.rules.for_source("task-dir")
         scraper = TMDBScraper()
         scraper.match = MagicMock()
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         recognizer = MagicMock()
         recognizer.match.return_value = None
         with patch.object(organizer, "_nsfw_recognizer_lease", return_value=nullcontext(recognizer)):
@@ -1546,6 +1573,7 @@ class NsfwDownloadSourceTests(IsolatedDatabaseTestCase):
             )
         recognizer.match.assert_called_once()
         scraper.match.assert_not_called()
+        assert match is not None
         self.assertTrue(match.need_confirm)
         self.assertEqual(match.provider, "metatube")
 

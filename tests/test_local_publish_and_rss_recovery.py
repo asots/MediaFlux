@@ -85,6 +85,7 @@ with patch("ctypes.CDLL", return_value=SimpleNamespace(renameat2=None)), patch("
         self.assertEqual(target.read_bytes(), b"process-only-copy")
         db.init_db()
         task = db.get_local_media_task(manifest["task"], owner="admin")
+        assert task is not None
         self.assertEqual(task.status, "requires_manual")
         self.assertFalse(db.reset_local_media_task(task.id, owner="admin"))
         steps = db.list_local_media_operation_steps(task.id, owner="admin")

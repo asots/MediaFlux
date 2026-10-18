@@ -1,10 +1,12 @@
 from __future__ import annotations
+from typing import Callable, cast
+from app.agent.kernel.model import ModelAdapter
 
 import asyncio
 import types
 import unittest
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, patch
 
 from app.agent.kernel.adapters import ApprovalView, TurnView
@@ -46,9 +48,12 @@ class User:
 @dataclass
 class Chat:
     id: int
+    type: str = field(init=False)
 
 
 class Message:
+    reply_markup: Markup
+    quote: types.SimpleNamespace | None
     def __init__(self, text="检查媒体库", *, chat_id=-100, user_id=7, message_id=11):
         self.text = text
         self.chat = Chat(chat_id)
@@ -108,12 +113,18 @@ class FakeBot:
         pass
 
 
-class RegisteredFakeBot(FakeBot, test_production.TelegramBotTests.FakeBot):
+class RegisteredFakeBot(FakeBot):
     """同时复用消息记录和正式注册装饰器，不绕过 handler → executor。"""
+
+    message_handlers: list[tuple[dict, Callable[..., object]]]
+    callback_handlers: list[tuple[dict, Callable[..., object]]]
+    message_handler = test_production.TelegramBotTests.FakeBot.message_handler
+    callback_query_handler = test_production.TelegramBotTests.FakeBot.callback_query_handler
+    set_my_commands = test_production.TelegramBotTests.FakeBot.set_my_commands
 
     def __init__(self):
         FakeBot.__init__(self)
-        test_production.TelegramBotTests.FakeBot.__init__(self)
+        test_production.TelegramBotTests.FakeBot.__init__(cast(test_production.TelegramBotTests.FakeBot, self))
 
 
 class FakeDraftBot(FakeBot):
@@ -623,7 +634,7 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
 
         self.assertEqual(transport.confirmations, [])
         self.assertEqual(bot.edits, [])
-        self.assertIsNotNone(message.reply_markup)
+        assert (message.reply_markup) is not None
         self.assertIn("已处理或被替代", bot.answers[-1][1])
         self.assertTrue(bot.answers[-1][2]["show_alert"])
 
@@ -925,7 +936,7 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
                     )
                 )
             )
-            self.assertIsNotNone(preview.approval)
+            assert (preview.approval) is not None
             call.data = f"agk:c:{preview.approval.plan_id}"
 
             with patches[0], patches[1], patches[2]:
@@ -947,6 +958,7 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
             preview = asyncio.run(transport.query(QueryEnvelope(
                 owner=owner, session_id=session_id, message="重新预览云盘文件变更",
             )))
+            assert preview.approval is not None
             call.data = f"agk:c:{preview.approval.plan_id}"
             clock[0] += 601
             with patches[0], patches[1], patches[2]:
@@ -1382,10 +1394,12 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                         failed = executor.submit(fail)
                         release.set()
                         with self.assertRaises(type(failure)) as caught:
+                            assert failed is not None
                             failed.result(1)
                         self.assertIs(caught.exception, failure)
                         self.assertTrue(completed.wait(1))
                         next_job = executor.submit(lambda: "worker still available")
+                        assert next_job is not None
                         self.assertEqual(next_job.result(1), "worker still available")
                 finally:
                     release.set()
@@ -1411,7 +1425,9 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                         future.cancel()
                     with patch.object(executor._pool, "submit", return_value=future):
                         self.assertIs(executor.submit(lambda: None), future)
-                    self.assertEqual(executor.submit(lambda: "lease released").result(1), "lease released")
+                    submit_result = executor.submit(lambda: "lease released")
+                    assert submit_result is not None
+                    self.assertEqual(submit_result.result(1), "lease released")
         finally:
             self.assertTrue(executor.stop(timeout=2))
 
@@ -1432,15 +1448,20 @@ class TelegramAgentExecutorTests(unittest.TestCase):
             self.assertTrue(all(event.wait(1) for event in started))
             self.assertIsNone(executor.submit(lambda: None))
             control = executor.submit(lambda: "control responded", control=True)
+            assert control is not None
             self.assertEqual(control.result(1), "control responded")
             self.assertFalse(executor.stop(timeout=0.01))
             self.assertFalse(executor.start())
             self.assertIsNone(executor.submit(lambda: None, control=True))
             release.set()
-            wait(jobs, timeout=2)
+            for job in jobs:
+                assert job is not None
+            wait([job for job in jobs if job is not None], timeout=2)
             self.assertTrue(executor.stop(timeout=1))
             self.assertTrue(executor.start())
-            self.assertEqual(executor.submit(lambda: "new generation").result(1), "new generation")
+            submit_result_2 = executor.submit(lambda: "new generation")
+            assert submit_result_2 is not None
+            self.assertEqual(submit_result_2.result(1), "new generation")
         finally:
             release.set()
             self.assertTrue(executor.stop(timeout=3))
@@ -1469,7 +1490,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                     exited.set()
 
         session = make_session()
-        session.model = SlowModel()
+        session.model = cast(ModelAdapter, SlowModel())
         transport = TelegramKernelTransport(session)
         try:
             def query():
@@ -1481,8 +1502,10 @@ class TelegramAgentExecutorTests(unittest.TestCase):
             self.assertTrue(entered.wait(1))
             effect = executor.submit(lambda: release_effect.wait(3), control=True)
             self.assertFalse(executor.stop(timeout=0.1))
+            assert job is not None
             self.assertEqual(job.result(1).status, "cancelled")
             self.assertTrue(exited.is_set())
+            assert effect is not None
             self.assertFalse(effect.done())
             self.assertFalse(executor.start())
             release_effect.set()
@@ -1650,7 +1673,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
             preview = asyncio.run(transport.query(QueryEnvelope(
                 owner=owner, session_id=session_id, message="先暂停下载，再预览恢复下载",
             )))
-            self.assertIsNotNone(preview.approval)
+            assert (preview.approval) is not None
             source = Message("旧确认卡", user_id=0, message_id=33)
             call_a = Call(f"agk:c:{preview.approval.plan_id}", source)
             call_b = Call(call_a.data, source)
@@ -1705,7 +1728,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                     edits_before_retry = list(bot.edits)
                     callback(call_b)
                     retry_job = submissions[2][0]
-                    self.assertIsNotNone(retry_job)
+                    assert (retry_job) is not None
                     retry_job.result(2)
                     self._wait_for_job_release(retry_job, finished)
                     self.assertEqual(execution.call_count, 2)
@@ -1785,7 +1808,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                         retry.id = "retry"
                         registered(retry)
                         retry_job = submissions[2][0]
-                        self.assertIsNotNone(retry_job, "完成或异常后必须释放同一 message key")
+                        assert (retry_job) is not None, "完成或异常后必须释放同一 message key"
                         self.assertEqual(retry_job.result(2), "retry")
                         self._wait_for_job_release(retry_job, finished)
                         self.assertEqual(execution.call_count, 2)
@@ -1836,7 +1859,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                 query_job, query_kwargs = submissions[2]
                 self.assertIsNone(query_kwargs.get("message_key"))
                 self.assertFalse(query_kwargs["control"])
-                self.assertIsNotNone(query_job)
+                assert (query_job) is not None
 
                 stop = next(
                     handler for filters, handler in bot.message_handlers
@@ -1846,7 +1869,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                 stop_job, stop_kwargs = submissions[3]
                 self.assertIsNone(stop_kwargs.get("message_key"))
                 self.assertTrue(stop_kwargs["control"])
-                self.assertIsNotNone(stop_job, "拒绝重复 callback 不得耗尽 control 容量")
+                assert (stop_job) is not None, "拒绝重复 callback 不得耗尽 control 容量"
                 self.assertTrue(stopped.wait(2), "/stop 必须在 A 与普通查询阻塞时仍可执行")
                 stop_job.result(2)
                 self._wait_for_job_release(stop_job, finished)
@@ -1956,6 +1979,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
             owner=owner, session_id=session_id, message="暂停下载",
         )))
         bot = FakeBot()
+        assert preview.approval is not None
         call = Call(
             f"agk:c:{preview.approval.plan_id}",
             Message("确认暂停下载", chat_id=-100, user_id=0, message_id=33),
@@ -1976,7 +2000,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
             handlers._progress_recovery_thread, handlers._progress_recovery_stop,
             handlers._registered_bot_id,
         )
-        handlers._bot = bot
+        self.enterContext(patch.object(handlers, "_bot", bot))
         handlers._bot_thread = handlers._bot_thread_stop = None
         handlers._progress_recovery_thread = handlers._progress_recovery_stop = None
         try:
@@ -2015,6 +2039,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
                 self.assertFalse(progress_instances[0].finished_event.is_set())
                 self.assertFalse(handlers.start_bot())
                 release.set()
+                assert job is not None
                 job.result(2)
                 self.assertTrue(executed.is_set())
                 self.assertIn("completed", bot.edits[-1][0])

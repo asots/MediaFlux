@@ -91,7 +91,7 @@ def _digest(manifest: dict[str, Any]) -> str:
 
 
 def _safe_component(name: str) -> str:
-    value = str(name or "").replace("\\", "_").replace("/", "_").strip()
+    value = (name or "").replace("\\", "_").replace("/", "_").strip()
     return value or "未命名"
 
 
@@ -234,10 +234,10 @@ def export_manifest(
     max_files: int = MAX_MANIFEST_FILES,
 ) -> dict[str, Any]:
     """递归导出可直接进入 v2 预览的标准清单，不修改云端。"""
-    source_id = str(source_dir_id or "").strip()
+    source_id = (source_dir_id or "").strip()
     if not source_id:
         raise ValueError("缺少源目录 ID")
-    limit = max(1, min(int(max_files or MAX_MANIFEST_FILES), MAX_MANIFEST_FILES))
+    limit = max(1, min((max_files or MAX_MANIFEST_FILES), MAX_MANIFEST_FILES))
     entries: list[dict[str, Any]] = []
     visited_dirs: set[str] = set()
 
@@ -254,15 +254,15 @@ def export_manifest(
                     continue
                 if len(entries) >= limit:
                     raise ValueError(f"文件数量超过安全上限 {limit}")
-                gcid = str(item.etag or "").strip()
+                gcid = (item.etag or "").strip()
                 if not gcid:
                     detail = client.file_info(item.file_id)
-                    gcid = str(detail.etag if detail else "").strip()
+                    gcid = (detail.etag if detail else "").strip()
                 if not gcid:
                     raise ValueError(f"文件缺少 GCID，无法生成 v2 清单: {relative.as_posix()}")
                 entries.append({
                     "path": relative.as_posix(),
-                    "size": max(0, int(item.size or 0)),
+                    "size": max(0, (item.size or 0)),
                     "gcid": gcid,
                 })
         finally:

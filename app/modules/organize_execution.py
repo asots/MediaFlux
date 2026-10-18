@@ -1,11 +1,10 @@
 """统一整理的串行云端写入阶段。"""
 from __future__ import annotations
 
-from inspect import getattr_static
-
 import threading
 import time
-from typing import TYPE_CHECKING, Callable
+from inspect import getattr_static
+from typing import TYPE_CHECKING, Any, Callable, TypedDict
 
 from app import database as db
 from app.clients.guangya import GuangYaFile
@@ -16,8 +15,6 @@ from app.modules.organize_delete_audit import (
     execute_recycle_bin_delete,
     record_blocked_delete,
 )
-from app.modules.organize_runtime import OrganizeTaskRuntime
-from app.modules.scraper import MatchResult
 from app.modules.organize_postprocess import (
     companion_target_name,
     media_notification_item,
@@ -26,9 +23,16 @@ from app.modules.organize_postprocess import (
     replacement_delete_block_reason,
     resolved_plan_position,
 )
+from app.modules.organize_runtime import OrganizeTaskRuntime
+from app.modules.scraper import MatchResult
 
 if TYPE_CHECKING:
-    from app.modules.organize import OrganizePlan, OrganizeRules, Organizer
+    from app.modules.organize import OrganizePlan, Organizer, OrganizeRules
+
+
+class _CompanionJournalEntry(TypedDict):
+    item: GuangYaFile
+    current_name: str
 
 
 logger = get_logger(__name__)
@@ -66,7 +70,7 @@ def execute_organize_plans(
     notification_context: dict | None = None,
     task_runtime: OrganizeTaskRuntime | None = None,
 ) -> None:
-    operation_token = str(operation_token or "").strip()
+    operation_token = (operation_token or "").strip()
     from app.modules.organize_probe_notifications import apply_notification_context
 
     apply_notification_context(stats, notification_context)
@@ -93,7 +97,7 @@ def execute_organize_plans(
 
     subtitle_plans_by_video = subtitle_plans_by_video or {}
     moved_companions: set[str] = set()
-    directory_stats: dict[str, dict[str, object]] = {}
+    directory_stats: dict[str, dict[str, Any]] = {}
     runtime = task_runtime or OrganizeTaskRuntime()
     target_episode_inventory_cache = runtime.target_episode_inventory_cache
     # 光鸭目录创建后列表可能短时间仍返回旧数据。同一批整理必须复用
@@ -141,8 +145,8 @@ def execute_organize_plans(
     source_group_paths: dict[str, set[str]] = {}
     for plan in plans:
         group_key = (
-            f"{str(plan.source_group_id or source_dir_id)}\x1f"
-            f"{str(plan.source_group_path or '__root__')}"
+            f"{(plan.source_group_id or source_dir_id)}\x1f"
+            f"{(plan.source_group_path or '__root__')}"
         )
         source_group_paths.setdefault(group_key, set()).add(plan.original_path or "/")
         current = directory_stats.setdefault(plan.original_path or "/", {
@@ -216,8 +220,8 @@ def execute_organize_plans(
     plan_total = len(plans)
     for plan_index, p in enumerate(plans, start=1):
         group_key = (
-            f"{str(p.source_group_id or source_dir_id)}\x1f"
-            f"{str(p.source_group_path or '__root__')}"
+            f"{(p.source_group_id or source_dir_id)}\x1f"
+            f"{(p.source_group_path or '__root__')}"
         )
         if group_key != active_group_key:
             if active_group_key and active_group_key not in completed_group_keys:
@@ -321,10 +325,10 @@ def execute_organize_plans(
         existing = None
         replacement_backup_name = ""
         existing_original_name = ""
-        target_id = ""
+        target_id: str = ""
         rollback_incomplete = False
         companion_rollback_errors: dict[str, str] = {}
-        companion_journal: list[dict[str, object]] = []
+        companion_journal: list[_CompanionJournalEntry] = []
         replacement_deleted = False
         companion_key = f"{p.original_path}:{normalized_stem(p.original_name)}"
         candidates = companion_files.get(p.original_path, [])
@@ -366,7 +370,7 @@ def execute_organize_plans(
             if (
                 p.original_parent_id
                 and target_id
-                and str(p.original_parent_id) == str(target_id)
+                and p.original_parent_id == target_id
             ):
                 reason = "文件已位于目标目录，未执行重复移动、覆盖或回收"
                 p.conflict_decision = "already_organized"
@@ -375,7 +379,7 @@ def execute_organize_plans(
                 continue
 
             runtime.remember_target_path(
-                str(rules.target_dir_id or ""), p.target_path, target_id,
+                (rules.target_dir_id or ""), p.target_path, target_id,
             )
             target_snapshot = runtime.load_target_inventory(
                 target_id, list_files=organizer.client.list_dir,
@@ -469,7 +473,7 @@ def execute_organize_plans(
                     companion_guard = _optional_guard_method(write_guard, "before_companion_write")
                     if callable(companion_guard):
                         companion_guard(p, item, target_id, target_name if rules.rename_enabled else item.name)
-                    journal_entry: dict[str, object] = {"item": item, "current_name": item.name}
+                    journal_entry: _CompanionJournalEntry = {"item": item, "current_name": item.name}
                     companion_journal.append(journal_entry)
                     organizer.client.move([item.file_id], target_id)
                     if rules.rename_enabled and target_name != item.name:
@@ -479,7 +483,7 @@ def execute_organize_plans(
             except Exception:
                 for journal_entry in reversed(companion_journal):
                     item = journal_entry["item"]
-                    current_name = str(journal_entry["current_name"] or item.name)
+                    current_name = (journal_entry["current_name"] or item.name)
                     try:
                         organizer._restore_remote_file(
                             item,
@@ -488,7 +492,7 @@ def execute_organize_plans(
                         )
                     except Exception as rollback_exc:
                         rollback_incomplete = True
-                        companion_rollback_errors[str(item.file_id)] = (
+                        companion_rollback_errors[item.file_id] = (
                             safe_organize_failure(rollback_exc)
                         )
                         logger.error(
@@ -642,6 +646,7 @@ def execute_organize_plans(
             parsed = organizer._parse_media_fields(p.original_name)
             position_season, position_episode = resolved_plan_position(p, parsed)
             season_inventory = None
+            assert p.match is not None
             if p.match.media_type == "tv" and position_season is not None:
                 inventory_key = (target_id, position_season)
                 season_inventory = target_episode_inventory_cache.setdefault(
@@ -698,8 +703,8 @@ def execute_organize_plans(
 
                         db.enqueue_organize_probe_completion(
                             log_id,
-                            source_id=str(rules.target_dir_id or ""),
-                            rel_dir=str(p.target_path or ""),
+                            source_id=(rules.target_dir_id or ""),
+                            rel_dir=(p.target_path or ""),
                             rules=organize_rules_snapshot(rules),
                             notification_context=notification_context,
                             delay_seconds=130,
@@ -721,34 +726,34 @@ def execute_organize_plans(
                             p.file_id, type(queue_exc).__name__,
                         )
                 stats.setdefault("strm_changes", []).append({
-                    "source_id": str(rules.target_dir_id),
+                    "source_id": rules.target_dir_id,
                     "kind": "video",
                     "action": "upsert",
-                    "file_id": str(p.file_id),
-                    "rel_dir": str(p.target_path or ""),
-                    "name": str(actual_name),
-                    "etag": str(p.etag or ""),
-                    "size": int(p.size or 0),
-                    "parent_id": str(target_id),
+                    "file_id": p.file_id,
+                    "rel_dir": (p.target_path or ""),
+                    "name": actual_name,
+                    "etag": (p.etag or ""),
+                    "size": (p.size or 0),
+                    "parent_id": target_id,
                 })
                 for item, target_name in moved_metadata:
                     stats["strm_changes"].append({
-                        "source_id": str(rules.target_dir_id),
+                        "source_id": rules.target_dir_id,
                         "kind": "metadata",
                         "action": "upsert",
-                        "file_id": str(item.file_id),
-                        "rel_dir": str(p.target_path or ""),
-                        "name": str(target_name),
-                        "etag": str(item.etag or ""),
-                        "size": int(item.size or 0),
-                        "parent_id": str(target_id),
+                        "file_id": item.file_id,
+                        "rel_dir": (p.target_path or ""),
+                        "name": target_name,
+                        "etag": (item.etag or ""),
+                        "size": (item.size or 0),
+                        "parent_id": target_id,
                     })
                 if existing and replacement_deleted:
                     stats["strm_changes"].append({
-                        "source_id": str(rules.target_dir_id),
+                        "source_id": rules.target_dir_id,
                         "kind": "video",
                         "action": "remove",
-                        "file_id": str(existing.file_id),
+                        "file_id": existing.file_id,
                     })
                 elif existing:
                     # 旧文件仍以备份名留在云端；只有全量扫描才能安全判断

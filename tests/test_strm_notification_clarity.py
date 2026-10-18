@@ -30,11 +30,15 @@ def test_round_guard_reason_is_not_repeated_with_source_prefixes():
     assert len(aggregate['error_samples']) == 2
     assert aggregate['error_samples'].count(ROUND_CLEANUP_BLOCKED_REASON) == 1
     event = STRMScheduler._build_success_event(aggregate, {}, 1.0, 'organize', [], '/tmp/strm')
-    assert sum('为避免误删' in line for line in event.lines) == 1
-    errors = [line for line in event.lines if line.startswith('错误摘要：')]
+    lines: list[str] = []
+    for line in event.lines:
+        assert isinstance(line, str)
+        lines.append(line)
+    assert sum('为避免误删' in line for line in lines) == 1
+    errors = [line for line in lines if line.startswith('错误摘要：')]
     assert len(errors) == 1
     assert '整理/扫描目录 source' in errors[0]
-    assert not any('已排队' in line for line in event.lines)
+    assert not any('已排队' in line for line in lines)
 
 
 @pytest.mark.parametrize('queued', [False, True])
@@ -91,6 +95,10 @@ def test_terminal_result_records_actual_pending_queue_without_starting_it(queued
         assert scheduler._run_lock.acquire(blocking=False)
         scheduler._run_lock.release()
         notify.assert_called_once()
-        saved = json.loads(db.get_last_task_run('strm_sync')['result'])
+        get_last_task_run_result = db.get_last_task_run('strm_sync')
+        assert get_last_task_run_result is not None
+        saved = json.loads(get_last_task_run_result['result'])
         assert saved['stats']['organize_followup_queued'] is (queued and not stopping)
-        assert db.get_last_task_run('strm_sync')['status'] == 'partial'
+        get_last_task_run_result_2 = db.get_last_task_run('strm_sync')
+        assert get_last_task_run_result_2 is not None
+        assert get_last_task_run_result_2['status'] == 'partial'

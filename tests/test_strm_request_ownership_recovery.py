@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import tests  # noqa: F401  # 先加载测试隔离环境，再导入 app。
 import tempfile
 import unittest
@@ -104,6 +107,7 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             episode=episode,
             subscription_revision=1,
         )
+        assert admission is not None
         self.assertTrue(
             db.begin_media_download_dispatch(
                 admission,
@@ -186,14 +190,14 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             patch(
                 "app.modules.scheduler.sync_strm_incremental",
                 side_effect=lambda **kw: strm.sync_strm_incremental(
-                    client=self.cloud, **kw
+                    client=cast(GuangYaClient, self.cloud), **kw
                 ),
             )
         )
         self.enterContext(
             patch(
                 "app.modules.scheduler.sync_strm",
-                side_effect=lambda **kw: strm.sync_strm(client=self.cloud, **kw),
+                side_effect=lambda **kw: strm.sync_strm(client=cast(GuangYaClient, self.cloud), **kw),
             )
         )
         self.enterContext(patch.object(scheduler, "_drain_persisted_change_queue"))
@@ -251,7 +255,9 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.assertEqual(result["stats"]["generated"], 1)
         self.assertEqual(len(list(self.root.rglob("*.strm"))), 1)
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "completed")
+        get_download_request_result = db.get_download_request(request)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["strm_status"], "completed")
         self.assertEqual(self.admission(admission)["status"], "processing")
         db.reconcile_media_download_admissions(self.sub, {key}, expected_revision=1)
         self.assertEqual(self.admission(admission)["status"], "completed")
@@ -269,13 +275,19 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.assertFalse(first["strm_partial"])
         self.assertTrue(first["refresh_pending"])
         self.assertEqual(first["stats"]["generated"], 1)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "partial")
+        get_download_request_result_2 = db.get_download_request(request)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["strm_status"], "partial")
         self.assertGreater(db.count_strm_refresh_paths(), 0)
         self.refresh.side_effect = None
         STRMMetadataWorker()._flush_media_refresh(force=True)
         self.assertEqual(db.count_strm_refresh_paths(), 0)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "completed")
-        self.assertEqual(db.get_download_request(request)["strm_error"], "")
+        get_download_request_result_3 = db.get_download_request(request)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["strm_status"], "completed")
+        get_download_request_result_4 = db.get_download_request(request)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["strm_error"], "")
         self.assertEqual(self.admission(admission)["status"], "processing")
         self.assertEqual(len(list(self.root.rglob("*.strm"))), 1)
         db.reconcile_media_download_admissions(self.sub, {key}, expected_revision=1)
@@ -289,7 +301,9 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.queue(scheduler, [request], [self.change()])
         db.init_db()
         db.reconcile_startup_media_download_admissions()
-        self.assertEqual(db.get_download_request(request)["strm_status"], "failed")
+        get_download_request_result_5 = db.get_download_request(request)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5["strm_status"], "failed")
         self.assertEqual(self.admission(admission)["status"], "failed")
 
         candidate = db.replace_media_subscription_candidates(
@@ -322,6 +336,7 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.assertEqual(len(list(self.root.rglob("*.strm"))), 1)
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
         self.assertEqual(self.admission(newer_admission), newer_snapshot)
         self.assertNotIn(
@@ -348,7 +363,9 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             first = self.execute(scheduler, options)
         self.assertFalse(first["ok"], first)
         self.assertEqual(first["error"], error)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "failed")
+        get_download_request_result_6 = db.get_download_request(request)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6["strm_status"], "failed")
         self.assertEqual(self.admission(admission)["status"], "failed")
         self.assertNotIn("super-secret", self.admission(admission)["error"])
         if legacy_error:
@@ -369,6 +386,7 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.assertEqual(len(list(self.root.rglob("*.strm"))), 1)
         self.assertEqual(db.count_pending_strm_change_targets(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
         # STRM/刷新交接成功不等于媒体库已提供存在性证据。
         self.assertEqual(self.admission(admission)["status"], "processing")
@@ -387,6 +405,7 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.assertFalse(first["ok"], first)
         self.assertEqual(first["error"], error)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("failed", error))
         self.assertEqual(self.admission(admission)["status"], "failed")
         self.assertEqual(db.count_pending_strm_change_targets(), 1)
@@ -399,6 +418,7 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         # 不能因文本相同就把后来独立写入误认为旧任务自身的失败。
         db.update_download_request(request, strm_status="failed", strm_error=error)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("failed", error))
         db.reschedule_strm_change_targets([self.change()], not_before_seconds=0)
         resumed = self.scheduler()
@@ -415,6 +435,7 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             self.assertEqual(completed["state"], "completed")
             self.assertGreater(completed["lease_generation"], failed_lease)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("failed", error))
         self.assertEqual(self.admission(admission)["status"], "failed")
 
@@ -474,16 +495,21 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             Path(entry["path"]).name for entry in db.list_strm_refresh_entries()
         }
         self.assertTrue({"B", "C"} <= pending_dirs, pending_dirs)
-        self.assertNotEqual(db.get_download_request(request)["strm_status"], "completed")
+        get_download_request_result_7 = db.get_download_request(request)
+        assert get_download_request_result_7 is not None
+        self.assertNotEqual(get_download_request_result_7["strm_status"], "completed")
 
         worker = STRMMetadataWorker()
         worker._flush_media_refresh(force=True)
         self.assertGreater(db.count_strm_refresh_paths(), 0)
-        self.assertNotEqual(db.get_download_request(request)["strm_status"], "completed")
+        get_download_request_result_8 = db.get_download_request(request)
+        assert get_download_request_result_8 is not None
+        self.assertNotEqual(get_download_request_result_8["strm_status"], "completed")
         self.refresh.side_effect = None
         worker._flush_media_refresh(force=True)
         self.assertEqual(db.count_strm_refresh_paths(), 0)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["strm_status"], row["strm_error"]), ("completed", ""))
         self.assertEqual(self.admission(admission)["status"], "processing")
         self.assertEqual(
@@ -521,12 +547,16 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.owned_queue(request, [self.change(), self.change(2, "other")])
         first = db.claim_strm_change_targets(owner="first", limit=1)[0]
         self.assertEqual(self.complete_target(first), "completed")
+        get_download_request_result_9 = db.get_download_request(request)
+        assert get_download_request_result_9 is not None
         self.assertNotEqual(
-            db.get_download_request(request)["strm_status"], "completed"
+            get_download_request_result_9["strm_status"], "completed"
         )
         second = db.claim_strm_change_targets(owner="second", limit=1)[0]
         self.assertEqual(self.complete_target(second), "completed")
-        self.assertEqual(db.get_download_request(request)["strm_status"], "completed")
+        get_download_request_result_10 = db.get_download_request(request)
+        assert get_download_request_result_10 is not None
+        self.assertEqual(get_download_request_result_10["strm_status"], "completed")
 
     def test_dirty_target_does_not_complete_either_request_early(self):
         first, _, _ = self.seed()
@@ -536,16 +566,20 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.owned_queue(second, [self.change(2)])
         self.assertEqual(self.complete_target(claimed), "queued")
         for request in (first, second):
+            get_download_request_result_11 = db.get_download_request(request)
+            assert get_download_request_result_11 is not None
             self.assertNotEqual(
-                db.get_download_request(request)["strm_status"], "completed"
+                get_download_request_result_11["strm_status"], "completed"
             )
         self.assertEqual(
             self.complete_target(db.claim_strm_change_targets(owner="second")[0]),
             "completed",
         )
         for request in (first, second):
+            get_download_request_result_12 = db.get_download_request(request)
+            assert get_download_request_result_12 is not None
             self.assertEqual(
-                db.get_download_request(request)["strm_status"], "completed"
+                get_download_request_result_12["strm_status"], "completed"
             )
 
     def test_stale_change_lease_cannot_complete_request(self):
@@ -558,11 +592,15 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             )
         new = db.claim_strm_change_targets(owner="new")[0]
         self.assertEqual(self.complete_target(old), "stale")
+        get_download_request_result_13 = db.get_download_request(request)
+        assert get_download_request_result_13 is not None
         self.assertNotEqual(
-            db.get_download_request(request)["strm_status"], "completed"
+            get_download_request_result_13["strm_status"], "completed"
         )
         self.assertEqual(self.complete_target(new), "completed")
-        self.assertEqual(db.get_download_request(request)["strm_status"], "completed")
+        get_download_request_result_14 = db.get_download_request(request)
+        assert get_download_request_result_14 is not None
+        self.assertEqual(get_download_request_result_14["strm_status"], "completed")
 
     def test_refresh_ack_waits_for_all_paths(self):
         request, _, _ = self.seed()
@@ -570,9 +608,13 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             request, [str(self.root / "a.strm"), str(self.root / "b.strm")]
         )
         db.acknowledge_strm_refresh_paths(entries[:1])
-        self.assertEqual(db.get_download_request(request)["strm_status"], "partial")
+        get_download_request_result_15 = db.get_download_request(request)
+        assert get_download_request_result_15 is not None
+        self.assertEqual(get_download_request_result_15["strm_status"], "partial")
         db.acknowledge_strm_refresh_paths(entries[1:])
-        self.assertEqual(db.get_download_request(request)["strm_status"], "completed")
+        get_download_request_result_16 = db.get_download_request(request)
+        assert get_download_request_result_16 is not None
+        self.assertEqual(get_download_request_result_16["strm_status"], "completed")
 
     def test_old_refresh_token_cannot_complete_new_path_event(self):
         request, _, _ = self.seed()
@@ -580,9 +622,13 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         old = self.handoff(request, [path])
         new = db.enqueue_strm_refresh_paths([path])
         self.assertEqual(db.acknowledge_strm_refresh_paths(old), 0)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "partial")
+        get_download_request_result_17 = db.get_download_request(request)
+        assert get_download_request_result_17 is not None
+        self.assertEqual(get_download_request_result_17["strm_status"], "partial")
         self.assertEqual(db.acknowledge_strm_refresh_paths(new), 1)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "completed")
+        get_download_request_result_18 = db.get_download_request(request)
+        assert get_download_request_result_18 is not None
+        self.assertEqual(get_download_request_result_18["strm_status"], "completed")
 
     def test_previous_organize_attempt_cannot_finish_new_generation(self):
         request, _, _ = self.seed()
@@ -594,7 +640,9 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             db.update_strm_request_state(owner, strm_status="completed", strm_error="")
         )
         db.acknowledge_strm_refresh_paths(old)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "queued")
+        get_download_request_result_19 = db.get_download_request(request)
+        assert get_download_request_result_19 is not None
+        self.assertEqual(get_download_request_result_19["strm_status"], "queued")
 
     def test_refresh_success_does_not_override_later_failure(self):
         request, admission, _ = self.seed()
@@ -603,9 +651,13 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
             request, strm_status="failed", strm_error="new independent failure"
         )
         db.acknowledge_strm_refresh_paths(entries)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "failed")
+        get_download_request_result_20 = db.get_download_request(request)
+        assert get_download_request_result_20 is not None
+        self.assertEqual(get_download_request_result_20["strm_status"], "failed")
+        get_download_request_result_21 = db.get_download_request(request)
+        assert get_download_request_result_21 is not None
         self.assertEqual(
-            db.get_download_request(request)["strm_error"], "new independent failure"
+            get_download_request_result_21["strm_error"], "new independent failure"
         )
         self.assertEqual(self.admission(admission)["status"], "failed")
 
@@ -615,6 +667,7 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         db.update_download_request(request, status="cancelled", strm_status="failed")
         db.acknowledge_strm_refresh_paths(entries)
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual((row["status"], row["strm_status"]), ("cancelled", "failed"))
 
     def test_legacy_unowned_refresh_does_not_guess_download_ownership(self):
@@ -624,7 +677,9 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         )
         entries = db.enqueue_strm_refresh_paths([str(self.root / "legacy.strm")])
         db.acknowledge_strm_refresh_paths(entries)
-        self.assertEqual(db.get_download_request(request)["strm_status"], "partial")
+        get_download_request_result_22 = db.get_download_request(request)
+        assert get_download_request_result_22 is not None
+        self.assertEqual(get_download_request_result_22["strm_status"], "partial")
 
     def test_v28_migration_is_idempotent_and_does_not_guess_legacy_links(self):
         import sqlite3

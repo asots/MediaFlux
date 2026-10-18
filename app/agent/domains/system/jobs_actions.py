@@ -40,7 +40,7 @@ def _now() -> str:
 
 
 def _require_owner(context: ToolContext) -> str:
-    owner = str(context.owner or "").strip()
+    owner = (context.owner or "").strip()
     if not owner:
         raise AgentToolError("该动作需要在已登录会话中执行", code="identity_required")
     return owner
@@ -200,7 +200,7 @@ def start_episode_audit_confirmed(
     arguments: dict[str, Any], expected_context: str, context: ToolContext
 ) -> ToolResult:
     current_context, _active = _start_context(arguments, context)
-    if not secrets.compare_digest(current_context, str(expected_context or "")):
+    if not secrets.compare_digest(current_context, (expected_context or "")):
         raise AgentToolError(
             "后台任务状态已变化，请重新确认", code="confirmation_stale"
         )
@@ -275,7 +275,7 @@ def start_episode_audit_confirmed(
 def _load_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     try:
         raw = json.loads(str(row["projection_json"] or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         raw = None
     projection = validate_persisted_patrol_projection(raw)
     if projection is not None:
@@ -285,7 +285,7 @@ def _load_projection(row: Mapping[str, Any]) -> dict[str, Any]:
         input_data = json.loads(str(row["input_json"] or "{}"))
         if isinstance(input_data, dict):
             as_of = str(input_data.get("as_of") or "")
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         pass
     try:
         return empty_patrol_projection(
@@ -298,7 +298,7 @@ def _load_projection(row: Mapping[str, Any]) -> dict[str, Any]:
 def _load_input_summary(row: Mapping[str, Any]) -> tuple[str, int]:
     try:
         raw = json.loads(str(row["input_json"] or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return "", 0
     if not isinstance(raw, dict):
         return "", 0
@@ -522,9 +522,9 @@ def get_agent_job_status(arguments: dict[str, Any], context: ToolContext) -> Too
             suggestions=["可以说：巡检整个媒体库有没有缺集。"],
         )
 
-    latest = _project_row(rows[0], include_findings=True)
+    latest = _project_row(dict(rows[0]), include_findings=True)
     public_status, summary, suggestions = _status_summary(latest)
-    recent = [_project_row(row, include_findings=False) for row in rows]
+    recent = [_project_row(dict(row), include_findings=False) for row in rows]
     return ToolResult(
         ok=public_status != "failed",
         status=public_status,
@@ -557,7 +557,7 @@ def _resolve_cancel_target(arguments: Mapping[str, Any], context: ToolContext):
 
 def _cancel_context(
     arguments: Mapping[str, Any], context: ToolContext
-) -> tuple[str, object]:
+) -> tuple[str, dict[str, Any]]:
     owner, row = _resolve_cancel_target(arguments, context)
     return _fingerprint(
         {
@@ -565,7 +565,7 @@ def _cancel_context(
             "job_type": _JOB_TYPE,
             "job_id": str(row["job_id"]),
         }
-    ), row
+    ), dict(row)
 
 
 def prepare_cancel_agent_job(
@@ -603,7 +603,7 @@ def cancel_agent_job_confirmed(
     arguments: dict[str, Any], expected_context: str, context: ToolContext
 ) -> ToolResult:
     current_context, target = _cancel_context(arguments, context)
-    if not secrets.compare_digest(current_context, str(expected_context or "")):
+    if not secrets.compare_digest(current_context, (expected_context or "")):
         raise AgentToolError(
             "后台任务状态已变化，请重新确认", code="confirmation_stale"
         )

@@ -125,8 +125,11 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         snapshot = restore_resource_candidate_reference(result.references[0].value)
         eligible = [item for item in ranked["items"] if item["quality"]["eligible"]]
         self.assertEqual(len(eligible), 11)
+        assert snapshot is not None
         self.assertEqual([item["result_id"] for item in snapshot["candidates"]], [item["result_id"] for item in eligible])
+        assert snapshot is not None
         self.assertEqual([item["position"] for item in snapshot["candidates"]], list(range(1, 12)))
+        assert snapshot is not None
         self.assertEqual(snapshot["candidates"][6]["title"], "理想禁区 07 黑历史 1080P")
         self.assertTrue(all(item["match"] == "unknown" for item in snapshot["candidates"]))
 
@@ -137,6 +140,7 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         result.data["search"]["items"][3]["quality"]["eligible"] = False
         attach_resource_candidate_reference(result)
         snapshot = restore_resource_candidate_reference(result.references[0].value)
+        assert snapshot is not None
         self.assertEqual(len(snapshot["candidates"]), 14)
         self.assertEqual([item["position"] for item in snapshot["candidates"]], list(range(1, 15)))
         self.assertEqual(len({item["result_id"] for item in snapshot["candidates"]}), 14)
@@ -166,7 +170,7 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         ):
             snapshot = restore_resource_candidate_reference(private_value)
 
-        self.assertIsNotNone(snapshot)
+        assert (snapshot) is not None
         self.assertEqual(
             snapshot["candidates"][0]["_verification_context"]["episode"], 3
         )
@@ -185,7 +189,9 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
             ),
         )
         snapshot = store.get(owner="session-a")
+        assert snapshot is not None
         self.assertEqual([item["position"] for item in snapshot["candidates"]], [1, 2])
+        assert snapshot is not None
         self.assertEqual(snapshot["candidates"][0]["episode_label"], "S02E03")
         self.assertEqual(snapshot["candidates"][0]["result_id"], "resource-result-0001")
         self.assertEqual(
@@ -199,8 +205,11 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         for secret in ("magnet:", "/private", "/secret", "secret.example"):
             self.assertNotIn(secret, serialized)
         self.assertIsNone(store.get(owner="session-b"))
+        assert snapshot is not None
         snapshot["candidates"].clear()
-        self.assertEqual(len(store.get(owner="session-a")["candidates"]), 2)
+        get_result = store.get(owner="session-a")
+        assert get_result is not None
+        self.assertEqual(len(get_result["candidates"]), 2)
         now[0] = 111.0
         self.assertIsNone(store.get(owner="session-a"))
 
@@ -209,7 +218,9 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         store.capture(
             owner="session-a", result=_single_result(_candidate("resource-result-0001"))
         )
-        candidate = store.get(owner="session-a")["candidates"][0]
+        get_result_2 = store.get(owner="session-a")
+        assert get_result_2 is not None
+        candidate = get_result_2["candidates"][0]
         self.assertEqual(
             candidate["_verification_context"],
             {
@@ -228,8 +239,10 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         invalid = _single_result(_candidate("resource-result-0002"))
         invalid.data["verification"]["verified_missing"] = False
         store.capture(owner="session-a", result=invalid)
+        get_result_3 = store.get(owner="session-a")
+        assert get_result_3 is not None
         self.assertIsNone(
-            store.get(owner="session-a")["candidates"][0]["_verification_context"]
+            get_result_3["candidates"][0]["_verification_context"]
         )
 
     def test_exact_search_id_keeps_older_snapshot_addressable(self):
@@ -242,9 +255,13 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
             owner="session-a",
             result=_generic_result(_candidate("resource-second-001", title="Second")),
         )
-        self.assertEqual(store.get(owner="session-a")["search_id"], second_search_id)
+        get_result_4 = store.get(owner="session-a")
+        assert get_result_4 is not None
+        self.assertEqual(get_result_4["search_id"], second_search_id)
+        get_result_5 = store.get(owner="session-a", search_id=first_search_id)
+        assert get_result_5 is not None
         self.assertEqual(
-            store.get(owner="session-a", search_id=first_search_id)["candidates"][0][
+            get_result_5["candidates"][0][
                 "title"
             ],
             "First",
@@ -259,13 +276,17 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
             owner="session-a", result=_single_result(_candidate("resource-result-0001"))
         )
         store.capture(owner="session-a", result=_single_result())
-        self.assertEqual(store.get(owner="session-a")["candidates"], [])
+        get_result_6 = store.get(owner="session-a")
+        assert get_result_6 is not None
+        self.assertEqual(get_result_6["candidates"], [])
 
     def test_season_projection_deduplicates_result_handles(self):
         store = RecentResourceCandidateStore()
         duplicate = _candidate("resource-result-0001")
         store.capture(owner="session-a", result=_season_result(duplicate, duplicate))
-        self.assertEqual(len(store.get(owner="session-a")["candidates"]), 1)
+        get_result_7 = store.get(owner="session-a")
+        assert get_result_7 is not None
+        self.assertEqual(len(get_result_7["candidates"]), 1)
 
     def test_generic_indexer_results_are_projected_for_natural_followup(self):
         store = RecentResourceCandidateStore()
@@ -282,6 +303,7 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         )
         store.capture(owner="session-a", result=_generic_result(candidate))
         snapshot = store.get(owner="session-a")
+        assert snapshot is not None
         self.assertEqual(snapshot["candidates"][0]["position"], 1)
         self.assertEqual(snapshot["candidates"][0]["title"], "The.Show.1080p")
         self.assertEqual(snapshot["candidates"][0]["size_text"], "1.2 GiB")
@@ -307,7 +329,9 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
         store.capture(
             owner="session-a", result=_generic_result(*unavailable, *actionable)
         )
-        candidates = store.get(owner="session-a")["candidates"]
+        get_result_8 = store.get(owner="session-a")
+        assert get_result_8 is not None
+        candidates = get_result_8["candidates"]
         self.assertEqual(len(candidates), 20)
         self.assertEqual(candidates[0]["title"], "Actionable 0")
         self.assertEqual(candidates[-1]["title"], "Actionable 19")
@@ -324,6 +348,7 @@ class RecentResourceCandidateStoreTests(unittest.TestCase):
             ),
         )
         snapshot = store.get(owner="session-a")
+        assert snapshot is not None
         self.assertEqual(snapshot["candidates"][0]["download_kinds"], ["magnet"])
         self.assertEqual(validate_safe_resource_snapshot(snapshot), snapshot)
         missing_search_id = dict(snapshot)

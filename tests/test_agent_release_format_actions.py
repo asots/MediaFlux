@@ -1,5 +1,7 @@
 """文件名只读解析与发布格式教学 Agent 动作的真实隔离数据库契约。"""
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
 import json
 import sqlite3
@@ -125,6 +127,7 @@ class ReleaseFormatAgentActionTests(IsolatedDatabaseTestCase):
         self.assertEqual(result.data["batch_total"], 0)
         self.assertEqual(result.data["review_required"], 0)
         self.assertEqual(result.data["summary"]["total"], 2)
+        assert result.model_data is not None
         self.assertEqual(result.model_data["summary"]["total"], 0)
         self.assertIn("已核对 2 个标注样本", result.summary)
 
@@ -183,6 +186,8 @@ class ReleaseFormatAgentActionTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             rows = conn.execute("SELECT id FROM recognition_format_rules").fetchall()
         self.assertEqual(len(rows), 1)
+        assert first.model_data is not None
+        assert second.model_data is not None
         self.assertEqual(first.model_data["draft"], second.model_data["draft"])
 
     def test_disabled_duplicate_is_not_reported_as_enabled_or_reenabled(self) -> None:
@@ -211,6 +216,7 @@ class ReleaseFormatAgentActionTests(IsolatedDatabaseTestCase):
         for result in (first, second):
             self.assertEqual(result.data["rule_type"], "release_format")
             self.assertEqual(result.data["rule_id"], item["id"])
+            assert result.model_data is not None
             self.assertEqual(result.model_data["rule_id"], item["id"])
 
     def test_cancel_without_confirmation_has_no_write(self) -> None:
@@ -387,7 +393,7 @@ class RecognitionInspectionTests(IsolatedDatabaseTestCase):
         ]
         for args in bad:
             with self.subTest(args=args), self.assertRaises(AgentToolError):
-                inspect_filenames_arguments(args)
+                inspect_filenames_arguments(cast(dict[str, Any], args))
         args = {"filenames": SAMPLES, "parent_path": ""}
         self.assertEqual(inspect_filenames_arguments(args), args)
         self.assertEqual(args["filenames"], SAMPLES)
@@ -460,6 +466,7 @@ class RecognitionInspectionTests(IsolatedDatabaseTestCase):
             with self.subTest(message=message):
                 selected = CapabilityRetriever().retrieve(message, catalog)
                 self.assertIn(TOOL, selected.names)
+        assert spec.handler is not None
         result = spec.handler(spec.validator({"filenames": SAMPLES}))
         outcome = DefaultProjector().project(result)
         model = json.loads(outcome.model_message())

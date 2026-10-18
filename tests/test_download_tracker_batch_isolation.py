@@ -43,8 +43,12 @@ class DownloadTrackerBatchIsolationTests(IsolatedDatabaseTestCase):
             DownloadTracker, "_qb_tasks", return_value=(True, [self._task("bad", "invalid"), self._task("good")]),
         ):
             self.assertEqual(DownloadTracker().run_once(), 2)
-        self.assertEqual(db.get_download_request(bad)["qb_status"], "submitted")
-        self.assertEqual(db.get_download_request(good)["qb_status"], "downloading")
+        get_download_request_result = db.get_download_request(bad)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["qb_status"], "submitted")
+        get_download_request_result_2 = db.get_download_request(good)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["qb_status"], "downloading")
         self.assertEqual(db.kv_get(_TRACKER_CURSOR_KEY), str(good))
 
         # 模拟重启：新 tracker 使用同一持久游标；坏记录恢复后会绕回处理。
@@ -53,8 +57,12 @@ class DownloadTrackerBatchIsolationTests(IsolatedDatabaseTestCase):
         ):
             self.assertEqual(DownloadTracker().run_once(), 2)
             self.assertEqual(DownloadTracker().run_once(), 2)
-        self.assertEqual(db.get_download_request(bad)["qb_status"], "downloading")
-        self.assertEqual(db.get_download_request(good)["qb_status"], "downloading")
+        get_download_request_result_3 = db.get_download_request(bad)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["qb_status"], "downloading")
+        get_download_request_result_4 = db.get_download_request(good)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["qb_status"], "downloading")
 
     def test_one_database_failure_does_not_skip_other_requests(self) -> None:
         first = self._request("first")
@@ -74,7 +82,9 @@ class DownloadTrackerBatchIsolationTests(IsolatedDatabaseTestCase):
         ):
             self.assertEqual(DownloadTracker().run_once(), 2)
         self.assertEqual(seen, [first, second])
-        self.assertEqual(db.get_download_request(second)["qb_status"], "downloading")
+        get_download_request_result_5 = db.get_download_request(second)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5["qb_status"], "downloading")
         self.assertEqual(db.kv_get(_TRACKER_CURSOR_KEY), str(second))
 
     def test_guangya_partial_batch_is_polled_after_restart_until_remaining_task_finishes(self) -> None:
@@ -95,9 +105,13 @@ class DownloadTrackerBatchIsolationTests(IsolatedDatabaseTestCase):
                     patch.object(DownloadTracker, "_start_organize") as organize,
                 ):
                     self.assertEqual(DownloadTracker().run_once(), 1)
-                    self.assertEqual(db.get_download_request(request_id)["gy_status"], "downloading")
+                    get_download_request_result_6 = db.get_download_request(request_id)
+                    assert get_download_request_result_6 is not None
+                    self.assertEqual(get_download_request_result_6["gy_status"], "downloading")
                     self.assertEqual(DownloadTracker().run_once(), 1)
-                self.assertEqual(db.get_download_request(request_id)["gy_status"], expected)
+                get_download_request_result_7 = db.get_download_request(request_id)
+                assert get_download_request_result_7 is not None
+                self.assertEqual(get_download_request_result_7["gy_status"], expected)
                 self.assertEqual(tasks.call_count, 2)
                 qb.assert_not_called()
                 organize.assert_not_called()

@@ -619,7 +619,7 @@ def search_missing_season_resources(
             recommendation["alternatives"] = recommendation["alternatives"][:arguments["limit_per_episode"] - 1]
             by_episode[number] = {
                 **target, "episode_label": f"S{target['season']:02d}E{number:02d}",
-                "ok": bool(searched.ok), "status": searched.status,
+                "ok": (searched.ok), "status": searched.status,
                 "summary": search_data["recommendation"]["reason"] if number != episode else searched.summary[:160],
                 "search": search_data,
             }

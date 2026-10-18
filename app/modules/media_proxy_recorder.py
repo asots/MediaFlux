@@ -29,7 +29,7 @@ class PlaybackRecordWriter:
         write_record: Callable[[Mapping[str, Any]], None] | None = None,
         task_name: str = "media-proxy-playback-records",
     ) -> None:
-        self._capacity = max(2, int(capacity))
+        self._capacity = max(2, capacity)
         self._drain_timeout_seconds = max(0.05, float(drain_timeout_seconds))
         self._write_record = write_record or _write_record
         self._task_name = task_name
@@ -181,6 +181,6 @@ class PlaybackRecordWriter:
             "pending": self._queue.qsize(),
             **self._counters,
             "accepting": self._accepting,
-            "worker_running": bool(task is not None and not task.done()),
+            "worker_running": (task is not None and not task.done()),
             "drained": self._last_drained,
         }

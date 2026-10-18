@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from app.clients.guangya import GuangYaClient, GuangYaFile
 from app.config import PATHS
@@ -75,15 +75,15 @@ def _ensure_directory(path: Path) -> None:
 
 
 def _plan_path(plan_id: str) -> Path:
-    if not _SAFE_PLAN_ID.fullmatch(str(plan_id or "")):
+    if not _SAFE_PLAN_ID.fullmatch(plan_id or ""):
         raise GuangYaWorkspaceError("光鸭观察编号无效")
     return _directory() / f"{plan_id}.json"
 
 
 def observation_ref(plan_id: str) -> str:
-    if not _SAFE_PLAN_ID.fullmatch(str(plan_id or "")):
+    if not _SAFE_PLAN_ID.fullmatch(plan_id or ""):
         raise GuangYaWorkspaceError("光鸭观察编号无效")
-    return "OBS" + str(plan_id).upper()
+    return "OBS" + plan_id.upper()
 
 
 def observation_plan_id(value: object) -> str:
@@ -111,7 +111,7 @@ def _canonical(payload: dict[str, Any]) -> bytes:
 
 
 def _auth(payload: dict[str, Any]) -> str:
-    secret = str(get_web_secret() or "").encode("utf-8")
+    secret = (get_web_secret() or "").encode("utf-8")
     if not secret:
         raise GuangYaWorkspaceError("光鸭观察签名密钥不可用")
     return hmac.new(
@@ -158,7 +158,7 @@ def _read(plan_id: str) -> dict[str, Any]:
         ):
             raise GuangYaWorkspaceError("光鸭观察快照不可用")
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         raise GuangYaWorkspaceError("光鸭观察快照不可用") from exc
     if (
         not isinstance(payload, dict)
@@ -187,7 +187,7 @@ def discard_observation(value: object) -> None:
 
 def discard_owner_observations(owner: str) -> int:
     """删除指定 Agent owner 的全部短期观察，阻止旧引用在 reset 后复用。"""
-    owner_key = str(owner or "").strip()
+    owner_key = (owner or "").strip()
     if not owner_key:
         return 0
     owner_digest = organize_operation_owner_digest(owner_key)
@@ -217,7 +217,7 @@ def maintain_workspace_observations(
     directory = _directory()
     if not directory.exists() or directory.is_symlink():
         return {"removed": 0, "remaining": 0, "bytes": 0}
-    preserved = str(preserve_plan_id or "").strip().casefold()
+    preserved = (preserve_plan_id or "").strip().casefold()
     current = time.time()
     rows: list[tuple[float, str, int, str]] = []
     removed = 0
@@ -227,7 +227,7 @@ def maintain_workspace_observations(
             if path.is_symlink() or not path.is_file():
                 continue
             stat = path.stat()
-            size = max(0, int(stat.st_size))
+            size = max(0, stat.st_size)
             try:
                 payload = _read(path.stem)
                 expiry = float(payload.get("expires_at_epoch") or 0)
@@ -292,6 +292,7 @@ def _normalize_path(value: object, *, allow_root: bool = False) -> str:
 
 def _resolve_path(client: GuangYaClient, path: str) -> tuple[GuangYaFile, str]:
     components = _normalize_path(path).strip("/").split("/")
+    current: GuangYaFile | None = None
     parent_id = "0"
     parent_path = "/"
     for index, component in enumerate(components):
@@ -308,7 +309,8 @@ def _resolve_path(client: GuangYaClient, path: str) -> tuple[GuangYaFile, str]:
         if index < len(components) - 1 and not current.is_dir:
             raise GuangYaWorkspaceError("光鸭路径的中间组件不是目录")
         parent_path = "/" + "/".join(components[:index]) if index else "/"
-        parent_id = str(current.file_id)
+        parent_id = current.file_id
+    assert current is not None
     return current, parent_path
 
 
@@ -319,7 +321,7 @@ def resolve_workspace_path(client: GuangYaClient, path: object) -> GuangYaFile:
 
 
 def _extension(item: GuangYaFile) -> str:
-    declared = str(item.extension or "").strip().lower().lstrip(".")
+    declared = (item.extension or "").strip().lower().lstrip(".")
     if declared:
         return declared
     match = re.search(r"[.。．]([A-Za-z0-9]{1,10})$", item.name)
@@ -345,13 +347,13 @@ def _snapshot(
     item: GuangYaFile, *, parent_path: str, relative_parent: str
 ) -> dict[str, Any]:
     return {
-        "file_id": str(item.file_id),
-        "parent_id": str(item.parent_id),
-        "name": str(item.name),
-        "is_dir": bool(item.is_dir),
-        "size": max(0, int(item.size or 0)),
-        "etag": str(item.etag or ""),
-        "updated_at": max(0, int(item.updated_at or 0)),
+        "file_id": item.file_id,
+        "parent_id": item.parent_id,
+        "name": item.name,
+        "is_dir": item.is_dir,
+        "size": max(0, (item.size or 0)),
+        "etag": (item.etag or ""),
+        "updated_at": max(0, (item.updated_at or 0)),
         "extension": _extension(item),
         "media_kind": _media_kind(item),
         "parent_path": parent_path,
@@ -360,7 +362,7 @@ def _snapshot(
 
 
 def _handle(plan_id: str, item: dict[str, Any]) -> str:
-    secret = str(get_web_secret() or "").encode("utf-8")
+    secret = (get_web_secret() or "").encode("utf-8")
     if not secret:
         raise GuangYaWorkspaceError("光鸭观察签名密钥不可用")
     digest = (
@@ -426,7 +428,7 @@ def capture_observation_source(payload: dict[str, Any], object_refs: Sequence[st
     ref = observation_ref(str(payload.get("plan_id") or ""))
     entries = observation_entry_map(payload)
     selected = []
-    for handle in dict.fromkeys(str(value).strip().upper() for value in object_refs):
+    for handle in dict.fromkeys(value.strip().upper() for value in object_refs):
         if handle not in entries:
             raise GuangYaWorkspaceStale("所选对象不属于原观察，请重新读取")
         entry = entries[handle]
@@ -461,7 +463,7 @@ def _store_observation(
     operation: str,
     recursive: bool,
     query: str,
-    kinds: Sequence[str] = (),
+    kinds: Iterable[str] = (),
     scope_names: Sequence[str] = (),
     max_depth: int = _MAX_DEPTH,
     truncated: bool,
@@ -489,24 +491,24 @@ def _store_observation(
         "version": _OBSERVATION_VERSION,
         "plan_id": plan_id,
         "owner_digest": organize_operation_owner_digest(owner),
-        "credential_generation": int(client.credential_generation),
+        "credential_generation": client.credential_generation,
         "created_at": _now_iso(),
         "created_at_epoch": current,
         "expires_at_epoch": current + _OBSERVATION_TTL_SECONDS,
         "scope_path": scope_path,
-        "scope_name": str(scope_name),
-        "scope_names": [str(item) for item in scope_names if str(item)],
+        "scope_name": scope_name,
+        "scope_names": [item for item in scope_names if item],
         # 私有查询来源；展示 scope 不携带完整根身份，不能用于还原查询范围。
         "roots": roots,
         "max_items": max_items,
         "operation": operation,
         "query": query,
-        "kinds": sorted({str(item) for item in kinds if str(item)}),
-        "max_depth": max(0, min(int(max_depth), _MAX_DEPTH)),
-        "recursive": bool(recursive),
-        "truncated": bool(truncated),
-        "scanned_dirs": max(0, int(scanned_dirs)),
-        "scanned_items": max(0, int(scanned_items)),
+        "kinds": sorted({item for item in kinds if item}),
+        "max_depth": max(0, min(max_depth, _MAX_DEPTH)),
+        "recursive": recursive,
+        "truncated": truncated,
+        "scanned_dirs": max(0, scanned_dirs),
+        "scanned_items": max(0, scanned_items),
         "entries": entries,
         **({"source_observations": deepcopy(list(source_observations))} if source_observations else {}),
     }
@@ -520,7 +522,7 @@ def _store_observation(
 def _search_match(entry: dict[str, Any], query: str, kinds: frozenset[str]) -> bool:
     if kinds and str(entry.get("media_kind") or "") not in kinds:
         return False
-    needle = str(query or "").strip().casefold()
+    needle = (query or "").strip().casefold()
     if not needle:
         return True
     haystack = " ".join(
@@ -542,7 +544,7 @@ def create_multi_directory_observation(
     recursive: bool = False,
     max_items: int = 500,
     query: str = "",
-    kinds: Sequence[str] = (),
+    kinds: Iterable[str] = (),
     max_depth: int = _MAX_DEPTH,
     operation: str = "",
     expected_roots: Sequence[dict[str, Any]] | None = None,
@@ -552,16 +554,16 @@ def create_multi_directory_observation(
     )
     if not normalized_paths or len(normalized_paths) > 32:
         raise GuangYaWorkspaceError("光鸭批量观察必须包含 1 到 32 个精确目录")
-    safe_max = max(1, min(int(max_items), _MAX_SCANNED_ITEMS))
-    safe_depth = max(0, min(int(max_depth), _MAX_DEPTH))
-    normalized_query = str(query or "").strip()
+    safe_max = max(1, min(max_items, _MAX_SCANNED_ITEMS))
+    safe_depth = max(0, min(max_depth, _MAX_DEPTH))
+    normalized_query = (query or "").strip()
     if len(normalized_query) > 160:
         raise GuangYaWorkspaceError("光鸭搜索关键词过长")
-    normalized_kinds = frozenset(str(item or "").strip().casefold() for item in kinds)
+    normalized_kinds = frozenset((item or "").strip().casefold() for item in kinds)
     if normalized_kinds - _MEDIA_KINDS:
         raise GuangYaWorkspaceError("光鸭对象类型过滤值无效")
     normalized_operation = (
-        str(operation or ("tree" if recursive else "list")).strip().casefold()
+        (operation or ("tree" if recursive else "list")).strip().casefold()
     )
     if normalized_operation not in {"list", "tree", "search"}:
         raise GuangYaWorkspaceError("不支持的光鸭目录查询方式")
@@ -569,7 +571,7 @@ def create_multi_directory_observation(
         raise GuangYaWorkspaceError("光鸭目录搜索必须提供关键词")
     if normalized_operation == "list" and recursive:
         raise GuangYaWorkspaceError("目录列表不能启用递归")
-    recursive = normalized_operation in {"tree", "search"} or bool(recursive)
+    recursive = normalized_operation in {"tree", "search"} or recursive
 
     roots: list[dict[str, Any]] = []
     scope_names: list[str] = []
@@ -583,8 +585,8 @@ def create_multi_directory_observation(
             target, parent_path = _resolve_path(client, target_path)
             if not target.is_dir:
                 raise GuangYaWorkspaceError("通用目录观察只支持精确目录路径")
-            target_id = str(target.file_id)
-            target_name = str(target.name)
+            target_id = target.file_id
+            target_name = target.name
             root = _snapshot(target, parent_path=parent_path, relative_parent="查询目录本身")
             root["path"] = target_path
             root["source_root"] = {key: root[key] for key in ("file_id", "path", "is_dir", "parent_id")}
@@ -631,7 +633,7 @@ def create_multi_directory_observation(
                 parent_path=directory_path,
                 relative_parent=relative_parent or "当前目录",
             )
-            entry_key = (str(item.file_id), str(item.parent_id))
+            entry_key = (item.file_id, item.parent_id)
             if entry_key not in seen_entries and _search_match(
                 entry, normalized_query, normalized_kinds
             ):
@@ -650,7 +652,7 @@ def create_multi_directory_observation(
                     else f"{relative_parent} › {item.name}"
                 )
                 queue.append(
-                    (str(item.file_id), child_path, child_relative, depth + 1, source_root)
+                    (item.file_id, child_path, child_relative, depth + 1, source_root)
                 )
             elif item.is_dir and recursive and depth >= safe_depth:
                 # Reaching the requested depth is expected and is not observation truncation.
@@ -686,7 +688,7 @@ def create_directory_observation(
     recursive: bool = False,
     max_items: int = 500,
     query: str = "",
-    kinds: Sequence[str] = (),
+    kinds: Iterable[str] = (),
     max_depth: int = _MAX_DEPTH,
     operation: str = "",
     expected_roots: Sequence[dict[str, Any]] | None = None,
@@ -718,24 +720,24 @@ def create_path_observation(
     if expected_roots is not None:
         if len(expected_roots) != 1 or any(
             actual != expected_roots[0].get(key) for key, actual in (
-                ("file_id", str(target.file_id)), ("is_dir", bool(target.is_dir)),
-                ("parent_id", str(target.parent_id)), ("path", target_path),
+                ("file_id", target.file_id), ("is_dir", target.is_dir),
+                ("parent_id", target.parent_id), ("path", target_path),
             )
         ):
             raise GuangYaWorkspaceStale("原观察对象已变化，未读取同名替代对象")
     entry = _snapshot(target, parent_path=parent_path, relative_parent="当前对象")
     root = {
-        "file_id": str(target.file_id),
+        "file_id": target.file_id,
         "path": target_path,
-        "is_dir": bool(target.is_dir),
-        "parent_id": str(target.parent_id),
+        "is_dir": target.is_dir,
+        "parent_id": target.parent_id,
     }
     entry["source_root"] = dict(root)
     return _store_observation(
         client,
         owner=owner,
         scope_path=target_path,
-        scope_name=str(target.name),
+        scope_name=target.name,
         roots=[root],
         max_items=1,
         operation="stat",
@@ -776,7 +778,7 @@ def load_directory_observation_set(
     """加载主快照，并按 owner 合并近期快照中实际需要的不透明对象引用。"""
     primary = load_directory_observation(value, owner=owner)
     required = {
-        str(item or "").strip().upper()
+        (item or "").strip().upper()
         for item in object_refs
         if valid_object_handle(item)
     }
@@ -847,11 +849,11 @@ def locate_observed_object(client: GuangYaClient, expected: dict[str, Any], root
 
     file_id = str(expected.get("file_id") or "")
     current = read(file_id)
-    if current is None or str(current.file_id) != file_id or bool(current.is_dir) != bool(expected.get("is_dir")):
+    if current is None or current.file_id != file_id or current.is_dir != bool(expected.get("is_dir")):
         return None
     by_id = {str(root["file_id"]): root for root in roots if root.get("is_dir") is True}
-    parent_id = str(current.parent_id or "0")
-    names = [str(current.name)]
+    parent_id = (current.parent_id or "0")
+    names = [current.name]
     visited = {file_id}
     for _ in range(_MAX_DEPTH + 1):
         check_cancelled()
@@ -867,10 +869,10 @@ def locate_observed_object(client: GuangYaClient, expected: dict[str, Any], root
             return None
         visited.add(parent_id)
         parent = read(parent_id)
-        if parent is None or str(parent.file_id) != parent_id or not parent.is_dir:
+        if parent is None or parent.file_id != parent_id or not parent.is_dir:
             return None
-        names.append(str(parent.name))
-        parent_id = str(parent.parent_id or "0")
+        names.append(parent.name)
+        parent_id = (parent.parent_id or "0")
     return None
 
 
@@ -889,7 +891,7 @@ def merge_directory_observations(client: GuangYaClient, *, owner: str,
     scope_names = [f"来源 {index} · {payload.get('scope_name') or '当前目录'}" for index, payload in enumerate(payloads, 1)]
     for index, payload in enumerate(payloads):
         if (payload.get("owner_digest") != organize_operation_owner_digest(owner)
-                or payload.get("credential_generation") != int(client.credential_generation)):
+                or payload.get("credential_generation") != client.credential_generation):
             raise GuangYaWorkspaceStale("合并观察的会话或账号已变化")
         contents = payload.get("entries") or []
         for position, item in enumerate([*contents, *(root for root in payload.get("roots") or () if root.get("media_kind") == "directory")]):
@@ -922,8 +924,8 @@ def merge_directory_observations(client: GuangYaClient, *, owner: str,
 def observation_page(
     payload: dict[str, Any], *, page: int = 1, page_size: int = _MAX_PAGE_SIZE
 ) -> dict[str, Any]:
-    safe_size = max(1, min(int(page_size), _MAX_PAGE_SIZE))
-    safe_page = max(1, int(page))
+    safe_size = max(1, min(page_size, _MAX_PAGE_SIZE))
+    safe_page = max(1, page)
     entries = list(payload.get("entries") or [])
     start = (safe_page - 1) * safe_size
     selected = entries[start : start + safe_size]

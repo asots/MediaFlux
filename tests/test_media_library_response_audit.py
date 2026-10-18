@@ -8,11 +8,11 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app.main import create_app
 from app.agent.provider_models import ProviderGatewayError
 from app.agent.providers.media_server import MediaServerProviderTransport
 from app.clients.emby import EmbyClient
 from app.clients.jellyfin import JellyfinClient
+from app.main import create_app
 from app.modules.media_server_profiles import MediaServerProfile
 from app.routes.media_libraries_api import _probe_profile
 from tests.support import IsolatedDatabaseTestCase
@@ -136,7 +136,7 @@ class MediaLibraryHttpResponseAuditTests(IsolatedDatabaseTestCase):
             match = re.search(
                 r'name="csrf[-_]token"\s+(?:value|content)="([^"]+)"', html
             )
-            self.assertIsNotNone(match)
+            assert (match) is not None
             return match.group(1)
 
         profile = MediaLibraryResponseAuditTests._profile()

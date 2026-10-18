@@ -1,6 +1,9 @@
 """下载跟踪器启动、停止与线程收敛边界测试。"""
 from __future__ import annotations
 
+from threading import Thread
+from typing import cast
+
 import threading
 import unittest
 from unittest.mock import patch
@@ -48,9 +51,9 @@ class DownloadTrackerLifecycleTests(unittest.TestCase):
         ):
             event = build_download_lifecycle_event(row)
 
-        self.assertIn("Web 下载任务", event.footer)
-        self.assertIn("请勿直接重试", event.footer)
-        self.assertNotIn("候选卡会单独发送", event.footer)
+        self.assertIn("Web 下载任务", str(event.footer))
+        self.assertIn("请勿直接重试", str(event.footer))
+        self.assertNotIn("候选卡会单独发送", str(event.footer))
 
     def test_requires_manual_explains_separate_candidate_card(self) -> None:
         row = {
@@ -65,8 +68,8 @@ class DownloadTrackerLifecycleTests(unittest.TestCase):
         ):
             event = build_download_lifecycle_event(row)
 
-        self.assertIn("候选卡会单独发送", event.footer)
-        self.assertIn("Web 待确认队列", event.footer)
+        self.assertIn("候选卡会单独发送", str(event.footer))
+        self.assertIn("Web 待确认队列", str(event.footer))
 
     def test_stop_returns_false_while_worker_remains_alive(self) -> None:
         class StubbornThread:
@@ -77,10 +80,10 @@ class DownloadTrackerLifecycleTests(unittest.TestCase):
                 return None
 
         tracker = DownloadTracker()
-        tracker._thread = StubbornThread()
+        tracker._thread = cast(Thread, StubbornThread())
 
         self.assertFalse(tracker.stop(timeout=0))
-        self.assertIsNotNone(tracker._thread)
+        assert (tracker._thread) is not None
         self.assertTrue(tracker._stop_event.is_set())
 
 

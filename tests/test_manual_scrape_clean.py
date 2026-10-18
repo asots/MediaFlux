@@ -44,7 +44,7 @@ class ManualScrapeCleanApiTests(IsolatedDatabaseTestCase):
                     self.assertEqual(response.status_code, 200)
                     expected = case['expected']
                     self.assertEqual(
-                        _comparison_key(json.loads(response.body)['query']),
+                        _comparison_key(json.loads(bytes(response.body))['query']),
                         _comparison_key(f"{expected['title']} {expected['year']}"),
                     )
 
@@ -61,7 +61,7 @@ class ManualScrapeCleanApiTests(IsolatedDatabaseTestCase):
         for raw, expected in cases:
             with self.subTest(raw=raw):
                 response = self.clean({'query': raw})
-                self.assertEqual(json.loads(response.body)['query'], expected)
+                self.assertEqual(json.loads(bytes(response.body))['query'], expected)
 
     def test_invalid_names_are_rejected_before_creating_scraper(self):
         with patch('app.routes.tools_api.TMDBScraper') as scraper:
@@ -77,7 +77,7 @@ class ManualScrapeCleanApiTests(IsolatedDatabaseTestCase):
             for position in ('', '.S02E01'):
                 with self.subTest(audio=audio, position=position):
                     raw = f'Movie{position}.2024.1080p.BluRay.{audio}.mkv'
-                    self.assertEqual(json.loads(self.clean({'query': raw}).body)['query'], 'Movie 2024')
+                    self.assertEqual(json.loads(bytes(self.clean({'query': raw}).body))['query'], 'Movie 2024')
                     parsed = scraper.parse_media(raw)
                     self.assertEqual(parsed.media_type, 'tv' if position else 'movie')
                     self.assertEqual(parsed.source_episode, 1 if position else None)
@@ -93,6 +93,7 @@ class LocalManualScrapeCleanBrowserTests(IsolatedDatabaseTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = _chromium_executable(cls.playwright)
         if not executable:
@@ -112,13 +113,17 @@ class LocalManualScrapeCleanBrowserTests(IsolatedDatabaseTestCase):
         self.client = TestClient(create_app(start_background=False))
         self.addCleanup(self.client.close)
         login = self.client.get('/login')
-        token = re.search(r'name="csrf_token"\s+value="([^"]+)"', login.text).group(1)
+        search_result = re.search(r'name="csrf_token"\s+value="([^"]+)"', login.text)
+        assert search_result is not None
+        token = search_result.group(1)
         response = self.client.post('/login', data={
             'username': 'admin', 'password': '123456', 'csrf_token': token,
         }, follow_redirects=False)
         self.assertEqual(response.status_code, 302)
         html = self.client.get('/local-media').text
-        self.csrf = re.search(r'name="csrf-token"\s+content="([^"]+)"', html).group(1)
+        search_result_2 = re.search(r'name="csrf-token"\s+content="([^"]+)"', html)
+        assert search_result_2 is not None
+        self.csrf = search_result_2.group(1)
         self.html = re.sub(r'<script\b[^>]*>.*?</script>', '', html, flags=re.S)
         self.requests = []
         self.errors = []

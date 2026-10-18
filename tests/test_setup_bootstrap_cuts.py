@@ -18,10 +18,10 @@ def test_failed_durability_never_reports_success_or_replays(tmp_path, cut):
         paths = get_runtime_paths()
         sync, get_conn = backup._fsync_directory, database.get_conn
         if cut == 'env_directory':
-            def fail(path):
-                if path == paths.config_dir and paths.env_file.exists():
+            def fail(directory):
+                if directory == paths.config_dir and paths.env_file.exists():
                     raise OSError('injected directory durability failure')
-                sync(path)
+                sync(directory)
             backup._fsync_directory = fail
         else:
             @contextmanager

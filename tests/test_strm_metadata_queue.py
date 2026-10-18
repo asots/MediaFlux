@@ -1,6 +1,11 @@
 """STRM 伴随元数据持久化队列状态机。"""
 from __future__ import annotations
 
+from threading import Thread
+
+from typing import TypedDict, cast
+from app.clients.guangya import GuangYaClient
+
 import time
 
 from app import database as db
@@ -430,7 +435,7 @@ class StrmMetadataQueueIntegrationTests(IsolatedDatabaseTestCase):
                 source_id,
                 "http://media.invalid",
                 root,
-                client=client,
+                client=cast(GuangYaClient, client),
                 metadata_exts={"nfo"},
             )
 
@@ -455,6 +460,14 @@ class StrmMetadataQueueIntegrationTests(IsolatedDatabaseTestCase):
         from app.repositories.strm import StrmRefreshPolicy
         from tests.support import isolated_test_database
 
+        class SyncOptions(TypedDict):
+            source_dir_id: str
+            base_url: str
+            strm_root: str
+            client: GuangYaClient
+            metadata_exts: set[str]
+            refresh_policy: StrmRefreshPolicy
+
         for mode in ("full", "incremental"):
             for enabled, allow_emby in ((False, False), (True, False), (True, True)):
                 with self.subTest(mode=mode, enabled=enabled, allow_emby=allow_emby), \
@@ -468,21 +481,23 @@ class StrmMetadataQueueIntegrationTests(IsolatedDatabaseTestCase):
                         media_root=str(Path(root) / strm.STRM_SUBDIR),
                         enabled=enabled, allow_emby=allow_emby,
                     )
-                    options = {
+                    options: SyncOptions = {
                         "source_dir_id": "source", "base_url": "http://media.invalid",
-                        "strm_root": root, "client": client,
+                        "strm_root": root, "client": cast(GuangYaClient, client),
                         "metadata_exts": {"nfo"}, "refresh_policy": policy,
                     }
                     if mode == "incremental":
-                        options["changes"] = [{
+                        changes = [{
                             "source_id": "source", "kind": "metadata", "action": "upsert",
                             "file_id": "meta", "parent_id": "film", "name": "Movie.nfo",
                             "etag": "m1", "size": 8, "rel_dir": "Film",
                         }]
-                    result = (strm.sync_strm if mode == "full" else strm.sync_strm_incremental)(**options)
+                        result = strm.sync_strm_incremental(changes=changes, **options)
+                    else:
+                        result = strm.sync_strm(**options)
                     self.assertEqual(result["metadata_queued"], 1)
                     worker = STRMMetadataWorker()
-                    worker._client = client
+                    worker._client = cast(GuangYaClient, client)
                     with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                          patch("app.modules.strm_metadata_worker.get", side_effect=lambda k, d="": {
                              "STRM_ROOT": root, "STRM_METADATA_EXTS": "nfo",
@@ -522,7 +537,7 @@ class StrmMetadataQueueIntegrationTests(IsolatedDatabaseTestCase):
                 "target_rel_path": "光鸭云盘/Movie/Movie.nfo",
             }])
             worker = STRMMetadataWorker()
-            worker._client = client
+            worker._client = cast(GuangYaClient, client)
             with patch(
                 "app.modules.strm_metadata_worker.get_bool", return_value=True
             ), patch(
@@ -688,8 +703,8 @@ class StrmMetadataQueueIntegrationTests(IsolatedDatabaseTestCase):
         client = FakeClient()
         replacement = FakeThread()
         old = FakeThread(alive=True, on_join=worker.start)
-        worker._thread = old
-        worker._client = client
+        worker._thread = cast(Thread, old)
+        worker._client = cast(GuangYaClient, client)
 
         with patch("app.modules.strm_metadata_worker.threading.Thread", return_value=replacement):
             self.assertFalse(worker.stop(timeout=0.1))

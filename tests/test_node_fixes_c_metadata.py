@@ -1,4 +1,7 @@
 """C04：真实 HTTP parser + Unix socketpair，绝不连接网络服务。"""
+
+from app.clients.guangya import GuangYaClient
+from typing import cast
 import socket
 import tempfile
 import threading
@@ -67,7 +70,7 @@ class MetadataTransportFixesTests(unittest.TestCase):
                     return client
                 settings = {"STRM_ROOT": root, "STRM_METADATA_EXTS": "nfo"}
                 worker = STRMMetadataWorker()
-                worker._client = cloud
+                worker._client = cast(GuangYaClient, cloud)
                 with requests.Session() as session:
                     session.trust_env = False
                     with patch("urllib3.util.connection.create_connection", side_effect=connect), \

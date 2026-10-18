@@ -1,6 +1,10 @@
 """Synthetic wire fixtures exercise the real adapter, session and SQLite store."""
 
 from __future__ import annotations
+from typing import Any
+from typing import Callable
+from app.clients.http import FixedHostHttpClient
+from typing import cast
 
 import json
 import tempfile
@@ -616,7 +620,7 @@ class ProviderStateSessionTests(unittest.IsolatedAsyncioTestCase):
                         protocol="chat_completions",
                         max_response_bytes=1024,
                     ),
-                    client_factory=lambda **_: wire,
+                    client_factory=cast(Callable[..., FixedHostHttpClient], lambda **_: wire),
                 )
                 with self.assertRaisesRegex(ModelProviderError, "响应超过安全上限"):
                     _ = [
@@ -849,8 +853,8 @@ class ProviderStateSessionTests(unittest.IsolatedAsyncioTestCase):
                         {"type": "redacted_thinking", "data": REDACTED},
                     ]
                     tool = {"type": "tool_use", "id": "call-1", "name": "inspect", "input": {}}
-                    raw_blocks = [private[0]]
-                    expected_blocks = [private[0]]
+                    raw_blocks: list[dict[str, Any]] = [private[0]]
+                    expected_blocks: list[dict[str, Any]] = [private[0]]
                     frames = anthropic_tool_frames()[:5]
                     for position, ((start, deltas), visible) in enumerate(zip(case, expected)):
                         index = len(raw_blocks)

@@ -32,7 +32,7 @@ def _digest(payload: dict) -> str:
 
 
 def _manifest(files: list[dict] | None = None, **overrides) -> dict:
-    entries = files if files is not None else [
+    entries: list[dict] = files if files is not None else [
         {"path": "Movies/A.mkv", "size": 10, "gcid": "gcid-a"},
         {"path": "Movies/B.mkv", "size": 20, "gcid": "gcid-b"},
     ]

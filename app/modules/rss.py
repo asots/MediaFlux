@@ -20,6 +20,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Mapping
 from urllib.parse import urljoin, urlsplit
 
 import feedparser
@@ -64,7 +65,7 @@ def validate_rss_source_url(value: str, *, resolve: bool = False) -> str:
 
 
 def _validate_rss_fetch_url(
-    value: str, *, resolve: bool = False, allow_http: bool = False,
+    value: object, *, resolve: bool = False, allow_http: bool = False,
 ) -> str:
     """复用公网校验；仅种子传输可启用 HTTP，订阅入口始终保持 HTTPS-only。"""
     normalized = str(value or "").strip()
@@ -108,10 +109,10 @@ def _resolve_public_rss_addresses(
         addresses = {
             literal
         } if literal is not None else {
-            ipaddress.ip_address(record[4][0].split("%", 1)[0])
+            ipaddress.ip_address(str(record[4][0]).split("%", 1)[0])
             for record in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         }
-    except (OSError, socket.gaierror, IndexError, TypeError, ValueError) as exc:
+    except (OSError, IndexError, TypeError, ValueError) as exc:
         raise ValueError("RSS URL 域名解析失败") from exc
     if not addresses or any(address is None or not address.is_global for address in addresses):
         raise ValueError("RSS URL 不允许访问本机或内网地址")
@@ -127,7 +128,7 @@ def _pinned_rss_request_target(
     """返回逻辑 URL 与固定公网 IP 的实际请求参数，消除 DNS 重绑定窗口。"""
     logical_url = _validate_rss_fetch_url(url, allow_http=allow_http)
     parsed = httpx.URL(logical_url)
-    host = str(parsed.host or "").rstrip(".").lower()
+    host = (parsed.host or "").rstrip(".").lower()
     port = parsed.port or (80 if parsed.scheme == "http" else 443)
     address = _resolve_public_rss_addresses(host, port)[0]
     request_url = parsed.copy_with(host=str(address))
@@ -209,13 +210,13 @@ def _fetch_rss_payload(
                     payload.extend(chunk)
                     if len(payload) > _RSS_MAX_RESPONSE_BYTES:
                         raise ValueError("RSS 响应体过大")
-                headers = {str(key): str(value) for key, value in response.headers.items()}
+                headers = {key: value for key, value in response.headers.items()}
                 headers.setdefault("content-location", logical_url)
                 return bytes(payload), headers
     raise ValueError("RSS 重定向超过上限")
 
 
-def validate_rss_source_urls(value: str) -> str:
+def validate_rss_source_urls(value: object) -> str:
     """规范化订阅 URL 列表并限制单订阅的网络工作量。"""
     raw = str(value or "").strip()
     if not raw or len(raw) > _RSS_MAX_SOURCE_TOTAL_LENGTH:
@@ -279,13 +280,13 @@ def capture_rss_qb_runtime_config() -> tuple[dict, str]:
     )
     values = get_many(keys, {"RSS_DOWNLOAD_METHOD": "qb"})
     runtime = {
-        "url": str(values["QB_URL"] or "").strip(),
-        "username": str(values["QB_USERNAME"] or ""),
-        "password": str(values["QB_PASSWORD"] or ""),
-        "api_key": str(values["QB_API_KEY"] or ""),
-        "category": str(values["RSS_QB_CATEGORY"] or ""),
-        "default_save_path": str(values["RSS_QB_SAVE_PATH"] or ""),
-        "default_method": str(values["RSS_DOWNLOAD_METHOD"] or "qb").strip().lower(),
+        "url": (values["QB_URL"] or "").strip(),
+        "username": (values["QB_USERNAME"] or ""),
+        "password": (values["QB_PASSWORD"] or ""),
+        "api_key": (values["QB_API_KEY"] or ""),
+        "category": (values["RSS_QB_CATEGORY"] or ""),
+        "default_save_path": (values["RSS_QB_SAVE_PATH"] or ""),
+        "default_method": (values["RSS_DOWNLOAD_METHOD"] or "qb").strip().lower(),
         "timeout": 10,
     }
     if not runtime["url"]:
@@ -295,7 +296,7 @@ def capture_rss_qb_runtime_config() -> tuple[dict, str]:
 
 def _safe_download_source_marker(url: str) -> str:
     """只记录协议类型，避免把磁力哈希、私有 tracker 或 passkey 写入日志。"""
-    normalized = str(url or "").strip().lower()
+    normalized = (url or "").strip().lower()
     if normalized.startswith("magnet:"):
         return "[magnet]"
     if normalized.startswith("https://"):
@@ -364,7 +365,7 @@ class MikanParser:
                     if timeout_seconds is not None else self._refresh_timeout_seconds
                 ),
             )
-            feed = feedparser.parse(bytes(payload), response_headers=response_headers)
+            feed = feedparser.parse(payload, response_headers=response_headers)
         except Exception as exc:
             self.last_error_code = "fetch_failed"
             logger.error("RSS 拉取失败 type=%s", type(exc).__name__)
@@ -379,7 +380,8 @@ class MikanParser:
             return []
 
         entries: list[RSSEntry] = []
-        for it in feed.entries:
+        for raw_entry in feed.entries:
+            it: Mapping[str, Any] = raw_entry
             torrent, content_type = self._extract_download(it)
             guid = it.get("id") or it.get("guid") or it.get("link") or it.get("title", "")
             pub = self._format_date(it.get("published") or it.get("updated") or "")
@@ -497,7 +499,7 @@ class RSSEngine:
     @staticmethod
     def _series_identity_key(value: str) -> str:
         """生成仅用于混合 RSS 防误绑的保守作品键。"""
-        normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        normalized = unicodedata.normalize("NFKC", (value or "")).casefold()
         return re.sub(r"[^0-9a-z\u3040-\u30ff\u3400-\u9fff]+", "", normalized)
 
     @staticmethod
@@ -531,7 +533,7 @@ class RSSEngine:
         if not isinstance(detail, dict):
             return set(), False
         try:
-            detail_id = str(int(detail.get("id")))
+            detail_id = str(int(detail.get("id", "")))
             expected_id = str(int(tmdb_id))
         except (TypeError, ValueError):
             return set(), False
@@ -589,7 +591,7 @@ class RSSEngine:
             if not urls:
                 return {"error": "订阅项无 URL"}
             if expected_revision and not secrets.compare_digest(
-                rss_subscription_refresh_revision(sub), str(expected_revision)
+                rss_subscription_refresh_revision(sub), expected_revision
             ):
                 return {"error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True}
 
@@ -667,7 +669,7 @@ class RSSEngine:
                 else:
                     binding_bypass_reason = "episode_unresolved"
             mixed_feed_bypassed = binding_bypass_reason == "mixed_feed"
-            skip_existing = bool(skip_existing_requested and binding_allowed)
+            skip_existing = (skip_existing_requested and binding_allowed)
             if skip_existing:
                 library_positions, library_check = self._existing_library_episodes(media_tmdb_id)
             elif media_binding_bypassed:
@@ -732,7 +734,7 @@ class RSSEngine:
                 sub_id, total, new, skipped, library_skipped, semantic_duplicates, failed_sources,
             )
             db.update_rss_subscription(sub_id, {"last_refreshed_at": db.now()})
-            result = {"total": total, "new": new, "skipped": skipped}
+            result: dict[str, Any] = {"total": total, "new": new, "skipped": skipped}
             if media_tmdb_id:
                 result.update({
                     "library_skipped": library_skipped,
@@ -955,6 +957,7 @@ class RSSEngine:
                 bind_rss_entry_download(entry_id, linked_key, method)
                 if not rss_retry_source_is_safe(retry_source, method):
                     current = db.get_rss_entry(entry_id)
+                    assert current is not None
                     if current["status"] == "downloaded":
                         return {"ok": True, "existing": True, "method": method,
                                 "status": "downloaded", "request_id": int(retry_source["id"])}
@@ -971,7 +974,7 @@ class RSSEngine:
                     rss_item_id=int(entry["rss_item_id"]),
                     log_path=_safe_download_source_marker(str(retry_source["source_value"] or "")),
                 )
-                submission = {
+                submission: dict[str, Any] = {
                     "request_id": int(dispatch.get("request_id") or retry_source["id"]),
                     "summary": public_dispatch_summary(dispatch),
                     "dispatch": dispatch,
@@ -1061,7 +1064,7 @@ class RSSEngine:
         task_id = str(backend.get("task_id") or "")
         if not task_id and current_request is not None and method == "qb":
             task_id = str(current_request["qb_task_id"] or "")
-        unverified = bool(method == "qb" and ok and not task_id)
+        unverified = (method == "qb" and ok and not task_id)
         error = str(summary.get("error") or "")
         review_required = False
         if ok:
@@ -1120,7 +1123,7 @@ class RSSEngine:
         return self._download_entry(db.get_rss_entry(entry_id))
 
     def download_many(self, entry_ids: list[int], *, auto_guard: Callable[[], bool] | None = None) -> dict:
-        ids = list(dict.fromkeys(int(item) for item in entry_ids))[:_RSS_DOWNLOAD_BATCH_SIZE]
+        ids = list(dict.fromkeys(item for item in entry_ids))[:_RSS_DOWNLOAD_BATCH_SIZE]
         entries_by_id = db.get_rss_entries_by_ids(ids)
         entries = [entries_by_id.get(entry_id) for entry_id in ids]
         succeeded: list[dict] = []
@@ -1319,7 +1322,7 @@ class RSSEngine:
         ]
         ids = pending_ids[:_RSS_AUTO_DOWNLOAD_MAX_ENTRIES]
         deadline = time.monotonic() + _RSS_AUTO_DOWNLOAD_DEADLINE_SECONDS
-        result = {
+        result: dict[str, Any] = {
             "total": 0,
             "succeeded": [],
             "existing": [],

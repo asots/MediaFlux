@@ -50,7 +50,7 @@ def _media_server_area() -> dict[str, Any]:
         if not enabled:
             continue
         enabled_count += 1
-        if all(str(config.get(key, "") or "").strip() for key in required):
+        if all((config.get(key, "") or "").strip() for key in required):
             ready_count += 1
         else:
             incomplete_count += 1

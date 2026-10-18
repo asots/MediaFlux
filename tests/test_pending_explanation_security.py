@@ -1,3 +1,5 @@
+
+from typing import Any
 import asyncio
 
 import pytest
@@ -32,7 +34,7 @@ def test_web_explain_rejects_before_generation_or_model(case, monkeypatch):
                 runtime.session.pipeline.get_pending_plan(owner=owner, session_id=sid)
             )
             headers = {"X-CSRF-Token": "explain-csrf"}
-            payload = {
+            payload: dict[str, Any] = {
                 "session_id": sid,
                 "plan_id": approval.plan_id,
                 "message": "解释",

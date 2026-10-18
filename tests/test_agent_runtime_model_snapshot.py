@@ -82,7 +82,9 @@ class Bot:
     def send_chat_action(self, *args, **kwargs):
         if self.ready is not None and not self.blocked:
             import inspect
-            frame = inspect.currentframe().f_back
+            currentframe_result = inspect.currentframe()
+            assert currentframe_result is not None
+            frame = currentframe_result.f_back
             while frame is not None:
                 self.call_path.append(frame.f_code.co_name)
                 if frame.f_code.co_name == '_execute_query':
@@ -92,6 +94,7 @@ class Bot:
             assert self.retained_runtime is not None
             self.blocked = True
             self.ready.set()
+            assert self.release is not None
             assert self.release.wait(10), 'handshake release timeout'
         return True
 
@@ -298,7 +301,7 @@ def test_provider_settings_is_one_real_config_snapshot(harness, monkeypatch):
         value = original(key, default)
         if key == 'AGENT_LLM_API_URL' and first and threading.current_thread().name != 'snapshot-publisher':
             first = False
-            owned = lock._is_owned()
+            owned = getattr(lock, "_is_owned")()
             ready.set()
             assert attempted.wait(10)
             if not owned:

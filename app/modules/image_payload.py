@@ -1,7 +1,7 @@
 """受限读取可信图片 MIME 的共享上游响应。"""
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Iterator, Mapping, Protocol
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 SAFE_IMAGE_MIME_TYPES = frozenset({
@@ -18,9 +18,10 @@ class ImagePayloadError(ValueError):
 
 
 class ImageStreamResponse(Protocol):
-    headers: object
+    @property
+    def headers(self) -> Mapping[str, str]: ...
 
-    def iter_content(self, chunk_size: int = 64 * 1024): ...
+    def iter_content(self, chunk_size: int = 64 * 1024) -> Iterator[bytes]: ...
 
 
 def matches_image_magic(content_type: str, content: bytes) -> bool:
@@ -53,7 +54,7 @@ def read_bounded_image(
     *,
     max_bytes: int = MAX_IMAGE_BYTES,
 ) -> tuple[bytes, str]:
-    maximum = max(1, int(max_bytes))
+    maximum = max(1, max_bytes)
     headers = getattr(upstream, "headers", {})
     content_type = str(headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
     if content_type not in SAFE_IMAGE_MIME_TYPES:

@@ -100,6 +100,7 @@ class GuangYaAccountCapacityTests(unittest.TestCase):
             self.assertEqual(kwargs["timeout"], 15)
         self.assertEqual(client.calls[0][2]["json"], {})
         self.assertEqual(client.calls[1][2]["headers"], {"x-client-id": "test-client"})
+        assert client._raw is not None
         client._raw.user_info.assert_not_called()
         self.assertTrue(client.closed)
 

@@ -24,7 +24,7 @@ class TelegramWriteConfirmationError(ValueError):
 
 
 def _telegram_owner(
-    chat_id: str, user_id: str, message_thread_id: object = None
+    chat_id: str | int, user_id: str | int, message_thread_id: Any = None
 ) -> str:
     # 延迟导入避免 Telegram handler/adapter 初始化时形成模块环。
     from app.bot.agent_adapter import telegram_agent_owner
@@ -73,8 +73,8 @@ class TelegramWriteConfirmationStore:
     ) -> None:
         if ttl_seconds <= 0 or max_actions <= 1:
             raise ValueError("confirmation store limits must be positive")
-        self.ttl_seconds = int(ttl_seconds)
-        self.max_actions = int(max_actions)
+        self.ttl_seconds = ttl_seconds
+        self.max_actions = max_actions
         source = token_factory or (lambda: secrets.token_urlsafe(18))
         self._store = _backend or ConfirmationStore(
             ttl_seconds=self.ttl_seconds,
@@ -90,7 +90,7 @@ class TelegramWriteConfirmationStore:
         *,
         max_actions: int,
     ) -> tuple[str, list[dict[str, Any]]]:
-        operation_name = str(operation or "").strip()
+        operation_name = (operation or "").strip()
         if not operation_name or len(operation_name) > 80:
             raise ValueError("confirmation operation is invalid")
         if not actions:
@@ -100,7 +100,7 @@ class TelegramWriteConfirmationStore:
 
         normalized: list[dict[str, Any]] = []
         for decision, value in actions:
-            decision_name = str(decision or "").strip()
+            decision_name = (decision or "").strip()
             if (
                 not decision_name
                 or len(decision_name) > 40
@@ -126,11 +126,11 @@ class TelegramWriteConfirmationStore:
     def create_group(
         self,
         *,
-        chat_id: str,
-        user_id: str,
+        chat_id: str | int,
+        user_id: str | int,
         operation: str,
         actions: list[tuple[str, dict[str, Any]]],
-        message_thread_id: object = None,
+        message_thread_id: Any = None,
     ) -> tuple[str, ...]:
         operation_name, normalized = self._normalize_actions(
             operation,
@@ -150,11 +150,11 @@ class TelegramWriteConfirmationStore:
     def create_pair(
         self,
         *,
-        chat_id: str,
-        user_id: str,
+        chat_id: str | int,
+        user_id: str | int,
         operation: str,
         value: dict[str, Any],
-        message_thread_id: object = None,
+        message_thread_id: Any = None,
     ) -> tuple[str, str]:
         confirm_id, cancel_id = self.create_group(
             chat_id=chat_id,
@@ -169,11 +169,11 @@ class TelegramWriteConfirmationStore:
         self,
         action_id: str,
         *,
-        chat_id: str,
-        user_id: str,
-        message_thread_id: object = None,
+        chat_id: str | int,
+        user_id: str | int,
+        message_thread_id: Any = None,
     ) -> dict[str, Any]:
-        match = _CALLBACK_ID_RE.fullmatch(str(action_id or "").strip())
+        match = _CALLBACK_ID_RE.fullmatch((action_id or "").strip())
         if match is None:
             raise TelegramWriteConfirmationError("确认已过期或已处理，请重新发起")
         ticket_id = match.group("ticket")

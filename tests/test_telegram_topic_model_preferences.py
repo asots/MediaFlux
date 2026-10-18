@@ -281,11 +281,11 @@ class TelegramTopicAndModelPreferenceTests(unittest.TestCase):
             header_calls.append((protocol, api_key, include_content_type))
             return {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
 
-        provider_module.normalize_provider_location = lambda base_url, **_kwargs: SimpleNamespace(
+        setattr(provider_module, "normalize_provider_location", lambda base_url, **_kwargs: SimpleNamespace(
             host="api.anthropic.com", models_url=base_url.rstrip("/") + "/models"
-        )
-        provider_module.resolve_protocol = resolve_protocol
-        provider_module.provider_headers = provider_headers
+        ))
+        setattr(provider_module, "resolve_protocol", resolve_protocol)
+        setattr(provider_module, "provider_headers", provider_headers)
 
         http_module = ModuleType("app.clients.http")
 
@@ -305,7 +305,7 @@ class TelegramTopicAndModelPreferenceTests(unittest.TestCase):
             async def aclose(self):
                 return None
 
-        http_module.FixedHostHttpClient = FakeHttpClient
+        setattr(http_module, "FixedHostHttpClient", FakeHttpClient)
         clients_package = ModuleType("app.clients")
         clients_package.__path__ = []
         indexers_package = ModuleType("app.indexers")
@@ -352,6 +352,7 @@ class TelegramTopicAndModelPreferenceTests(unittest.TestCase):
         with self._channel():
             token = model_preferences.create_model_callback(self.owner, "session-topic", 41, action="cancel")
             route = model_preferences.resolve_model_callback(self.owner, token, 41)
+            assert route is not None
             self.assertEqual(route["action"], "cancel")
             self.assertEqual(route["session_id"], "session-topic")
             self.assertIsNone(model_preferences.resolve_model_callback(self.owner, token, 42))
@@ -366,6 +367,7 @@ class TelegramTopicAndModelPreferenceTests(unittest.TestCase):
                 model_id="model-a",
             )
             route = model_preferences.resolve_model_callback(self.owner, token, 41)
+            assert route is not None
             self.assertEqual(route["session_id"], "session-topic")
             self.assertEqual(route["model_id"], "model-a")
             self.assertIsNone(

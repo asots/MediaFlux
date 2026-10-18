@@ -99,7 +99,7 @@ def test_json_unique_equality(values, duplicate):
 
 @pytest.mark.parametrize("mapping", [dict, MappingProxyType, UserDict])
 def test_admitted_mapping_and_nested_arguments_are_preserved(mapping):
-    nested = {"leaf": True}
+    nested: dict[str, object] = {"leaf": True}
     for _ in range(55):
         nested = {"child": nested}
     arguments = {"values": [nested, {"other": 1}]}

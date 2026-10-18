@@ -147,7 +147,7 @@ class LocalMediaDiagnosisUnitTests(IsolatedDatabaseTestCase):
         self._task(source, "requires_manual", suffix="manual")
         self._task(source, "failed", suffix="failed")
         source_without_target = self._source(suffix="unmapped")
-        self.assertIsInstance(source_without_target, int)
+        assert isinstance(source_without_target, int)
         with patch(
             "app.agent.domains.local_media.queries.peek_local_media_scheduler_status"
         ) as scheduler:

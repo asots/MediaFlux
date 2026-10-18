@@ -58,9 +58,9 @@ class KernelToolSpec:
     model_name: str = ""
 
     def __post_init__(self) -> None:
-        name = str(self.name or "").strip()
-        domain = str(self.domain or "").strip().casefold()
-        description = str(self.description or "").strip()
+        name = (self.name or "").strip()
+        domain = (self.domain or "").strip().casefold()
+        description = (self.description or "").strip()
         if not name or not re.fullmatch(r"[a-z][a-z0-9_.-]{2,119}", name):
             raise ValueError(f"invalid tool name: {name!r}")
         if not domain or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,79}", domain):
@@ -92,21 +92,19 @@ class KernelToolSpec:
         object.__setattr__(
             self,
             "examples",
-            tuple(str(item).strip() for item in self.examples if str(item).strip()),
+            tuple(item.strip() for item in self.examples if item.strip()),
         )
         object.__setattr__(
             self,
             "context_requirements",
             frozenset(
-                str(item).strip().casefold()
+                item.strip().casefold()
                 for item in self.context_requirements
-                if str(item).strip()
+                if item.strip()
             ),
         )
         object.__setattr__(self, "cost", max(0.0, float(self.cost)))
-        model_name = str(
-            self.model_name or name.replace(".", "__").replace("-", "_")
-        ).strip()
+        model_name = (self.model_name or name.replace(".", "__").replace("-", "_")).strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", model_name):
             raise ValueError(f"invalid provider tool name: {model_name!r}")
         object.__setattr__(self, "model_name", model_name)
@@ -150,7 +148,7 @@ class ToolCatalog:
 
     def get(self, name: str) -> KernelToolSpec:
         try:
-            key = str(name or "").strip()
+            key = (name or "").strip()
             return self._tools[self._aliases.get(key, key)]
         except KeyError as exc:
             raise KeyError(f"unknown tool: {name}") from exc
@@ -172,7 +170,7 @@ class ToolCatalog:
                 continue
             if tool.availability is not None:
                 try:
-                    if not bool(tool.availability(runtime)):
+                    if not tool.availability(runtime):
                         continue
                 except Exception as exc:  # noqa: BLE001 - optional plug-in boundary
                     logger.warning(
@@ -185,7 +183,7 @@ class ToolCatalog:
         return tuple(result)
 
     def has(self, name: str) -> bool:
-        key = str(name or "").strip()
+        key = (name or "").strip()
         return key in self._tools or key in self._aliases
 
     def __len__(self) -> int:

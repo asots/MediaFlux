@@ -39,14 +39,20 @@ class WorkspaceHandoffBrowserTests(AgentShellBrowserCase):
                 page, unexpected, errors = self.handoff_shell({'width': width, 'height': height})
                 page.locator('#agentPrompt').fill('保留这份草稿')
                 button = page.locator('[data-agent-action-key="review_downloads"]')
-                self.assertIn('只读', button.get_attribute('aria-label'))
+                text_content = button.get_attribute('aria-label')
+                assert text_content is not None
+                self.assertIn('只读', text_content)
                 draft = page.get_by_role('button', name='填入草稿：检查下载队列', exact=True)
                 for control in (button, draft):
-                    self.assertGreaterEqual(control.bounding_box()['height'], 44)
+                    bounds = control.bounding_box()
+                    assert bounds is not None
+                    self.assertGreaterEqual(bounds['height'], 44)
                 page.mouse.move(0, 0)
                 composer = page.locator('#agentComposer').bounding_box()
+                assert composer is not None
                 draft.click()
                 after = page.locator('#agentComposer').bounding_box()
+                assert after is not None
                 self.assertLessEqual(abs(composer['y'] - after['y']), .5)
                 self.assertEqual(page.locator('#agentPrompt').input_value(), '保留这份草稿')
                 page.locator('#agentPrompt').fill('')

@@ -26,8 +26,10 @@ class SingleTrackBusinessContractTests(unittest.TestCase):
                 provider="tmdb", external_id="1", tmdb_id="1", media_type="tv", title="Test",
             )
             run_id = db.claim_media_subscription_check_run(subscription_id)
-            self.assertIsInstance(run_id, int)
-            self.assertEqual(db.get_media_subscription(subscription_id)["status"], "checking")
+            assert isinstance(run_id, int)
+            get_media_subscription_result = db.get_media_subscription(subscription_id)
+            assert get_media_subscription_result is not None
+            self.assertEqual(get_media_subscription_result["status"], "checking")
             self.assertEqual(db.list_media_subscription_runs(subscription_id=subscription_id)[0]["id"], run_id)
             self.assertIsNone(db.claim_media_subscription_check_run(subscription_id))
 

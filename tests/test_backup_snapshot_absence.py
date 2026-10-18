@@ -152,9 +152,11 @@ def test_committed_recovery_keeps_absence_and_cleans_saved_token(tmp_path):
     ):
         backup.restore_backup(target, archive)
     journal = backup._read_restore_journal(target)
+    assert journal is not None
     token_entry = next(entry for entry in journal["entries"] if entry["name"] == TOKEN)
     assert journal["version"] == 2 and journal["phase"] == "committed"
     assert token_entry["new"] is None and token_entry["had_target"] is True
+    assert journal is not None
     _temporary, saved_token = backup._restore_artifacts(target.token_file, journal["transaction_id"])
     assert saved_token.read_text() == "original-token"
     assert backup.recover_pending_restore(target)
@@ -237,7 +239,9 @@ def test_cold_process_recovers_token_deletion_journal(tmp_path, phase):
     with fault, pytest.raises(KeyboardInterrupt):
         backup.restore_backup(target, archive)
     assert not target.token_file.exists()
-    assert backup._read_restore_journal(target)["phase"] == phase
+    read_restore_journal_result = backup._read_restore_journal(target)
+    assert read_restore_journal_result is not None
+    assert read_restore_journal_result["phase"] == phase
 
     # exec 后无父进程模块/锁/内存状态；先安装既有测试的 Inet/DNS 阻断再导入应用。
     script = _LIFECYCLE_EXEC_BOOTSTRAP + '''

@@ -1,4 +1,7 @@
 """运维配置发布、消费者切换与真实关停结果的离线契约。"""
+
+from typing import cast
+from starlette.requests import Request
 import os
 import threading
 from contextlib import ExitStack
@@ -49,7 +52,7 @@ def services():
 
 def save(values):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(background_services_enabled=False)))
-    return api.save_config(request, values)
+    return api.save_config(cast(Request, request), values)
 
 
 def runtime(service):
@@ -100,9 +103,12 @@ def test_save_warns_and_never_closes_a_client_in_flight(services, consumer):
         try:
             assert entered.wait(2)
             result = save(NEW)
+            assert isinstance(result, dict)
             assert result["success"] is True and result["warnings"]
             # 相同值再保存仍须如实报告 pending，不能从 changed=0 路径假成功。
-            assert save(NEW)["warnings"]
+            repeat_response = save(NEW)
+            assert isinstance(repeat_response, dict)
+            assert repeat_response["warnings"]
             assert runtime(service) == OLD
             assert not old._closed
             with pytest.raises(local.LocalMediaServiceError, match="切换配置"):
@@ -130,6 +136,7 @@ def test_failed_resource_close_is_reported_and_retried_before_new_operation(serv
     old = web.scraper
     with patch.object(old, "close", side_effect=[False, True]):
         result = save(NEW)
+        assert isinstance(result, dict)
         assert result["warnings"]
         assert web.scraper is old
         with patch.object(TMDBScraper, "search_candidates", return_value=[]):
@@ -144,6 +151,7 @@ def test_constructor_failure_warns_and_configuration_revert_does_not_reuse_close
     old = web.scraper
     with patch.object(local, "TMDBScraper", side_effect=RuntimeError("fixture constructor failure")):
         result = save(NEW)
+    assert isinstance(result, dict)
     assert result["warnings"] and result["restart_required"] is True
     assert old._closed
     config.set_and_save(OLD)
@@ -187,7 +195,9 @@ def test_parallel_planning_pins_the_shared_parent_client(services):
         thread.start()
         try:
             assert entered.wait(2)
-            assert save(NEW)["warnings"]
+            repeat_response = save(NEW)
+            assert isinstance(repeat_response, dict)
+            assert repeat_response["warnings"]
             assert not old._closed
             assert scheduler.service._active_operations == 1
         finally:
@@ -227,8 +237,8 @@ def bot_stopped():
 @pytest.mark.parametrize("outcome", [True, False, RuntimeError("fixture close failure")])
 def test_bot_stop_includes_indexer_outcome_without_changing_agent_cancellation(bot_stopped, outcome):
     handlers, agent_stop = bot_stopped
-    options = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
-    with patch("app.modules.telegram_resource_search.shutdown_telegram_indexer_worker", **options):
+    replacement = patch("app.modules.telegram_resource_search.shutdown_telegram_indexer_worker", side_effect=outcome) if isinstance(outcome, Exception) else patch("app.modules.telegram_resource_search.shutdown_telegram_indexer_worker", return_value=outcome)
+    with replacement:
         assert handlers.stop_bot(timeout=0.1) is (outcome is True)
     agent_stop.assert_called_once_with(timeout=0.1, cancel_queries=True)
 
@@ -265,6 +275,7 @@ def test_bot_stop_rejects_real_worker_until_retry_finishes(bot_stopped):
         try:
             with patch.object(tg, "shutdown_telegram_indexer_worker", side_effect=worker.stop):
                 assert handlers.stop_bot(timeout=0.05) is False
+                assert worker._thread is not None
                 assert worker._thread.is_alive() and worker._stopping
                 assert handlers.stop_bot(timeout=1.0) is True
         finally:

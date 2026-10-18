@@ -42,16 +42,18 @@ def test_receipt_merge_preserves_executed_call_group(protocol,mode,pressure,stor
             'tool_name':'old.inspect','effect_plan_id':f'legal-plan-{i}','completion_receipt_id':f'legal-plan-{i}'}}
             for i in range(2)}
         handled=[]; snapshots=[]; injected=False
-        base=SQLiteKernelStore if store_kind=='sqlite' else InMemorySessionStateStore
-        class Store(base):
-            async def commit(self,lease,*,conversation=None,updates=()):
-                nonlocal injected
-                complete=conversation is not None and any(r.get('tool_call_id')=='work-4' and 'FACT-4' in str(r.get('content')) for r in conversation)
-                if mode=='commit_boundary' and complete and not injected:
-                    injected=True
-                    await self.update_effect_state(owner=OWNER,session_id=SESSION,change=lambda s:s.metadata.update(effect_waits=deepcopy(receipts)))
-                return await super().commit(lease,conversation=conversation,updates=updates)
-        store=Store(**({'secret_provider':lambda:'started-checkpoint-synthetic'} if store_kind=='sqlite' else {}))
+        store = SQLiteKernelStore(secret_provider=lambda: 'started-checkpoint-synthetic') if store_kind == 'sqlite' else InMemorySessionStateStore()
+        original_commit = store.commit
+
+        async def commit(lease, *, conversation=None, updates=(), task_patch=None):
+            nonlocal injected
+            complete = conversation is not None and any(r.get('tool_call_id') == 'work-4' and 'FACT-4' in str(r.get('content')) for r in conversation)
+            if mode == 'commit_boundary' and complete and not injected:
+                injected = True
+                await store.update_effect_state(owner=OWNER, session_id=SESSION, change=lambda state: state.metadata.update(effect_waits=deepcopy(receipts)))
+            return await original_commit(lease, conversation=conversation, updates=updates, task_patch=task_patch)
+
+        store.commit = commit
         async def load():
             return await reopened() if store_kind=='sqlite' else await store.load(owner=OWNER,session_id=SESSION)
         async def handler(value,context):

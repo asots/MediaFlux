@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from tests.support import assert_present
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import hashlib
 import json
 import tempfile
@@ -230,14 +235,14 @@ class P2StrmOwnershipTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             first = sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=_TreeClient({source_id: [video]}),
+                client=cast(GuangYaClient, _TreeClient({source_id: [video]})),
             )
             target = next((Path(root) / STRM_SUBDIR).rglob("*.strm"))
             target.write_text("broken-address", encoding="utf-8")
 
             second = sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=_TreeClient({source_id: [video]}),
+                client=cast(GuangYaClient, _TreeClient({source_id: [video]})),
             )
             row = db.list_strm_index(source_key)[0]
             expected = build_play_url(
@@ -263,7 +268,7 @@ class P2StrmOwnershipTests(IsolatedDatabaseTestCase):
 
             stats = sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=_TreeClient({source_id: [video]}),
+                client=cast(GuangYaClient, _TreeClient({source_id: [video]})),
             )
 
             self.assertEqual(stats["generated"], 0)
@@ -286,7 +291,7 @@ class P2StrmOwnershipTests(IsolatedDatabaseTestCase):
 
             stats = sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=_TreeClient({source_id: [video]}),
+                client=cast(GuangYaClient, _TreeClient({source_id: [video]})),
                 metadata_exts={"nfo", "jpg"},
             )
 
@@ -329,7 +334,7 @@ class P2StrmOwnershipTests(IsolatedDatabaseTestCase):
                     "file_id": renamed.file_id, "rel_dir": "电影/Test",
                     "name": renamed.name, "etag": renamed.etag, "size": renamed.size,
                     "parent_id": renamed.parent_id,
-                }], "http://localhost:1258", root, client=_IncrementalClient(),
+                }], "http://localhost:1258", root, client=cast(GuangYaClient, _IncrementalClient()),
             )
             rows = db.list_strm_index(source_key)
             new_paths = list((Path(root) / STRM_SUBDIR).rglob("New.strm"))
@@ -377,7 +382,7 @@ class P2StrmOwnershipTests(IsolatedDatabaseTestCase):
 
             stats = sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=_TreeClient({source_id: [metadata]}), metadata_exts={"jpg"},
+                client=cast(GuangYaClient, _TreeClient({source_id: [metadata]})), metadata_exts={"jpg"},
             )
             row = db.list_strm_index(source_key)[0]
 
@@ -394,7 +399,7 @@ class P2StrmOwnershipTests(IsolatedDatabaseTestCase):
         ) as cleanup:
             stats = sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=_TreeClient({source_id: [video]}),
+                client=cast(GuangYaClient, _TreeClient({source_id: [video]})),
                 should_stop=lambda: True,
             )
 
@@ -435,7 +440,9 @@ class P2SchedulerCancellationTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["stopped"])
         refresh.assert_not_called()
-        self.assertEqual(db.get_last_task_run("strm_sync")["status"], "skipped")
+        get_last_task_run_result = db.get_last_task_run("strm_sync")
+        assert get_last_task_run_result is not None
+        self.assertEqual(get_last_task_run_result["status"], "skipped")
 
 class P2RecoveryAndRaceTests(IsolatedDatabaseTestCase):
     def test_organize_request_is_marked_running_before_worker_start(self) -> None:
@@ -492,7 +499,9 @@ class P2RecoveryAndRaceTests(IsolatedDatabaseTestCase):
             def start(self):
                 observed["started"] = True
                 # 检查真实SQLite提交，而不是绑定旧的无围栏更新函数。
-                assert db.get_download_request(request_id)["strm_status"] == "queued"
+                get_download_request_result = db.get_download_request(request_id)
+                assert get_download_request_result is not None
+                assert get_download_request_result["strm_status"] == "queued"
 
         with patch("app.modules.scheduler.threading.Thread", Thread):
             result = scheduler._queue_organize_trigger({"download_request_ids": [request_id]})
@@ -528,6 +537,7 @@ class P2RecoveryAndRaceTests(IsolatedDatabaseTestCase):
         db.init_db()
 
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["organize_started"], -1)
         self.assertEqual(row["organize_status"], "failed")
         self.assertEqual(row["strm_status"], "failed")
@@ -559,7 +569,7 @@ class P2RecoveryAndRaceTests(IsolatedDatabaseTestCase):
         scheduler._wait_and_run_pending_organize()
 
         self.assertEqual(
-            [db.get_download_request(request_id)["strm_status"] for request_id in request_ids],
+            [assert_present(db.get_download_request(request_id))["strm_status"] for request_id in request_ids],
             ["stopped", "stopped"],
         )
 
@@ -650,10 +660,10 @@ class P2MetadataCancellationTests(IsolatedDatabaseTestCase):
             client = Client({source_id: [remote]})
             stats = sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=client, metadata_exts={"jpg"},
+                client=cast(GuangYaClient, client), metadata_exts={"jpg"},
             )
             worker = STRMMetadataWorker()
-            worker._client = client
+            worker._client = cast(GuangYaClient, client)
             with patch("app.modules.strm.requests.get", return_value=Response()):
                 worked = _process_metadata_once(worker, root)
 
@@ -684,7 +694,7 @@ class P2OwnershipRaceRegressionTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=_TreeClient({source_id: [original]}),
+                client=cast(GuangYaClient, _TreeClient({source_id: [original]})),
             )
             target = next((Path(root) / STRM_SUBDIR).rglob("*.strm"))
             original_copy = strm_module._copy_backup
@@ -700,7 +710,7 @@ class P2OwnershipRaceRegressionTests(IsolatedDatabaseTestCase):
             with patch("app.modules.strm._copy_backup", side_effect=copy_then_modify):
                 stats = sync_strm(
                     source_id, "http://localhost:1258", root,
-                    client=_TreeClient({source_id: [changed]}),
+                    client=cast(GuangYaClient, _TreeClient({source_id: [changed]})),
                 )
 
             self.assertEqual(stats["generated"], 0)
@@ -718,7 +728,7 @@ class P2OwnershipRaceRegressionTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=_TreeClient({source_id: [original]}),
+                client=cast(GuangYaClient, _TreeClient({source_id: [original]})),
             )
             target = next((Path(root) / STRM_SUBDIR).rglob("*.strm"))
             def fail_after_external_write(*args, **kwargs):
@@ -731,7 +741,7 @@ class P2OwnershipRaceRegressionTests(IsolatedDatabaseTestCase):
             ):
                 stats = sync_strm(
                     source_id, "http://localhost:1258", root,
-                    client=_TreeClient({source_id: [changed]}),
+                    client=cast(GuangYaClient, _TreeClient({source_id: [changed]})),
                 )
 
             self.assertEqual(stats["generated"], 0)
@@ -787,10 +797,10 @@ class P2OwnershipRaceRegressionTests(IsolatedDatabaseTestCase):
             client = Client({source_id: [remote]})
             stats = sync_strm(
                 source_id, "http://localhost:1258", root,
-                client=client, metadata_exts={"jpg"},
+                client=cast(GuangYaClient, client), metadata_exts={"jpg"},
             )
             worker = STRMMetadataWorker()
-            worker._client = client
+            worker._client = cast(GuangYaClient, client)
             with patch(
                 "app.modules.strm._copy_backup", side_effect=copy_then_modify
             ), patch("app.modules.strm.requests.get", return_value=Response()):

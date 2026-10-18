@@ -104,9 +104,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
     def test_owner_isolation_and_no_raw_owner_persistence(self):
         row, created = self._create(owner="private-owner-a")
         self.assertTrue(created)
-        self.assertIsNotNone(
-            db.get_agent_job(owner="private-owner-a", job_id=row["job_id"])
-        )
+        assert (db.get_agent_job(owner="private-owner-a", job_id=row["job_id"])) is not None
         self.assertIsNone(
             db.get_agent_job(owner="private-owner-b", job_id=row["job_id"])
         )
@@ -129,6 +127,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
             owner="owner-idempotent", job_id=str(first["job_id"])
         )
         self.assertEqual(outcome, "cancelled")
+        assert cancelled is not None
         self.assertEqual(cancelled["status"], "cancelled")
         second, created = self._create(owner="owner-idempotent")
         self.assertTrue(created)
@@ -141,6 +140,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
             current_time="2099-01-01 00:00:00",
             stale_before="2098-12-31 23:55:00",
         )
+        assert claimed is not None
         self.assertEqual(claimed["job_id"], row["job_id"])
         generation = int(claimed["lease_generation"])
         self.assertTrue(
@@ -188,7 +188,9 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
             owner="owner-cancel", job_id=str(row["job_id"])
         )
         self.assertEqual(outcome, "requested")
+        assert requested is not None
         self.assertEqual(requested["status"], "running")
+        assert claimed is not None
         generation = int(claimed["lease_generation"])
         self.assertTrue(
             db.is_agent_job_cancel_requested(
@@ -201,6 +203,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
             )
         )
         terminal = db.get_agent_job(owner="owner-cancel", job_id=str(row["job_id"]))
+        assert terminal is not None
         self.assertEqual(terminal["status"], "cancelled")
 
     def test_cancel_racing_with_terminal_completion_is_finalized_immediately(self):
@@ -228,6 +231,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 1)
 
         stored = db.get_agent_job(owner="owner-terminal-race", job_id=job_id)
+        assert stored is not None
         self.assertEqual(stored["status"], "cancelled")
         self.assertTrue(stored["finished_at"])
 
@@ -258,6 +262,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 1)
 
         stored = db.get_agent_job(owner="owner-continuation-race", job_id=job_id)
+        assert stored is not None
         self.assertEqual(stored["status"], "cancelled")
         self.assertTrue(stored["finished_at"])
 
@@ -268,9 +273,11 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
             current_time="2099-01-01 00:00:00",
             stale_before="2098-12-31 23:55:00",
         )
+        assert claimed is not None
         old_generation = int(claimed["lease_generation"])
         db.init_db()
         recovered = db.get_agent_job(owner="owner-restart", job_id=str(row["job_id"]))
+        assert recovered is not None
         self.assertEqual(recovered["status"], "retry_wait")
         self.assertEqual(recovered["error_code"], "ProcessInterrupted")
         self.assertEqual(int(recovered["lease_generation"]), old_generation + 1)
@@ -297,6 +304,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
         stored = db.get_agent_job(
             owner="owner-not-configured", job_id=str(row["job_id"])
         )
+        assert stored is not None
         self.assertEqual(stored["status"], "failed")
         self.assertEqual(stored["error_code"], "NotConfigured")
         public = get_agent_job_status(
@@ -317,6 +325,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
         stored = db.get_agent_job(
             owner="owner-unavailable", job_id=str(unavailable["job_id"])
         )
+        assert stored is not None
         self.assertEqual(stored["status"], "retry_wait")
         self.assertEqual(stored["error_code"], "UpstreamUnavailable")
 
@@ -333,6 +342,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
         stored = db.get_agent_job(
             owner="owner-inconclusive", job_id=str(inconclusive["job_id"])
         )
+        assert stored is not None
         self.assertEqual(stored["status"], "succeeded")
         public = get_agent_job_status(
             {"job_id": str(inconclusive["job_id"]), "limit": 5},

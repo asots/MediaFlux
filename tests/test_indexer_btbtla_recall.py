@@ -91,8 +91,9 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(page.partial)
                     self.assertEqual([(error.site_id, error.code) for error in page.errors], [('btbtla', code)])
                     self.assertNotIn('private', page.errors[0].message)
-                    self.assertTrue(all(service.get_result(item.result_id).detail_url == item.detail_url
-                                        for item in page.items))
+                    for item in page.items:
+                        assert item.result_id is not None
+                        self.assertEqual(service.get_result(item.result_id).detail_url, item.detail_url)
                 repeated = await service.search('Demo', site_ids=('btbtla',))
                 self.assertTrue(repeated.cached)
                 self.assertTrue(repeated.partial)
@@ -274,7 +275,9 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([item.detail_url for item in third.items], [BTBtlaAdapter.base_url + 'tdown/new.html'])
                 self.assertFalse(third.has_more)
                 self.assertFalse(third.partial)
-                self.assertTrue(all(service.get_result(item.result_id) for item in first.items))
+                for item in first.items:
+                    assert item.result_id is not None
+                    self.assertTrue(service.get_result(item.result_id))
                 self.assertEqual(len(http.calls), 7)
 
     async def test_failed_following_native_page_does_not_erase_valid_windows(self):
@@ -592,7 +595,9 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any('2026' in item.title for item in result.items))
                 self.assertEqual(len(http.calls), 4)
                 self.assertTrue(all(call['url'].startswith('https://btbtlb.com/') for call in http.calls[1:]))
-                self.assertTrue(all(item.detail_url.startswith('https://btbtlb.com/') for item in result.items))
+                for item in result.items:
+                    assert item.detail_url is not None
+                    self.assertTrue(item.detail_url.startswith('https://btbtlb.com/'))
 
     async def test_shared_service_keeps_year_context_and_caches_correct_resources(self):
         http = FakeHttpClient(_EMPTY)

@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from app import database as db
 from app.clients.guangya import GuangYaClient, close_guangya_client
@@ -82,7 +83,7 @@ class STRMMetadataWorker:
     def wake(self) -> None:
         self._wake_event.set()
 
-    def status(self) -> dict[str, object]:
+    def status(self) -> dict[str, Any]:
         counts = db.count_strm_metadata_jobs()
         with self._state_lock:
             breaker_remaining = max(0, int(self._breaker_until - time.monotonic()))
@@ -90,12 +91,12 @@ class STRMMetadataWorker:
                 **counts,
                 "enabled": get_bool("STRM_METADATA_ENABLED", False),
                 "worker_running": bool(self._thread and self._thread.is_alive()),
-                "consumer_active": bool(self._consumer_active),
-                "current_job_id": int(self._current_job_id),
+                "consumer_active": self._consumer_active,
+                "current_job_id": self._current_job_id,
                 "breaker_seconds": breaker_remaining,
                 "last_error_type": self._last_error_type,
-                "completed_session": int(self._completed_session),
-                "failed_session": int(self._failed_session),
+                "completed_session": self._completed_session,
+                "failed_session": self._failed_session,
             }
 
     def _runtime_client(self) -> GuangYaClient:
@@ -408,7 +409,7 @@ class STRMMetadataWorker:
             try:
                 results = enqueue_media_refresh_paths(
                     paths,
-                    immediate=bool(force),
+                    immediate=force,
                     allow_emby=allow_emby,
                 )
             except Exception:

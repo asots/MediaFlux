@@ -42,6 +42,7 @@ class MediaProxyRepositoryTests(unittest.TestCase):
                 trusted_proxy_cidrs_json='["172.18.0.1/32"]',
             )
             instance = repository.get_media_proxy_instance(instance_id)
+            assert instance is not None
             self.assertEqual(int(instance["trust_forwarded_headers"]), 1)
             self.assertEqual(
                 instance["trusted_proxy_cidrs_json"],
@@ -55,6 +56,7 @@ class MediaProxyRepositoryTests(unittest.TestCase):
                 },
             ))
             instance = repository.get_media_proxy_instance(instance_id)
+            assert instance is not None
             self.assertEqual(int(instance["trust_forwarded_headers"]), 0)
             self.assertEqual(
                 instance["trusted_proxy_cidrs_json"],
@@ -68,7 +70,7 @@ class MediaProxyRepositoryTests(unittest.TestCase):
                 local_relative_path="Movie.mkv",
             )
             row = repository.get_media_proxy_binding(instance_id, "item-1", "missing-source")
-            self.assertIsNotNone(row)
+            assert (row) is not None
             self.assertEqual(row["media_source_id"], "source-1")
             repository.record_media_proxy_playback_attempt(
                 instance_id=instance_id,

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from app.routes.discovery_image import poster
 
@@ -44,7 +46,7 @@ class DiscoveryImageHeaderTests(unittest.TestCase):
             "app.routes.discovery_image.decode_poster_token",
             return_value="img1.doubanio.com/view/photo/test.jpg",
         ), patch("app.routes.discovery_image._get_poster_session", return_value=session):
-            response = poster(request, "douban", "signed-token")
+            response = poster(cast(Request, request), "douban", "signed-token")
 
         self.assertEqual(response.status_code, 200)
         call_kwargs = session.get.call_args
@@ -60,7 +62,7 @@ class DiscoveryImageHeaderTests(unittest.TestCase):
             "app.routes.discovery_image.decode_poster_token",
             return_value="poster.jpg",
         ), patch("app.routes.discovery_image._get_poster_session", return_value=session):
-            response = poster(request, "tmdb", "signed-token")
+            response = poster(cast(Request, request), "tmdb", "signed-token")
 
         self.assertEqual(response.status_code, 200)
         call_kwargs = session.get.call_args
@@ -77,7 +79,7 @@ class DiscoveryImageHeaderTests(unittest.TestCase):
             "app.routes.discovery_image.decode_poster_token", return_value="poster.jpg"
         ), patch("app.routes.discovery_image._get_poster_session", return_value=session):
             with self.assertRaises(HTTPException) as raised:
-                poster(request, "tmdb", "signed-token")
+                poster(cast(Request, request), "tmdb", "signed-token")
         self.assertEqual(raised.exception.status_code, 502)
         self.assertTrue(first.closed)
         session.get.assert_called_once()
@@ -93,7 +95,7 @@ class DiscoveryImageHeaderTests(unittest.TestCase):
             "app.routes.discovery_image.decode_poster_token",
             return_value="img1.doubanio.com/view/photo/test.jpg",
         ), patch("app.routes.discovery_image._get_poster_session", return_value=session):
-            response = poster(request, "douban", "signed-token")
+            response = poster(cast(Request, request), "douban", "signed-token")
 
         self.assertEqual(response.status_code, 200)
         self.assertGreaterEqual(session.get.call_count, 2)
@@ -115,7 +117,7 @@ class DiscoveryImageHeaderTests(unittest.TestCase):
             "app.routes.discovery_image.decode_poster_token",
             return_value="img9.doubanio.com/view/photo/poster.jpg",
         ), patch("app.routes.discovery_image._get_poster_session", return_value=session):
-            response = poster(request, "douban", "signed-token")
+            response = poster(cast(Request, request), "douban", "signed-token")
 
         self.assertEqual(response.status_code, 200)
         # 至少 3 次调用：原始 URL 2 次 + 备用节点 1 次
@@ -131,7 +133,7 @@ class DiscoveryImageHeaderTests(unittest.TestCase):
             "app.routes.discovery_image.decode_poster_token",
             return_value="img1.doubanio.com/view/photo/test.jpg",
         ), patch("app.routes.discovery_image._get_poster_session", return_value=session):
-            poster(request, "douban", "signed-token")
+            poster(cast(Request, request), "douban", "signed-token")
 
         call_kwargs = session.get.call_args
         headers = call_kwargs.kwargs["headers"]
@@ -151,7 +153,7 @@ class DiscoveryImageHeaderTests(unittest.TestCase):
             "app.routes.discovery_image.decode_poster_token",
             return_value="img1.doubanio.com/view/photo/test.jpg",
         ), patch("app.routes.discovery_image._get_poster_session", return_value=session):
-            poster(request, "douban", "signed-token")
+            poster(cast(Request, request), "douban", "signed-token")
 
         call_kwargs = session.get.call_args
         self.assertTrue(call_kwargs.kwargs["allow_redirects"])

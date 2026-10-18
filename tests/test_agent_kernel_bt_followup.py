@@ -1,5 +1,7 @@
 """生产短句的完整能力窗口与搜索引用→批量 EffectPlan 回归。"""
 from __future__ import annotations
+from app.agent.kernel.model import ModelAdapter
+from typing import cast
 
 import unittest
 from dataclasses import replace
@@ -51,7 +53,7 @@ class SubmitTwoFromHistoryModel:
 
 class AgentKernelBtFollowupTests(unittest.IsolatedAsyncioTestCase):
     def test_short_numbered_cloud_followup_keeps_submit_and_discovery_visible(self):
-        session = build_agent_kernel(model=NoModel())
+        session = build_agent_kernel(model=cast(ModelAdapter | None, NoModel()))
         context = {
             "owner": "fixture-owner", "session_id": "fixture-session", "channel": "test",
             "reference_kinds": ("resource_candidates",),
@@ -70,7 +72,7 @@ class AgentKernelBtFollowupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLessEqual(len([n for n in names if n != "agent.capabilities"]), session.retriever.maximum)
 
     def test_short_cloud_followup_after_explicit_candidate_selection_keeps_submission(self):
-        session = build_agent_kernel(model=NoModel())
+        session = build_agent_kernel(model=cast(ModelAdapter | None, NoModel()))
         context = {
             "owner": "fixture-owner", "session_id": "fixture-session", "channel": "test",
             "reference_kinds": ("resource_candidates",),

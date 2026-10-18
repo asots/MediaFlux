@@ -130,7 +130,9 @@ async def _ready_case(tmp_path, *, channel='web', route=None, fail_write=False):
             row = conn.execute('SELECT * FROM organize_operation_jobs').fetchone()
         assert row['status'] == 'pending'
         worker = _run_real_worker(jobs.claim_organize_operation_job(row['job_id']))
-        assert jobs.get_organize_operation_job(row['job_id'])['status'] in ({'partial', 'failed'} if fail_write else {'completed'})
+        get_organize_operation_job_result = jobs.get_organize_operation_job(row['job_id'])
+        assert get_organize_operation_job_result is not None
+        assert get_organize_operation_job_result['status'] in ({'partial', 'failed'} if fail_write else {'completed'})
         def due(s):
             s.metadata['effect_waits'][plan_id]['next_poll_at'] = 0
             s.metadata['effect_next_poll_at'] = 0
@@ -169,6 +171,7 @@ class NextWriteScript(FollowScript):
         body = json.loads(request.content)
         self.requests.append(body)
         step = self.steps.pop(0)
+        assert self.change_arguments is not None
         assert step == 'execute' and self.change_arguments['operations']
         name = 'guangya__fs__change__execute'
         return httpx.Response(200, json={'choices': [{'message': {'tool_calls': [{
@@ -188,7 +191,9 @@ def test_new_implicit_plan_after_completion_requires_fresh_confirmation(tmp_path
             assert final.pending_effect_plan_id and final.pending_effect_plan_id != candidate['wait_id']
             assert final.metadata['pending_effect_goal']['content'] == GOAL
             assert final.metadata['active_publication']['status'] == 'finished'
-            assert client.file_info('rename').name == 'admitted.mp4', 'new write must not execute without a new confirmation'
+            file_info_result = client.file_info('rename')
+            assert file_info_result is not None
+            assert file_info_result.name == 'admitted.mp4', 'new write must not execute without a new confirmation'
             with db.get_conn() as conn:
                 assert conn.execute('SELECT COUNT(*) FROM organize_operation_jobs').fetchone()[0] == 1
             assert [r for r in final.conversation if r['role'] == 'user'] == source_users
@@ -333,7 +338,9 @@ def test_new_tg_approval_is_durable_without_executing_it(tmp_path):
             view = deliveries[0]['delivery_view']
             assert view['status'] == 'approval_required'
             assert view['approval']['plan_id'] == (await cold.load(owner=OWNER, session_id=SID)).pending_effect_plan_id
-            assert client.file_info('rename').name == 'admitted.mp4'
+            file_info_result_2 = client.file_info('rename')
+            assert file_info_result_2 is not None
+            assert file_info_result_2.name == 'admitted.mp4'
     asyncio.run(run())
 
 

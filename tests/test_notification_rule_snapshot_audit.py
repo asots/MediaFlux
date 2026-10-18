@@ -30,6 +30,7 @@ class NotificationRuleSnapshotAuditTests(IsolatedDatabaseTestCase):
         assert self.initial is not None
 
     def _save(self, **updates):
+        assert self.initial is not None
         return repository.set_notification_rule(
             self.sid,
             expected_rule_revision=0,
@@ -140,10 +141,11 @@ class NotificationRuleSnapshotAuditTests(IsolatedDatabaseTestCase):
         with patch.object(db, "get_conn", hooked):
             receipt = self._save(enabled=True)
         self.assertTrue(deleted)
-        self.assertIsNotNone(receipt)
+        assert (receipt) is not None
         self.assertIsNone(repository.get_notification_rule(self.sid))
 
     def test_defaults_cas_partial_update_and_missing_subscription(self) -> None:
+        assert self.initial is not None
         self.assertFalse(self.initial["explicit"])
         self.assertFalse(self.initial["enabled"])
         self.assertEqual(self.initial["revision"], 0)

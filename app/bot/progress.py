@@ -60,7 +60,7 @@ def _compact_pending_rows(
     rows: Iterable[dict[str, Any]], *, now: int | None = None,
 ) -> list[dict[str, Any]]:
     """保留近期、活跃和终态优先记录，同时给持久 JSON 明确上限。"""
-    stamp = int(time.time()) if now is None else int(now)
+    stamp = int(time.time()) if now is None else now
     deduplicated: dict[str, tuple[int, dict[str, Any]]] = {}
     for position, raw in enumerate(rows):
         if not isinstance(raw, dict):
@@ -85,7 +85,7 @@ def _compact_pending_rows(
     ranked = sorted(
         items,
         key=lambda item: (
-            str(item[0]) in active_ids,
+            item[0] in active_ids,
             bool(item[1][1].get("terminal_pending")),
             _pending_sort_key(item[1][1], item[1][0]),
         ),
@@ -99,7 +99,7 @@ def _compact_pending_rows(
 def _load_pending() -> list[dict[str, Any]]:
     try:
         payload = json.loads(db.kv_get(_PENDING_KEY, "[]") or "[]")
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return []
     rows = [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
     return _compact_pending_rows(rows)
@@ -151,7 +151,7 @@ def _update_pending(operation_id: str, **fields: Any) -> bool:
             rows = _load_pending()
             updated = False
             for row in rows:
-                if str(row.get("id") or "") != str(operation_id or ""):
+                if str(row.get("id") or "") != (operation_id or ""):
                     continue
                 row.update(fields)
                 updated = True
@@ -208,7 +208,7 @@ def _rich_html(rendered: str) -> str:
         block_lines.clear()
         block_close = ""
 
-    normalized = str(rendered).replace("\r\n", "\n").replace("\r", "\n")
+    normalized = rendered.replace("\r\n", "\n").replace("\r", "\n")
     for line in normalized.split("\n"):
         stripped = line.strip()
         if block_close:
@@ -379,7 +379,7 @@ class TelegramProgress:
         _register_pending({
             "id": self.operation_id,
             "chat_id": str(self.chat_id),
-            "label": str(self.label)[:160],
+            "label": self.label[:160],
             "mode": self.mode,
             "message_id": self.message_id,
             "draft_id": self.draft_id,
@@ -395,9 +395,9 @@ class TelegramProgress:
         ).start()
         return self
 
-    def bind_task_run(self, task_name: str, run_id: object) -> bool:
+    def bind_task_run(self, task_name: str, run_id: Any) -> bool:
         """把 Telegram 临时进度与持久化后台任务精确关联。"""
-        normalized_name = str(task_name or "").strip()
+        normalized_name = (task_name or "").strip()
         try:
             normalized_run_id = int(run_id or 0)
         except (TypeError, ValueError):
@@ -470,7 +470,7 @@ class TelegramProgress:
         if callable(sender):
             return sender(self.chat_id, rendered, **kwargs)
         if self.source_message is not None:
-            return reply(self.source_message, rendered, **kwargs)
+            return target(self.source_message, rendered, **kwargs)
         return None
 
     def _send_real_result(
@@ -530,10 +530,10 @@ class TelegramProgress:
     def _mark_terminal_attempt(self, operation: str, rendered: str) -> None:
         _update_pending(
             self.operation_id,
-            terminal_text=str(rendered),
+            terminal_text=rendered,
             terminal_pending=True,
             terminal_delivery_state="sending",
-            terminal_operation=str(operation or "send"),
+            terminal_operation=(operation or "send"),
         )
 
     def _settle_terminal_result(
@@ -556,7 +556,7 @@ class TelegramProgress:
         if result.retryable:
             _update_pending(
                 self.operation_id,
-                terminal_text=str(rendered),
+                terminal_text=rendered,
                 terminal_pending=True,
                 terminal_delivery_state="retry_wait",
                 retry_not_before=time.time() + result.retry_after_seconds,
@@ -615,7 +615,7 @@ class TelegramProgress:
                     kwargs["reply_markup"] = None
                 result, _value = call_telegram_edit(
                     lambda: edit(rendered, self.chat_id, self.message_id, **kwargs),
-                    message_id=int(self.message_id),
+                    message_id=self.message_id,
                 )
                 updated = result.ok
             else:
@@ -686,7 +686,7 @@ class TelegramProgress:
         if callable(clear):
             result, _value = call_telegram_edit(
                 lambda: clear(self.chat_id, self.message_id, reply_markup=None),
-                message_id=int(self.message_id),
+                message_id=self.message_id,
             )
             if not result.ok:
                 logger.info("Telegram 旧消息键盘清理未确认 %s", telegram_error_summary(result))
@@ -741,7 +741,7 @@ class TelegramProgress:
     ) -> bool:
         """可靠结束进度，并把超长终态按顺序发送为多条完整消息。"""
 
-        chunks = tuple(str(chunk) for chunk in rendered_chunks if str(chunk))
+        chunks = tuple(chunk for chunk in rendered_chunks if chunk)
         if not chunks:
             chunks = ("任务已结束。",)
         rendered = chunks[0]
@@ -764,7 +764,7 @@ class TelegramProgress:
                     lambda: self.bot.edit_message_text(
                         rendered, self.chat_id, self.message_id, **kwargs
                     ),
-                    message_id=int(self.message_id),
+                    message_id=self.message_id,
                 )
                 if not result.ok and telegram_edit_fallback_allowed(result):
                     logger.info(
@@ -892,7 +892,7 @@ def deliver_terminal_to_existing_message(
         bot,
         telebot_module,
         chat_id,
-        str(label or "操作结果"),
+        (label or "操作结果"),
         source_message=source_message,
     )
     operation.mode = "edit"
@@ -904,20 +904,20 @@ def deliver_terminal_to_existing_message(
     _register_pending({
         "id": operation.operation_id,
         "chat_id": str(chat_id),
-        "label": str(operation.label)[:160],
+        "label": operation.label[:160],
         "mode": "edit",
         "message_id": operation.message_id,
         "message_thread_id": operation.message_thread_id,
         "started_at": stamp,
         "deadline": stamp + 180,
-        "terminal_text": str(rendered),
+        "terminal_text": rendered,
         "terminal_pending": True,
         "terminal_delivery_state": "retry_wait",
         "terminal_operation": "edit",
         "clear_reply_markup": True,
     })
     delivered = operation.finish(
-        str(rendered),
+        rendered,
         reply_markup=reply_markup,
         clear_reply_markup=True,
     )
@@ -963,7 +963,7 @@ def _clear_stale_draft(bot: Any, telebot_module: Any, row: dict[str, Any]) -> bo
 
 
 def _generic_interrupted_text(label: str) -> str:
-    safe_label = html.escape(str(label or "Telegram 任务"))
+    safe_label = html.escape(label or "Telegram 任务")
     return (
         f"<b>{safe_label}已中断</b>\n"
         "服务曾重启或异常退出，本次操作已结束，请重新发起。"
@@ -1007,7 +1007,7 @@ def _task_run_recovery_text(row: dict[str, Any], label: str) -> str:
         result = json.loads(str(task_run["result"] or "{}"))
         if isinstance(result, dict) and isinstance(result.get("stats"), dict):
             stats = result["stats"]
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         stats = {}
     def safe_count(key: str) -> int:
         try:
@@ -1049,7 +1049,7 @@ def pending_stale_operation_count(
 ) -> int:
     """返回仍需收尾的持久化 Telegram 操作数；读取失败返回 -1。"""
     targets = (
-        {str(operation_id) for operation_id in operation_ids if str(operation_id)}
+        {operation_id for operation_id in operation_ids if operation_id}
         if operation_ids is not None else None
     )
     try:
@@ -1097,7 +1097,7 @@ def recover_stale_operations(
         logger.info("Telegram 中断任务状态读取失败 type=%s", type(exc).__name__)
         return 0
     targets = (
-        {str(operation_id) for operation_id in operation_ids if str(operation_id)}
+        {operation_id for operation_id in operation_ids if operation_id}
         if operation_ids is not None else None
     )
     recovered_ids: set[str] = set()
@@ -1237,7 +1237,7 @@ def _retry_terminal_until_delivered(
     delays: tuple[float, ...] = (2.0, 8.0, 30.0, 120.0, 300.0),
 ) -> int:
     """在当前 Bot 代内重投一个已持久化终态；失败记录留给启动恢复。"""
-    target = (str(operation_id or "").strip(),)
+    target = ((operation_id or "").strip(),)
     if not target[0]:
         return 0
     for delay in delays:
@@ -1285,7 +1285,7 @@ def schedule_terminal_delivery_retry(
     delays: tuple[float, ...] = (2.0, 8.0, 30.0, 120.0, 300.0),
 ) -> bool:
     """为运行期新产生的 pending 终态启动一次去重、可停止的后台重投。"""
-    operation_id = str(operation_id or "").strip()
+    operation_id = (operation_id or "").strip()
     if not operation_id:
         return False
     with _terminal_retry_lock:

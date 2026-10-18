@@ -39,7 +39,7 @@ class IndexerSearchRequest:
         query: str,
         page: int = 1,
         *,
-        media_type: str = "",
+        media_type: str | None = "",
         sort_mode: str = "relevance_desc",
         season: int | str | None = None,
         episode: int | str | None = None,
@@ -84,7 +84,7 @@ class IndexerMediaSearchRequest:
         english_title: str = "",
         aliases: Iterable[str] | None = None,
         year: int | str | None = None,
-        media_type: str = "",
+        media_type: str | None = "",
         page: int = 1,
         sort_mode: str = "relevance_desc",
         season: int | str | None = None,
@@ -268,9 +268,9 @@ class IndexerItem:
     cluster_size: int = 1
 
     def __post_init__(self) -> None:
-        self.site_id = str(self.site_id).strip().lower()
-        self.site_name = str(self.site_name).strip()
-        self.title = str(self.title).strip()
+        self.site_id = self.site_id.strip().lower()
+        self.site_name = self.site_name.strip()
+        self.title = self.title.strip()
         if not self.site_id or not self.site_name or not self.title:
             raise ValueError("site_id, site_name and title are required")
         if self.download_state not in _DOWNLOAD_STATES:
@@ -281,10 +281,10 @@ class IndexerItem:
         if self.size_bytes is not None and self.size_bytes < 0:
             raise ValueError("size_bytes cannot be negative")
         if self.relevance_score is not None:
-            self.relevance_score = max(0, min(int(self.relevance_score), 100))
-        self.match_reasons = tuple(dict.fromkeys(str(reason).strip() for reason in self.match_reasons if str(reason).strip()))
-        self.cluster_id = str(self.cluster_id or "").strip() or None
-        self.cluster_size = max(1, int(self.cluster_size or 1))
+            self.relevance_score = max(0, min(self.relevance_score, 100))
+        self.match_reasons = tuple(dict.fromkeys(reason.strip() for reason in self.match_reasons if reason.strip()))
+        self.cluster_id = (self.cluster_id or "").strip() or None
+        self.cluster_size = max(1, (self.cluster_size or 1))
 
     def with_result_id(self, result_id: str) -> "IndexerItem":
         return replace(self, result_id=result_id)

@@ -1,4 +1,6 @@
 """READ 直接修参；WRITE/DANGER 仍由真实 Session/Pipeline 校验修复证据。"""
+from app.agent.kernel.pipeline import AuthorizationPolicy
+from typing import cast
 import asyncio
 import json
 
@@ -56,7 +58,7 @@ def test_read_invalid_arguments_returns_schema_without_ticket_or_field_locks(sta
         ctx = ToolCallContext(owner=lease.owner, session_id=lease.session_id,
             request_id=lease.request_id, turn_id=lease.turn_id, lease=lease,
             cancellation=CancellationToken(), report_progress=lambda _: asyncio.sleep(0))
-        pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=state, authorization=Authorization())
+        pipeline = ToolPipeline(catalog=ToolCatalog([tool]), state_store=state, authorization=cast(AuthorizationPolicy | None, Authorization()))
         bad = {"query": "old", "limit": "bad" if stage == "schema" else 1}
         with pytest.raises(ToolPipelineError) as caught:
             await pipeline.execute(tool.name, bad, context=ctx)
@@ -191,7 +193,14 @@ def test_write_repair_ticket_scope_and_single_consumption(field, effect):
             await pipeline.execute(tool.name, {}, context=context)
         ticket = failure.value.repair_ticket
         assert ticket
-        other = replace(context, lease=replace(lease, generation=lease.generation+1)) if field == "generation" else replace(context, **{field: "other"})
+        if field == "generation":
+            other = replace(context, lease=replace(lease, generation=lease.generation + 1))
+        elif field == "owner":
+            other = replace(context, owner="other")
+        elif field == "session_id":
+            other = replace(context, session_id="other")
+        else:
+            other = replace(context, turn_id="other")
         args = {"ticket": ticket, "arguments": {"target": "x"}}
         with pytest.raises(ToolPipelineError, match="不属于本轮"):
             await pipeline.execute("agent.repair", args, context=other)

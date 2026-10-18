@@ -1,6 +1,7 @@
 """Media Agent 统一工作区待办的安全、路由与 API 回归测试。"""
 
 from __future__ import annotations
+from typing import Any
 
 import json
 from unittest.mock import patch
@@ -26,7 +27,7 @@ def _automation(**overrides):
     return value
 
 
-def _local_media(**task_overrides):
+def _local_media(**task_overrides) -> dict[str, Any]:
     tasks = {
         "waiting_stable": 0,
         "active": 0,

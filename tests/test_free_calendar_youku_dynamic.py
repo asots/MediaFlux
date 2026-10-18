@@ -5,17 +5,21 @@ import asyncio
 import copy
 import hashlib
 import json
+import unittest
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
-import unittest
 from unittest.mock import patch
 
 import httpx
 
 import tests  # noqa: F401 -- 先隔离DB/config，再导入应用。
 from app.discovery.calendar.http import CalendarHttp
-from app.discovery.calendar.providers.youku import YoukuCalendarProvider, _dynamic_calendar_data, _parse_calendar_data
+from app.discovery.calendar.providers.youku import (
+    YoukuCalendarProvider,
+    _dynamic_calendar_data,
+    _parse_calendar_data,
+)
 from app.discovery.calendar.youku_challenge import has_access_challenge
 
 FIXTURES = Path(__file__).with_name("fixtures") / "calendar" / "youku"
@@ -44,7 +48,7 @@ class YoukuDynamicTests(unittest.IsolatedAsyncioTestCase):
             self.enterContext(patch("socket." + name, side_effect=forbidden))
         self.provider = YoukuCalendarProvider(clock=lambda: datetime(2026, 9, 10, 3, 7))
         self.calls = []
-        self.html = STALE_HTML
+        self.html: str | httpx.Response = STALE_HTML
         self.payload = copy.deepcopy(DYNAMIC)
         self.responses = None
 

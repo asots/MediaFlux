@@ -151,7 +151,7 @@ class StaticAssetBuildTests(unittest.TestCase):
 
     def test_built_javascript_is_valid_classic_script(self) -> None:
         node = shutil.which("node")
-        self.assertIsNotNone(node)
+        assert (node) is not None
         for javascript in sorted(self.output.rglob("*.js")):
             with self.subTest(javascript=javascript.relative_to(self.output).as_posix()):
                 completed = subprocess.run(

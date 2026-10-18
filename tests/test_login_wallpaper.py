@@ -113,6 +113,7 @@ class LoginWallpaperServiceTests(IsolatedDatabaseTestCase):
                 client_factory=lambda **_kwargs: client,
             )
 
+        assert result is not None
         self.assertEqual(
             result["image_url"],
             "https://image.tmdb.org/t/p/w1280/portrait.jpg",
@@ -138,6 +139,7 @@ class LoginWallpaperServiceTests(IsolatedDatabaseTestCase):
              patch("app.modules.login_wallpaper.schedule_login_wallpaper_refresh") as schedule:
             result = get_login_wallpaper(now=1_000)
 
+        assert result is not None
         self.assertEqual(result["tmdb_id"], 1)
         schedule.assert_called_once()
 

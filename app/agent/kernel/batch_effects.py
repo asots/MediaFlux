@@ -172,6 +172,7 @@ def batch_tool(pipeline) -> KernelToolSpec | None:
                 resolved = await pipeline._authorize(tool, dict(step["arguments"]), context, confirmation=True)
                 if tool.metadata.get("batch_mode") == "tracked":
                     continue
+                assert tool.prepare is not None  # selected 仅允许已校验的写工具。
                 observed = await invoke(tool.prepare, resolved, context)
                 if not isinstance(observed, PreparedEffect) or observed.snapshot_fingerprint != step["snapshot"]:
                     raise ToolPipelineError("组合后项状态已变化，未执行新的写入；请重新预检", code="confirmation_stale")

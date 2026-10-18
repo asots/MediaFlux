@@ -47,6 +47,7 @@ class QbRemovalTrackingTests(unittest.TestCase):
         def interrupted(*_args, **kwargs):
             self.assertFalse(kwargs["delete_files"])
             row = db.get_download_request(request_id)
+            assert row is not None
             self.assertEqual((row["status"], row["qb_status"]), ("cancelled", "cancelled"))
             raise SystemExit("模拟进程在远端调用时退出")
 
@@ -54,7 +55,9 @@ class QbRemovalTrackingTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             remove_qb_tasks(client, ["A" * 40])
         db.init_db()
-        self.assertEqual(db.get_download_request(request_id)["qb_status"], "cancelled")
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["qb_status"], "cancelled")
         self.assertEqual(db.list_active_download_requests(include_local_import=True), [])
 
     def test_timeout_and_explicit_rejection_do_not_claim_remote_deleted(self):
@@ -68,7 +71,9 @@ class QbRemovalTrackingTests(unittest.TestCase):
                     client.delete_torrents.return_value = failure
                 with self.assertRaisesRegex(QBTaskRemovalUnconfirmed, "本地跟踪已停止.*移除未确认"):
                     remove_qb_tasks(client, ["a" * 40])
-                self.assertEqual(db.get_download_request(request_id)["status"], "cancelled")
+                get_download_request_result_2 = db.get_download_request(request_id)
+                assert get_download_request_result_2 is not None
+                self.assertEqual(get_download_request_result_2["status"], "cancelled")
                 client.delete_torrents.assert_called_once_with("a" * 40, delete_files=False)
 
     def test_db_unavailable_prevents_remote_deletion(self):
@@ -89,7 +94,9 @@ class QbRemovalTrackingTests(unittest.TestCase):
             tracker._update_request(db.get_download_request(request_id), [], [])
         local.assert_not_called()
         notify.assert_not_called()
-        self.assertEqual(db.get_download_request(request_id)["status"], "cancelled")
+        get_download_request_result_3 = db.get_download_request(request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["status"], "cancelled")
 
     def test_batch_exact_identity_preserves_completed_and_other_backend(self):
         first = self.request(gy="downloading", error="历史光鸭提示")
@@ -99,13 +106,22 @@ class QbRemovalTrackingTests(unittest.TestCase):
         db.update_download_request(legacy, qb_task_id="")
         result = db.cancel_qb_download_tracking(["A" * 40, "a" * 40, "b" * 40, "d" * 40])
         self.assertEqual(result, [first])
-        self.assertEqual(db.get_download_request(legacy)["qb_status"], "downloading")
+        get_download_request_result_4 = db.get_download_request(legacy)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["qb_status"], "downloading")
         row = db.get_download_request(first)
+        assert row is not None
         self.assertEqual((row["status"], row["qb_status"], row["gy_status"]), ("downloading", "cancelled", "downloading"))
         self.assertEqual(row["error"], "历史光鸭提示")
-        self.assertEqual(db.get_download_request(complete)["qb_status"], "completed")
-        self.assertEqual(db.get_download_request(complete)["local_import_status"], "completed")
-        self.assertEqual(db.get_download_request(other)["qb_status"], "downloading")
+        get_download_request_result_5 = db.get_download_request(complete)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5["qb_status"], "completed")
+        get_download_request_result_6 = db.get_download_request(complete)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6["local_import_status"], "completed")
+        get_download_request_result_7 = db.get_download_request(other)
+        assert get_download_request_result_7 is not None
+        self.assertEqual(get_download_request_result_7["qb_status"], "downloading")
         self.assertEqual(db.cancel_qb_download_tracking(["a" * 40, "d" * 40]), [])
 
     def test_cancelled_qb_does_not_prevent_other_backend_finishing_or_failing(self):
@@ -117,13 +133,16 @@ class QbRemovalTrackingTests(unittest.TestCase):
                 with patch.object(tracker, "_notify_completion"), patch.object(tracker, "_staging_ready_for_organize", return_value=False):
                     tracker._update_request(db.get_download_request(request_id), [], [gy_task])
                 row = db.get_download_request(request_id)
+                assert row is not None
                 self.assertEqual((row["status"], row["gy_status"], row["qb_status"]), (expected, expected, "cancelled"))
                 self.assertEqual(row["notification_delivery_status"], "pending")
 
     def test_cancelled_branch_does_not_resurrect_resubmitted_root(self):
         request_id = self.request(gy="downloading", status="resubmitted")
         db.cancel_qb_download_tracking(["a" * 40])
-        self.assertEqual(db.get_download_request(request_id)["status"], "resubmitted")
+        get_download_request_result_8 = db.get_download_request(request_id)
+        assert get_download_request_result_8 is not None
+        self.assertEqual(get_download_request_result_8["status"], "resubmitted")
         self.assertIn(request_id, [row["id"] for row in db.list_active_download_requests()])
 
     def test_unobserved_external_removal_keeps_missing_guard_and_never_assumes_cancel(self):
@@ -131,15 +150,20 @@ class QbRemovalTrackingTests(unittest.TestCase):
         tracker = DownloadTracker()
         with patch.object(tracker, "_notify_completion"):
             tracker._update_request(db.get_download_request(request_id), [], [], qb_available=False)
-            self.assertEqual(db.get_download_request(request_id)["qb_status"], "downloading")
+            get_download_request_result_9 = db.get_download_request(request_id)
+            assert get_download_request_result_9 is not None
+            self.assertEqual(get_download_request_result_9["qb_status"], "downloading")
             tracker._update_request(db.get_download_request(request_id), [], [], qb_available=True)
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual((row["status"], row["qb_status"]), ("manual_review", "manual_review"))
         with patch("app.modules.telegram_download_lifecycle.get_notification_thread_event", return_value=None):
             event = build_download_lifecycle_event(row, probe_progress={})
-        self.assertIn("未启动", dict(event.fields)["自动整理"])
-        self.assertIn("无法仅凭缺失判断", event.footer)
-        self.assertIn("请勿直接重试", event.footer)
+        organize_status = dict(event.fields)["自动整理"]
+        assert isinstance(organize_status, str)
+        self.assertIn("未启动", organize_status)
+        self.assertIn("无法仅凭缺失判断", str(event.footer))
+        self.assertIn("请勿直接重试", str(event.footer))
         self.assertEqual(dict(event.fields)["发现 qB 缺失"], "2000-01-01 00:00:00")
         self.assertIn("请求创建", dict(event.fields))
 
@@ -147,6 +171,7 @@ class QbRemovalTrackingTests(unittest.TestCase):
         request_id = self.request(qb="manual_review", status="manual_review", notification_event_status="manual_review", notification_delivery_status="pending")
         db.cancel_qb_download_tracking(["a" * 40])
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["notification_delivery_status"], "")
         self.assertIsNone(db.claim_download_request_notification(request_id))
 
@@ -155,7 +180,9 @@ class QbRemovalTrackingTests(unittest.TestCase):
         self.assertEqual(db.cancel_qb_download_tracking(["b" * 40]), [])
         with self.assertRaises(ValueError):
             db.cancel_qb_download_tracking(["a" * 40, "bad"])
-        self.assertEqual(db.get_download_request(request_id)["qb_status"], "downloading")
+        get_download_request_result_10 = db.get_download_request(request_id)
+        assert get_download_request_result_10 is not None
+        self.assertEqual(get_download_request_result_10["qb_status"], "downloading")
 
     def test_agent_delete_uses_same_durable_tracking_contract(self):
         from app.agent.providers.qbittorrent import QBittorrentProviderTransport
@@ -166,7 +193,9 @@ class QbRemovalTrackingTests(unittest.TestCase):
         client.list_torrents.side_effect = [[SimpleNamespace(hash="a" * 40)], []]
 
         def delete(*_args, **_kwargs):
-            self.assertEqual(db.get_download_request(request_id)["qb_status"], "cancelled")
+            get_download_request_result_11 = db.get_download_request(request_id)
+            assert get_download_request_result_11 is not None
+            self.assertEqual(get_download_request_result_11["qb_status"], "cancelled")
             return True
 
         client.delete_torrents.side_effect = delete
@@ -195,4 +224,6 @@ class QbRemovalTrackingTests(unittest.TestCase):
         self.assertEqual(failure.exception.code, "provider_unavailable")
         self.assertFalse(failure.exception.external_write_possible)
         client.delete_torrents.assert_not_called()
-        self.assertEqual(db.get_download_request(request_id)["qb_status"], "downloading")
+        get_download_request_result_12 = db.get_download_request(request_id)
+        assert get_download_request_result_12 is not None
+        self.assertEqual(get_download_request_result_12["qb_status"], "downloading")

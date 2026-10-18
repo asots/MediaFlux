@@ -218,7 +218,7 @@ def guangya_organize_task_status(task_id: str) -> ToolResult:
     from app.modules.organize_tasks import get_organize_manager
 
     manager = get_organize_manager()
-    raw = manager.task_result(str(task_id or "").strip())
+    raw = manager.task_result((task_id or "").strip())
     if raw is None:
         return ToolResult(
             ok=False,

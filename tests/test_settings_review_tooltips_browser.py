@@ -54,6 +54,7 @@ class SettingsReviewTooltipsBrowserTests(unittest.TestCase):
                 tooltip = page.locator(f"#{prefix}Tooltip")
                 option = trigger.locator("xpath=ancestor::div[contains(@class,'metadata-option')]")
                 before = self._rect(option)
+                assert expect is not None
                 expect(tooltip).to_be_hidden()
                 expect(page.locator(f"#{prefix}Description")).to_be_hidden()
                 trigger.hover()
@@ -85,12 +86,14 @@ class SettingsReviewTooltipsBrowserTests(unittest.TestCase):
                     trigger = page.get_by_role("button", name=f"{name}说明", exact=True)
                     trigger.scroll_into_view_if_needed()
                     rect = trigger.bounding_box()
+                    assert rect is not None
                     self.assertGreaterEqual(rect["width"], 44)
                     self.assertGreaterEqual(rect["height"], 44)
                     option = trigger.locator("xpath=ancestor::div[contains(@class,'metadata-option')]")
                     before = self._rect(option)
                     tooltip = page.locator(f"#{prefix}Tooltip")
                     trigger.tap()
+                    assert expect is not None
                     expect(tooltip).to_be_visible()
                     self._bounded(page, tooltip)
                     self._assert_same_rect(before, self._rect(option))
@@ -114,6 +117,7 @@ class SettingsReviewTooltipsBrowserTests(unittest.TestCase):
                 trigger.click()
                 page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
                 self.assertGreater(page.evaluate("scrollY"), 0)
+                assert expect is not None
                 expect(page.locator("#episodeResearchTooltip")).to_be_visible()
                 self._bounded(page, page.locator("#episodeResearchTooltip"))
                 self.assertEqual(page.evaluate("window.__settingsWrites"), [])
@@ -127,6 +131,7 @@ class SettingsReviewTooltipsBrowserTests(unittest.TestCase):
         page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
         trigger.click()
         tip = page.locator("#episodeResearchTooltip")
+        assert expect is not None
         expect(tip).to_be_visible()
         page.evaluate("document.dispatchEvent(new Event('scroll'))")
         expect(tip).to_be_visible()
@@ -147,6 +152,7 @@ class SettingsReviewTooltipsBrowserTests(unittest.TestCase):
         page, errors = self._page(390, {fixture.PARENT_KEY: "0"})
         trigger = page.locator('[data-help-tooltip="episodeResearchTooltip"]')
         # 现有页面在配置加载前整体visibility:hidden，但布局占位必须稳定。
+        assert expect is not None
         expect(trigger).to_be_hidden()
         before = self._rect(trigger.locator("xpath=ancestor::div[contains(@class,'metadata-option')]"))
         self._resolve_config(page)
@@ -179,6 +185,7 @@ class SettingsIndexerSiteBrowserTests(unittest.TestCase):
         fixture.NsfwCleanReviewSettingsBrowserTests._resolve_config(page)
         page.locator('[data-settings-target="discovery"]').click()
         box = page.locator('[data-indexer-site-box]')
+        assert expect is not None
         expect(box).to_be_visible()
         return page, errors, box.locator('[data-indexer-site="btbtla"]')
 
@@ -197,6 +204,7 @@ class SettingsIndexerSiteBrowserTests(unittest.TestCase):
                 self.assertEqual(page.locator('[data-indexer-site]').evaluate_all(
                     "inputs => inputs.map(input => input.dataset.indexerSite)"), site_order)
                 self.assertEqual(self.selected(page), default_sites)
+                assert expect is not None
                 expect(page.locator('[data-indexer-site="sukebei"]')).not_to_be_checked()
                 geometry = page.locator('[data-indexer-site-selector]').evaluate("""selector => {
                     const bounds = [...selector.children].map(option => option.getBoundingClientRect());
@@ -217,6 +225,8 @@ class SettingsIndexerSiteBrowserTests(unittest.TestCase):
                 remaining = ['nyaa', 'mikan', 'tpb']
                 self.assertEqual(self.selected(page), remaining)
                 after = site_toggle.locator('..').bounding_box()
+                assert after is not None
+                assert before is not None
                 self.assertEqual((before['width'], before['height']), (after['width'], after['height']))
                 page.locator('#settings-panel-discovery [data-save-settings]').click()
                 page.wait_for_function('window.__settingsWrites.length === 1')
@@ -233,6 +243,7 @@ class SettingsIndexerSiteBrowserTests(unittest.TestCase):
         })
         self.assertEqual(self.selected(page), ['mikan'])
         self.assertFalse(btbtla.is_checked())
+        assert expect is not None
         expect(page.locator('[data-indexer-site="mikan"]')).to_be_checked()
         expect(page.locator('[data-indexer-site="sukebei"]')).not_to_be_checked()
         self.assertNotIn('INDEXER_ENABLED_SITES', page.evaluate("collectConfigFields(document.getElementById('settings-panel-discovery'))"))
@@ -244,12 +255,15 @@ class SettingsIndexerSiteBrowserTests(unittest.TestCase):
             with self.subTest(sites=sites):
                 page, errors, site_toggle = self.ready({'INDEXER_ENABLED_SITES': sites})
                 if 'btbtla' in sites:
+                    assert expect is not None
                     expect(site_toggle).to_be_checked()
                 else:
+                    assert expect is not None
                     expect(site_toggle).not_to_be_checked()
                 for key in ('INDEXER_SEARCH_ENABLED', 'DISCOVERY_RESOURCE_RESULTS_ENABLED'):
                     toggle = page.locator(f'[data-key="{key}"]')
                     toggle.locator('..').click()
+                    assert expect is not None
                     expect(site_toggle).to_be_disabled()
                     self.assertEqual(self.selected(page), [site for site in sites.split(',') if site])
                     toggle.locator('..').click()

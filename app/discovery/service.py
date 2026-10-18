@@ -5,7 +5,7 @@ import asyncio
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -14,7 +14,6 @@ from functools import partial
 from typing import Any
 
 from app import config, database
-from app.logger import get_logger
 from app.discovery.cache import CacheLookup, DiscoveryCache
 from app.discovery.models import (
     DiscoveryPage,
@@ -35,6 +34,7 @@ from app.discovery.registry import (
     validate_filters,
     validate_request,
 )
+from app.logger import get_logger
 
 _DISCOVERY_CLOSED_MESSAGE = "探索服务已关闭，请重试"
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -66,10 +66,10 @@ class DiscoveryService:
     ):
         self.registry = registry or build_default_registry()
         self.cache = cache or DiscoveryCache()
-        self.cache_ttl_seconds = max(60, int(cache_ttl_seconds or config.get_int("DISCOVERY_CACHE_TTL_SECONDS", 3600)))
+        self.cache_ttl_seconds = max(60, (cache_ttl_seconds or config.get_int("DISCOVERY_CACHE_TTL_SECONDS", 3600)))
         self.stale_ttl_seconds = max(
             self.cache_ttl_seconds,
-            int(stale_ttl_seconds or config.get_int("DISCOVERY_STALE_TTL_SECONDS", 604800)),
+            (stale_ttl_seconds or config.get_int("DISCOVERY_STALE_TTL_SECONDS", 604800)),
         )
         self._refresh_guard = threading.Condition(threading.RLock())
         self._pending_refreshes: set[str] = set()
@@ -131,7 +131,7 @@ class DiscoveryService:
             _release_discovery_service(self)
 
     @contextmanager
-    def _network_operation(self) -> Iterator[None]:
+    def _network_operation(self) -> Generator[None, None, None]:
         with self._refresh_guard:
             if self._closed:
                 raise self._closed_error()
@@ -148,7 +148,7 @@ class DiscoveryService:
                 self._finish_deferred_shutdown()
 
     @contextmanager
-    def _scraper_operation(self) -> Iterator[Any]:
+    def _scraper_operation(self) -> Generator[Any, None, None]:
         """为一次映射请求创建并尽力释放 TMDB Scraper。"""
         scraper = self._scraper_factory()
         try:
@@ -243,7 +243,7 @@ class DiscoveryService:
 
     def list_items(self, provider: str, category: str, media_type: str,
                    page: int = 1, filters: dict[str, Any] | None = None) -> DiscoveryPage:
-        page = int(page)
+        page = page
         if page < 1 or page > 100:
             raise ValueError("页码必须在 1 到 100 之间")
         provider, category, media_type = validate_request(provider, category, media_type)
@@ -385,33 +385,33 @@ class DiscoveryService:
         missing = [
             (item.provider, item.media_type, item.external_id)
             for item in page.items
-            if not str(item.year or "").strip() or not str(item.release_date or "").strip()
+            if not (item.year or "").strip() or not (item.release_date or "").strip()
         ]
         metadata = self.cache.get_detail_metadata(missing)
         items = []
         for item in page.items:
             detail = metadata.get((item.provider, item.media_type, item.external_id), {})
             year, release_date = item.year, item.release_date
-            if not str(year or "").strip() and self._valid_year(detail.get("year", "")):
+            if not (year or "").strip() and self._valid_year(detail.get("year", "")):
                 year = detail["year"]
-            if not str(release_date or "").strip() and self._valid_release_date(detail.get("release_date", "")):
+            if not (release_date or "").strip() and self._valid_release_date(detail.get("release_date", "")):
                 release_date = detail["release_date"]
             items.append(replace(
                 item, year=year, release_date=release_date,
                 state="watchlisted" if item.stable_id in watched else item.state,
             ))
-        return replace(page, items=items, cached=cached, stale=stale)
+        return replace(page, items=tuple(items), cached=cached, stale=stale)
 
     @staticmethod
     def _valid_year(value: str) -> bool:
-        text = str(value or "").strip()
+        text = (value or "").strip()
         return bool(
             _YEAR_RE.fullmatch(text) and 1800 <= int(text) <= 2200
         )
 
     @staticmethod
     def _valid_release_date(value: str) -> bool:
-        text = str(value or "").strip()
+        text = (value or "").strip()
         try:
             return date.fromisoformat(text).isoformat() == text
         except ValueError:
@@ -453,9 +453,9 @@ class DiscoveryService:
         if media_type not in {"movie", "tv"}:
             raise ValueError("媒体类型无效")
         with self._network_operation():
-            detail = self.registry.get(provider).get_detail(str(external_id), media_type)
-            provider_key = str(provider or "").strip().lower()
-            external_key = str(external_id or "").strip()
+            detail = self.registry.get(provider).get_detail(external_id, media_type)
+            provider_key = (provider or "").strip().lower()
+            external_key = (external_id or "").strip()
             if (
                 isinstance(detail, MediaCard)
                 and (detail.provider, detail.media_type, detail.external_id)
@@ -504,7 +504,7 @@ class DiscoveryService:
     ) -> dict[str, Any]:
         """只读返回已确认映射或 TMDB 候选；绝不写入映射表。"""
         if provider == "tmdb":
-            return {"tmdb_id": str(external_id), "confirmed": True, "candidates": []}
+            return {"tmdb_id": external_id, "confirmed": True, "candidates": []}
         if media_type not in {"movie", "tv"}:
             raise ValueError("媒体类型无效")
         existing = database.get_media_external_id(provider, external_id, media_type)
@@ -528,9 +528,9 @@ class DiscoveryService:
     ) -> dict[str, Any]:
         """核验显式 TMDB 身份后持久化 confirmed 映射。"""
         if provider == "tmdb":
-            if str(external_id) != str(tmdb_id):
+            if external_id != tmdb_id:
                 raise ValueError("TMDB 来源身份不一致")
-            return {"tmdb_id": str(tmdb_id), "confirmed": True, "candidates": []}
+            return {"tmdb_id": tmdb_id, "confirmed": True, "candidates": []}
         verified = self.verify_tmdb_mapping_candidate(tmdb_id, media_type)
         requested_id = verified["tmdb_id"]
         database.upsert_media_external_id(
@@ -551,9 +551,9 @@ class DiscoveryService:
     ) -> dict[str, Any] | None:
         """核验候选并以 CAS 保存；映射已变化时返回 ``None``。"""
         if provider == "tmdb":
-            if str(external_id) != str(tmdb_id):
+            if external_id != tmdb_id:
                 raise ValueError("TMDB 来源身份不一致")
-            return {"tmdb_id": str(tmdb_id), "confirmed": True, "candidates": []}
+            return {"tmdb_id": tmdb_id, "confirmed": True, "candidates": []}
         verified = self.verify_tmdb_mapping_candidate(tmdb_id, media_type)
         requested_id = verified["tmdb_id"]
         if not database.confirm_media_external_id_if_unchanged(
@@ -572,7 +572,7 @@ class DiscoveryService:
         """只读核验一个显式 TMDB 候选，供预检与最终提交共同复用。"""
         if media_type not in {"movie", "tv"}:
             raise ValueError("媒体类型无效")
-        requested_id = str(tmdb_id or "").strip()
+        requested_id = (tmdb_id or "").strip()
         if not requested_id.isdigit() or not 1 <= len(requested_id) <= 10:
             raise ValueError("TMDB ID 无效")
         with self._network_operation(), self._scraper_operation() as scraper:
@@ -592,7 +592,7 @@ class DiscoveryService:
         """兼容入口：复用既有确认；仅新显式 tmdb_id 会核验后写入。"""
         del confirmed_title, confirmed_year
         if provider == "tmdb":
-            return {"tmdb_id": str(external_id), "confirmed": True, "candidates": []}
+            return {"tmdb_id": external_id, "confirmed": True, "candidates": []}
         if media_type not in {"movie", "tv"}:
             raise ValueError("媒体类型无效")
         existing = database.get_media_external_id(provider, external_id, media_type)

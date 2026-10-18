@@ -59,7 +59,7 @@ def _preview(candidate_id: str, *, errors: bool = False) -> dict:
     digest = f"digest-{candidate_id}"
     items = []
     for row, season, episode in zip(ROWS, (1, 2), (2, 7)):
-        item = {"log_id": row["id"], "original_name": row["original_name"]}
+        item: dict = {"log_id": row["id"], "original_name": row["original_name"]}
         if errors:
             item["error"] = f"与日志 #{ROWS[1 if row['id'] == 10 else 0]['id']} 的来源标题不匹配"
         else:
@@ -167,9 +167,10 @@ window.fetch=async(input,options={})=>{
 class LogsBatchCorrectionBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = next((shutil.which(name) for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser") if shutil.which(name)), None)
-        options = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+        options: dict = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
         if executable:
             options["executable_path"] = executable
         try:
@@ -188,6 +189,7 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
             DictLoader({"base.html": BASE_TEMPLATE}),
             FileSystemLoader(str(ROOT / "app/templates")),
         ])
+        assert Environment is not None
         environment = Environment(loader=loader, autoescape=True)
         self.html = environment.get_template("logs.html").render(static_url=lambda path: "/static/" + path)
         self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
@@ -260,7 +262,9 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.assertTrue(self.page.locator("#organizeEpisodeOverrideField").evaluate("el => el.hidden"))
         self.assertEqual(self.page.locator("#organizeSeasonOverride").input_value(), "")
         self.assertIn("来源 · TMDB", self.page.locator("#organizeBatchSourceScope").inner_text())
-        self.assertIn("每条日志仍由服务端", self.page.locator("#organizeBatchSourceScope").get_attribute("title"))
+        text_content = self.page.locator("#organizeBatchSourceScope").get_attribute("title")
+        assert text_content is not None
+        self.assertIn("每条日志仍由服务端", text_content)
         self.assertIn("Series/Correct/Season 1/Correct - S01E02.mkv", self.page.locator('[data-log-id="10"]').inner_text())
         self.assertIn("各自季集：S01E02", self.page.locator('[data-log-id="10"]').inner_text())
         preview = self.batch_previews()[0]["body"]
@@ -369,7 +373,9 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.prepare_single_preview()
         self.page.locator("#organizeReorganizeBtn").click()
         self.page.wait_for_function("() => document.getElementById('organizeOperationState').textContent.includes('单条写入失败')")
-        self.assertIn("is-error", self.page.locator("#organizeOperationState").get_attribute("class"))
+        text_content = self.page.locator("#organizeOperationState").get_attribute("class")
+        assert text_content is not None
+        self.assertIn("is-error", text_content)
         self.assertNotIn("云端操作已完成", self.page.locator("#organizeOperationState").inner_text())
         status_calls = [call for call in self.calls() if call["path"] == "/api/guangya/organize/status"]
         self.assertEqual([call["taskId"] for call in status_calls], ["single-task"])
@@ -390,7 +396,9 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
             count = len([call for call in self.calls() if call["path"] == "/api/guangya/organize/status" and call["taskId"] == "single-task"])
             self.page.wait_for_timeout(1100)
             self.assertEqual(len([call for call in self.calls() if call["path"] == "/api/guangya/organize/status" and call["taskId"] == "single-task"]), count)
-            self.assertIn("is-error", self.page.locator("#organizeOperationState").get_attribute("class"))
+            text_content = self.page.locator("#organizeOperationState").get_attribute("class")
+            assert text_content is not None
+            self.assertIn("is-error", text_content)
 
     def test_late_batch_task_error_does_not_touch_new_detail(self):
         self.page.evaluate("() => window.__testConfig.holdTaskIds=['batch-task']")
@@ -405,7 +413,9 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.page.evaluate("() => window.__releaseTaskStatus('batch-task',{status:'failed',error:'旧弹窗任务失败',result:{success:false,failed:[{log_id:10,error:'旧弹窗任务失败'}]}})")
         self.page.wait_for_timeout(100)
         self.assertEqual(self.page.locator("#organizeOperationState").inner_text(), "")
-        self.assertNotIn("is-error", self.page.locator("#organizeOperationState").get_attribute("class"))
+        text_content = self.page.locator("#organizeOperationState").get_attribute("class")
+        assert text_content is not None
+        self.assertNotIn("is-error", text_content)
 
     def test_nsfw_source_is_visible_and_numeric_search_does_not_become_tmdb_id(self):
         self.page.evaluate("() => window.__testConfig.nsfw=true")

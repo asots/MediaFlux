@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import codecs
+import json
+import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timezone
 from email.utils import parsedate_to_datetime
-import json
-import re
-import time
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -252,7 +252,7 @@ def provider_retry_delay(
             except (TypeError, ValueError, OverflowError):
                 delay = None
     if delay is None:
-        delay = 0.2 * (2 ** max(0, int(retry_index)))
+        delay = 0.2 * (2 ** max(0, retry_index))
     return min(limit, max(0.0, delay))
 
 
@@ -649,7 +649,7 @@ def native_tool_definitions(
                 "input_schema": parameters,
             })
         else:
-            function = {
+            function: dict[str, Any] = {
                 "name": name,
                 "description": description,
                 "parameters": parameters,
@@ -685,6 +685,7 @@ def native_tool_request_body(
     stream: bool = False,
     allow_parallel_tool_calls: bool = False,
 ) -> dict[str, Any]:
+    body: dict[str, Any]
     if protocol == "responses":
         body = {
             "model": model,
@@ -1049,7 +1050,7 @@ def parse_tool_arguments(value: object) -> dict[str, Any]:
         except (TypeError, ValueError) as exc:
             raise ToolArgumentsDecodeError("invalid_json") from exc
     elif value is None or isinstance(value, str):
-        text = str(value or "").strip() or "{}"
+        text = (value or "").strip() or "{}"
     else:
         raise ToolArgumentsDecodeError("not_object")
     if len(text) > _MAX_TOOL_ARGUMENTS_CHARS:
@@ -1072,25 +1073,34 @@ def parse_native_call(
     except ToolArgumentsDecodeError as exc:
         if not (allow_argument_errors and exc.reason == "invalid_json"
                 and isinstance(value, str) and len(value.encode("utf-8")) <= _MAX_TOOL_ARGUMENTS_CHARS
-                and all(isinstance(v, str) and v.strip() for v in (call_id, name))):
+                and isinstance(call_id, str) and call_id.strip()
+                and isinstance(name, str) and name.strip()):
             raise
         return NativeToolCall(call_id, name, None, "invalid_json", value)
     if require_identity:
+        call_id, name = _require_native_identity(call_id, name)
         call = NativeToolCall(call_id, name, arguments)
         validate_repair_batch([call], [(call_id, name)], require_identity=True)
         return call
     return NativeToolCall(str(call_id or ""), str(name or ""), arguments)
 
 
+def _require_native_identity(call_id: object, name: object) -> tuple[str, str]:
+    if not isinstance(call_id, str) or not call_id.strip():
+        raise ValueError("Ambiguous native tool identity")
+    call_id.encode("utf-8")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Ambiguous native tool identity")
+    name.encode("utf-8")
+    return call_id, name
+
+
 def validate_repair_batch(
     calls: list[NativeToolCall], identities: list[tuple[object, object]], *, require_identity: bool = False,
 ) -> None:
     if require_identity or any(call.argument_error is not None for call in calls):
-        for pair in identities:
-            for value in pair:
-                if not isinstance(value, str) or not value.strip():
-                    raise ValueError("Ambiguous native tool identity")
-                value.encode("utf-8")
+        for call_id, name in identities:
+            _require_native_identity(call_id, name)
         ids = [pair[0] for pair in identities]
         if len(set(ids)) != len(ids) or len(ids) != len(calls):
             raise ValueError("Ambiguous native tool identity")
@@ -1119,12 +1129,15 @@ def native_tool_call(
     if raw_arguments is not None:
         if arguments is not None or protocol not in {"responses", "chat_completions"}:
             raise ValueError("Cannot replay malformed native arguments")
+    if arguments is None and raw_arguments is None:
+        raise TypeError("'NoneType' object is not iterable")
     if protocol not in {"responses", "chat_completions"}:
+        assert arguments is not None
         return {"type": "tool_use", "id": call_id, "name": name, "input": dict(arguments)}
-    function = {
-        "name": name,
-        "arguments": raw_arguments if raw_arguments is not None else json.dumps(dict(arguments), ensure_ascii=False, separators=(",", ":")),
-    }
+    if raw_arguments is None:
+        assert arguments is not None
+        raw_arguments = json.dumps(dict(arguments), ensure_ascii=False, separators=(",", ":"))
+    function = {"name": name, "arguments": raw_arguments}
     if protocol == "responses":
         return {"type": "function_call", "call_id": call_id, **function}
     return {"type": "function", "id": call_id, "function": function}

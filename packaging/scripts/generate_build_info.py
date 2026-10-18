@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """从 tag 生成可复现构建信息与统一产物名称。"""
 from __future__ import annotations
-import argparse, json, os, re, tempfile
+
+import argparse
+import json
+import os
+import re
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path

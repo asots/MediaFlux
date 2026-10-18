@@ -113,7 +113,7 @@ class IqiyiCalendarProvider:
         dates = {day.strftime("%m-%d"): day for day in (monday + timedelta(days=i) for i in range(7))}
         try:
             payload = await http.get_json(_CALENDAR_URL, params=dict(_PARAMS))
-        except (SourceUnavailable, TimeoutError, OSError, httpx.HTTPError, HttpError):
+        except (SourceUnavailable, OSError, httpx.HTTPError, HttpError):
             return SourceResult(status="unavailable", message="爱奇艺追番表请求失败或要求验证，已停止请求。")
         if (isinstance(payload, dict) and isinstance(payload.get("code"), (str, int))
                 and payload["code"] not in (0, "0")):

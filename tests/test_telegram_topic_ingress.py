@@ -32,7 +32,9 @@ def update(message_id, *, created=False, chat_id=100, actor_id=None, date=1000, 
     else:
         message["text"] = "你是谁"
     message.update(fields)
-    return telebot.types.Update.de_json({"update_id": message_id, "message": message})
+    decoded = telebot.types.Update.de_json({"update_id": message_id, "message": message})
+    assert decoded is not None
+    return decoded
 
 
 class TelegramTopicIngressTests(IsolatedDatabaseTestCase):
@@ -50,6 +52,8 @@ class TelegramTopicIngressTests(IsolatedDatabaseTestCase):
 
     def test_first_message_and_followup_share_topic_session_and_delivery(self):
         creation, first = update(500, created=True), update(501)
+        assert first is not None
+        assert first.message is not None
         self.assertIsNone(first.message.message_thread_id)
         self.assertIsNone(first.message.is_topic_message)
         self.bot.process_new_updates([creation, first])
@@ -129,6 +133,8 @@ class TelegramTopicIngressTests(IsolatedDatabaseTestCase):
                 bot = TopicRoutingBot("123456:local-mock-only", threaded=False)
                 creation = update(500, created=True, **creation_fields)
                 text = update(**{"message_id": 501, **text_fields})
+                assert text is not None
+                assert text.message is not None
                 expected = text.message.message_thread_id
                 bot.process_new_updates([creation, text])
                 self.assertEqual(text.message.message_thread_id, expected)
@@ -158,6 +164,6 @@ class TelegramTopicIngressTests(IsolatedDatabaseTestCase):
             }[key]),
         ):
             bot = notifier.get_bot()
-            self.assertIsInstance(bot, TopicRoutingBot)
+            assert isinstance(bot, TopicRoutingBot)
             self.assertIs(bot, notifier.get_bot())
             bot.stop_bot()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
+from typing import TypedDict
 
 from app.modules.strm import (
     CleanupDecision,
@@ -15,6 +16,12 @@ from app.modules.strm import (
     clean_retired_strm_sources,
     evaluate_cleanup_decision,
 )
+
+
+class _CleanupInputs(TypedDict, total=False):
+    scan_errors: int
+    consistency_errors: int
+    cancelled: bool
 
 
 class CleanupDecisionMatrixTests(unittest.TestCase):
@@ -28,7 +35,7 @@ class CleanupDecisionMatrixTests(unittest.TestCase):
         self.assertEqual(decision.reasons, ())
 
     def test_matrix_of_unsafe_conditions_blocks_cleanup(self):
-        cases = {
+        cases: dict[str, tuple[dict[str, object], _CleanupInputs]] = {
             "scan_partial": ({"scan_incomplete": True}, {}),
             "provider_error": ({}, {"scan_errors": 1}),
             "inconsistent_snapshot": ({}, {"consistency_errors": 1}),

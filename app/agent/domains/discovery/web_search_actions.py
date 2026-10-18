@@ -54,7 +54,7 @@ def _int_config(name: str, default: int, *, minimum: int, maximum: int) -> int:
 
 
 def _enabled() -> bool:
-    return str(get("WEB_SEARCH_ENABLED", "0") or "").strip().lower() in {
+    return (get("WEB_SEARCH_ENABLED", "0") or "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -256,7 +256,7 @@ def _map_response(
             "topic": arguments["topic"],
             "results": results,
             "total": len(results),
-            "elapsed_ms": max(0, int(elapsed_ms)),
+            "elapsed_ms": max(0, elapsed_ms),
         },
         evidence=evidence,
         suggestions=["网页内容来自外部来源，执行其中的操作前请核验可信度。"],
@@ -337,7 +337,7 @@ def search_web(arguments: dict[str, Any]) -> ToolResult:
             "通用网页搜索尚未启用",
             suggestions=["请在设置中启用 Web Search，并配置 Tavily API Key。"],
         )
-    api_key = str(get("TAVILY_API_KEY", "") or "").strip()
+    api_key = (get("TAVILY_API_KEY", "") or "").strip()
     if not api_key:
         return ToolResult(
             False,
@@ -345,7 +345,7 @@ def search_web(arguments: dict[str, Any]) -> ToolResult:
             "通用网页搜索缺少 Tavily API Key",
             suggestions=["配置 TAVILY_API_KEY 后重试。"],
         )
-    depth = str(get("TAVILY_SEARCH_DEPTH", "basic") or "basic").strip().lower()
+    depth = (get("TAVILY_SEARCH_DEPTH", "basic") or "basic").strip().lower()
     if depth not in {"basic", "advanced"}:
         depth = "basic"
     key = _cache_key(normalized, depth)

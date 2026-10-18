@@ -36,8 +36,8 @@ class IndexerResultStore:
             raise ValueError("ttl_seconds must be positive")
         if max_entries <= 0:
             raise ValueError("max_entries must be positive")
-        self.ttl_seconds = int(ttl_seconds)
-        self.max_entries = int(max_entries)
+        self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._entries: OrderedDict[str, _StoredEntry] = OrderedDict()
         self._expired_ids: OrderedDict[str, None] = OrderedDict()
@@ -57,7 +57,7 @@ class IndexerResultStore:
 
     def restore(self, result_id: str, item: IndexerItem) -> str:
         """用原 opaque ID 恢复已认证的短期结果，供跨进程确认继续执行。"""
-        token = str(result_id or "").strip()
+        token = (result_id or "").strip()
         if not _RESULT_ID_PATTERN.fullmatch(token):
             raise ValueError("invalid result id")
         if not isinstance(item, IndexerItem):
@@ -74,7 +74,7 @@ class IndexerResultStore:
         return token
 
     def get(self, result_id: str) -> IndexerItem:
-        token = str(result_id or "").strip()
+        token = (result_id or "").strip()
         if not token:
             raise IndexerResultNotFound()
         now = self._clock()

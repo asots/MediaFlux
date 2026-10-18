@@ -1,11 +1,12 @@
 """光鸭目录/文件操作菜单的真实浏览器行为回归测试。"""
 from __future__ import annotations
 
-import shutil
 import json
+import shutil
 import textwrap
 import unittest
 from pathlib import Path
+
 from starlette.requests import Request
 
 from app.routes.tools_api import clean_scrape_query
@@ -123,6 +124,7 @@ class GuangYaDirectoryScrapeBrowserTests(unittest.TestCase):
         )
         if not cls.browser_path:
             raise unittest.SkipTest("未找到可用的本机 Chrome/Chromium")
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         try:
             cls.browser = cls.playwright.chromium.launch(
@@ -145,9 +147,9 @@ class GuangYaDirectoryScrapeBrowserTests(unittest.TestCase):
         self.page_errors: list[str] = []
         self.page.on("pageerror", lambda error: self.page_errors.append(str(error)))
         self.page.set_content(HARNESS)
-        self.page.expose_function("__cleanQuery", lambda body: json.loads(clean_scrape_query(
+        self.page.expose_function("__cleanQuery", lambda body: json.loads(bytes(clean_scrape_query(
             Request({"type": "http", "session": {"logged_in": True}}), body,
-        ).body))
+        ).body)))
         self.page.evaluate(
             """
             () => {
@@ -747,13 +749,17 @@ class GuangYaDirectoryScrapeBrowserTests(unittest.TestCase):
             self.page.locator('#gyScrapeInspectionSummary').text_content(),
             '12 可刮削 · 1 待确认',
         )
-        self.assertIn('不会移动', self.page.locator('#gyScrapeInspectionHint').text_content())
+        text_content = self.page.locator('#gyScrapeInspectionHint').text_content()
+        assert text_content is not None
+        self.assertIn('不会移动', text_content)
         self.page.wait_for_selector('.gy-scrape-candidate')
         self.page.locator('.gy-scrape-candidate').click()
         self.page.wait_for_function(
             "() => document.getElementById('gyScrapePlanSummary').textContent.includes('1 个待确认不移动')"
         )
-        self.assertIn('x.mp4（不会移动）', self.page.locator('#gyScrapeDetail').text_content())
+        text_content = self.page.locator('#gyScrapeDetail').text_content()
+        assert text_content is not None
+        self.assertIn('x.mp4（不会移动）', text_content)
         self.assertEqual(self.page_errors, [])
 
     def test_naming_preview_renders_every_plan_without_more_placeholder(self):
@@ -798,6 +804,7 @@ class GuangYaDirectoryScrapeBrowserTests(unittest.TestCase):
         rows = self.page.locator('#gyScrapeDetail .gy-scrape-plan-files > div')
         self.assertEqual(rows.count(), 14)
         detail = self.page.locator('#gyScrapeDetail').text_content()
+        assert detail is not None
         self.assertIn('Example.Show.S01E12.mkv', detail)
         self.assertIn('Example.Show.S01E01.zh.ass', detail)
         self.assertIn('x.mp4（不会移动）', detail)
@@ -809,8 +816,10 @@ class GuangYaDirectoryScrapeBrowserTests(unittest.TestCase):
         from jinja2 import Environment, FileSystemLoader, nodes
         env = Environment(loader=FileSystemLoader(str(ROOT / "app/templates")), autoescape=True)
         template = env.parse((ROOT / "app/templates/guangya.html").read_text("utf-8"))
-        options = next(node.node.as_const() for node in template.find_all(nodes.Assign)
-                       if getattr(node.target, "name", "") == "media_scrape")
+        assignment = next(node for node in template.find_all(nodes.Assign)
+                          if getattr(node.target, "name", "") == "media_scrape")
+        assert isinstance(assignment.node, nodes.Expr)
+        options = assignment.node.as_const()
         markup = env.get_template("_media_scrape_modal.html").render(media_scrape=options)
         for width in (320, 390, 650, 760, 1280):
             with self.subTest(width=width):
@@ -834,17 +843,23 @@ class GuangYaDirectoryScrapeBrowserTests(unittest.TestCase):
                     ids = ('gyScrapeType', 'gyScrapeNumbering', 'gyScrapeSeason', 'gyScrapeSearchBtn')
                     boxes = [page.locator('#' + name).bounding_box() for name in ids]
                     for box in boxes:
+                        assert box is not None
+                        assert boxes[0] is not None
                         self.assertAlmostEqual(box['y'], boxes[0]['y'], delta=1)
                         self.assertAlmostEqual(box['height'], boxes[0]['height'], delta=1)
                         self.assertGreaterEqual(box['x'], 0)
                         self.assertLessEqual(box['x'] + box['width'], width)
                     for left, right in zip(boxes, boxes[1:]):
+                        assert left is not None
+                        assert right is not None
                         self.assertLessEqual(left['x'] + left['width'], right['x'])
                     button = page.locator('#gyScrapeSearchBtn')
                     button.evaluate("node => { node.disabled = true; node.querySelector('span').textContent = '搜索中'; }")
                     self.assertEqual(button.bounding_box(), boxes[-1])
                     page.evaluate("document.querySelector('#gyScrapeEpisodeFields').hidden = true")
                     movie, search = page.locator('#gyScrapeType').bounding_box(), button.bounding_box()
+                    assert movie is not None
+                    assert search is not None
                     self.assertAlmostEqual(movie['y'], search['y'], delta=1)
                 finally:
                     page.close()

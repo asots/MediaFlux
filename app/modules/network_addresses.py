@@ -55,7 +55,7 @@ def _hostname_addresses() -> Iterable[str]:
         pass
     try:
         _, _, ip_list = socket.gethostbyname_ex(hostname)
-        addresses.extend(str(ip) for ip in ip_list if ip)
+        addresses.extend(ip for ip in ip_list if ip)
     except OSError:
         pass
     return tuple(addresses)
@@ -122,9 +122,9 @@ def build_lan_url_candidates(
     addresses: Iterable[str] | None = None,
 ) -> dict[str, object]:
     """根据监听状态构造候选；容器环境不猜测宿主机地址。"""
-    normalized_host = str(bind_host or "127.0.0.1").strip()
-    normalized_port = max(1, min(int(port), 65535))
-    in_container = _is_container() if container is None else bool(container)
+    normalized_host = (bind_host or "127.0.0.1").strip()
+    normalized_port = max(1, min(port, 65535))
+    in_container = _is_container() if container is None else container
     warnings: list[str] = []
     candidates: list[dict[str, str]] = []
 

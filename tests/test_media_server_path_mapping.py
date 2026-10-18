@@ -28,6 +28,7 @@ class MediaServerPathMappingTests(unittest.TestCase):
         )
 
         self.assertEqual(mapped, "//NAS/Media/整理/电影/作品 A")
+        assert selected is not None
         self.assertEqual(selected.local_prefix, "/data/strm/光鸭云盘/电影")
 
     def test_object_form_is_canonicalized_for_single_line_env_storage(self):
@@ -59,6 +60,7 @@ class MediaServerPathMappingTests(unittest.TestCase):
         )
 
         self.assertEqual(mapped, "/media/lower-movies/Film")
+        assert selected is not None
         self.assertEqual(selected.local_prefix, "/data/movies")
 
     def test_windows_drive_root_mapping_is_preserved(self):
@@ -71,6 +73,7 @@ class MediaServerPathMappingTests(unittest.TestCase):
         )
 
         self.assertEqual(mapped, "E:/Media/Movies/Film")
+        assert selected is not None
         self.assertEqual(selected.local_prefix, "D:/")
         self.assertEqual(selected.server_prefix, "E:/")
 

@@ -115,7 +115,7 @@ class RecognitionWebHintsTests(unittest.TestCase):
             )
 
         start = threading.Barrier(2)
-        results = [None, None]
+        results: list[hints.RecognitionWebHintResult | None] = [None, None]
         errors: list[BaseException] = []
 
         def worker(index: int) -> None:

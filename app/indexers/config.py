@@ -5,6 +5,7 @@ from base64 import b64decode
 from collections.abc import Iterable
 from typing import Any
 
+
 # 内置地址仅作Base64轻度混淆；运行时白名单和TLS策略不变。
 def _decode(encoded: str) -> str:
     return b64decode(encoded, validate=True).decode("ascii")
@@ -136,12 +137,12 @@ def plan_media_site_route(
     路由结果为空时原样返回可用集合，保证任何情况下都有站点可搜。
     """
     ordered = [
-        str(site_id).strip().lower()
+        site_id.strip().lower()
         for site_id in available
-        if str(site_id).strip() and str(site_id).strip().lower() not in RETIRED_INDEXER_SITE_IDS | {"sukebei"}
+        if site_id.strip() and site_id.strip().lower() not in RETIRED_INDEXER_SITE_IDS | {"sukebei"}
     ]
     if is_animation:
-        if str(original_language or "").strip().lower().startswith("zh"):
+        if (original_language or "").strip().lower().startswith("zh"):
             preferred, dropped = _ANIME_ZH_PREFERRED, _ANIME_ZH_DROPPED
         else:
             preferred, dropped = _ANIME_JA_PREFERRED, _ANIME_JA_DROPPED

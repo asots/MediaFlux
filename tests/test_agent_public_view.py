@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 import unittest
 
@@ -25,6 +26,13 @@ class AgentKernelPublicViewTests(unittest.TestCase):
             self.assertEqual(text.count(position), 1)
         self.assertNotIn("S01E03", text)
         self.assertNotIn("写操作", text)
+
+    def test_partial_reads_preserve_invalid_media_type_errors(self):
+        for media_type in ({"bad": "type"}, ["movie"]):
+            with self.subTest(media_type=media_type), self.assertRaises(TypeError):
+                format_partial_progress("后续查询失败", [("查询", {
+                    "ok": True, "data": {"items": [{"title": "测试片", "media_type": media_type}]},
+                })])
 
     def test_background_job_receipt_exposes_public_ref_and_actual_change_counts(self):
         operation_ref = "GY-0000-0000-0000-0000-0000-0000-0000-0001"
@@ -590,7 +598,7 @@ class PublicCompletionClaimRegressionTests(unittest.TestCase):
         "The message has been sent.",
     )
 
-    def _project(self, entrypoint: str, answer: str, result: dict[str, object]) -> str:
+    def _project(self, entrypoint: str, answer: str, result: Mapping[str, object]) -> str:
         if entrypoint == "format_partial_progress":
             return format_partial_progress(
                 "后续查询未完成", [], confirmed_result=result, analysis_text=answer,

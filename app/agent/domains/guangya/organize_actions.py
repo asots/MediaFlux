@@ -58,7 +58,7 @@ def _configured_sources() -> list[dict[str, str]]:
 
 def _configured_inputs() -> tuple[list[dict[str, str]], OrganizeRules, str]:
     sources = _configured_sources()
-    target = str(config.get("GY_ORGANIZE_TARGET_DIR", "0") or "0").strip()
+    target = (config.get("GY_ORGANIZE_TARGET_DIR", "0") or "0").strip()
     rules = OrganizeRules.from_config(target_dir_id=target)
     if not sources:
         return sources, rules, "未配置光鸭整理源目录"
@@ -73,7 +73,7 @@ def _serialize_organize_context(
     credential_generation: int,
 ) -> str:
     payload = {
-        "credential_generation": max(0, int(credential_generation)),
+        "credential_generation": max(0, credential_generation),
         "sources": sources,
         "rules": organize_rules_snapshot(rules),
     }
@@ -113,16 +113,16 @@ def _preview_data(
     scan_error_count = 0
     organizer = Organizer(client=client)
     protected_source_ids = {
-        str(source.get("id") or "").strip()
+        (source.get("id") or "").strip()
         for source in sources
-        if str(source.get("id") or "").strip()
+        if (source.get("id") or "").strip()
     }
 
     try:
         for source in sources:
             if remaining <= 0:
                 break
-            source_rules = rules.for_source(str(source.get("id") or ""))
+            source_rules = rules.for_source((source.get("id") or ""))
             plans, stats = organizer.organize(
                 source["id"],
                 source_rules,
@@ -169,10 +169,10 @@ def _preview_data(
         "effects": {
             "scope": "all_configured_sources",
             "moves_files": True,
-            "renames_files": bool(rules.rename_enabled),
-            "may_clean_empty_directories": bool(rules.clean_empty),
-            "may_recycle_replaced_files": bool(rules.recycle_replaced_enabled),
-            "triggers_strm_after_moves": bool(rules.link_strm),
+            "renames_files": (rules.rename_enabled),
+            "may_clean_empty_directories": (rules.clean_empty),
+            "may_recycle_replaced_files": (rules.recycle_replaced_enabled),
+            "triggers_strm_after_moves": (rules.link_strm),
         },
     }
     return data, scan_error_count
@@ -384,7 +384,7 @@ def prepare_guangya_organize_stop(
 
 def _parse_organize_stop_context(expected_context: str) -> dict[str, Any]:
     try:
-        task = json.loads(str(expected_context or ""))
+        task = json.loads((expected_context or ""))
     except (TypeError, ValueError) as exc:
         raise AgentToolError(
             "整理任务状态已变化，请重新预检",
@@ -540,7 +540,7 @@ def run_guangya_organize_once_confirmed(
             rules,
             _credential_generation(client),
         )
-        if not secrets.compare_digest(current_context, str(expected_context or "")):
+        if not secrets.compare_digest(current_context, (expected_context or "")):
             raise AgentToolError(
                 "光鸭整理配置已变化或登录凭据已更新，请重新预检",
                 code="confirmation_stale",

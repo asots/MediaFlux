@@ -140,4 +140,6 @@ def test_log_reorganize_recovers_part_from_original_name(pipeline):
     assert extract_nsfw_part_index(preview['file_name']) == 2
     organizer.client.move.assert_not_called()
     organizer.client.rename.assert_not_called()
-    assert db.get_organize_log(log_id)['current_name'] == current
+    get_organize_log_result = db.get_organize_log(log_id)
+    assert get_organize_log_result is not None
+    assert get_organize_log_result['current_name'] == current

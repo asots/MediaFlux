@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.support import assert_present
+
 import unittest
 from unittest.mock import patch
 
@@ -48,6 +50,6 @@ class DownloadTrackerSnapshotConsistencyTests(unittest.TestCase):
                         db.get_download_request(request_id), [], index
                     )
             self.assertEqual(
-                [db.get_download_request(i)["gy_status"] for i in ids],
+                [assert_present(db.get_download_request(i))["gy_status"] for i in ids],
                 ["downloading", "downloading"],
             )

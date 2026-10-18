@@ -30,7 +30,7 @@ def configured_web_secret() -> str:
 
 
 def _validate_secret(value: str) -> str:
-    secret = str(value or "").strip()
+    secret = (value or "").strip()
     if (
         not _MIN_SECRET_LENGTH <= len(secret) <= _MAX_SECRET_LENGTH
         or not secret.isascii()

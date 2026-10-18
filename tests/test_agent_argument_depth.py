@@ -1,5 +1,6 @@
 """Deep JSON arguments retain safe intent and results preserve complete safe trees."""
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 from copy import deepcopy
@@ -16,9 +17,10 @@ from tests.test_agent_capacity_recovery import (
 )
 
 
-def nested(value, depth, *, lists=False):
+def nested(value: object, depth: int, *, lists: bool = False) -> object:
     for index in range(depth):
-        value = {"nested": [value] if lists and index % 2 else value}
+        node: dict[str, object] = {"nested": [value] if lists and index % 2 else value}
+        value = node
     return value
 
 
@@ -26,7 +28,7 @@ def nested(value, depth, *, lists=False):
 @pytest.mark.parametrize("shape", ["original", "mixed", "private", "depth-limit"])
 def test_deep_arguments_survive_started_cold_and_next_wire(protocol, shape):
     async def exercise():
-        leaf = {"must_match": ["动画"], "exclude_played": True}
+        leaf: dict[str, Any] = {"must_match": ["动画"], "exclude_played": True}
         expected_leaf = deepcopy(leaf)
         if shape != "original":
             leaf.update({"zero": 0, "flag": False, "optional": None,
@@ -129,7 +131,7 @@ def test_non_json_and_unbounded_arguments_never_execute(kind):
         def to_dict(self):
             raise AssertionError("argument admission must not execute a DTO")
 
-    args = {"cycle": {}, "dto": {"value": DTO()}, "tuple": {"value": (1, 2)},
+    args: dict[str, Any] = {"cycle": {}, "dto": {"value": DTO()}, "tuple": {"value": (1, 2)},
             "nonstring-key": {"value": {1: "one"}}, "nan": {"value": float("nan")},
             "surrogate": {"value": "\ud800"}, "wide": {"value": [0] * 262145}}[kind]
     if kind == "cycle":

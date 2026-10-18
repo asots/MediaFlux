@@ -99,7 +99,7 @@ def attach_undo_receipt(
             }
         )
     )
-    if not secrets.compare_digest(str(expected), committed_expected):
+    if not secrets.compare_digest(expected, committed_expected):
         return
     payload = {
         **candidate,
@@ -247,7 +247,7 @@ def prepare_undo(arguments: dict, context: ToolContext) -> tuple[ToolResult, str
         public = preview.data
     else:
         public, current = _organize_state(payload["target"]["id"])
-    if not secrets.compare_digest(str(current), str(payload["expected"])):
+    if not secrets.compare_digest(current, str(payload["expected"])):
         raise AgentToolError(
             "操作后对象已发生变化，请重新核对；不会覆盖后续修改",
             code="confirmation_stale",

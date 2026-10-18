@@ -65,7 +65,7 @@ class NamingContext:
 
 
 def validate_template(template: str) -> None:
-    raw = str(template or "").strip()
+    raw = (template or "").strip()
     if not raw:
         raise ValueError("命名模板不能为空")
     if len(raw) > 500:
@@ -92,7 +92,7 @@ def template_has_media_identity(
     不传身份值时保留原有的模板语法检测；整理计划会传入当前媒体身份，
     防止 MetaTube 匹配把空的 ``tmdbTag`` 误当作有效身份标识。
     """
-    raw = str(template or "")
+    raw = (template or "")
     value_aware = tmdb_id is not None or identity_id is not None
     for match in _TOKEN.finditer(raw):
         field = match.group(1) or match.group(2)
@@ -109,7 +109,7 @@ def template_has_media_identity(
 
 
 def _clean_name(value: str) -> str:
-    name = _INVALID_NAME.sub("_", str(value or "")).strip().rstrip(".")
+    name = _INVALID_NAME.sub("_", (value or "")).strip().rstrip(".")
     if not name or name in {".", ".."}:
         raise ValueError("模板渲染结果为空")
     return name
@@ -202,7 +202,7 @@ def render_media_template(template: str, context: NamingContext) -> str:
 
 def append_variant_tags(name: str, tags: tuple[str, ...] | list[str]) -> str:
     """在扩展名前追加稳定版本标签，并保留 240 字符命名上限。"""
-    safe_name = _INVALID_NAME.sub("_", str(name or "")).strip().rstrip(".")
+    safe_name = _INVALID_NAME.sub("_", (name or "")).strip().rstrip(".")
     if not safe_name or safe_name in {".", ".."}:
         raise ValueError("模板渲染结果为空")
     if "." in safe_name:
@@ -213,7 +213,7 @@ def append_variant_tags(name: str, tags: tuple[str, ...] | list[str]) -> str:
     existing = {part.lower() for part in re.split(r"[._ -]+", stem) if part}
     stable_tags: list[str] = []
     for raw in tags:
-        tag = _INVALID_NAME.sub("_", str(raw or "")).strip(" .")
+        tag = _INVALID_NAME.sub("_", (raw or "")).strip(" .")
         if tag and tag.lower() not in existing and tag.lower() not in {item.lower() for item in stable_tags}:
             stable_tags.append(tag)
     if not stable_tags:
@@ -222,8 +222,8 @@ def append_variant_tags(name: str, tags: tuple[str, ...] | list[str]) -> str:
     return fit_media_filename(f"{stem}{suffix}{extension}", protected_suffix=suffix)
 
 
-def build_context(*, title: str, year: str, tmdb_id: str = "",
-                  identity_id: str = "", identity_tag: str = "",
+def build_context(*, title: str, year: str | int, tmdb_id: str | int = "",
+                  identity_id: str | int = "", identity_tag: str = "",
                   season=None, episode=None, media_info: str = "",
                   ext: str = "mkv", original_name: str = "") -> NamingContext:
     season_text = f"{int(season):02d}" if season is not None and str(season) != "" else ""
@@ -232,11 +232,11 @@ def build_context(*, title: str, year: str, tmdb_id: str = "",
     if episode_text:
         season_episode += f"E{episode_text}"
     original_stem = original_name.rsplit(".", 1)[0] if "." in original_name else original_name
-    safe_title = _INVALID_NAME.sub("_", str(title or ""))
+    safe_title = _INVALID_NAME.sub("_", (title or ""))
     tmdb_value = str(tmdb_id or "")
     stable_id = str(identity_id or tmdb_value)
     tmdb_tag = f"{{tmdb-{tmdb_value}}}" if tmdb_value else ""
-    stable_tag = str(identity_tag or tmdb_tag)
+    stable_tag = (identity_tag or tmdb_tag)
     return NamingContext(
         title=safe_title,
         year=str(year or ""),
@@ -247,10 +247,10 @@ def build_context(*, title: str, year: str, tmdb_id: str = "",
         season=season_text,
         episode=episode_text,
         season_episode=season_episode,
-        media_info=str(media_info or ""),
+        media_info=(media_info or ""),
         media_info_suffix=f"-{media_info}" if media_info else "",
         media_info_dot_suffix=f".{media_info}" if media_info else "",
-        ext=str(ext or "mkv").lstrip("."),
-        original_name=str(original_name or ""),
+        ext=(ext or "mkv").lstrip("."),
+        original_name=(original_name or ""),
         original_stem=original_stem,
     )

@@ -23,7 +23,7 @@ _ASSET_PATHS = {
 }
 
 
-def canonical_platform_poster_key(source: str, value: object) -> str:
+def canonical_platform_poster_key(source: object, value: object) -> str:
     """验证已存储的 host/path；失败仅丢图片，不丢平台排期。"""
     if not isinstance(source, str) or not isinstance(value, str) or not value or len(value) > 1024:
         return ""
@@ -36,7 +36,7 @@ def canonical_platform_poster_key(source: str, value: object) -> str:
     return value
 
 
-def platform_poster_key(source: str, value: object) -> str:
+def platform_poster_key(source: object, value: object) -> str:
     """从来源明确给出的资产 URL 提取 key；不转发参数、凭据或 HTTP。"""
     if not isinstance(source, str) or not isinstance(value, str) or len(value) > 2048 or re.search(r"[\s\\\x00-\x1f\x7f]", value):
         return ""

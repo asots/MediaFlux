@@ -1,8 +1,8 @@
 """本地与光鸭媒体规格探测及稳定缓存。"""
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,9 +14,15 @@ from dataclasses import asdict, dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Protocol
 
 from app import database as db
 from app.logger import get_logger, log_throttled, redact_sensitive_text
+
+
+class CancelSignal(Protocol):
+    def is_set(self) -> bool: ...
+
 
 logger = get_logger(__name__)
 
@@ -24,7 +30,7 @@ logger = get_logger(__name__)
 def resolve_ffprobe_executable() -> str:
     """解析 ffprobe 可执行文件；安装包显式路径优先于系统 PATH。"""
     for key in ("MEDIAFLUX_FFPROBE",):
-        configured = str(os.environ.get(key) or "").strip()
+        configured = (os.environ.get(key) or "").strip()
         if configured:
             return str(Path(configured).expanduser())
     return shutil.which("ffprobe") or "ffprobe"
@@ -34,8 +40,8 @@ def _sanitize_probe_error(value: object, *, limit: int = 320) -> str:
     """保留可诊断信息，但移除 signedURL、查询参数和凭据。"""
     text = redact_sensitive_text(value)
     text = re.sub(r"(?i)https?://\S+", "[URL]", text)
-    text = " ".join(str(text or "").split())
-    return text[: max(40, int(limit))]
+    text = " ".join((text or "").split())
+    return text[: max(40, limit)]
 
 
 def _transient_probe_error(exc: subprocess.CalledProcessError) -> bool:
@@ -60,7 +66,7 @@ _PROBE_SLOT_ACTIVE = 0
 
 
 def _acquire_probe_slot(
-    cancel_event: threading.Event | None,
+    cancel_event: CancelSignal | None,
 ) -> None:
     """获取进程级 ffprobe 槽位；排队不消耗子进程执行超时。"""
     global _PROBE_SLOT_ACTIVE
@@ -103,7 +109,7 @@ def _run_ffprobe(
     url: str,
     timeout: float,
     *,
-    cancel_event: threading.Event | None = None,
+    cancel_event: CancelSignal | None = None,
 ) -> subprocess.CompletedProcess:
     """运行 ffprobe；本地与光鸭共同消费进程级并发槽位。"""
     command = [
@@ -158,7 +164,7 @@ def _run_ffprobe(
 class _CompositeCancelEvent:
     """把调用方取消与批次内部截止信号合并为只读 Event 接口。"""
 
-    def __init__(self, *events: threading.Event | None):
+    def __init__(self, *events: CancelSignal | None):
         self._events = tuple(event for event in events if event is not None)
 
     def is_set(self) -> bool:
@@ -172,7 +178,7 @@ _BUDGET_EXHAUSTED_EPSILON_SECONDS = 0.05
 
 class ProbeBudget:
     def __init__(self, attempts: int = 24, max_seconds: float | None = None):
-        self.remaining = max(0, int(attempts))
+        self.remaining = max(0, attempts)
         self.attempted = 0
         self.failure_cache_hits = 0
         self.skipped_by_budget = 0
@@ -375,7 +381,7 @@ def _fps(value) -> str:
         return ""
     if number <= 0:
         return ""
-    text = str(int(round(number))) if abs(number - round(number)) < 0.02 else f"{number:.3f}".rstrip("0").rstrip(".")
+    text = str(round(number)) if abs(number - round(number)) < 0.02 else f"{number:.3f}".rstrip("0").rstrip(".")
     return f"{text}fps"
 
 
@@ -524,7 +530,7 @@ def _read_probe_cache(
     """缓存不可用时直接降级，媒体探测本身不能因迁移/磁盘异常阻断整理。"""
     try:
         return db.get_media_probe_cache(
-            str(file_id), str(etag or ""), int(size or 0),
+            file_id, (etag or ""), (size or 0),
             allow_fingerprint_fallback=allow_fingerprint_fallback,
         )
     except Exception as exc:
@@ -539,7 +545,7 @@ def _write_success_cache(file_id: str, etag: str, size: int, profile: MediaProfi
     """成功探测结果即使缓存写入失败也照常用于本次命名。"""
     try:
         db.upsert_media_probe_cache(
-            str(file_id), str(etag or ""), int(size or 0),
+            file_id, (etag or ""), (size or 0),
             json.dumps(asdict(profile), ensure_ascii=False),
         )
     except Exception as exc:
@@ -552,8 +558,8 @@ def _write_success_cache(file_id: str, etag: str, size: int, profile: MediaProfi
 def _write_failure_cache(file, reason: str, ttl_seconds: int = 600) -> None:
     payload = json.dumps({
         "_media_probe_cache": "failure",
-        "retry_after_epoch": time.time() + max(30, int(ttl_seconds)),
-        "reason": str(reason or "probe_failed")[:120],
+        "retry_after_epoch": time.time() + max(30, ttl_seconds),
+        "reason": (reason or "probe_failed")[:120],
     }, ensure_ascii=False)
     try:
         db.upsert_media_probe_failure_cache(
@@ -574,7 +580,7 @@ def _probe_budget_exhausted(budget: ProbeBudget | None) -> bool:
 
 def _probe_should_abort(
     budget: ProbeBudget | None,
-    cancel_event: threading.Event | None,
+    cancel_event: CancelSignal | None,
 ) -> bool:
     if cancel_event is not None and cancel_event.is_set():
         return True
@@ -597,7 +603,7 @@ def _acquire_download_url_lock(
     lock: threading.Lock,
     *,
     budget: ProbeBudget | None,
-    cancel_event: threading.Event | None,
+    cancel_event: CancelSignal | None,
 ) -> bool:
     """可响应取消与墙钟预算地等待签名 URL 串行锁。"""
     while not _probe_should_abort(budget, cancel_event):
@@ -627,12 +633,12 @@ def probe_media_profile(
     cache_prefetched: bool = False,
     budget: ProbeBudget | None = None,
     download_url_lock: threading.Lock | None = None,
-    cancel_event: threading.Event | None = None,
+    cancel_event: CancelSignal | None = None,
 ) -> MediaProfile | None:
     if not enabled:
         return None
     cached = (
-        str(prefetched_payload or "")
+        (prefetched_payload or "")
         if cache_prefetched
         else _read_probe_cache(
             str(file.file_id),
@@ -667,7 +673,7 @@ def probe_media_profile(
         if cancel_event is not None and cancel_event.is_set():
             return None
         attempts += 1
-        probe_timeout = float(min(max(5, int(timeout)), 30))
+        probe_timeout = float(min(max(5, timeout), 30))
         if budget is not None:
             probe_timeout = budget.clamp_timeout(probe_timeout)
         if probe_timeout <= 0:
@@ -771,7 +777,7 @@ def probe_media_profile(
             break
         except subprocess.CalledProcessError as exc:
             last_reason = "ffprobe_exit_error"
-            last_returncode = int(exc.returncode or 0)
+            last_returncode = (exc.returncode or 0)
             last_detail = _sanitize_probe_error(exc.stderr or exc.stdout or "")
             should_retry = attempts == 1 and _transient_probe_error(exc)
             if should_retry and (budget is None or budget.consume()):
@@ -805,7 +811,7 @@ def probe_media_profile(
 def resolve_media_probe_workers() -> int:
     """进程级媒体探测并发数；本地与光鸭共享同一保守预算。"""
     try:
-        configured = int(str(os.environ.get("MEDIAFLUX_MEDIA_PROBE_WORKERS") or "4"))
+        configured = int(os.environ.get("MEDIAFLUX_MEDIA_PROBE_WORKERS") or "4")
     except (TypeError, ValueError):
         configured = 4
     return max(1, min(configured, 8))
@@ -821,7 +827,7 @@ def probe_media_profiles_batch(
     cache_prefetched: bool = False,
     budget: ProbeBudget | None = None,
     max_workers: int | None = None,
-    cancel_event: threading.Event | None = None,
+    cancel_event: CancelSignal | None = None,
 ) -> dict[str, MediaProfile]:
     """有界并发探测云盘文件。
 
@@ -831,7 +837,7 @@ def probe_media_profiles_batch(
     if not enabled or not files:
         return {}
     payloads = prefetched_payloads or {}
-    workers = max(1, min(int(max_workers or resolve_media_probe_workers()), 8, len(files)))
+    workers = max(1, min((max_workers or resolve_media_probe_workers()), 8, len(files)))
     download_url_lock = threading.Lock()
     batch_stop_event = threading.Event()
     worker_cancel_event = _CompositeCancelEvent(cancel_event, batch_stop_event)
@@ -944,12 +950,12 @@ def probe_local_media_profile(
     """使用本机 ffprobe 探测本地文件；失败只降级到文件名规格，不阻断整理。"""
     media_path = Path(path)
     stable_id = (
-        f"local:{int(device)}:{int(inode)}"
-        if int(device or 0) > 0 and int(inode or 0) > 0
+        f"local:{device}:{inode}"
+        if (device or 0) > 0 and (inode or 0) > 0
         else f"local-path:{media_path.resolve(strict=False)}"
     )
-    version = f"local-mtime:{int(mtime_ns or 0)}"
-    cached = _read_probe_cache(stable_id, version, int(size or 0))
+    version = f"local-mtime:{(mtime_ns or 0)}"
+    cached = _read_probe_cache(stable_id, version, (size or 0))
     profile = media_profile_from_cache(cached, source_hint=media_path.name)
     if profile is not None:
         return profile
@@ -964,11 +970,11 @@ def probe_local_media_profile(
     cache_file = SimpleNamespace(
         file_id=stable_id,
         etag=version,
-        size=int(size or 0),
+        size=(size or 0),
         name=media_path.name,
     )
     started = time.monotonic()
-    probe_timeout = float(min(max(5, int(timeout)), 30))
+    probe_timeout = float(min(max(5, timeout), 30))
     if budget is not None:
         probe_timeout = budget.clamp_timeout(probe_timeout)
     if probe_timeout <= 0:
@@ -977,7 +983,7 @@ def probe_local_media_profile(
         result = _run_ffprobe(executable, str(media_path), probe_timeout)
         profile = parse_ffprobe_payload(json.loads(result.stdout or "{}"), source_hint=media_path.name)
         if profile.render():
-            _write_success_cache(stable_id, version, int(size or 0), profile)
+            _write_success_cache(stable_id, version, (size or 0), profile)
             return profile
         reason = "empty_media_profile"
     except subprocess.TimeoutExpired:
@@ -991,7 +997,7 @@ def probe_local_media_profile(
     except json.JSONDecodeError:
         reason = "invalid_json"
     except subprocess.CalledProcessError as exc:
-        reason = f"ffprobe_exit_{int(exc.returncode or 0)}"
+        reason = f"ffprobe_exit_{(exc.returncode or 0)}"
     except Exception as exc:
         reason = type(exc).__name__
 

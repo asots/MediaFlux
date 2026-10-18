@@ -230,6 +230,7 @@ def test_real_preference_edit_confirm_and_next_query_preserve_auditable_history(
     original_execute = tool.execute_confirmed
     def execute(arguments, snapshot, context):
         origins.append(deepcopy(context.completion_scope.origin))
+        assert original_execute is not None
         return original_execute(arguments, snapshot, context)
     tool = replace(tool, execute_confirmed=execute)
     catalog = ToolCatalog([tool])

@@ -13,13 +13,19 @@
 
 from __future__ import annotations
 
-from app.repositories.download_requests import download_display_title
-
 import hmac
 import html
 import logging
 import threading
 import time
+from typing import TYPE_CHECKING, Any, TypedDict
+
+from app.repositories.download_requests import download_display_title
+
+if TYPE_CHECKING:
+    from telebot import TeleBot
+
+    from app.modules.local_media_models import LocalMediaSource
 
 from app import database as db
 from app.bot.progress import TelegramProgress, send_typing
@@ -39,7 +45,11 @@ from app.notifier import (
 
 logger = get_logger(__name__)
 
-_bot = None
+class _DownloadDispatchOptions(TypedDict, total=False):
+    kwargs: dict[str, str]
+
+
+_bot: TeleBot | None = None
 _bot_thread: threading.Thread | None = None
 _bot_thread_stop: threading.Event | None = None
 _registered_bot_id: int | None = None
@@ -201,7 +211,7 @@ def _configured_organize_sources() -> list[dict[str, str]]:
 
 
 def _nsfw_download_source(source_id: str) -> dict[str, str] | None:
-    source_id = str(source_id or "").strip()
+    source_id = (source_id or "").strip()
     if not source_id:
         return None
     return next(
@@ -239,12 +249,12 @@ def _download_target_picker_markup(
         if sources:
             name_counts: dict[str, int] = {}
             for source in sources:
-                name = " ".join(str(source.get("name") or "未命名来源").split())
+                name = " ".join((source.get("name") or "未命名来源").split())
                 name_counts[name] = name_counts.get(name, 0) + 1
             seen_names: dict[str, int] = {}
             for source in sources:
-                source_id = str(source["id"]).strip()
-                name = " ".join(str(source.get("name") or "未命名来源").split())
+                source_id = source["id"].strip()
+                name = " ".join((source.get("name") or "未命名来源").split())
                 suffix = ""
                 if name_counts[name] > 1:
                     seen_names[name] = seen_names.get(name, 0) + 1
@@ -294,7 +304,7 @@ def _download_target_picker_markup(
     return keyboard
 
 
-def _configured_local_organize_sources() -> list[object]:
+def _configured_local_organize_sources() -> list[LocalMediaSource]:
     """返回可执行移动入库的本地来源；显式整理不依赖 qB 自动接管开关。"""
     sources = []
     try:
@@ -428,9 +438,9 @@ def _edit_write_confirmation_message(
     message_id = getattr(message, "message_id", None)
     if not callable(edit) or chat_id is None or message_id is None:
         return False
-    text = f"<b>{html.escape(str(title))}</b>"
+    text = f"<b>{html.escape(title)}</b>"
     if detail:
-        text += f"\n{html.escape(str(detail))}"
+        text += f"\n{html.escape(detail)}"
     try:
         edit(
             text,
@@ -497,14 +507,14 @@ def _resource_search_view(
     store = store or get_telegram_resource_search_store()
     snapshot = store.snapshot(session_id, chat_id, user_id)
     all_items = list(snapshot["items"])
-    selected_site = str(site_id or "")
+    selected_site = (site_id or "")
     items = [
         item
         for item in all_items
         if not selected_site or str(item.get("site_id") or "") == selected_site
     ]
     pages = max(1, (len(items) + _RESOURCE_PAGE_SIZE - 1) // _RESOURCE_PAGE_SIZE)
-    page = max(0, min(int(page), pages - 1))
+    page = max(0, min(page, pages - 1))
     start = page * _RESOURCE_PAGE_SIZE
     visible = items[start : start + _RESOURCE_PAGE_SIZE]
 
@@ -738,7 +748,7 @@ def _share_selection_view(
     store.begin_actions(preview_id, chat_id, user_id)
     files = list(snapshot["files"])
     pages = max(1, (len(files) + _SHARE_PAGE_SIZE - 1) // _SHARE_PAGE_SIZE)
-    page = max(0, min(int(page), pages - 1))
+    page = max(0, min(page, pages - 1))
     start = page * _SHARE_PAGE_SIZE
     selected = set(snapshot["selected_ids"])
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
@@ -853,7 +863,7 @@ def _share_target_view(
         if not client.logged_in:
             raise ValueError("光鸭未登录，请先重新登录")
         directories = [
-            item for item in client.list_dir(str(parent_id or "0")) if item.is_dir
+            item for item in client.list_dir(parent_id or "0") if item.is_dir
         ]
     finally:
         if owns_client:
@@ -861,7 +871,7 @@ def _share_target_view(
     pages = max(
         1, (len(directories) + _SHARE_DIR_PAGE_SIZE - 1) // _SHARE_DIR_PAGE_SIZE
     )
-    page = max(0, min(int(page), pages - 1))
+    page = max(0, min(page, pages - 1))
     trail = list(trail or [])
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -874,8 +884,8 @@ def _share_target_view(
             "选择当前目录",
             "choose_target",
             {
-                "target_id": str(parent_id or "0"),
-                "target_name": str(parent_name or "根目录"),
+                "target_id": (parent_id or "0"),
+                "target_name": (parent_name or "根目录"),
             },
         )
     )
@@ -897,8 +907,8 @@ def _share_target_view(
                     "trail": trail
                     + [
                         {
-                            "id": str(parent_id or "0"),
-                            "name": str(parent_name or "根目录"),
+                            "id": (parent_id or "0"),
+                            "name": (parent_name or "根目录"),
                         }
                     ],
                 },
@@ -916,8 +926,8 @@ def _share_target_view(
                 "上一页",
                 "target",
                 {
-                    "parent_id": str(parent_id),
-                    "parent_name": str(parent_name),
+                    "parent_id": parent_id,
+                    "parent_name": parent_name,
                     "page": page - 1,
                     "trail": trail,
                 },
@@ -934,8 +944,8 @@ def _share_target_view(
                 "下一页",
                 "target",
                 {
-                    "parent_id": str(parent_id),
-                    "parent_name": str(parent_name),
+                    "parent_id": parent_id,
+                    "parent_name": parent_name,
                     "page": page + 1,
                     "trail": trail,
                 },
@@ -976,7 +986,7 @@ def _share_target_view(
     )
     text = (
         "<b>选择目标目录</b>\n"
-        f"目标目录: {html.escape(str(parent_name or '根目录'))}\n"
+        f"目标目录: {html.escape(parent_name or '根目录')}\n"
         f"目录页: {page + 1}/{pages}"
     )
     return text, markup
@@ -1106,8 +1116,8 @@ def _start_sync_gy(bot, telebot, source_message) -> bool:
         return False
     _sync_running = True
     progress = None
+    sync_label = "光鸭 STRM 完整同步"
     try:
-        sync_label = "光鸭 STRM 完整同步"
         progress = TelegramProgress(
             bot,
             telebot,
@@ -1487,7 +1497,10 @@ def _register_commands(bot, telebot):
             _reply_to_source(bot, msg, "/topic 仅支持 Bot 私聊，不支持群组。")
             return
         from app.bot.agent_adapter import telegram_agent_owner
-        from app.modules.telegram_topic_routing import set_topic_mode, topic_mode_enabled
+        from app.modules.telegram_topic_routing import (
+            set_topic_mode,
+            topic_mode_enabled,
+        )
 
         chat_id, user_id = _telegram_identity(msg)
         owner = telegram_agent_owner(chat_id, user_id)
@@ -1524,7 +1537,7 @@ def _register_commands(bot, telebot):
         if _reject_unauthorized(bot, call):
             return
         message = getattr(call, "message", None)
-        if getattr(getattr(message, "chat", None), "type", "") != "private":
+        if message is None or getattr(getattr(message, "chat", None), "type", "") != "private":
             bot.answer_callback_query(call.id, "仅支持 Bot 私聊话题", show_alert=True)
             return
         from app.bot.agent_adapter import telegram_agent_owner
@@ -2144,7 +2157,10 @@ def _register_commands(bot, telebot):
     def choose_agent_action(call):
         if _reject_unauthorized(bot, call):
             return
-        from app.bot.agent_adapter import handle_agent_callback, handle_agent_patrol_callback
+        from app.bot.agent_adapter import (
+            handle_agent_callback,
+            handle_agent_patrol_callback,
+        )
 
         patrol = str(call.data).startswith("agp:")
         handler = handle_agent_patrol_callback if patrol else handle_agent_callback
@@ -2454,7 +2470,8 @@ def _handle_write_confirmation_callback(bot, call, telebot) -> None:
             handle_agent_control_action(bot, call, telebot, action)
             return
         if operation == "download_request":
-            request_id = int(value.get("request_id"))
+            raw_request_id: Any = value.get("request_id")
+            request_id = int(raw_request_id)
             row = db.bind_pending_download_request_owner(
                 request_id,
                 chat_id=chat_id,
@@ -2564,6 +2581,9 @@ def _handle_write_confirmation_callback(bot, call, telebot) -> None:
                 bot, call.message, "下载请求已确认", "正在提交到所选下载目标…"
             )
             bot.answer_callback_query(call.id, "正在提交下载任务")
+            thread_options: _DownloadDispatchOptions = (
+                {"kwargs": {"nsfw_source_id": nsfw_source_id}} if nsfw_source_id else {}
+            )
             threading.Thread(
                 target=_dispatch_download_callback,
                 args=(
@@ -2575,11 +2595,7 @@ def _handle_write_confirmation_callback(bot, call, telebot) -> None:
                 ),
                 name=f"tg-download-{request_id}",
                 daemon=True,
-                **(
-                    {"kwargs": {"nsfw_source_id": nsfw_source_id}}
-                    if nsfw_source_id
-                    else {}
-                ),
+                **thread_options,
             ).start()
             return
         if action["decision"] == "cancel":
@@ -2645,7 +2661,8 @@ def _handle_write_confirmation_callback(bot, call, telebot) -> None:
             ).start()
             return
         if operation == "rss_refresh":
-            subscription_id = int(value.get("subscription_id"))
+            raw_subscription_id: Any = value.get("subscription_id")
+            subscription_id = int(raw_subscription_id)
             expected_revision = str(value.get("expected_revision") or "")
             _edit_write_confirmation_message(
                 bot, call.message, "RSS 刷新已确认", f"正在刷新订阅 #{subscription_id}…"
@@ -2687,7 +2704,8 @@ def _handle_write_confirmation_callback(bot, call, telebot) -> None:
             progress.dismiss_source_message()
             return
         if operation == "rss_download":
-            entry_id = int(value.get("entry_id"))
+            raw_entry_id: Any = value.get("entry_id")
+            entry_id = int(raw_entry_id)
             _edit_write_confirmation_message(
                 bot, call.message, "RSS 下载已确认", f"正在提交条目 #{entry_id}…"
             )
@@ -2752,7 +2770,7 @@ def _dispatch_resource_download(
             result_id,
             target,
             chat_id=str(chat_id),
-            user_id=str(user_id),
+            user_id=user_id,
             message_id=str(message_id),
         )
         labels = {"qb": "qBittorrent", "guangya": "光鸭云盘"}
@@ -3126,10 +3144,10 @@ def _dispatch_share_transfer_callback(
                 "<b>光鸭分享转存完成</b>\n"
                 f"请求: #{result.get('request_id')} {duplicate}\n"
                 f"项目: {result.get('count', len(selected_ids))}\n"
-                f"目标: {html.escape(str(target_name or '根目录'))}"
+                f"目标: {html.escape(target_name or '根目录')}"
             )
-            organize_target = str(get("GY_ORGANIZE_TARGET_DIR", "") or "").strip()
-            if organize_target and organize_target != "0" and str(target_id) != "0":
+            organize_target = (get("GY_ORGANIZE_TARGET_DIR", "") or "").strip()
+            if organize_target and organize_target != "0" and target_id != "0":
                 text += "\n已交由现有 tracker 按配置处理整理、STRM 与媒体库刷新。"
             else:
                 text += "\n当前配置不触发后续整理链。"
@@ -3209,8 +3227,8 @@ def _dispatch_download_callback(
             dispatch_request(
                 request_id,
                 target,
-                gy_target_dir=str(nsfw_source["id"]),
-                gy_target_name=str(nsfw_source["name"]),
+                gy_target_dir=nsfw_source["id"],
+                gy_target_name=nsfw_source["name"],
             )
             if nsfw_source is not None
             else dispatch_request(request_id, target)
@@ -3246,7 +3264,7 @@ def _dispatch_download_callback(
     labels = {"qb": "qBittorrent", "guangya": "光鸭云盘"}
     succeeded = summary["succeeded"]
     if nsfw_source is not None:
-        source_name = str(nsfw_source.get("name") or nsfw_source["id"])
+        source_name = (nsfw_source.get("name") or nsfw_source["id"])
         text += f"\nNSFW 整理来源：{html.escape(source_name)}（按 NSFW 规则整理）"
     if succeeded:
         text += "\n成功: " + "、".join(labels[item] for item in succeeded)
@@ -4024,7 +4042,7 @@ def _notify_local_organize_confirmations(summary: dict, chat_id: object) -> int:
     from app.modules.local_media_notifications import notify_local_media_task
 
     raw_results = summary.get("task_results")
-    task_results = raw_results if isinstance(raw_results, dict) else {}
+    task_results: dict[int | str, Any] = raw_results if isinstance(raw_results, dict) else {}
     delivered = 0
     seen: set[int] = set()
     for raw_task_id in summary.get("task_ids") or []:
@@ -4043,14 +4061,12 @@ def _notify_local_organize_confirmations(summary: dict, chat_id: object) -> int:
             result = {"status": "requires_manual"}
         try:
             delivered += int(
-                bool(
-                    notify_local_media_task(
+                notify_local_media_task(
                         task_id,
                         result,
                         owner="admin",
                         chat_id=str(chat_id),
                     )
-                )
             )
         except Exception as exc:
             logger.warning(

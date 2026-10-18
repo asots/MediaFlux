@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -55,12 +56,11 @@ class MediaSnapshotCacheTests(unittest.TestCase):
 
     @staticmethod
     def board(**changes):
-        return DashboardData(**{
-            "server_type": "jellyfin", "server_name": "Test", "online": True,
-            "total_items": 42, "movie_count": 5,
-            "recent_added": [MediaItem(id="first", name="First", type="Movie")],
-            **changes,
-        })
+        return replace(DashboardData(
+            server_type="jellyfin", server_name="Test", online=True,
+            total_items=42, movie_count=5,
+            recent_added=[MediaItem(id="first", name="First", type="Movie")],
+        ), **changes)
 
     @staticmethod
     def source(**changes):

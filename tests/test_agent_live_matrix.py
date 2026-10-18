@@ -1,5 +1,6 @@
 """矩阵与领域判据的离线反例；这些轨迹绝不算真实验收结果。"""
 from __future__ import annotations
+from typing import Any
 
 import copy
 import hashlib
@@ -118,6 +119,7 @@ def test_read_recovery_requires_error_feedback_once_bounded_and_correct_answer(m
         if mutation == "no_error_event":
             bad["turns"][0]["events"] = []
         elif mutation == "duplicate_injection":
+            assert bad["matrix"] is not None
             bad["matrix"]["applied"] *= 2
         elif mutation == "four_attempts":
             bad["tools"] += copy.deepcopy(bad["tools"])
@@ -230,7 +232,7 @@ def test_effective_query_clears_preserve_parent_ref_and_same_candidate_snapshot(
         ("presented-ref-3", "cleared-ref-3", {"dynamic_range": "", "exclude_hdr": False}),
         ("cleared-ref-3", None, {}), ("presented-ref-3", None, {}),
     ):
-        document = {"ok": True, "data": {"positions": [1]}}
+        document: dict[str, Any] = {"ok": True, "data": {"positions": [1]}}
         if returned:
             document["data"]["effective_query"] = {**narrowed["data"]["effective_query"], **patch}
             document["reference_arguments"] = {"resource_candidates_ref": returned}
@@ -386,7 +388,7 @@ def test_last_turn_candidate_cannot_cover_missing_first_seven_turns(matrix_cases
 def test_each_turn_checks_its_own_scope_and_delivered_quality(matrix_cases, number, field, value):
     row = eight_constraints_trace(matrix_cases)
     if number == 8:
-        present = {**copy.deepcopy(row["tools"][-1]), "turn": 8}
+        present: dict[str, Any] = {**copy.deepcopy(row["tools"][-1]), "turn": 8}
         present["arguments"]["resource_candidates_ref"] = "synthetic-ref-1"
         row["tools"].append(present)
     else:
@@ -551,7 +553,7 @@ def test_refinement_subset_does_not_imply_incomplete_target_season(matrix_cases)
 
 
 def test_pagination_requires_actual_front_pages_and_inventory_counts():
-    row = {"matrix": {"scenario": "hybrid_guoman_front_owned", "applied": []}}
+    row: dict[str, Any] = {"matrix": {"scenario": "hybrid_guoman_front_owned", "applied": []}}
     assert not all(eval_agent.assess_pagination_replay(row).values())
     row["matrix"].update(applied=[{"owned_ids": ["1", "2"]}], replay={
         "provenance": {"kind": "synthetic_contract_replay"},

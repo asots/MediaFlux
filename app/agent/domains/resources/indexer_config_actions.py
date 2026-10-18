@@ -67,7 +67,7 @@ def indexer_sites_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         raise AgentToolError("至少选择一个资源站点")
     if len(site_ids) != len(raw_site_ids):
         raise AgentToolError("site_ids 不允许重复或空白项")
-    normalized = {"site_ids": list(site_ids)}
+    normalized: dict[str, Any] = {"site_ids": list(site_ids)}
     if "enable_search" in arguments:
         if not isinstance(arguments["enable_search"], bool):
             raise AgentToolError("enable_search 必须是布尔值")
@@ -88,7 +88,7 @@ def current_indexer_site_ids(*, strict: bool = False) -> tuple[str, ...]:
         "INDEXER_ENABLED_SITES",
         ",".join(DEFAULT_INDEXER_SITE_IDS),
     )
-    raw = str(configured or "")
+    raw = (configured or "")
     try:
         requested = set(normalize_persisted_indexer_site_ids(raw))
     except ValueError as exc:
@@ -302,7 +302,7 @@ def set_indexer_sites_confirmed(
     arguments: dict[str, Any], expected_context: str
 ) -> ToolResult:
     state = _capture(arguments)
-    if not secrets.compare_digest(_fingerprint(state), str(expected_context or "")):
+    if not secrets.compare_digest(_fingerprint(state), (expected_context or "")):
         raise AgentToolError(
             "配置已变化，请重新预检",
             code="confirmation_stale",

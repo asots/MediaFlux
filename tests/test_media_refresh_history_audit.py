@@ -6,11 +6,12 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 from app import database as db
 from app.modules.backup import create_backup, recover_pending_restore, restore_backup
-from app.modules.local_media_service import LocalMediaService
+from app.modules.local_media_service import LocalMediaService, LocalMovePlan
 from app.modules.media_refresh_coordinator import MediaRefreshCoordinator
 from app.repositories import media_refresh_queue as queue
 from app.routes import media_libraries_api as api
@@ -60,7 +61,7 @@ class MediaRefreshHistoryAuditTests(unittest.TestCase):
             with patch(
                 "app.modules.media_refresh_coordinator.get_media_refresh_coordinator"
             ):
-                self.assertEqual(LocalMediaService._refresh_plans([plan]), [])
+                self.assertEqual(LocalMediaService._refresh_plans([cast(LocalMovePlan, plan)]), [])
 
             endpoint = MediaEndpoint("/media/Movies")
             old_worker = MediaRefreshCoordinator()
@@ -81,7 +82,7 @@ class MediaRefreshHistoryAuditTests(unittest.TestCase):
             with patch(
                 "app.modules.media_refresh_coordinator.get_media_refresh_coordinator"
             ):
-                self.assertEqual(LocalMediaService._refresh_plans([plan]), [])
+                self.assertEqual(LocalMediaService._refresh_plans([cast(LocalMovePlan, plan)]), [])
             saved_state = db.kv_get(queue._QUEUE_KEY)
             self.assertEqual(queue.media_refresh_queue_status()["paths"], 2)
             archive = create_backup(paths)

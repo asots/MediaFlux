@@ -62,6 +62,7 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
             def interleave(*args, **kwargs):
                 # 新预览已提升 owner 级 flow generation，再让另一会话旧确认入队。
                 proceed.set()
+                assert thread is not None
                 thread.join(5)
                 assert not thread.is_alive() and not failures, failures
                 return build(*args, **kwargs)
@@ -82,6 +83,7 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
             # CAS 正确拒绝消费新 generation，但队列已经接受旧任务。
             assert accepted[0].data["requires_manual"] is True
             manager.start_durable_operation.assert_called_once()
+            assert prior is not None
             queued = plans.load_rename_plan(
                 prior.plan_id,
                 expected_fingerprint=prior.fingerprint,

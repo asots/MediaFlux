@@ -12,7 +12,7 @@ import threading
 import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator
+from typing import Generator, Any, Callable
 
 from app import database as db
 from app.clients.guangya import GuangYaClient, close_guangya_client
@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 @contextmanager
 def _guangya_client_scope(
     client: GuangYaClient | None,
-) -> Iterator[GuangYaClient]:
+) -> Generator[GuangYaClient, None, None]:
     """复用注入 Client，并只释放当前调用内部创建的连接池。"""
     owned_client = client is None
     runtime_client = client or GuangYaClient()
@@ -96,8 +96,8 @@ class ShareTransferPreviewStore:
         self._clock = clock
         self._token_factory = token_factory
         self._action_token_factory = action_token_factory
-        self._max_entries = max(1, int(max_entries))
-        self._max_actions = max(1, int(max_actions))
+        self._max_entries = max(1, max_entries)
+        self._max_actions = max(1, max_actions)
         self._entries: dict[str, _PreviewEntry] = {}
         self._actions: dict[str, _ShareAction] = {}
         self._lock = threading.RLock()
@@ -107,7 +107,7 @@ class ShareTransferPreviewStore:
         return int(self._ttl_seconds)
 
     @staticmethod
-    def owner_key(chat_id: str, user_id: str = "") -> str:
+    def owner_key(chat_id: str | int, user_id: str | int = "") -> str:
         chat = str(chat_id or "").strip()
         user = str(user_id or "").strip()
         if not chat:
@@ -155,14 +155,14 @@ class ShareTransferPreviewStore:
     def _entry_locked(
         self,
         preview_id: str,
-        chat_id: str,
-        user_id: str = "",
+        chat_id: str | int,
+        user_id: str | int = "",
         *,
         mutable: bool = False,
     ) -> _PreviewEntry:
         now = self._clock()
         self._prune_locked(now)
-        key = str(preview_id or "").strip()
+        key = (preview_id or "").strip()
         entry = self._entries.get(key)
         if entry is None or entry.owner_key != self.owner_key(chat_id, user_id):
             # 不区分不存在与越权，避免泄露其他会话的 preview 是否存在。
@@ -174,8 +174,8 @@ class ShareTransferPreviewStore:
     def create(
         self,
         inspected: dict,
-        chat_id: str,
-        user_id: str = "",
+        chat_id: str | int,
+        user_id: str | int = "",
         *,
         target_id: str = "0",
         target_name: str = "根目录",
@@ -193,11 +193,11 @@ class ShareTransferPreviewStore:
                 order.append(item["id"])
         if not order:
             raise ValueError("分享中没有可转存文件")
-        preview_id = str(self._token_factory() or "").strip()
+        preview_id = (self._token_factory() or "").strip()
         if not preview_id:
             raise RuntimeError("无法生成分享预览标识")
-        normalized_target_id = str(target_id or "0").strip() or "0"
-        normalized_target_name = str(target_name or "").strip() or (
+        normalized_target_id = (target_id or "0").strip() or "0"
+        normalized_target_name = (target_name or "").strip() or (
             "根目录" if normalized_target_id == "0" else "默认转存目录"
         )
         now = self._clock()
@@ -221,7 +221,7 @@ class ShareTransferPreviewStore:
                 self._drop_preview_locked(next(iter(self._entries)))
         return preview_id
 
-    def snapshot(self, preview_id: str, chat_id: str, user_id: str = "") -> dict[str, Any]:
+    def snapshot(self, preview_id: str, chat_id: str | int, user_id: str | int = "") -> dict[str, Any]:
         with self._lock:
             entry = self._entry_locked(preview_id, chat_id, user_id)
             files = [dict(entry.files[file_id]) for file_id in entry.file_order]
@@ -237,10 +237,10 @@ class ShareTransferPreviewStore:
                 "consumed": entry.consumed_selection is not None,
             }
 
-    def toggle(self, preview_id: str, file_id: str, chat_id: str, user_id: str = "") -> None:
+    def toggle(self, preview_id: str, file_id: str, chat_id: str | int, user_id: str | int = "") -> None:
         with self._lock:
             entry = self._entry_locked(preview_id, chat_id, user_id, mutable=True)
-            key = str(file_id or "").strip()
+            key = (file_id or "").strip()
             if key not in entry.files:
                 raise ValueError("选择中包含不属于该分享的文件")
             if key in entry.selected_ids:
@@ -248,12 +248,12 @@ class ShareTransferPreviewStore:
             else:
                 entry.selected_ids.add(key)
 
-    def select_all(self, preview_id: str, chat_id: str, user_id: str = "") -> None:
+    def select_all(self, preview_id: str, chat_id: str | int, user_id: str | int = "") -> None:
         with self._lock:
             entry = self._entry_locked(preview_id, chat_id, user_id, mutable=True)
             entry.selected_ids = set(entry.file_order)
 
-    def select_none(self, preview_id: str, chat_id: str, user_id: str = "") -> None:
+    def select_none(self, preview_id: str, chat_id: str | int, user_id: str | int = "") -> None:
         with self._lock:
             entry = self._entry_locked(preview_id, chat_id, user_id, mutable=True)
             entry.selected_ids.clear()
@@ -263,23 +263,23 @@ class ShareTransferPreviewStore:
         preview_id: str,
         target_id: str,
         target_name: str,
-        chat_id: str,
-        user_id: str = "",
+        chat_id: str | int,
+        user_id: str | int = "",
     ) -> None:
         with self._lock:
             entry = self._entry_locked(preview_id, chat_id, user_id, mutable=True)
-            entry.target_id = str(target_id or "0").strip() or "0"
-            entry.target_name = str(target_name or "根目录").strip() or "根目录"
+            entry.target_id = (target_id or "0").strip() or "0"
+            entry.target_name = (target_name or "根目录").strip() or "根目录"
 
     @staticmethod
     def _normalize_selected(selected_ids: list[str] | tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(sorted({str(item).strip() for item in selected_ids if str(item).strip()}))
+        return tuple(sorted({item.strip() for item in selected_ids if item.strip()}))
 
     def consume(
         self,
         preview_id: str,
-        chat_id: str,
-        user_id: str = "",
+        chat_id: str | int,
+        user_id: str | int = "",
         *,
         selected_ids: list[str] | tuple[str, ...] | None = None,
         target_id: str | None = None,
@@ -296,8 +296,8 @@ class ShareTransferPreviewStore:
             unknown = [file_id for file_id in selected if file_id not in entry.files]
             if unknown:
                 raise ValueError("选择中包含不属于该分享的文件")
-            chosen_target = str(target_id if target_id is not None else entry.target_id or "0").strip() or "0"
-            chosen_name = str(target_name if target_name is not None else entry.target_name or "根目录").strip() or "根目录"
+            chosen_target = (target_id if target_id is not None else entry.target_id or "0").strip() or "0"
+            chosen_name = (target_name if target_name is not None else entry.target_name or "根目录").strip() or "根目录"
             if entry.consumed_selection is None:
                 entry.consumed_selection = selected
                 entry.consumed_target_id = chosen_target
@@ -320,10 +320,10 @@ class ShareTransferPreviewStore:
                 expires_at=entry.expires_at,
             )
 
-    def discard(self, preview_id: str, chat_id: str, user_id: str = "") -> None:
+    def discard(self, preview_id: str, chat_id: str | int, user_id: str | int = "") -> None:
         with self._lock:
             self._entry_locked(preview_id, chat_id, user_id)
-            self._drop_preview_locked(str(preview_id or "").strip())
+            self._drop_preview_locked((preview_id or "").strip())
 
     def _clear_actions_locked(self, preview_id: str) -> None:
         for action_id in [
@@ -332,7 +332,7 @@ class ShareTransferPreviewStore:
         ]:
             self._actions.pop(action_id, None)
 
-    def begin_actions(self, preview_id: str, chat_id: str, user_id: str = "") -> None:
+    def begin_actions(self, preview_id: str, chat_id: str | int, user_id: str | int = "") -> None:
         with self._lock:
             entry = self._entry_locked(preview_id, chat_id, user_id, mutable=True)
             self._clear_actions_locked(entry.preview_id)
@@ -340,21 +340,21 @@ class ShareTransferPreviewStore:
     def create_action(
         self,
         preview_id: str,
-        chat_id: str,
-        user_id: str,
+        chat_id: str | int,
+        user_id: str | int,
         action: str,
         value: Any = None,
     ) -> str:
         with self._lock:
             entry = self._entry_locked(preview_id, chat_id, user_id, mutable=True)
-            action_id = str(self._action_token_factory() or "").strip()
+            action_id = (self._action_token_factory() or "").strip()
             if not action_id:
                 raise RuntimeError("无法生成 Telegram 操作标识")
             self._actions[action_id] = _ShareAction(
                 action_id=action_id,
                 preview_id=entry.preview_id,
                 owner_key=entry.owner_key,
-                action=str(action),
+                action=action,
                 value=value,
                 expires_at=entry.expires_at,
             )
@@ -362,11 +362,11 @@ class ShareTransferPreviewStore:
                 self._actions.pop(next(iter(self._actions)), None)
             return action_id
 
-    def resolve_action(self, action_id: str, chat_id: str, user_id: str = "") -> dict[str, Any]:
+    def resolve_action(self, action_id: str, chat_id: str | int, user_id: str | int = "") -> dict[str, Any]:
         now = self._clock()
         with self._lock:
             self._prune_locked(now)
-            key = str(action_id or "").strip()
+            key = (action_id or "").strip()
             action = self._actions.pop(key, None)
             owner = self.owner_key(chat_id, user_id)
             if action is None or action.owner_key != owner:
@@ -396,14 +396,14 @@ def share_request_key(
     share_id: str,
     selected_ids: list[str] | tuple[str, ...],
     target_id: str,
-    chat_id: str,
-    user_id: str = "",
+    chat_id: str | int,
+    user_id: str | int = "",
 ) -> str:
     canonical = {
         "chat": ShareTransferPreviewStore.owner_key(chat_id, user_id),
-        "files": sorted({str(item).strip() for item in selected_ids if str(item).strip()}),
-        "share": str(share_id or "").strip(),
-        "target": str(target_id or "0").strip() or "0",
+        "files": sorted({item.strip() for item in selected_ids if item.strip()}),
+        "share": (share_id or "").strip(),
+        "target": (target_id or "0").strip() or "0",
     }
     payload = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -411,17 +411,17 @@ def share_request_key(
 
 def inspect_share_for_transfer(
     share_url: str,
-    chat_id: str,
-    user_id: str = "",
+    chat_id: str | int,
+    user_id: str | int = "",
     *,
     client: GuangYaClient | None = None,
     store: ShareTransferPreviewStore | None = None,
 ) -> dict[str, Any]:
     with _guangya_client_scope(client) as runtime_client:
-        inspected = runtime_client.inspect_share(str(share_url or "").strip())
+        inspected = runtime_client.inspect_share((share_url or "").strip())
         store = store or get_share_transfer_store()
-        target_id = str(get("GY_SHARE_TARGET_DIR", "0") or "0").strip() or "0"
-        target_name = str(
+        target_id = (get("GY_SHARE_TARGET_DIR", "0") or "0").strip() or "0"
+        target_name = (
             get("GY_SHARE_TARGET_DIR_NAME", "根目录") or "根目录"
         ).strip() or ("根目录" if target_id == "0" else "默认转存目录")
         preview_id = store.create(
@@ -436,7 +436,7 @@ def inspect_share_for_transfer(
 
 def _share_staging_name(request_id: int) -> str:
     token = secrets.token_hex(8)
-    return f"MediaFlux-share-{int(request_id)}-{token}"
+    return f"MediaFlux-share-{request_id}-{token}"
 
 
 def _find_share_staging_dir(client: GuangYaClient, parent_id: str, name: str) -> str:
@@ -481,9 +481,9 @@ def create_share_request(
     preview_id: str,
     selected_ids: list[str],
     target_id: str,
-    chat_id: str,
+    chat_id: str | int,
     *,
-    user_id: str = "",
+    user_id: str | int = "",
     target_name: str = "根目录",
     origin: str = "telegram",
     tracker_chat_id: str | None = None,
@@ -515,8 +515,8 @@ def create_share_request(
     request_id, created = db.create_share_transfer_request(
         key,
         title=title,
-        chat_id=str(tracker_chat_id or ""),
-        origin=str(origin or "telegram"),
+        chat_id=(tracker_chat_id or ""),
+        origin=(origin or "telegram"),
     )
     retried = False
     if not created:
@@ -563,8 +563,8 @@ def create_share_request(
             # 尚未尝试任何云写，明确失败允许既有的一次显式重试。
             logger.warning("光鸭分享客户端初始化失败 (%s)", type(exc).__name__)
             return preparation_failed("光鸭客户端初始化失败，请重新确认后重试")
-        organize_target = str(get("GY_ORGANIZE_TARGET_DIR", "") or "").strip()
-        auto_follow_up = bool(
+        organize_target = (get("GY_ORGANIZE_TARGET_DIR", "") or "").strip()
+        auto_follow_up = (
             organize_target not in {"", "0"}
             and snapshot.target_id not in {"", "0"}
         )
@@ -614,7 +614,7 @@ def create_share_request(
                     )
                     if not effective_target_id:
                         try:
-                            effective_target_id = str(
+                            effective_target_id = (
                                 client.create_dir(staging_name, staging_parent_id) or ""
                             )
                         except Exception:

@@ -7,12 +7,14 @@ import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 from app import database as db
 from app.clients.http import HttpInvalidResponse
 from app.indexers import downloads
 from app.indexers.models import IndexerItem, IndexerPage, ResolvedDownload
+from app.indexers.providers.base import IndexerAdapter
 from app.indexers.registry import IndexerRegistry
 from app.indexers.result_store import IndexerResultStore
 from app.indexers.service import IndexerService
@@ -87,7 +89,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         source = OfflineSource(items)
         source.fail_titles = {items[index].title for index in failures}
         indexer = IndexerService(
-            registry=IndexerRegistry({"nyaa": source}),
+            registry=IndexerRegistry(cast(dict[str, IndexerAdapter], {"nyaa": source})),
             result_store=IndexerResultStore(),
         )
         self.addCleanup(lambda: asyncio.run(indexer.aclose()))
@@ -136,6 +138,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
 
     def assert_check_persisted(self, subscription_id, *, candidates, submitted, missing):
         row = db.get_media_subscription(subscription_id)
+        assert row is not None
         payload = json.loads(row["result_json"])
         run = db.list_media_subscription_runs(subscription_id=subscription_id)[0]
         self.assertEqual((row["status"], run["status"]), ("missing", "missing"))
@@ -159,7 +162,9 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.request_count(), 1)
         first = db.get_media_subscription_candidate(admissions[0]["candidate_id"])
         second = db.get_media_subscription_candidate(admissions[1]["candidate_id"])
+        assert first is not None
         self.assertEqual((first["status"], first["request_id"]), ("available", None))
+        assert second is not None
         self.assertEqual((second["status"], second["request_id"]), ("submitted", admissions[1]["request_id"]))
         self.assert_check_persisted(subscription_id, candidates=2, submitted=1, missing=1)
 
@@ -200,7 +205,9 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         self.assertEqual(source.resolve_titles, [source.items[0].title])
         self.assertEqual(backend.call_count, int(submitted))
         self.assertEqual(db.list_media_subscription_runs(subscription_id=subscription_id)[0]["status"], "failed")
-        self.assertEqual(db.get_media_subscription(subscription_id)["status"], "error")
+        get_media_subscription_result = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result is not None
+        self.assertEqual(get_media_subscription_result["status"], "error")
         return self.admissions(subscription_id)
 
     def test_invalid_magnet_input_is_safe_to_try_next_candidate(self):
@@ -242,6 +249,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         self.assertEqual(admissions[0]["status"], "failed")
         self.assertTrue(admissions[0]["request_id"])
         request = db.get_download_request(admissions[0]["request_id"])
+        assert request is not None
         self.assertEqual((request["status"], request["qb_status"]), ("failed", "failed"))
 
     def test_unknown_receipt_keeps_bound_admission_and_never_switches_candidate(self):
@@ -258,9 +266,11 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(admissions), 1)
         self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), 1)
         request = db.get_download_request(admissions[0]["request_id"])
+        assert request is not None
         self.assertEqual(request["qb_status"], "outcome_unknown")
         self.assertIn(request["status"], {"submitted", "manual_review"})
         candidate = db.get_media_subscription_candidate(admissions[0]["candidate_id"])
+        assert candidate is not None
         self.assertEqual(candidate["status"], "submitted")
         self.assert_check_persisted(subscription_id, candidates=2, submitted=0, missing=1)
 
@@ -273,6 +283,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         backend.assert_called_once()
         admission = self.admissions(subscription_id)[0]
         request = db.get_download_request(admission["request_id"])
+        assert request is not None
         self.assertEqual(request["qb_status"], "outcome_unknown")
         self.assertIn(request["status"], {"submitted", "manual_review"})
         self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), 1)
@@ -300,7 +311,9 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
             admissions = self.assert_failure_stops_round(subscription_id, source, backend, submitted=True)
         self.assertEqual(len(admissions), 1)
         self.assertTrue(admissions[0]["request_id"])
-        self.assertEqual(db.get_download_request(admissions[0]["request_id"])["status"], "submitted")
+        get_download_request_result = db.get_download_request(admissions[0]["request_id"])
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["status"], "submitted")
         self.assertEqual(len(db.list_active_media_download_admissions(subscription_id)), 1)
 
     def test_unclassified_unbound_creation_error_does_not_switch_source(self):
@@ -349,6 +362,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         self.assertEqual(source.resolve_titles, [source.items[0].title])
         backend.assert_not_called()
         row = db.get_media_subscription(subscription_id)
+        assert row is not None
         self.assertEqual((row["action"], row["revision"], row["status"]), ("confirm", 2, "new"))
         self.assertEqual(db.list_media_subscription_runs(subscription_id=subscription_id)[0]["status"], "cancelled")
         self.assertEqual(row["result_json"], "{}")
@@ -423,7 +437,9 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         self.assertEqual(raised.exception.code, "cancelled")
         self.assertEqual(source.resolve_titles, [source.items[0].title])
         backend.assert_not_called()
-        self.assertEqual(db.get_media_subscription(subscription_id)["status"], "paused")
+        get_media_subscription_result_2 = db.get_media_subscription(subscription_id)
+        assert get_media_subscription_result_2 is not None
+        self.assertEqual(get_media_subscription_result_2["status"], "paused")
         self.assertEqual(db.list_media_subscription_runs(subscription_id=subscription_id)[0]["status"], "cancelled")
 
     def test_delete_during_resolver_failure_cancels_round_without_switching(self):
@@ -450,7 +466,9 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
             asyncio.run(service.download_candidate(candidate_id))
         self.assertEqual((raised.exception.code, raised.exception.status_code), ("download_failed", 502))
         self.assertTrue(raised.exception.can_try_next_candidate)
-        self.assertEqual(db.get_media_subscription_candidate(candidate_id)["status"], "available")
+        get_media_subscription_candidate_result = db.get_media_subscription_candidate(candidate_id)
+        assert get_media_subscription_candidate_result is not None
+        self.assertEqual(get_media_subscription_candidate_result["status"], "available")
         backend.assert_not_called()
         source.fail_titles.clear()
         result = asyncio.run(service.download_candidate(candidate_id))

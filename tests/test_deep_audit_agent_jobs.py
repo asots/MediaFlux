@@ -135,6 +135,7 @@ def test_restart_repeat_cancelled_batch_never_publishes_or_reexecutes():
 
     def cancel_during_batch(_arguments):
         row, outcome = db.cancel_agent_job(owner=OWNER, job_id=job_id)
+        assert row is not None
         assert outcome == "requested" and row["cancel_requested"] == 1
         return batch(checked=2, missing=3, cursor="100")
 
@@ -206,7 +207,9 @@ def test_history_scheduled_patrol_missing_progress_never_publishes_completion():
         patch.object(worker, "_notifications_enabled", return_value=False),
     ):
         assert worker.run_once() == 1
-    row = dict(db.get_agent_library_patrol())
+    get_agent_library_patrol_result = db.get_agent_library_patrol()
+    assert get_agent_library_patrol_result is not None
+    row = dict(get_agent_library_patrol_result)
     assert row["outcome"] != "up_to_date"
     assert row["error_type"] and row["status"] == "retry_wait"
     assert row["cycle_cursor_tmdb_id"] == "100"
@@ -239,7 +242,9 @@ def test_history_scheduled_patrol_valid_progress_preserves_prior_findings():
     executor.assert_called_once_with(
         {"as_of": AS_OF, "max_series": 2, "after_tmdb_id": "100"}
     )
-    row = dict(db.get_agent_library_patrol())
+    get_agent_library_patrol_result_2 = db.get_agent_library_patrol()
+    assert get_agent_library_patrol_result_2 is not None
+    row = dict(get_agent_library_patrol_result_2)
     assert row["outcome"] == "updates_available"
     assert row["checked_series_count"] == 3 and row["missing_episode_count"] == 3
     assert row["cycle_cursor_tmdb_id"] == ""

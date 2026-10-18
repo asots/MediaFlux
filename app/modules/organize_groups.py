@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from app.logger import get_logger
 from app.modules.organize_scan import filter_source_entries, record_protected_staging
@@ -59,7 +59,7 @@ GROUP_STAGE_LABELS = {
 
 def group_key(group_id: str, group_path: str) -> str:
     """与 ``organize_execution`` 中的分组键保持完全一致。"""
-    return f"{str(group_id or '')}\x1f{str(group_path or GROUP_ROOT_PATH)}"
+    return f"{(group_id or '')}\x1f{(group_path or GROUP_ROOT_PATH)}"
 
 
 @dataclass(frozen=True)
@@ -91,9 +91,9 @@ class OrganizeGroupTask:
             "group_id": self.group_id,
             "group_path": self.group_path,
             "group_name": self.group_name,
-            "index": int(self.index),
-            "total": int(self.total),
-            "is_root": bool(self.is_root),
+            "index": self.index,
+            "total": self.total,
+            "is_root": self.is_root,
             "trigger": self.trigger,
             "file_ids": list(self.file_ids),
         }
@@ -131,13 +131,13 @@ class OrganizeGroupResult:
             "status": self.status,
             "stage": self.stage,
             "identities": list(self.identities),
-            "scanned": int(self.scanned),
-            "moved": int(self.moved),
-            "replaced": int(self.replaced),
-            "metadata_moved": int(self.metadata_moved),
-            "skipped": int(self.skipped),
-            "need_confirm": int(self.need_confirm),
-            "failed": int(self.failed),
+            "scanned": self.scanned,
+            "moved": self.moved,
+            "replaced": self.replaced,
+            "metadata_moved": self.metadata_moved,
+            "skipped": self.skipped,
+            "need_confirm": self.need_confirm,
+            "failed": self.failed,
             "failures": list(self.failures),
             "changed_target_dirs": list(self.changed_target_dirs),
             "changed_strm_paths": list(self.changed_strm_paths),
@@ -154,13 +154,13 @@ class OrganizeGroupResult:
             "name": self.task.group_name,
             "status": self.status,
             "stage": self.stage,
-            "index": int(self.task.index),
-            "total": int(self.scanned),
-            "moved": int(self.moved),
-            "metadata_moved": int(self.metadata_moved),
-            "skipped": int(self.skipped),
-            "need_confirm": int(self.need_confirm),
-            "failed": int(self.failed),
+            "index": self.task.index,
+            "total": self.scanned,
+            "moved": self.moved,
+            "metadata_moved": self.metadata_moved,
+            "skipped": self.skipped,
+            "need_confirm": self.need_confirm,
+            "failed": self.failed,
         }
 
 
@@ -179,7 +179,7 @@ class GroupEnumeration:
 
 
 def _video_extension(name: str) -> str:
-    text = str(name or "")
+    text = (name or "")
     return text.rsplit(".", 1)[-1].lower() if "." in text else ""
 
 
@@ -209,13 +209,13 @@ _UNIT_KEY_NOISE_RE = re.compile(r"[^0-9a-z\u3400-\u9fff]+", re.IGNORECASE)
 
 def _unit_key_text(value: str) -> str:
     """生成仅用于同批分组的保守比较键，不参与最终媒体识别。"""
-    stem = str(value or "").rsplit(".", 1)[0]
+    stem = (value or "").rsplit(".", 1)[0]
     return _UNIT_KEY_NOISE_RE.sub(" ", stem.casefold()).strip()
 
 
 def _movie_release_unit_key(name: str) -> str:
     """用“片名 + 年份”保守合并同一电影的多个规格版本。"""
-    stem = str(name or "").rsplit(".", 1)[0]
+    stem = (name or "").rsplit(".", 1)[0]
     years = list(_MOVIE_RELEASE_YEAR_RE.finditer(stem))
     if not years:
         return ""
@@ -241,6 +241,8 @@ def _root_media_unit_key(item, *, nsfw_enabled: bool = False) -> str:
         except Exception:
             identifier = None
     if identifier is not None:
+        from app.modules.nsfw import normalize_code
+
         code = normalize_code(identifier.code)
         if code:
             return f"code:{code}"
@@ -288,7 +290,7 @@ def _root_media_unit_key(item, *, nsfw_enabled: bool = False) -> str:
 
 
 def _root_media_units(
-    root_videos: list[object], *, nsfw_enabled: bool = False,
+    root_videos: Sequence[object], *, nsfw_enabled: bool = False,
 ) -> list[list[object]] | None:
     """安全拆分根目录媒体；身份不完整时返回 ``None`` 触发旧路径。"""
     if not root_videos:
@@ -328,13 +330,13 @@ def enumerate_group_tasks(
     CD/Part 分段仍保持为同一单元。无法可靠拆分时回退一个 ``__root__`` 组。
     每个第一层子目录构成独立媒体组，深层 Season/Specials 继续继承本组身份。
     """
-    source_dir_id = str(source_dir_id or "").strip()
+    source_dir_id = (source_dir_id or "").strip()
     protected = {
-        str(item).strip() for item in (protected_source_ids or set()) if str(item).strip()
+        item.strip() for item in (protected_source_ids or set()) if item.strip()
     }
     protected.update(protected_staging_ids)
     protected.discard(source_dir_id)
-    root_name = str(source_name or "").strip()
+    root_name = (source_name or "").strip()
 
     try:
         info = client.file_info(source_dir_id)
@@ -362,7 +364,7 @@ def enumerate_group_tasks(
             tasks=[], complete=False, errors=["枚举已取消"], source_root_name=root_name,
         )
 
-    exts = {str(item).lower() for item in (video_exts or set())}
+    exts = {item.lower() for item in (video_exts or set())}
     tasks: list[OrganizeGroupTask] = []
     root_videos = [
         item
@@ -504,15 +506,15 @@ def merge_group_stats(aggregate: dict, group_stats: dict) -> dict:
         if isinstance(value, bool):
             if key in _AND_BOOL_KEYS:
                 previous = aggregate.get(key)
-                aggregate[key] = bool(value) if previous is None else bool(previous and value)
+                aggregate[key] = value if previous is None else bool(previous and value)
             else:
-                aggregate[key] = bool(aggregate.get(key)) or bool(value)
+                aggregate[key] = bool(aggregate.get(key)) or value
             continue
         if isinstance(value, int):
             if key in _MAX_INT_KEYS:
-                aggregate[key] = max(int(aggregate.get(key, 0) or 0), int(value))
+                aggregate[key] = max(int(aggregate.get(key, 0) or 0), value)
             else:
-                aggregate[key] = int(aggregate.get(key, 0) or 0) + int(value)
+                aggregate[key] = int(aggregate.get(key, 0) or 0) + value
             continue
         if isinstance(value, float):
             aggregate[key] = round(float(aggregate.get(key, 0.0) or 0.0) + float(value), 3)
@@ -627,7 +629,7 @@ def build_group_result(
         changed_strm_paths=changed_strm_paths(changes),
         strm_changes=changes,
         cleanup=cleanup,
-        error=str(error or ""),
+        error=(error or ""),
         elapsed_seconds=float(elapsed_seconds or stats.get("total_elapsed_seconds", 0.0) or 0.0),
         stats=stats,
     )
@@ -654,7 +656,7 @@ def resolve_group_status(stats: dict, *, error: str = "") -> str:
 
 
 def is_terminal_group_status(status: str) -> bool:
-    return str(status or "") in _TERMINAL_GROUP_STATUSES
+    return (status or "") in _TERMINAL_GROUP_STATUSES
 
 
 @dataclass
@@ -672,14 +674,14 @@ class GroupProgress:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "total": int(self.total),
-            "completed": int(self.completed),
-            "current_index": int(self.current_index),
+            "total": self.total,
+            "completed": self.completed,
+            "current_index": self.current_index,
             "current_group": self.current_group,
             "current_stage": self.current_stage,
             "current_stage_label": GROUP_STAGE_LABELS.get(self.current_stage, ""),
-            "current_file_index": int(self.current_file_index),
-            "current_file_total": int(self.current_file_total),
+            "current_file_index": self.current_file_index,
+            "current_file_total": self.current_file_total,
             "elapsed_seconds": (
                 round(max(0.0, time.monotonic() - self.started_at), 3)
                 if self.started_at

@@ -314,7 +314,7 @@ class OrganizeNotificationDeliveryTests(IsolatedDatabaseTestCase):
             media_refresh="Jellyfin 已刷新",
         )
         self.assertTrue(any(
-            "暂不生成最终缺集结论" in line for line in previous.lines
+            "暂不生成最终缺集结论" in str(line) for line in previous.lines
         ))
 
         published = []
@@ -340,7 +340,7 @@ class OrganizeNotificationDeliveryTests(IsolatedDatabaseTestCase):
         event = published[-1]
         self.assertEqual(event.title, "✅ 光鸭整理完成")
         self.assertFalse(any(
-            "暂不生成最终缺集结论" in line for line in event.lines
+            "暂不生成最终缺集结论" in str(line) for line in event.lines
         ))
         self.assertTrue(any("将夜" in line for line in event.lines))
 
@@ -394,7 +394,7 @@ class OrganizeNotificationDeliveryTests(IsolatedDatabaseTestCase):
             line
             for block in event.lines
             for line in block.splitlines()
-            if "暂不生成最终缺集结论" in line
+            if "暂不生成最终缺集结论" in str(line)
         ]
         self.assertEqual(event.title, "⚠️ 光鸭整理部分完成")
         self.assertEqual(status_lines, [
@@ -451,7 +451,7 @@ class OrganizeNotificationDeliveryTests(IsolatedDatabaseTestCase):
             line
             for block in event.lines
             for line in block.splitlines()
-            if "暂不生成最终缺集结论" in line
+            if "暂不生成最终缺集结论" in str(line)
         ]
         self.assertEqual(status_lines, [
             "- ⚠️ 整理状态：本次整理仍有待确认项，暂不生成最终缺集结论",

@@ -70,7 +70,7 @@ def _cancel_organize_operation(owner: str, operation_ref: str) -> str:
         request_cancel_organize_operation_job,
     )
 
-    reference = str(operation_ref or "").strip().upper()
+    reference = (operation_ref or "").strip().upper()
     try:
         job_id = organize_operation_job_id_from_public_ref(reference)
         row = get_organize_operation_job_for_owner(job_id, owner)
@@ -232,11 +232,9 @@ async def _cancel_effect_continuations(
 
 
 def _same_turn(active: Any, *, generation: int, request_id: str) -> bool:
-    return bool(
-        isinstance(active, Mapping)
+    return (isinstance(active, Mapping)
         and int(active.get("generation") or 0) == generation
-        and str(active.get("request_id") or "") == request_id
-    )
+        and str(active.get("request_id") or "") == request_id)
 
 
 async def _stop_captured_turn(
@@ -366,13 +364,14 @@ def _response(
 
 async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[str, Any]:
     """协作停止单个 owner/session，不停止服务、全局队列或其它会话。"""
-    owner_key = str(owner or "").strip()
-    session_key = str(session_id or "").strip()
+    owner_key = (owner or "").strip()
+    session_key = (session_id or "").strip()
     if not owner_key or not session_key:
         raise ValueError("owner and session_id are required")
 
     session = runtime.session
     store = getattr(runtime, "store", session.state_store)
+    assert store is not None
     model_turn = "not_running"
     confirmation = "none"
     stop_requested_generation = 0

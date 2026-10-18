@@ -21,10 +21,10 @@ def test_selected_scope_and_durability_controls(tmp_path, cut):
         paths = get_runtime_paths()
         original_sync, original_init = backup._fsync_directory, database.init_db
         retained = []
-        def sync(path):
-            if cut in ('db_fsync', 'db_fsync_unsupported') and path == paths.database_path.parent and paths.database_path.exists():
+        def sync(directory):
+            if cut in ('db_fsync', 'db_fsync_unsupported') and directory == paths.database_path.parent and paths.database_path.exists():
                 raise OSError(errno.EINVAL if cut == 'db_fsync_unsupported' else errno.EIO, 'injected strict DB directory fsync failure')
-            original_sync(path)
+            original_sync(directory)
         def initialize_stage():
             original_init()
             if cut == 'env_cas_late':

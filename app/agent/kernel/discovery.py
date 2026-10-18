@@ -146,7 +146,7 @@ class CapabilityDiscovery:
             return unchecked
         return {
             "status": str(status["status"]),
-            "reason": str(status.get("reason", ""))[:240],
+            "reason": (status.get("reason", ""))[:240],
         }
 
     def search(self, arguments: dict[str, Any]) -> dict[str, Any]:

@@ -136,6 +136,7 @@ class IndexerHardeningTests(unittest.IsolatedAsyncioTestCase):
         cached = await service.search("first")
         self.assertTrue(cached.cached)
         self.assertNotEqual(first.items[0].result_id, cached.items[0].result_id)
+        assert cached.items[0].result_id is not None
         self.assertEqual(store.get(cached.items[0].result_id).title, "first")
         await service.search("third")
         self.assertLessEqual(len(service._cache), 2)

@@ -107,7 +107,7 @@ def telegram_user_is_allowed(user_id: object) -> bool:
 def telegram_agent_control_access(chat_id: object, user_id: object) -> str:
     chat = str(chat_id or "").strip()
     user = str(user_id or "").strip()
-    configured_chat = str(config.get("TG_CHAT_ID", "") or "").strip()
+    configured_chat = (config.get("TG_CHAT_ID", "") or "").strip()
     if (
         not _ALLOWED_ID_RE.fullmatch(chat)
         or not _ALLOWED_USER_RE.fullmatch(user)
@@ -133,7 +133,7 @@ def telegram_agent_owner(chat_id: object, user_id: object) -> str:
 
 
 def telegram_agent_session_id(
-    chat_id: object, user_id: object, message_thread_id: object = None
+    chat_id: object, user_id: object, message_thread_id: Any = None
 ) -> str:
     owner = telegram_agent_owner(chat_id, user_id)
     try:
@@ -163,7 +163,7 @@ def _request_id(source: Any, text: str) -> str:
     message_id = getattr(source, "message_id", None)
     if message_id is None:
         message_id = getattr(getattr(source, "message", None), "message_id", "0")
-    digest = hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:12]
     return f"tg_{message_id}_{digest}"[:150]
 
 
@@ -201,6 +201,7 @@ class TelegramAgentExecutor:
                 return None
             context = copy_context()
             context.run(AGENT_CANCELLATION.set, self._cancellation)
+            assert self._pool is not None
             future = self._pool.submit(context.run, function, *args)
             self._jobs[future] = (control, message_key)
             future.add_done_callback(self._finished)
@@ -239,6 +240,7 @@ def _thread_kwargs(source: Any) -> dict[str, Any]:
 
 def _delivery_route(source: Any, *, owner: str) -> dict[str, Any]:
     message = getattr(source, "message", source)
+    assert message is not None
     return normalize_delivery_route({
         "chat_id": message.chat.id,
         "message_thread_id": getattr(message, "message_thread_id", None),
@@ -388,7 +390,7 @@ def _task_summary(task: Any) -> str:
 def _render_turn(view: TurnView) -> str:
     if view.status in {"success", "partial"}:
         chain = _tool_chain_line(view.tool_calls)
-        answer = str(view.answer or "Agent 未返回可显示的回答，请重试。").replace("\x00", "").strip()
+        answer = (view.answer or "Agent 未返回可显示的回答，请重试。").replace("\x00", "").strip()
         receipt = format_public_result(view.effect_result) if view.effect_result else ""
         if receipt and receipt not in answer:
             answer = receipt + "\n\n" + answer
@@ -442,12 +444,12 @@ class _ExistingMessageProgress(TelegramProgress):
         )
         self._started = False
 
-    def update(self, rendered: str) -> bool:
+    def update(self, rendered: str, *, clear_reply_markup: bool = True) -> bool:
         if not self._started:
             self._started = True
             self.begin(rendered)
             self._last_rendered = None  # 原消息仍是确认卡，首次进度必须真实编辑。
-        return super().update(rendered, clear_reply_markup=True)
+        return super().update(rendered, clear_reply_markup=clear_reply_markup)
 
 
 _STREAM_EDIT_INTERVAL_SECONDS = 0.85
@@ -565,7 +567,7 @@ class _TelegramEventObserver:
                 logger.info("Telegram Agent 增量展示失败 type=%s", type(exc).__name__)
 
 
-def _positive_int(value: object) -> int | None:
+def _positive_int(value: Any) -> int | None:
     try:
         normalized = int(value or 0)
     except (TypeError, ValueError):
@@ -581,7 +583,7 @@ def _edit_final(
     reply_markup: Any = None,
     rendered_html: bool = False,
 ) -> bool:
-    body = str(text) if rendered_html else html.escape(_safe_text(text))
+    body = text if rendered_html else html.escape(_safe_text(text))
     chunks = split_telegram_html(body, limit=_MAX_MESSAGE) or ("任务已结束。",)
     return TelegramProgress(
         bot, None, target.chat.id, "Agent 回执", mode="edit",
@@ -649,7 +651,7 @@ def prepare_agent_continuation_delivery(
         error_code=str(error.get("code") or ""), error_message=str(error.get("message") or ""),
         tool_calls=tuple(view.get("tool_calls") or ()), task=view.get("task"),
     )
-    identity = str(delivery_id or turn.turn_id).strip()
+    identity = (delivery_id or turn.turn_id).strip()
     if not turn.terminal or not identity or (turn.approval is not None) != (turn.status == "approval_required"):
         raise TransportInputError("后台 Telegram 结果不是可交付终态")
     body = _render_approval_turn(turn) if turn.approval else _render_turn(turn)
@@ -1233,7 +1235,7 @@ def _telegram_model_page(
     )
     current_model = get_telegram_model_preference(owner, session_id, settings=settings) or settings.model
     page_count = max(1, (len(models) + _TELEGRAM_MODEL_PAGE_SIZE - 1) // _TELEGRAM_MODEL_PAGE_SIZE)
-    page = max(0, min(int(page), page_count - 1))
+    page = max(0, min(page, page_count - 1))
     start = page * _TELEGRAM_MODEL_PAGE_SIZE
     visible = models[start : start + _TELEGRAM_MODEL_PAGE_SIZE]
     lines = [

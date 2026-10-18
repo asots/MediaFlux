@@ -1,6 +1,9 @@
 """Nyaa 文件清单自动整理基准工具契约。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.http import FixedHostHttpClient
+
 import asyncio
 import tempfile
 import unittest
@@ -78,7 +81,7 @@ def _tv_match(
     media_type: str = "tv",
 ) -> MatchResult:
     return MatchResult(
-        tmdb_id=str(tmdb_id),
+        tmdb_id=tmdb_id,
         title=title,
         year="2024",
         media_type=media_type,
@@ -86,7 +89,7 @@ def _tv_match(
         status="matched",
         matched_by="tmdb_id",
         provider="tmdb",
-        external_id=str(tmdb_id),
+        external_id=tmdb_id,
     )
 
 
@@ -182,7 +185,7 @@ class OrganizeBenchmarkTests(unittest.TestCase):
                 )
 
         http = FakeHttp()
-        candidates = asyncio.run(fetch_nyaa_candidates(http, pages=3, query=""))
+        candidates = asyncio.run(fetch_nyaa_candidates(cast(FixedHostHttpClient, http), pages=3, query=""))
         self.assertEqual([item.title for item in candidates], [
             "Show 101 - 01", "Show 102 - 01",
         ])
@@ -1083,7 +1086,7 @@ class OrganizeBenchmarkTests(unittest.TestCase):
                 },
             },
         )
-        result.score = "invalid-number"
+        setattr(result, "score", "invalid-number")
 
         payload = _safe_match(result)
         rendered = str(payload)

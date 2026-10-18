@@ -15,21 +15,23 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import httpx
+from starlette.requests import Request
+
+from app.modules.media_proxy import _UpstreamClientPool
 from tests.support import InitializedWebTestCase, IsolatedDatabaseTestCase
 
 
 class MediaServerProfileTests(unittest.TestCase):
     def test_profile_resolver_module_exists(self):
-        self.assertIsNotNone(
-            importlib.util.find_spec("app.modules.media_server_profiles"),
-            "缺少服务端媒体服务器配置解析模块",
-        )
+        assert (importlib.util.find_spec("app.modules.media_server_profiles")) is not None, "缺少服务端媒体服务器配置解析模块"
 
     def test_configured_jellyfin_is_resolved_server_side(self):
         spec = importlib.util.find_spec("app.modules.media_server_profiles")
-        self.assertIsNotNone(spec, "缺少服务端媒体服务器配置解析模块")
+        assert (spec) is not None, "缺少服务端媒体服务器配置解析模块"
         profiles = importlib.import_module("app.modules.media_server_profiles")
         row = {
             "id": 7,
@@ -68,9 +70,9 @@ class MediaProxyProfileApiTests(InitializedWebTestCase):
     def test_profiles_and_configured_instance_do_not_expose_secret(self):
         from fastapi.testclient import TestClient
 
-        from app.main import create_app
-        from app.config import web_credentials
         import app.modules.media_server_profiles as profiles
+        from app.config import web_credentials
+        from app.main import create_app
 
         values = {
             "MEDIAFLUX_INITIALIZED": "1",
@@ -133,6 +135,7 @@ class MediaProxyProfileApiTests(InitializedWebTestCase):
 class MediaProxyProbeApiTests(unittest.TestCase):
     def test_probe_endpoint_reuses_pinned_service_and_preserves_contract(self):
         import json
+
         from app.routes import media_proxy_api
 
         with (
@@ -143,17 +146,18 @@ class MediaProxyProbeApiTests(unittest.TestCase):
                 new=AsyncMock(return_value={"status_code": 204, "latency_ms": 37}),
             ) as probe,
         ):
-            response = asyncio.run(media_proxy_api.test_instance(7, SimpleNamespace()))
+            response = asyncio.run(media_proxy_api.test_instance(7, cast(Request, SimpleNamespace())))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            json.loads(response.body),
+            json.loads(bytes(response.body)),
             {"success": True, "status_code": 204, "elapsed_ms": 37},
         )
         probe.assert_awaited_once_with(7, timeout_seconds=10.0)
 
     def test_probe_endpoint_maps_oversize_upstream_to_stable_error(self):
         import json
+
         from app.routes import media_proxy_api
 
         with (
@@ -165,10 +169,10 @@ class MediaProxyProbeApiTests(unittest.TestCase):
                 new=AsyncMock(side_effect=media_proxy_api.ProxyUpstreamBodyTooLarge()),
             ),
         ):
-            response = asyncio.run(media_proxy_api.test_instance(7, SimpleNamespace()))
+            response = asyncio.run(media_proxy_api.test_instance(7, cast(Request, SimpleNamespace())))
 
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(json.loads(response.body), {"error": "上游响应过大"})
+        self.assertEqual(json.loads(bytes(response.body)), {"error": "上游响应过大"})
 
 
 class MediaProxyLoggingBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -291,6 +295,7 @@ class MediaProxyLoggingBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 await manager._start_runtime(row)
 
         stop_runtime.assert_awaited_once()
+        assert stop_runtime.await_args is not None
         runtime = stop_runtime.await_args.args[0]
         self.assertEqual(runtime.instance_id, 11)
         self.assertIs(runtime.server, fake_server)
@@ -345,6 +350,7 @@ class MediaProxyLoggingBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
         stop_runtime.assert_awaited_once()
         update_status.assert_not_called()
+        assert stop_runtime.await_args is not None
         runtime = stop_runtime.await_args.args[0]
         self.assertEqual(runtime.instance_id, 12)
         self.assertIs(runtime.task, fake_task)
@@ -597,7 +603,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(media_proxy.httpx, "AsyncClient", return_value=FakeClient()),
         ):
             authorized, _ = await asyncio.gather(
-                media_proxy._client_is_authorized(instance, request),
+                media_proxy._client_is_authorized(instance, cast(Request, request)),
                 ticker(),
             )
 
@@ -677,6 +683,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.object(manager, "restart_instance", new=restart_instance):
                 future = manager.request_restart(9)
+                assert future is not None
                 self.assertEqual(future.result(timeout=1), {
                     "restarted": True, "reason": "",
                 })
@@ -731,7 +738,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         closed = Client(fail_once=False)
         failed_key = ("http", "failed.invalid", 80)
         closed_key = ("http", "closed.invalid", 80)
-        pool._clients = {failed_key: failed, closed_key: closed}
+        pool._clients = {failed_key: cast(httpx.AsyncClient, failed), closed_key: cast(httpx.AsyncClient, closed)}
 
         with self.assertRaisesRegex(RuntimeError, "1 个客户端关闭失败"):
             await pool.aclose()
@@ -756,7 +763,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         pool = media_proxy._UpstreamClientPool()
         client = FailOnceClient()
-        pool._clients[("http", "upstream.invalid", 80)] = client
+        pool._clients[("http", "upstream.invalid", 80)] = cast(httpx.AsyncClient, client)
         with self.assertRaises(RuntimeError):
             await pool.aclose()
 
@@ -798,7 +805,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             task=runtime_task,
             sock=MagicMock(),
             signed_urls=MagicMock(),
-            upstream_clients=pool,
+            upstream_clients=cast(_UpstreamClientPool, pool),
         )
         with patch.object(media_proxy, "_release_signed_url_cache"):
             stop_task = asyncio.create_task(
@@ -811,7 +818,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(pool.closed)
         self.assertTrue(runtime_task.done())
-        runtime.sock.close.assert_called_once_with()
+        cast(Mock, runtime.sock.close).assert_called_once_with()
 
     async def test_manager_stop_removes_runtime_whose_server_task_was_cancelled(self):
         from app.modules import media_proxy
@@ -835,7 +842,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             task=runtime_task,
             sock=MagicMock(),
             signed_urls=MagicMock(),
-            upstream_clients=pool,
+            upstream_clients=cast(_UpstreamClientPool, pool),
         )
         manager._runtimes = {16: runtime}
 
@@ -844,7 +851,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(pool.closed)
         self.assertEqual(manager._runtimes, {})
-        runtime.sock.close.assert_called_once_with()
+        cast(Mock, runtime.sock.close).assert_called_once_with()
 
     async def test_manager_stop_retains_failed_runtime_for_retry(self):
         from app.modules import media_proxy
@@ -943,7 +950,7 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             task=runtime_task,
             sock=MagicMock(),
             signed_urls=MagicMock(),
-            upstream_clients=pool,
+            upstream_clients=cast(_UpstreamClientPool, pool),
         )
         manager._runtimes = {15: runtime}
 
@@ -1017,13 +1024,13 @@ class MediaProxyManagerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(media_proxy, "_release_signed_url_cache"):
             await media_proxy.MediaProxyManager._stop_runtime(runtime)
-        runtime.sock.close.assert_called_once_with()
+        cast(Mock, runtime.sock.close).assert_called_once_with()
 
 
 class MediaProxyRuntimeProfileTests(unittest.TestCase):
     def test_runtime_resolves_configured_upstream(self):
-        from app.modules import media_proxy
         import app.modules.media_server_profiles as profiles
+        from app.modules import media_proxy
 
         row = {
             "id": 9,
@@ -1044,6 +1051,7 @@ class MediaProxyRuntimeProfileTests(unittest.TestCase):
              patch.object(profiles.config, "get", side_effect=lambda key, default="": values.get(key, default)), \
              patch.object(profiles.config, "get_bool", return_value=True):
             resolved = media_proxy._resolved_instance(9)
+        assert resolved is not None
         self.assertEqual(resolved["upstream_url"], "http://127.0.0.1:8096")
         self.assertEqual(resolved["api_key"], "current-key")
 
@@ -1074,6 +1082,7 @@ class MediaProxyRuntimeProfileTests(unittest.TestCase):
 class LocalPlaybackPassthroughTests(unittest.TestCase):
     def test_legacy_local_binding_does_not_rewrite_playback_info(self):
         import copy
+
         from app.modules import media_proxy
 
         source = {

@@ -5,6 +5,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from app import config
 from app.clients.guangya import GuangYaClient, close_guangya_client
@@ -137,14 +138,14 @@ def prepare_delete(payload: dict) -> tuple[DeleteTarget, ...]:
     except ValueError as exc:
         raise DirectoryScrapeRequestError(str(exc)) from exc
 
-    root_text = str(config.get("STRM_ROOT", "") or "").strip()
+    root_text = (config.get("STRM_ROOT", "") or "").strip()
     if not root_text:
         raise DirectoryScrapeConflictError("尚未配置 STRM 输出目录")
     root = (Path(root_text).expanduser() / STRM_SUBDIR).resolve()
     sources, source_error = configured_strm_source_plans()
     if source_error:
         raise DirectoryScrapeConflictError("STRM 来源配置无效，请先检查 MF 配置")
-    source_ids = {str(source["id"]) for source in sources}
+    source_ids = {source["id"] for source in sources}
     scopes = _scopes(payload, mappings, local_paths)
     targets = []
     for text in sorted(local_paths):
@@ -231,7 +232,7 @@ def _verify_cloud_file(client, target: DeleteTarget, directories: dict, parents:
 
 def _video_extensions() -> set[str]:
     extensions = set(DEFAULT_ORGANIZE_VIDEO_EXTS) | {"strm", "iso"}
-    extensions.update(Organizer._parse_exts(str(config.get("GY_ORGANIZE_VIDEO_EXTS", "") or ""), set()))
+    extensions.update(Organizer._parse_exts((config.get("GY_ORGANIZE_VIDEO_EXTS", "") or ""), set()))
     return {"." + ext.lstrip(".") for ext in extensions}
 
 
@@ -259,7 +260,7 @@ def _protected_directories():
     sources, source_error = configured_strm_source_plans()
     if error or source_error:
         raise DirectoryScrapeConflictError("来源保护配置无法核对，已取消删除")
-    protected.update(str(source["id"]) for source in sources)
+    protected.update(source["id"] for source in sources)
     return protected, sources
 
 
@@ -269,7 +270,7 @@ def _cloud_plan(client, expected, candidates, listings, parents):
         return {target.file_id: target for target in expected}, {}, set(), set(), {}, {}
     protected, sources = _protected_directories()
     source_plans = {str(source["id"]): source for source in sources}
-    strm_root = str(config.get("STRM_ROOT", ""))
+    strm_root = config.get("STRM_ROOT", "")
     files = {target.file_id: target for target in expected}
     selected_media = frozenset(files)
     video_exts = _video_extensions()
@@ -410,7 +411,7 @@ def execute_delete(payload: dict, expected: tuple[DeleteTarget, ...]) -> dict:
     completed = []
     attempted_sources: set[str] = set()
     error = ""
-    stats = {}
+    stats: dict[str, Any] = {}
     try:
         if not client.logged_in:
             raise DirectoryScrapeConflictError("光鸭未登录，请先在 MF 登录")
@@ -462,7 +463,7 @@ def execute_delete(payload: dict, expected: tuple[DeleteTarget, ...]) -> dict:
             completed.append({"file_id": file_id, "audit_id": audit["audit_id"]})
             removed.add(file_id)
         # 不调用递归目录删除。云端新增内容会让安全空目录删除拒绝，绝不会被顺带删除。
-        organizer = Organizer(client=client, scraper=object())
+        organizer = Organizer(client=client, recognition_enabled=False)
         def depth(directory_id):
             count, current = 0, directory_id
             while current in directories:

@@ -4,6 +4,8 @@
 只替换 Provider IO；原生模型用 NativeScript/MockTransport，所有业务 handler 保持真实。
 """
 from __future__ import annotations
+from typing import cast
+from app.agent.kernel.capabilities import CapabilityRetriever
 
 import asyncio
 import json
@@ -24,7 +26,7 @@ from app.agent.domains.guangya import share_actions as shares
 from app.agent.domains.guangya import workspace_actions as files
 from app.agent.errors import AgentToolError, ToolPipelineError
 from app.agent.kernel.adapters import TurnViewBuilder
-from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
+from app.agent.kernel.capabilities import ToolCatalog
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
@@ -168,6 +170,7 @@ class QueryCase:
             self.kernel_context = ToolCallContext(owner=self.context.owner, session_id=self.context.session_id,
                 request_id=lease.request_id, turn_id=lease.turn_id, lease=lease,
                 cancellation=CancellationToken(), report_progress=progress)
+        assert self.pipeline is not None
         result = await self.pipeline.execute(tool, arguments, context=replace(self.kernel_context, reobservation_source=source))
         self.record(tool, {"public": result.outcome.public_content,
                           "plan_id": result.effect_plan.plan_id if result.effect_plan else None,
@@ -490,7 +493,7 @@ def test_native_failed_confirmation_passes_actual_private_prepare_source_to_reob
             def without_source(*args, **kwargs):
                 selected = retrieve(*args, **kwargs)
                 return replace(selected, tools=tuple(tool for tool in selected.tools if tool.name != FS_READ))
-            session.retriever = SimpleNamespace(maximum=4, retrieve=without_source)
+            session.retriever = cast(CapabilityRetriever, SimpleNamespace(maximum=4, retrieve=without_source))
         events = [event async for event in session.confirm(owner=case.context.owner,
             session_id=case.context.session_id, plan_id=old.plan_id, request_id="confirm-old")]
         case.events.extend(events)

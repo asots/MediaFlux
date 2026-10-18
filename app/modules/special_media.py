@@ -116,7 +116,7 @@ _GENERIC_CONTEXT_DIR = re.compile(
 
 
 def _strip_explicit_tmdb_markers(value: str) -> str:
-    text = str(value or "")
+    text = (value or "")
     spans: list[tuple[int, int]] = []
     for pattern in (_EXPLICIT_TMDB_WRAPPED_RE, _EXPLICIT_TMDB_BARE_RE):
         for match in pattern.finditer(text):
@@ -132,7 +132,7 @@ def _strip_explicit_tmdb_markers(value: str) -> str:
 
 
 def split_path(value: str) -> list[str]:
-    return [part.strip() for part in re.split(r"[\\/]+", str(value or "")) if part.strip()]
+    return [part.strip() for part in re.split(r"[\\/]+", (value or "")) if part.strip()]
 
 
 def is_special_directory_name(value: str) -> bool:
@@ -150,7 +150,7 @@ def is_special_path(value: str) -> bool:
 
 def _media_stem(value: str) -> str:
     """只剥离真实媒体扩展名，保留 ``07.5`` 这类小数集号。"""
-    name = str(value or "").rsplit("/", 1)[-1]
+    name = (value or "").rsplit("/", 1)[-1]
     base, separator, suffix = name.rpartition(".")
     if separator and re.fullmatch(r"(?i)[a-z][a-z0-9]{1,7}", suffix):
         return base
@@ -241,7 +241,7 @@ def fractional_episode_position(value: str) -> tuple[int | None, Decimal] | None
 
 def strip_special_media_markers(value: str) -> str:
     """移除特殊集位置标记，避免它们残留在作品标题中。"""
-    cleaned = _ZERO_EPISODE_SPECIAL.sub(" ", str(value or ""))
+    cleaned = _ZERO_EPISODE_SPECIAL.sub(" ", (value or ""))
     cleaned = _PROLOGUE_SPECIAL.sub(" ", cleaned)
     cleaned = _ADJACENT_BRACKET_SPECIAL_POSITION.sub(" ", cleaned)
     cleaned = _SPECIAL_MEDIA_NAME.sub(" ", cleaned)
@@ -290,8 +290,8 @@ def special_parent_context(value: str, fallback: str = "") -> str:
     parts = split_path(value)
     for index, part in enumerate(parts):
         if is_special_directory_name(part):
-            return "/".join(parts[:index]) or str(fallback or "").strip()
-    return "/".join(parts) or str(fallback or "").strip()
+            return "/".join(parts[:index]) or (fallback or "").strip()
+    return "/".join(parts) or (fallback or "").strip()
 
 
 def title_hint_from_path(value: str, fallback: str = "") -> str:

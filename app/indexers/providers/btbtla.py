@@ -68,7 +68,7 @@ class BTBtlaAdapter(IndexerAdapter):
     site_id = "btbtla"
     site_name = "综合"
     base_url = BTBTLA_URL
-    mirror_base_urls = (BTBTLA_MIRROR_URL,)
+    mirror_base_urls: tuple[str, ...] = (BTBTLA_MIRROR_URL,)
     default_enabled = True
     capabilities = IndexerCapabilities(pagination_supported=True, download_kinds=("magnet", "torrent"))
 
@@ -85,7 +85,7 @@ class BTBtlaAdapter(IndexerAdapter):
         mirror_base_urls: tuple[str, ...] | None = None,
     ):
         self.http = http
-        self.page_size = max(1, min(int(page_size), 100))
+        self.page_size = max(1, min(page_size, 100))
         self.cache_ttl_seconds = max(1.0, float(cache_ttl_seconds))
         self._cache_lock = threading.Lock()
         self._catalog_locks: WeakValueDictionary[IndexerSearchRequest, CrossLoopAsyncLock] = WeakValueDictionary()
@@ -94,7 +94,7 @@ class BTBtlaAdapter(IndexerAdapter):
         self._monotonic = monotonic or time.monotonic
         self._request_lock = CrossLoopAsyncLock()
         self._request_pacer = SearchRequestPacer(self.min_interval_seconds, monotonic=self._monotonic, sleeper=sleeper)
-        self.max_detail_candidates = max(1, min(int(max_detail_candidates), 3))
+        self.max_detail_candidates = max(1, min(max_detail_candidates, 3))
         self.mirror_base_urls = tuple(
             dict.fromkeys(self.mirror_base_urls if mirror_base_urls is None else mirror_base_urls)
         )
@@ -206,7 +206,8 @@ class BTBtlaAdapter(IndexerAdapter):
                     break
                 zero_summary = any(
                     node.get_text(strip=True) == "0"
-                    and re.search(r"^搜索.*找到\s*0\s*部影视作品", node.find_parent("h2").get_text(" ", strip=True))
+                    and (heading := node.find_parent("h2")) is not None
+                    and re.search(r"^搜索.*找到\s*0\s*部影视作品", heading.get_text(" ", strip=True))
                     for node in soup.select("h2 strong.mac_total")
                 )
                 known_empty = any(marker in soup.get_text(" ", strip=True).lower()
@@ -232,7 +233,7 @@ class BTBtlaAdapter(IndexerAdapter):
         matched_tier = None
         for title, detail_url, category, candidate_year in ranked_candidates:
             tier = (self._search_candidate_score(query, title)[0], year is not None and candidate_year == year)
-            if items and tier < matched_tier:
+            if items and matched_tier is not None and tier < matched_tier:
                 break  # 不为已精确命中的作品额外请求弱匹配；同名作品不能提前截断。
             try:
                 detail = await self._get(detail_url)
@@ -329,7 +330,7 @@ class BTBtlaAdapter(IndexerAdapter):
                 continue
             try:
                 detail_url = self._join_known_host(
-                    anchor.get("href") or "",
+                    str(anchor.get("href") or ""),
                     relative_base_url=base_url,
                 )
             except HttpSecurityError:
@@ -369,7 +370,9 @@ class BTBtlaAdapter(IndexerAdapter):
         seen_urls: set[str] = set()
         download_list = soup.select_one("#download-list")
         scope = download_list if download_list is not None else soup
-        tabs = scope.select(".downtab-item [data-dropdown-value]") or soup.select(".downtab-item [data-dropdown-value]")
+        tabs = scope.select(".downtab-item [data-dropdown-value]")
+        if len(tabs) == 0:
+            tabs = soup.select(".downtab-item [data-dropdown-value]")
         panels = scope.select(".module-downlist")
         excluded = {
             id(panel) for tab, panel in zip(tabs, panels)
@@ -387,11 +390,13 @@ class BTBtlaAdapter(IndexerAdapter):
                 continue
             resource_anchor = None
             resource_url = ""
-            anchors = row.select("a.module-row-text[href]") or row.find_all("a", href=True)
+            anchors = row.select("a.module-row-text[href]")
+            if len(anchors) == 0:
+                anchors = row.find_all("a", href=True)
             for anchor in anchors:
                 try:
                     candidate = self._join_known_host(
-                        anchor.get("href") or "",
+                        str(anchor.get("href") or ""),
                         relative_base_url=base_url,
                     )
                 except HttpSecurityError:
@@ -431,7 +436,7 @@ class BTBtlaAdapter(IndexerAdapter):
             for download_counter in download_counters:
                 try:
                     counter_url = self._join_known_host(
-                        download_counter.get("href") or "",
+                        str(download_counter.get("href") or ""),
                         relative_base_url=base_url,
                     )
                 except HttpSecurityError:
@@ -474,7 +479,7 @@ class BTBtlaAdapter(IndexerAdapter):
         for anchor in soup.select("a[href]"):
             try:
                 candidate = self._join_known_host(
-                    anchor.get("href") or "",
+                    str(anchor.get("href") or ""),
                     relative_base_url=base_url,
                 )
             except HttpSecurityError:
@@ -507,7 +512,7 @@ class BTBtlaAdapter(IndexerAdapter):
         for anchor in soup.select("a.btn-down[href]"):
             try:
                 candidate = self._join_known_host(
-                    anchor.get("href") or "",
+                    str(anchor.get("href") or ""),
                     relative_base_url=base_url,
                 )
             except HttpSecurityError:
@@ -556,7 +561,7 @@ class BTBtlaAdapter(IndexerAdapter):
         for anchor in soup.select("a[href]"):
             try:
                 candidate = self._join_known_host(
-                    anchor.get("href") or "",
+                    str(anchor.get("href") or ""),
                     relative_base_url=base_url,
                 )
             except HttpSecurityError:

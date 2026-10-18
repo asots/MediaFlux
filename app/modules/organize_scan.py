@@ -33,7 +33,7 @@ def filter_source_entries(
     """只约束来源发现，绝不改变真实 client 的目标/写前/清理回读。"""
     if source_member_ids is None:
         return entries
-    return [item for item in entries if str(item.file_id) in source_member_ids]
+    return [item for item in entries if item.file_id in source_member_ids]
 
 
 def record_protected_staging(
@@ -99,8 +99,8 @@ class OrganizeScanResult:
 
 class TraversalLimitExceeded(RuntimeError):
     def __init__(self, kind: str, limit: int):
-        self.kind = str(kind)
-        self.limit = int(limit)
+        self.kind = kind
+        self.limit = limit
         super().__init__(f"{self.kind}:{self.limit}")
 
 
@@ -115,7 +115,7 @@ class TraversalBudget:
     duplicates: int = 0
 
     def enter(self, dir_id: str, depth: int) -> bool:
-        key = str(dir_id or "")
+        key = (dir_id or "")
         if key in self.visited:
             self.duplicates += 1
             return False
@@ -128,7 +128,7 @@ class TraversalBudget:
         return True
 
     def consume_entries(self, count: int) -> None:
-        value = max(0, int(count or 0))
+        value = max(0, (count or 0))
         if self.entries + value > self.max_entries:
             raise TraversalLimitExceeded("entries", self.max_entries)
         self.entries += value
@@ -222,10 +222,10 @@ class OrganizerScanner:
                     source_group_path=restriction.group_path,
                 ):
                     accumulator.scanned_dirs.append((
-                        str(restriction.dir_id),
+                        restriction.dir_id,
                         1,
-                        str(restriction.etag or ""),
-                        max(0, int(restriction.updated_at or 0)),
+                        (restriction.etag or ""),
+                        max(0, (restriction.updated_at or 0)),
                     ))
         except TraversalLimitExceeded as exc:
             labels = {
@@ -262,7 +262,7 @@ class OrganizerScanner:
     def _max_files_reached(
         self, context: "OrganizeContext", stats: dict,
     ) -> bool:
-        limit = int(context.max_files or 0)
+        limit = (context.max_files or 0)
         if not limit or int(stats.get("total") or 0) < limit:
             return False
         # 负数保留旧版“立即停止但不报错”的兼容语义；正数代表扫描
@@ -344,7 +344,7 @@ class OrganizerScanner:
             if item.is_dir:
                 if files_only:
                     continue
-                child_id = str(item.file_id or "").strip()
+                child_id = (item.file_id or "").strip()
                 if not child_id or child_id in accumulator.protected_sources:
                     if child_id in context.protected_staging_ids:
                         sub = f"{rel}/{item.name}" if rel else item.name

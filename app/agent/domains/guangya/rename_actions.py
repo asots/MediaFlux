@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -17,6 +18,7 @@ from app.agent.public_safety import sanitize_resource_title
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
+    PersistedAgentContext,
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.guangya_media_hygiene import build_media_hygiene_plan
@@ -127,13 +129,13 @@ def _flow_from_payload(
     ):
         return None
     return _Flow(
-        owner=str(owner),
+        owner=owner,
         plan_id=plan_id,
         fingerprint=fingerprint,
         preview_safe=preview_safe,
         updated_at=time.monotonic(),
-        generation=max(0, int(generation or 0)),
-        revision=max(0, int(revision or 0)),
+        generation=max(0, generation or 0),
+        revision=max(0, revision or 0),
     )
 
 
@@ -310,7 +312,7 @@ class GuangyaRenameActions:
 
     def clear_guangya_rename_context(self, *, owner: str) -> None:
         """清除 owner 的内存缓存；SQLite epoch 是唯一有效性权威。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return
         with self._lock:
@@ -319,7 +321,7 @@ class GuangyaRenameActions:
     def _begin_flow(self, owner: str) -> AgentContextWriteGuard:
         if self._repository is None:
             return AgentContextWriteGuard(generation=0, revision=0)
-        begin = getattr(self._repository, "begin_context", None)
+        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
         if not callable(begin):
             return AgentContextWriteGuard(generation=0, revision=0)
         return begin(owner=owner, context_type=_CONTEXT_TYPE)
@@ -329,7 +331,7 @@ class GuangyaRenameActions:
         owner: str,
     ) -> tuple[_Flow | None, AgentContextWriteGuard]:
         if self._repository is not None:
-            begin_update = getattr(self._repository, "begin_context_update", None)
+            begin_update: Callable[..., tuple[PersistedAgentContext | None, AgentContextWriteGuard]] | None = getattr(self._repository, "begin_context_update", None)
             if callable(begin_update):
                 persisted, guard = begin_update(
                     owner=owner,
@@ -353,7 +355,7 @@ class GuangyaRenameActions:
         flow.updated_at = time.monotonic()
         if self._repository is not None:
             try:
-                guarded = getattr(self._repository, "replace_latest_guarded", None)
+                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
                 if callable(guarded):
                     if flow.generation <= 0:
                         return False
@@ -393,7 +395,7 @@ class GuangyaRenameActions:
         return True
 
     def _flow(self, owner: str) -> _Flow | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return None
         if self._repository is not None:
@@ -604,7 +606,7 @@ class GuangyaRenameActions:
             )
             client = GuangYaClient()
             try:
-                if not client.logged_in or int(client.credential_generation) != int(
+                if not client.logged_in or client.credential_generation != int(
                     plan["credential_generation"]
                 ):
                     raise GuangYaRenamePlanStale("光鸭登录凭据已变化，请重新预览")
@@ -664,7 +666,7 @@ class GuangyaRenameActions:
                 owner=context.owner,
                 expected_fingerprint=flow.fingerprint,
             )
-            if _confirmation_fingerprint(flow, plan) != str(expected_context or ""):
+            if _confirmation_fingerprint(flow, plan) != (expected_context or ""):
                 raise AgentToolError(
                     "重命名预览已变化，请重新预检", code="confirmation_stale"
                 )

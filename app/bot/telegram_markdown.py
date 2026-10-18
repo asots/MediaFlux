@@ -37,7 +37,7 @@ def _escape(value: object, *, quote: bool = False) -> str:
 
 
 def _safe_link(raw_url: str) -> str | None:
-    value = html.unescape(str(raw_url or "")).strip().strip("<>")
+    value = html.unescape(raw_url or "").strip().strip("<>")
     if not value or any(character in value for character in ("\x00", "\r", "\n")):
         return None
     try:
@@ -102,7 +102,7 @@ def _close_html_tags(stack: tuple[tuple[str, str], ...]) -> str:
 def split_telegram_html(value: object, *, limit: int = 3900) -> tuple[str, ...]:
     """按 Telegram 可见文本长度拆分 HTML，并在每段闭合、续接样式标签。"""
 
-    maximum = int(limit or 0)
+    maximum = (limit or 0)
     if maximum <= 0:
         raise ValueError("limit 必须大于 0")
     source = str(value or "")
@@ -482,14 +482,14 @@ def render_telegram_markdown(value: object) -> str:
 
         unordered = _UNORDERED_RE.match(raw)
         if unordered is not None:
-            body = unordered.group("body")
-            task = re.match(r"^\[([ xX])\]\s+(.*)$", body)
+            list_body = unordered.group("body")
+            task = re.match(r"^\[([ xX])\]\s+(.*)$", list_body)
             prefix = "•"
             if task is not None:
                 prefix = "☑" if task.group(1).casefold() == "x" else "☐"
-                body = task.group(2)
+                list_body = task.group(2)
             indent = "　" * min(3, len(unordered.group("indent")) // 2)
-            output.append(f"{indent}{prefix} {_render_inline(body)}")
+            output.append(f"{indent}{prefix} {_render_inline(list_body)}")
             index += 1
             continue
 

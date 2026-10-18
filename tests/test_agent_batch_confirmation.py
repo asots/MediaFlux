@@ -487,7 +487,9 @@ def test_unlisted_third_write_requires_its_own_approval(rig):
         session, preview, _ = await rig.start(followups=[call(NAMES[2], step(NAMES[2])["arguments"]), FINAL])
         next_view, _ = await confirm(session, preview.approval.plan_id)
         assert rig.attempted == list(NAMES[:2]) and rig.values[NAMES[2]] == "before"
+        assert next_view.approval is not None
         assert next_view.status == "approval_required" and next_view.approval.tool_name == NAMES[2]
+        assert next_view.approval is not None
         assert next_view.approval.plan_id != preview.approval.plan_id
         await confirm(session, preview.approval.plan_id)
         assert rig.attempted == list(NAMES[:2])

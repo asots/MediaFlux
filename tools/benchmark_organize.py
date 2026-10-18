@@ -32,12 +32,12 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Sequence, cast
 
 from bs4 import BeautifulSoup
 
 from app import database as db
-from app.clients.guangya import GuangYaFile
+from app.clients.guangya import GuangYaClient, GuangYaFile
 from app.clients.http import FixedHostHttpClient
 from app.config import get
 from app.indexers.providers.base import require_html_response
@@ -196,7 +196,7 @@ class ManifestGuangYaClient:
             parts = tuple(str(part) for part in raw_path)
             parent_path: tuple[str, ...] = ()
             for component in parts[:-1]:
-                current_path = parent_path + (component,)
+                current_path: tuple[str, ...] = parent_path + (component,)
                 if current_path not in directory_ids:
                     node_id = self._node_id(case_id, "dir", current_path)
                     self._add_node(GuangYaFile(
@@ -228,13 +228,13 @@ class ManifestGuangYaClient:
             children.sort(key=lambda item: (not item.is_dir, item.name.casefold(), item.file_id))
 
     def file_info(self, file_id: str) -> GuangYaFile | None:
-        return self._nodes.get(str(file_id))
+        return self._nodes.get(file_id)
 
     def list_dir(self, dir_id: str) -> list[GuangYaFile]:
-        node = self._nodes.get(str(dir_id))
+        node = self._nodes.get(dir_id)
         if node is None or not node.is_dir:
-            raise FileNotFoundError(str(dir_id))
-        return list(self._children.get(str(dir_id), ()))
+            raise FileNotFoundError(dir_id)
+        return list(self._children.get(dir_id, ()))
 
     def create_dir(self, *_args, **_kwargs):  # pragma: no cover - dry-run guard
         raise AssertionError("benchmark client is read-only")
@@ -247,7 +247,7 @@ class ManifestGuangYaClient:
 
 
 def _normalize_title(value: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", str(value or "")).split())
+    return " ".join(unicodedata.normalize("NFKC", (value or "")).split())
 
 
 def bucket_tags(title: str) -> set[str]:
@@ -382,7 +382,7 @@ def _case_from_manifest(candidate: Candidate, bucket: str, body: bytes, manifest
     fingerprint = hashlib.sha256(body).hexdigest()
     case_id = f"nyaa-{fingerprint[:20]}"
     files = tuple(
-        {"path": list(item.path), "length": int(item.length)}
+        {"path": list(item.path), "length": (item.length)}
         for item in manifest.files
     )
     return CollectedCase(
@@ -592,7 +592,7 @@ def _safe_text(value: object, *, limit: int) -> str:
     return _scrub_cell(value)[:limit]
 
 
-def _safe_finite_float(value: object, *, digits: int = 4) -> float:
+def _safe_finite_float(value: Any, *, digits: int = 4) -> float:
     try:
         number = float(value or 0.0)
     except (TypeError, ValueError, OverflowError):
@@ -737,17 +737,17 @@ def _safe_mapping(plan: OrganizePlan) -> dict[str, Any] | None:
 
 def plan_payload(plan: OrganizePlan) -> dict[str, Any]:
     return {
-        "action": str(plan.action or ""),
+        "action": (plan.action or ""),
         "source_path": "/".join(part for part in (plan.original_path, plan.original_name) if part),
         "source_season": plan.source_season,
         "source_episode": plan.source_episode,
         "season": plan.season,
         "episode": plan.episode,
-        "target_path": str(plan.target_path or ""),
-        "new_name": str(plan.new_name or ""),
-        "note": str(plan.note or "")[:500],
-        "conflict_decision": str(plan.conflict_decision or ""),
-        "conflict_note": str(plan.conflict_note or "")[:500],
+        "target_path": (plan.target_path or ""),
+        "new_name": (plan.new_name or ""),
+        "note": (plan.note or "")[:500],
+        "conflict_decision": (plan.conflict_decision or ""),
+        "conflict_note": (plan.conflict_note or "")[:500],
         "match": _safe_match(plan.match),
         "episode_mapping": _safe_mapping(plan),
     }
@@ -796,7 +796,7 @@ def run_benchmark_case(
     case: dict[str, Any], *, scraper: TMDBScraper, base_rules: OrganizeRules,
 ) -> dict[str, Any]:
     client = ManifestGuangYaClient(case)
-    organizer = Organizer(client=client, scraper=scraper)
+    organizer = Organizer(client=cast(GuangYaClient, client), scraper=scraper)
     started = time.monotonic()
     try:
         plans, stats = organizer.organize(
@@ -869,7 +869,7 @@ def _truth_index(rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _normalized_expected_int(value: object) -> int | None:
+def _normalized_expected_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     try:
@@ -1311,7 +1311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not truth_path.exists():
             write_jsonl(truth_path, truth_template(cases))
 
-    if not str(get("TMDB_API_KEY", "") or "").strip():
+    if not (get("TMDB_API_KEY", "") or "").strip():
         print("警告：未配置 TMDB_API_KEY；本轮只能验证降级/人工确认路径，不能代表识别能力。", file=sys.stderr)
     results, summary = run_cases(cases, truth_rows=truth_rows)
     _write_benchmark(output_dir, results, summary)

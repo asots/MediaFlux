@@ -54,7 +54,7 @@ class AgentKernelArchitectureTests(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     names = {item.name for item in node.names}
                 elif isinstance(node, ast.ImportFrom):
-                    names = {str(node.module or "")}
+                    names = {node.module or ""}
                 else:
                     continue
                 overlap = names & OLD_MODULES
@@ -78,7 +78,7 @@ class AgentKernelArchitectureTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom):
                     continue
-                module = str(node.module or "")
+                module = node.module or ""
                 if module == "support" or module.endswith("domain_catalog.support"):
                     violations.append(f"{path}:{node.lineno}")
         self.assertEqual(violations, [])
@@ -114,7 +114,7 @@ class AgentKernelArchitectureTests(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     modules = [item.name for item in node.names]
                 elif isinstance(node, ast.ImportFrom):
-                    modules = [str(node.module or "")]
+                    modules = [node.module or ""]
                     modules.extend(f"{node.module or ''}.{item.name}" for item in node.names)
                 else:
                     continue
@@ -129,7 +129,7 @@ class AgentKernelArchitectureTests(unittest.TestCase):
         violations: list[int] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                names = [str(node.module or ""), *(item.name for item in node.names)]
+                names = [node.module or "", *(item.name for item in node.names)]
             elif isinstance(node, ast.Import):
                 names = [item.name for item in node.names]
             elif isinstance(node, ast.Attribute):

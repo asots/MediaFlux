@@ -157,7 +157,7 @@ def _positive_ids(value: Any, *, maximum: int) -> list[int]:
             raise AgentToolError("entry_numbers 只能包含正整数")
         if item in result:
             raise AgentToolError("entry_numbers 不能重复")
-        result.append(int(item))
+        result.append(item)
     return result
 
 
@@ -174,12 +174,12 @@ def rss_entry_summaries_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         raise AgentToolError("status 无效")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
         raise AgentToolError("limit 必须是 1 到 50 的整数")
-    result: dict[str, Any] = {"status": status, "limit": int(limit)}
+    result: dict[str, Any] = {"status": status, "limit": limit}
     if "subscription_number" in arguments:
         number = arguments["subscription_number"]
         if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             raise AgentToolError("subscription_number 必须是正整数")
-        result["subscription_number"] = int(number)
+        result["subscription_number"] = number
     return result
 
 
@@ -193,7 +193,7 @@ def rss_mark_entries_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         raise AgentToolError("processed 必须是布尔值")
     return {
         "entry_numbers": _positive_ids(arguments["entry_numbers"], maximum=50),
-        "processed": bool(arguments["processed"]),
+        "processed": (arguments["processed"]),
     }
 
 
@@ -344,14 +344,14 @@ def mark_rss_entries_confirmed(
     arguments: dict[str, Any], expected_context: str
 ) -> ToolResult:
     state = _mark_snapshot(arguments)
-    if not state["eligible"] or state["fingerprint"] != str(expected_context or ""):
+    if not state["eligible"] or state["fingerprint"] != (expected_context or ""):
         raise AgentToolError(
             "RSS 条目状态已变化，请重新预检", code="confirmation_stale"
         )
     updated = db.update_rss_entries_processed_snapshot(
         state["snapshot"], arguments["processed"]
     )
-    if int(updated) != len(arguments["entry_numbers"]):
+    if updated != len(arguments["entry_numbers"]):
         raise AgentToolError(
             "RSS 条目标记发生并发冲突，请重新查看", code="confirmation_stale"
         )
@@ -360,7 +360,7 @@ def mark_rss_entries_confirmed(
         ok=True,
         status="completed",
         summary=f"已将 {updated} 个 RSS 条目标记为{label}",
-        data={"affected": int(updated), "processed": arguments["processed"]},
+        data={"affected": updated, "processed": arguments["processed"]},
         evidence=[
             Evidence("sqlite:rss_entries", "已按确认时冻结的条目集合更新状态。", _now())
         ],
@@ -399,14 +399,14 @@ def _submit_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
             "requested": arguments["entry_numbers"],
             "entries": entries,
             "runtime": runtime,
-            "config_error": str(config_error or ""),
+            "config_error": (config_error or ""),
         },
         domain="rss-submit-entries-to-qb",
     )
     return {
         "entries": entries,
         "runtime": runtime,
-        "config_error": str(config_error or ""),
+        "config_error": (config_error or ""),
         "complete": complete,
         "fingerprint": fingerprint,
     }
@@ -456,7 +456,7 @@ def submit_rss_entries_confirmed(
     state = _submit_snapshot(arguments)
     if (
         not state["complete"]
-        or state["fingerprint"] != str(expected_context or "")
+        or state["fingerprint"] != (expected_context or "")
         or not state["runtime"].get("url")
     ):
         raise AgentToolError(

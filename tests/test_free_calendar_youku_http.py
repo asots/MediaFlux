@@ -154,8 +154,8 @@ class YoukuCalendarHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raw, json.dumps(data, ensure_ascii=True, separators=(",", ":")))
         self.assertEqual(set(data), {"ms_codes", "params", "system_info"})
         self.assertEqual(data["ms_codes"], "2019061000")
-        self.assertIsInstance(data["params"], str)
-        self.assertIsInstance(data["system_info"], str)
+        assert isinstance(data["params"], str)
+        assert isinstance(data["system_info"], str)
         params = json.loads(data["params"])
         system = json.loads(data["system_info"])
         self.assertEqual(params, {
@@ -394,8 +394,10 @@ class YoukuCalendarHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_external_endpoint_data_or_credentials_arguments(self):
         self.assertEqual(list(inspect.signature(fetch_youku_calendar).parameters), ["http"])
         http, calls = self.client(lambda request: self.fail("must not call transport"))
-        with self.assertRaises(TypeError):
-            await fetch_youku_calendar(http, api="mtop.other", credentials="not-accepted")
+        self.assertRaises(
+            TypeError, fetch_youku_calendar, http,
+            api="mtop.other", credentials="not-accepted",
+        )
         self.assertEqual(calls, [])
 
     async def test_cookie_prefix_is_raw_without_url_decoding_or_invented_suffix_rules(self):

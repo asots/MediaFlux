@@ -12,6 +12,7 @@ from typing import Any
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
+    PersistedAgentContext,
 )
 from app.agent.state_commit import (
     AgentStateCommitBuffer,
@@ -63,9 +64,9 @@ class LocalMediaAgentContextStore:
         wall_clock: Callable[[], float] = time.time,
         repository: AgentSessionContextRepository | None = None,
     ) -> None:
-        self.ttl_seconds = max(1, int(ttl_seconds))
-        self.max_owners = max(1, int(max_owners))
-        self.max_inspections_per_owner = max(1, int(max_inspections_per_owner))
+        self.ttl_seconds = max(1, ttl_seconds)
+        self.max_owners = max(1, max_owners)
+        self.max_inspections_per_owner = max(1, max_inspections_per_owner)
         self._clock = clock
         self._wall_clock = wall_clock
         self._repository = repository
@@ -80,7 +81,7 @@ class LocalMediaAgentContextStore:
 
 
     def capture_tasks(self, *, owner: str, tasks: list[Any]) -> tuple[_TaskRef, ...]:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return ()
         refs = tuple(
@@ -126,24 +127,24 @@ class LocalMediaAgentContextStore:
         return refs
 
     def task(self, *, owner: str, number: int) -> _TaskRef | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         buffered = self._buffered_context(owner_key)
         if buffered is not None:
             _, state = buffered
             with self._lock:
-                if not 1 <= int(number) <= len(state.tasks):
+                if not 1 <= number <= len(state.tasks):
                     return None
-                return state.tasks[int(number) - 1]
+                return state.tasks[number - 1]
         if active_agent_state_commit_buffer() is not None:
             return None
         with self._lock:
             self._prune_locked()
             self._restore_locked(owner_key, required="tasks")
             entry = self._tasks.get(owner_key)
-            if entry is None or not 1 <= int(number) <= len(entry[1]):
+            if entry is None or not 1 <= number <= len(entry[1]):
                 return None
             self._tasks.move_to_end(owner_key)
-            return entry[1][int(number) - 1]
+            return entry[1][number - 1]
 
     def capture_inspection(
         self,
@@ -153,7 +154,7 @@ class LocalMediaAgentContextStore:
         inspection_id: str,
         digest: str,
     ) -> int:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key or not inspection_id or not digest:
             return 0
         buffered = self._buffered_context(owner_key)
@@ -171,7 +172,7 @@ class LocalMediaAgentContextStore:
                 while number in used:
                     number = 1 if number >= common._MAX_INSPECTION_NUMBER else number + 1
                 state.next_inspection = number
-                ref = _InspectionRef(number, task, str(inspection_id), str(digest))
+                ref = _InspectionRef(number, task, inspection_id, digest)
                 state.inspections = (ref, *state.inspections)[
                     : self.max_inspections_per_owner
                 ]
@@ -206,7 +207,7 @@ class LocalMediaAgentContextStore:
                 while number in used:
                     number = 1 if number >= common._MAX_INSPECTION_NUMBER else number + 1
                 assigned[:] = [number]
-                ref = _InspectionRef(number, task, str(inspection_id), str(digest))
+                ref = _InspectionRef(number, task, inspection_id, digest)
                 return (
                     current_tasks,
                     (ref, *current_inspections)[: self.max_inspections_per_owner],
@@ -225,7 +226,7 @@ class LocalMediaAgentContextStore:
             while number in used:
                 number = 1 if number >= common._MAX_INSPECTION_NUMBER else number + 1
             self._next_inspection[owner_key] = number
-            ref = _InspectionRef(number, task, str(inspection_id), str(digest))
+            ref = _InspectionRef(number, task, inspection_id, digest)
             self._inspections[owner_key] = (
                 self._clock() + self.ttl_seconds,
                 (ref, *current)[: self.max_inspections_per_owner],
@@ -235,13 +236,13 @@ class LocalMediaAgentContextStore:
             return number
 
     def inspection(self, *, owner: str, number: int) -> _InspectionRef | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         buffered = self._buffered_context(owner_key)
         if buffered is not None:
             _, state = buffered
             with self._lock:
                 return next(
-                    (item for item in state.inspections if item.number == int(number)),
+                    (item for item in state.inspections if item.number == number),
                     None,
                 )
         if active_agent_state_commit_buffer() is not None:
@@ -253,7 +254,7 @@ class LocalMediaAgentContextStore:
             if entry is None:
                 return None
             selected = next(
-                (item for item in entry[1] if item.number == int(number)), None
+                (item for item in entry[1] if item.number == number), None
             )
             if selected is not None:
                 self._inspections.move_to_end(owner_key)
@@ -267,7 +268,7 @@ class LocalMediaAgentContextStore:
         inspection_id: str,
         digest: str,
     ) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key or not inspection_id or not digest:
             return False
         buffered = self._buffered_context(owner_key)
@@ -279,10 +280,10 @@ class LocalMediaAgentContextStore:
                 refs: list[_InspectionRef] = []
                 replaced = False
                 for item in state.inspections:
-                    if item.number == int(number):
+                    if item.number == number:
                         refs.append(
                             _InspectionRef(
-                                item.number, item.task, str(inspection_id), str(digest)
+                                item.number, item.task, inspection_id, digest
                             )
                         )
                         replaced = True
@@ -309,10 +310,10 @@ class LocalMediaAgentContextStore:
                     tasks, inspections, next_number = current
                 refs: list[_InspectionRef] = []
                 for item in inspections:
-                    if item.number == int(number):
+                    if item.number == number:
                         refs.append(
                             _InspectionRef(
-                                item.number, item.task, str(inspection_id), str(digest)
+                                item.number, item.task, inspection_id, digest
                             )
                         )
                         replaced[0] = True
@@ -329,10 +330,10 @@ class LocalMediaAgentContextStore:
                 return False
             refs = []
             for item in entry[1]:
-                if item.number == int(number):
+                if item.number == number:
                     refs.append(
                         _InspectionRef(
-                            item.number, item.task, str(inspection_id), str(digest)
+                            item.number, item.task, inspection_id, digest
                         )
                     )
                     replaced[0] = True
@@ -346,7 +347,7 @@ class LocalMediaAgentContextStore:
             return True
 
     def clear_owner(self, *, owner: str, invalidate_persisted: bool = True) -> None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return
         with self._lock:
@@ -398,7 +399,7 @@ class LocalMediaAgentContextStore:
         with self._lock:
             self._prune_locked()
             repository = self._repository
-            begin_update = (
+            begin_update: Callable[..., tuple[PersistedAgentContext | None, AgentContextWriteGuard]] | None = (
                 getattr(repository, "begin_context_update", None)
                 if repository is not None
                 else None
@@ -417,6 +418,7 @@ class LocalMediaAgentContextStore:
                     self._inspections.pop(owner, None)
                     self._next_inspection.pop(owner, None)
                     return _BufferedContext((), (), 0, guard)
+                assert persisted is not None
                 self._install_decoded_locked(
                     owner, decoded, persisted_expires_at=persisted.expires_at
                 )
@@ -446,7 +448,7 @@ class LocalMediaAgentContextStore:
             expires_at = self._wall_clock() + self.ttl_seconds
             repository = self._repository
             if repository is not None:
-                guarded = getattr(repository, "replace_latest_guarded", None)
+                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(repository, "replace_latest_guarded", None)
                 if state.guard is not None and callable(guarded):
                     persisted = guarded(
                         owner=owner,
@@ -517,7 +519,7 @@ class LocalMediaAgentContextStore:
         ],
     ) -> tuple[tuple[_TaskRef, ...], tuple[_InspectionRef, ...], int] | None:
         repository = self._repository
-        mutate = (
+        mutate: Callable[..., PersistedAgentContext] | None = (
             getattr(repository, "mutate_latest", None)
             if repository is not None
             else None
@@ -704,7 +706,7 @@ class LocalMediaAgentContextStore:
             "source_id",
         }:
             return None
-        values = (raw.get("task_id"), raw.get("version"), raw.get("source_id"))
+        values = (raw["task_id"], raw["version"], raw["source_id"])
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value < 1
             for value in values

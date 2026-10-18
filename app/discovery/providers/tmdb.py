@@ -110,9 +110,9 @@ class TMDBProvider(DiscoveryProvider):
         filters: dict[str, Any] | None,
     ) -> DiscoveryPage:
         self._ensure_open()
-        category = str(category or "").strip().lower()
-        media_type = str(media_type or "").strip().lower()
-        page = max(1, int(page))
+        category = (category or "").strip().lower()
+        media_type = (media_type or "").strip().lower()
+        page = max(1, page)
         params: dict[str, Any] = {"page": page}
 
         if category in {"trending", "weekly_trending", "trending_week"}:
@@ -148,7 +148,7 @@ class TMDBProvider(DiscoveryProvider):
         except (TypeError, ValueError):
             total_pages = page
         return DiscoveryPage(
-            items=items,
+            items=tuple(items),
             page=page,
             has_more=page < min(total_pages, 100),
             provider=ProviderHealth(name=self.name),
@@ -157,7 +157,7 @@ class TMDBProvider(DiscoveryProvider):
     def get_detail(self, external_id: str, media_type: str) -> MediaCard:
         self._ensure_open()
         media_type = "tv" if media_type == "tv" else "movie"
-        payload = self.client.detail(str(external_id or ""), media_type)
+        payload = self.client.detail((external_id or ""), media_type)
         card = self._card(payload, media_type)
         if card is None:
             raise ProviderInvalidResponse("TMDB 详情响应结构无效")

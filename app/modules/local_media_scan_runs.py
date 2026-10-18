@@ -46,7 +46,7 @@ def _payload(row: Any, *, owner: str) -> dict[str, Any] | None:
 
 def record_local_media_scan(summary: dict[str, Any], *, owner: str = "admin") -> str:
     """在唤醒任务 Worker 之前记录扫描成员，后续复用旧任务也不会丢失批次归属。"""
-    owner = str(owner).strip()
+    owner = owner.strip()
     if not owner:
         raise ValueError("owner 不能为空")
     task_ids = list(dict.fromkeys(int(v) for v in summary.get("task_ids", [])))
@@ -70,7 +70,7 @@ def record_local_media_scan(summary: dict[str, Any], *, owner: str = "admin") ->
 
 def resolve_local_media_scan(scan_ref: str = "", *, owner: str = "admin") -> dict[str, Any]:
     """只解析明确扫描或本工作区最近扫描；旧版本没有回执时绝不用全历史冒充。"""
-    scan_ref = str(scan_ref or "").strip().upper()
+    scan_ref = (scan_ref or "").strip().upper()
     if scan_ref == UNRECORDED_LOCAL_SCAN:
         raise LookupError("本次扫描回执保存失败，不能使用以前的扫描替代")
     if scan_ref:

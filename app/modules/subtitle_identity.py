@@ -38,7 +38,7 @@ class SubtitleIdentity:
 
     @classmethod
     def parse(cls, filename: str) -> "SubtitleIdentity":
-        raw = str(filename or "").strip()
+        raw = (filename or "").strip()
         if "." in raw:
             stem, extension = raw.rsplit(".", 1)
         else:
@@ -78,7 +78,7 @@ class SubtitleIdentity:
         return ".".join(parts)
 
     def target_name(self, video_target_name: str) -> str:
-        video_name = str(video_target_name or "")
+        video_name = (video_target_name or "")
         video_stem = video_name.rsplit(".", 1)[0] if "." in video_name else video_name
         suffix = self.normalized_suffix
         return f"{video_stem}.{suffix}" if suffix else video_stem
@@ -108,7 +108,7 @@ class SubtitlePlanResult:
 
 
 def _stem(name: str) -> str:
-    value = str(name or "")
+    value = (name or "")
     return value.rsplit(".", 1)[0] if "." in value else value
 
 

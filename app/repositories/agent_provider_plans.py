@@ -14,7 +14,6 @@ from typing import Any
 from app.agent.errors import AgentToolError
 from app.modules.web_secret import get_web_secret
 
-
 _PLAN_RE = re.compile(r"^PP-[0-9A-F]{24}$")
 _ALLOWED_RISKS = {"low_write", "write", "danger"}
 _TERMINAL_STATUSES = {"succeeded", "failed", "stale", "outcome_unknown"}
@@ -36,21 +35,19 @@ def recover_orphaned_provider_plans_under_writer_lease() -> int:
     stamp = db.now()
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        return int(
-            db.recover_interrupted_provider_plans(
+        return db.recover_interrupted_provider_plans(
                 conn,
                 timestamp=stamp,
             )
-        )
 
 
 def _digest(value: str, *, domain: bytes, required: bool = True) -> str:
-    normalized = str(value or "").strip()
+    normalized = (value or "").strip()
     if required and not normalized:
         raise AgentToolError("无法确认当前 Agent 身份", code="identity_required")
     if len(normalized) > 512:
         raise AgentToolError("当前 Agent 身份无效", code="identity_required")
-    secret = str(get_web_secret() or "")
+    secret = (get_web_secret() or "")
     if not secret:
         raise AgentToolError("Agent 身份隔离密钥不可用", code="identity_required")
     return hmac.new(
@@ -96,7 +93,7 @@ def _json_object(value: object, *, field: str) -> str:
 def _decode_object(value: object) -> dict[str, Any]:
     try:
         parsed = json.loads(str(value or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
@@ -199,8 +196,8 @@ def _invalidate_provider_plans(
             f"DELETE FROM agent_provider_plans WHERE {scope} AND status<>'running'",
             scope_values,
         )
-    scrubbed = max(0, int(running.rowcount or 0))
-    deleted = max(0, int(removed.rowcount or 0))
+    scrubbed = max(0, (running.rowcount or 0))
+    deleted = max(0, (removed.rowcount or 0))
     return {"scrubbed_running": scrubbed, "deleted": deleted}
 
 
@@ -238,12 +235,12 @@ def create_provider_plan(
     ttl_seconds: int = 300,
 ) -> dict[str, Any]:
     owner_digest, session_digest = _principal(owner, session_id)
-    normalized_risk = str(risk or "").strip().casefold()
+    normalized_risk = (risk or "").strip().casefold()
     if normalized_risk not in _ALLOWED_RISKS:
         raise ValueError("Provider 写计划风险等级无效")
     plan_ref = f"PP-{secrets.token_hex(12).upper()}"
     stamp = db.now()
-    expiry = time.time() + max(30, min(int(ttl_seconds), 900))
+    expiry = time.time() + max(30, min(ttl_seconds, 900))
     with db.get_conn() as conn:
         conn.execute(
             "UPDATE agent_provider_plans SET status='stale',summary='写计划已过期',"
@@ -262,14 +259,14 @@ def create_provider_plan(
                 plan_ref,
                 owner_digest,
                 session_digest,
-                str(provider),
-                str(profile_ref),
-                str(operation),
+                provider,
+                profile_ref,
+                operation,
                 normalized_risk,
                 _json_object(arguments, field="arguments"),
                 _json_object(target_snapshot, field="target_snapshot"),
-                str(context_fingerprint),
-                " ".join(str(summary or "").split())[:_MAX_SUMMARY_LENGTH],
+                context_fingerprint,
+                " ".join((summary or "").split())[:_MAX_SUMMARY_LENGTH],
                 expiry,
                 stamp,
                 stamp,
@@ -394,7 +391,7 @@ def claim_provider_plan(
         else:
             stored_context = str(row["context_fingerprint"] or "")
             if not stored_context or not hmac.compare_digest(
-                stored_context, str(expected_context or "")
+                stored_context, (expected_context or "")
             ):
                 conn.execute(
                     "UPDATE agent_provider_plans SET status='stale',"
@@ -435,13 +432,13 @@ def finish_provider_plan(
     error_code: str = "",
 ) -> None:
     normalized = _plan_id(plan_ref)
-    normalized_status = str(status or "").strip().casefold()
+    normalized_status = (status or "").strip().casefold()
     if normalized_status not in _TERMINAL_STATUSES:
         raise ValueError("Provider 写计划终态无效")
     stamp = db.now()
     serialized_result = _json_object(result, field="result")
-    safe_summary = " ".join(str(summary or "").split())[:_MAX_SUMMARY_LENGTH]
-    safe_error = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_code or ""))[
+    safe_summary = " ".join((summary or "").split())[:_MAX_SUMMARY_LENGTH]
+    safe_error = re.sub(r"[^A-Za-z0-9_.-]", "", (error_code or ""))[
         :_MAX_ERROR_CODE_LENGTH
     ]
     with db.get_conn() as conn:

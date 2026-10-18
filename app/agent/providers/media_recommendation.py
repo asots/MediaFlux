@@ -23,7 +23,7 @@ def _compact(value: object) -> str:
 
 
 def _expression_matches(text: str, compact_text: str, expression: str) -> bool:
-    for raw in str(expression or "").split("|"):
+    for raw in (expression or "").split("|"):
         term = _normalized(raw)
         if not term:
             continue
@@ -46,7 +46,7 @@ def _candidate_corpus(candidate: MediaRecommendationCandidate) -> tuple[str, str
     if _JAPANESE_SCRIPT_RE.search(candidate.original_title):
         # 原始标题含平假名/片假名是可验证的日语元数据，只用于本地排序信号。
         values.extend(("日本", "Japanese", "日语"))
-    text = _normalized(" ".join(str(value or "") for value in values))
+    text = _normalized(" ".join((value or "") for value in values))
     return text, _compact(text)
 
 
@@ -59,10 +59,10 @@ def _history_signals(
     recent_titles: list[str] = []
     seen_entities: set[str] = set()
     for item in history:
-        object_id = str(item.series_id or item.id or "").strip()
+        object_id = (item.series_id or item.id or "").strip()
         if object_id:
             object_ids.add(object_id)
-        display_title = str(item.display_name or "").strip()
+        display_title = (item.display_name or "").strip()
         title = _compact(display_title)
         if title:
             titles.add(title)

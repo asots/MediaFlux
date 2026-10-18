@@ -22,6 +22,7 @@ def extract(source, start, end):
 class RssFilterRefreshBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         bundled = Path(cls.playwright.chromium.executable_path)
         executable = str(bundled) if bundled.is_file() else next(

@@ -373,7 +373,7 @@ def _decode_text(value: object) -> str:
 
 
 def _remove_internal_tool_guidance(text: str) -> str:
-    cleaned = _INTERNAL_TOOL_GUIDANCE_RE.sub(" ", str(text or ""))
+    cleaned = _INTERNAL_TOOL_GUIDANCE_RE.sub(" ", (text or ""))
     cleaned = re.sub(r"(?:下一步(?:建议)?|建议)\s*[:：]\s*$", "", cleaned).strip()
     return " ".join(cleaned.replace("\r", " ").replace("\n", " ").split()).strip()
 
@@ -405,7 +405,7 @@ def sanitize_untrusted_filename(value: object, *, limit: int = 255) -> str:
         return ""
     text = _URI_RE.sub("[网址]", text)
     text = _P2P_RE.sub("[链接]", text)
-    return text[: max(1, int(limit))].rstrip()
+    return text[: max(1, limit)].rstrip()
 
 
 def sanitize_public_text(value: object, *, limit: int = 600, preserve_format: bool = False) -> str:
@@ -428,7 +428,7 @@ def sanitize_public_text(value: object, *, limit: int = 600, preserve_format: bo
         or _UNICODE_FILE_PATH_RE.search(path_scan_text)
     ):
         return ""
-    return (str(value) if preserve_format and text == decoded else text)[: max(1, int(limit))].rstrip()
+    return (str(value) if preserve_format and text == decoded else text)[: max(1, limit)].rstrip()
 
 
 def sanitize_resource_title(value: object, *, limit: int = 300) -> str:
@@ -438,4 +438,4 @@ def sanitize_resource_title(value: object, *, limit: int = 300) -> str:
     # Preserve filename punctuation and URL masking, but inspect the full title
     # before applying the display limit so a private suffix cannot be hidden.
     text = sanitize_untrusted_filename(text, limit=max(1, len(text)))
-    return text[: max(1, int(limit))].rstrip() if sanitize_public_text(text, limit=limit) else ""
+    return text[: max(1, limit)].rstrip() if sanitize_public_text(text, limit=limit) else ""

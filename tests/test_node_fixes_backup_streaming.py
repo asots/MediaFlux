@@ -60,6 +60,7 @@ class BackupStreamingTests(unittest.TestCase):
     def test_large_backup_and_verification_have_bounded_python_allocations(self):
         with tempfile.TemporaryDirectory() as raw:
             paths = self.make_database(Path(raw), mib=24)
+            archive = None
             for operation in ('create', 'verify'):
                 with self.subTest(operation=operation):
                     tracemalloc.start()
@@ -67,6 +68,7 @@ class BackupStreamingTests(unittest.TestCase):
                         if operation == 'create':
                             archive = create_backup(paths)
                         else:
+                            assert archive is not None
                             verify_backup(archive)
                         _, peak = tracemalloc.get_traced_memory()
                     finally:

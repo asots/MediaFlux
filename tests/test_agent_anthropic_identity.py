@@ -1,4 +1,5 @@
 """Anthropic identities are native, not synthesized or normalized tool keys."""
+from typing import Any
 import asyncio
 import json
 import sqlite3
@@ -27,7 +28,7 @@ FINAL = (json.dumps({'content': [{'type': 'text', 'text': '已核验'}],
                      'stop_reason': 'end_turn'}).encode(), 'application/json')
 
 
-def block(cid='call-original', name='lookup', value=None):
+def block(cid='call-original', name='lookup', value=None) -> dict[str, Any]:
     result = {'type': 'tool_use', 'input': {'query': 42} if value is None else value}
     if cid is not MISSING:
         result['id'] = cid
@@ -40,7 +41,7 @@ def payload(mode, blocks):
     content = [PRIVATE, OPAQUE, *blocks]
     if mode == 'json':
         return json.dumps({'content': content, 'stop_reason': 'tool_use'}).encode(), 'application/json'
-    events = [{'type': 'message_start', 'message': {'role': 'assistant', 'content': []}}]
+    events: list[dict[str, Any]] = [{'type': 'message_start', 'message': {'role': 'assistant', 'content': []}}]
     for index, item in enumerate(content):
         start = {**item, 'input': {}} if item['type'] == 'tool_use' else item
         events.append({'type': 'content_block_start', 'index': index, 'content_block': start})
@@ -67,7 +68,8 @@ def test_invalid_original_identity_rejects_complete_batch(mode, field, value, ba
     assert [event.tool_call.call_id for event in seen if event.tool_call] == (
         ['call-good'] if mode == 'sse' and not bad_first else [])
     # Invalid private identity values must not leak through exception chains.
-    pending, visited = [error], set()
+    pending: list[BaseException | None] = [error]
+    visited = set()
     while pending:
         current = pending.pop()
         if current is None or id(current) in visited:
@@ -84,7 +86,12 @@ def test_duplicate_native_ids_with_distinct_arguments_never_finish(mode):
     assert isinstance(error, ModelProviderError)
     assert not any(event.type is ModelEventType.FINISH for event in seen)
     if mode == 'sse':
-        assert [dict(event.tool_call.arguments) for event in seen if event.tool_call] == [
+        actual_calls = []
+        for event in seen:
+            if event.tool_call:
+                assert event.tool_call.arguments is not None
+                actual_calls.append(dict(event.tool_call.arguments))
+        assert actual_calls == [
             {'query': 'first'}, {'query': 'different'}]
     else:
         assert not any(event.tool_call for event in seen)
@@ -101,7 +108,12 @@ def test_repeated_sse_block_index_cannot_replace_original_identity():
     seen, error = asyncio.run(observe(P, reply))
     assert isinstance(error, ModelProviderError)
     assert not any(event.type is ModelEventType.FINISH for event in seen)
-    assert [dict(event.tool_call.arguments) for event in seen if event.tool_call] == [{'query': 'first'}]
+    actual_calls = []
+    for event in seen:
+        if event.tool_call:
+            assert event.tool_call.arguments is not None
+            actual_calls.append(dict(event.tool_call.arguments))
+    assert actual_calls == [{'query': 'first'}]
 
 
 @pytest.mark.parametrize('mode', ['json', 'sse'])
@@ -110,8 +122,10 @@ def test_valid_identity_and_private_layout_are_exact(mode, cid, name):
     seen, error = asyncio.run(observe(P, payload(mode, [block(cid, name)])))
     assert error is None
     call = next(event.tool_call for event in seen if event.tool_call)
+    assert call.arguments is not None
     assert (call.call_id, call.name, dict(call.arguments)) == (cid, name, {'query': 42})
     assert seen[-1].type is ModelEventType.FINISH
+    assert seen[-1].provider_state is not None
     assert json.loads(seen[-1].provider_state.layout_json) == [
         PRIVATE, OPAQUE, {'type': 'tool_ref', 'call_id': cid}]
 

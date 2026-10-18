@@ -47,7 +47,7 @@ def _guessit_cached(value: str) -> dict:
 def _guessit_info(value: str) -> dict:
     try:
         # 返回顶层副本，避免某个调用方补写字段污染后续识别结果。
-        return dict(_guessit_cached(str(value or "")))
+        return dict(_guessit_cached(value or ""))
     except Exception:
         return {}
 
@@ -67,7 +67,7 @@ def _guessit_episode_is_untrusted(
     """
     if explicit_episode is not None:
         return False
-    raw_value = str(value or "")
+    raw_value = (value or "")
     if _GUESSIT_CJK_EPISODE_WORD_COLLISION.search(raw_value):
         return True
     for match in re.finditer(r"(?<!\d)(\d{3,4})(?!\d)", raw_value):

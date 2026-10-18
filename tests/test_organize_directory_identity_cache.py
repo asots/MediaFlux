@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import copy
 import unicodedata
 import unittest
@@ -151,7 +154,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             },
             map_source_positions=True,
         )
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper)).organize(
             "source", self._rules(), dry_run=True,
         )
         return plans, stats, delegate
@@ -456,7 +459,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             "seasons": [{"season_number": 1, "episode_count": 12}],
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -523,13 +526,13 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         )
         scraper = self._scraper()
 
-        Organizer(client=client, scraper=scraper).organize(
+        Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
         self.assertEqual(
-            scraper.match.call_args.args[0],
+            cast(Mock, scraper.match).call_args.args[0],
             "A Certain Magical Index.2008.S01E03.mkv",
         )
 
@@ -606,11 +609,11 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         )
         scraper = self._scraper()
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
         self.assertEqual(stats["directory_identity_cache_hits"], 2)
         self.assertEqual(stats["directory_identity_cache_groups"], 1)
         self.assertEqual([plan.episode for plan in plans], [1, 2, 3])
@@ -648,16 +651,16 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             },
         )
         scraper = self._scraper()
-        scraper.get_detail.return_value["seasons"] = [
+        cast(Mock, scraper.get_detail).return_value["seasons"] = [
             {"season_number": 3, "episode_count": 14},
         ]
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
-        self.assertEqual(scraper.match.call_count, 1)
-        recognition_name = scraper.match.call_args.args[0]
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
+        recognition_name = cast(Mock, scraper.match).call_args.args[0]
         self.assertTrue(
             recognition_name.endswith(".S03E01.mkv"),
             recognition_name,
@@ -706,7 +709,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             ],
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -768,7 +771,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             "seasons": [{"season_number": 23, "episode_count": 18}],
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -778,7 +781,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         self.assertEqual(stats["need_confirm"], 0)
         self.assertEqual((plan.season, plan.episode), (23, 18))
         self.assertEqual((plan.source_season, plan.source_episode), (None, 1173))
-        self.assertIsNotNone(plan.episode_mapping)
+        assert (plan.episode_mapping) is not None
         self.assertEqual(plan.episode_mapping.mode, "absolute")
         self.assertTrue(plan.episode_mapping.changed)
         self.assertEqual(
@@ -801,11 +804,11 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         )
         scraper = self._scraper()
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
         self.assertEqual(stats["directory_identity_cache_hits"], 1)
         self.assertEqual(plans[0].action, "move")
         self.assertEqual(plans[1].action, "skip")
@@ -834,12 +837,12 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             },
         )
         scraper = self._scraper()
-        scraper.get_detail.return_value["seasons"] = [
+        cast(Mock, scraper.get_detail).return_value["seasons"] = [
             {"season_number": 1, "episode_count": 10},
             {"season_number": 2, "episode_count": 14},
         ]
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -851,7 +854,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         self.assertTrue(all(plan.action == "move" for plan in plans))
         self.assertEqual(stats["need_confirm"], 0)
         self.assertEqual(stats["conflict"], 0)
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
         self.assertEqual(stats["directory_identity_cache_hits"], 23)
         self.assertEqual(plans[10].source_episode, 11)
         self.assertEqual(plans[10].episode_mapping.mode, "absolute")
@@ -885,14 +888,14 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             },
         )
         scraper = self._scraper()
-        scraper.match.return_value.title = "Boruto: Naruto Next Generations"
-        scraper.get_detail.return_value["seasons"] = [
+        cast(Mock, scraper.match).return_value.title = "Boruto: Naruto Next Generations"
+        cast(Mock, scraper.get_detail).return_value["seasons"] = [
             {"season_number": 1, "episode_count": 2},
             {"season_number": 2, "episode_count": 2},
             {"season_number": 3, "episode_count": 2},
         ]
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -900,9 +903,9 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         self.assertTrue(all(plan.action == "move" for plan in plans))
         self.assertEqual(stats["need_confirm"], 0)
         self.assertEqual(stats["conflict"], 0)
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
         self.assertEqual(
-            scraper.match.call_args.args[0],
+            cast(Mock, scraper.match).call_args.args[0],
             "Boruto: Naruto Next Generations.S01E06.mkv",
         )
         self.assertEqual(stats["directory_identity_cache_hits"], 5)
@@ -935,10 +938,10 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             },
         )
         scraper = self._scraper()
-        scraper.match.return_value.tmdb_id = "226045"
-        scraper.match.return_value.external_id = "226045"
-        scraper.match.return_value.title = "大主宰"
-        scraper.get_detail.return_value.update({
+        cast(Mock, scraper.match).return_value.tmdb_id = "226045"
+        cast(Mock, scraper.match).return_value.external_id = "226045"
+        cast(Mock, scraper.match).return_value.title = "大主宰"
+        cast(Mock, scraper.get_detail).return_value.update({
             "id": 226045,
             "name": "大主宰",
             "first_air_date": "2023-06-30",
@@ -966,7 +969,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             "episodes": episodes,
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -1003,12 +1006,12 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             },
         )
         scraper = self._scraper()
-        scraper.get_detail.return_value["seasons"] = [
+        cast(Mock, scraper.get_detail).return_value["seasons"] = [
             {"season_number": 1, "episode_count": 12},
             {"season_number": 2, "episode_count": 12},
         ]
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -1019,7 +1022,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         self.assertTrue(all(plan.action == "move" for plan in plans))
         self.assertEqual(stats["need_confirm"], 0)
         self.assertEqual(stats["conflict"], 0)
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
         self.assertEqual(stats["directory_identity_cache_hits"], 11)
         self.assertEqual(plans[0].source_episode, 13)
         self.assertEqual(plans[0].episode_mapping.mode, "season_continuous")
@@ -1059,7 +1062,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             ],
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -1090,17 +1093,17 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             },
         )
         scraper = self._scraper()
-        scraper.match.return_value.matched_by = "bangumi_hint"
-        scraper.get_detail.return_value["seasons"] = [
+        cast(Mock, scraper.match).return_value.matched_by = "bangumi_hint"
+        cast(Mock, scraper.get_detail).return_value["seasons"] = [
             {"season_number": 1, "episode_count": 12},
             {"season_number": 2, "episode_count": 13},
         ]
 
-        _plans, stats = Organizer(client=client, scraper=scraper).organize(
+        _plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
-        self.assertEqual(scraper.match.call_count, 3)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 3)
         self.assertEqual(stats["directory_identity_cache_hits"], 0)
         self.assertEqual(stats["directory_identity_cache_groups"], 0)
 
@@ -1132,7 +1135,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             ],
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -1162,11 +1165,11 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         }
         scraper = self._scraper()
 
-        _, stats = Organizer(client=_TreeClient(tree, infos), scraper=scraper).organize(
+        _, stats = Organizer(client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=scraper).organize(
             "source", self._rules(), dry_run=True,
         )
 
-        self.assertEqual(scraper.match.call_count, 3)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 3)
         self.assertEqual(stats["directory_identity_cache_hits"], 0)
         self.assertEqual(stats["directory_identity_cache_groups"], 0)
 
@@ -1248,7 +1251,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         })
 
         plans, stats = Organizer(
-            client=_TreeClient(tree, infos), scraper=scraper,
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=scraper,
         ).organize("source", self._rules(), dry_run=True, automatic=True)
 
         self.assertEqual([plan.action for plan in plans], ["move"] * 3)
@@ -1294,7 +1297,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             title="关于我转生变成史莱姆这档事",
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -1311,9 +1314,9 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         self.assertEqual(stats["need_confirm"], 0)
         self.assertEqual(stats["directory_identity_attestation_bindings"], 1)
         self.assertEqual(stats["directory_identity_attestation_hits"], 19)
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
         self.assertTrue(
-            scraper.match.call_args.args[0].endswith(".S04E01.mp4")
+            cast(Mock, scraper.match).call_args.args[0].endswith(".S04E01.mp4")
         )
 
     def test_slime_fourth_season_maps_into_single_merged_tmdb_season(self):
@@ -1369,7 +1372,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             "seasons": [{"season_number": 1, "episode_count": 92}],
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -1423,7 +1426,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             title="关于我转生变成史莱姆这档事",
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -1439,7 +1442,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(all("超出 TMDB" in plan.note for plan in plans[24:]))
         self.assertEqual(stats["need_confirm"], 2)
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
 
     def test_later_season_continuous_pack_uses_e01_identity_probe(self):
         show = GuangYaFile(
@@ -1500,7 +1503,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             ],
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -1550,7 +1553,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             ],
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -1565,8 +1568,8 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             for plan in plans
         ))
         self.assertEqual(stats["need_confirm"], 0)
-        self.assertEqual(scraper.match.call_count, 1)
-        self.assertTrue(scraper.match.call_args.args[0].endswith(".S03E01.mkv"))
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
+        self.assertTrue(cast(Mock, scraper.match).call_args.args[0].endswith(".S03E01.mkv"))
 
     def test_fixed_tmdb_confirmation_uses_the_same_continued_number_mapping(self):
         show = GuangYaFile(
@@ -1619,7 +1622,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             map_source_positions=True,
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper)).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -1654,7 +1657,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             for plan in plans
         ))
         self.assertEqual(stats["need_confirm"], 0)
-        self.assertEqual(delegate.get_tv_season_detail.call_count, 3)
+        self.assertEqual(cast(Mock, delegate.get_tv_season_detail).call_count, 3)
 
     def test_fixed_tmdb_confirmation_keeps_existing_source_season(self):
         season_detail = self._merged_cour_season_detail(12, 13)
@@ -1677,7 +1680,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             for plan in plans
         ))
         self.assertEqual(stats["need_confirm"], 0)
-        delegate.get_tv_season_detail.assert_not_called()
+        cast(Mock, delegate.get_tv_season_detail).assert_not_called()
 
     def test_fixed_tmdb_confirmation_maps_third_cour_into_merged_season(self):
         plans, stats, _delegate = self._fixed_cour_confirmation(
@@ -1759,7 +1762,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             position_overrides={filename: (2, 13)},
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper)).organize(
             "source", self._rules(), dry_run=True,
         )
 
@@ -1825,7 +1828,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             "seasons": [{"season_number": 1, "episode_count": 92}],
         })
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -1915,7 +1918,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
             )
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", self._rules(), dry_run=True, automatic=True,
         )
 
@@ -1995,7 +1998,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         }
         scraper = TMDBScraper()
         scraper.get_detail = Mock(return_value=copy.deepcopy(stale_detail))
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         organizer._refresh_tmdb_detail_once = Mock(
             return_value=(copy.deepcopy(refreshed_detail), False)
         )
@@ -2010,12 +2013,13 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(plan.action, "move")
         self.assertEqual((plan.season, plan.episode), (2, 13))
-        self.assertIsNotNone(plan.episode_mapping)
+        assert (plan.episode_mapping) is not None
         self.assertEqual(
             (plan.episode_mapping.source_season, plan.episode_mapping.source_episode),
             (None, 25),
         )
         self.assertEqual(plan.episode_mapping.mode, "absolute")
+        assert plan.match is not None
         self.assertTrue(plan.match.metadata["tmdb_detail_force_refreshed"])
         organizer._refresh_tmdb_detail_once.assert_called_once()
 
@@ -2066,7 +2070,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         }
         scraper = TMDBScraper()
         scraper.get_detail = Mock(return_value=copy.deepcopy(refreshed_detail))
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         organizer._refresh_tmdb_detail_once = Mock(
             return_value=(copy.deepcopy(refreshed_detail), False)
         )
@@ -2095,12 +2099,13 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(plan.action, "move")
         self.assertEqual((plan.season, plan.episode), (3, 1))
-        self.assertIsNotNone(plan.episode_mapping)
+        assert (plan.episode_mapping) is not None
         self.assertEqual(plan.episode_mapping.mode, "season_continuous")
         self.assertEqual(
             plan.episode_mapping.reason,
             "continued_numbering_rebased_to_tmdb_season",
         )
+        assert plan.match is not None
         self.assertTrue(plan.match.metadata["tmdb_detail_force_refreshed"])
         self.assertFalse(plan.match.metadata["tmdb_detail_refresh_performed"])
         organizer._refresh_tmdb_detail_once.assert_called_once()
@@ -2145,7 +2150,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         }
         scraper = TMDBScraper()
         scraper.get_detail = Mock(return_value=copy.deepcopy(stale_detail))
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         organizer._refresh_tmdb_detail_once = Mock(
             return_value=(copy.deepcopy(refreshed_detail), False)
         )
@@ -2173,9 +2178,10 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(plan.action, "move")
         self.assertEqual((plan.season, plan.episode), (3, 13))
-        self.assertIsNotNone(plan.episode_mapping)
+        assert (plan.episode_mapping) is not None
         self.assertFalse(plan.episode_mapping.changed)
         self.assertEqual(plan.episode_mapping.confidence, 1.0)
+        assert plan.match is not None
         self.assertTrue(plan.match.metadata["tmdb_detail_force_refreshed"])
         self.assertFalse(plan.match.metadata["tmdb_detail_refresh_performed"])
         organizer._refresh_tmdb_detail_once.assert_called_once()
@@ -2243,7 +2249,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
                     "seasons": [{"season_number": 1, "episode_count": 92}],
                 })
 
-                plans, stats = Organizer(client=client, scraper=scraper).organize(
+                plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
                     "source", self._rules(), dry_run=True, automatic=True,
                 )
 
@@ -2260,7 +2266,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
     def test_low_confidence_complete_package_uses_directory_identity_proof(self):
         scraper = self._low_confidence_package_scraper()
         plans, stats = Organizer(
-            client=self._boruto_tree(list(range(1, 13))), scraper=scraper,
+            client=cast(GuangYaClient, self._boruto_tree(list(range(1, 13)))), scraper=scraper,
         ).organize("source", self._rules(), dry_run=True, automatic=True)
 
         self.assertEqual(len(plans), 12)
@@ -2268,7 +2274,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         self.assertEqual(stats["need_confirm"], 0)
         self.assertEqual(stats["directory_package_identity_bindings"], 1)
         self.assertEqual(stats["directory_identity_cache_hits"], 11)
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
         self.assertEqual(
             [(plan.season, plan.episode) for plan in plans],
             [(1, episode) for episode in range(1, 13)],
@@ -2281,7 +2287,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
     def test_low_confidence_short_package_still_requires_confirmation(self):
         scraper = self._low_confidence_package_scraper()
         plans, stats = Organizer(
-            client=self._boruto_tree(list(range(1, 12))), scraper=scraper,
+            client=cast(GuangYaClient, self._boruto_tree(list(range(1, 12)))), scraper=scraper,
         ).organize("source", self._rules(), dry_run=True, automatic=True)
 
         self.assertTrue(all(plan.action == "skip" for plan in plans))
@@ -2289,12 +2295,12 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
         self.assertEqual(stats["directory_identity_cache_hits"], 0)
         self.assertEqual(stats["recognition_work_cache_hits"], 10)
         self.assertEqual(stats["recognition_work_cache_groups"], 1)
-        self.assertEqual(scraper.match.call_count, 1)
+        self.assertEqual(cast(Mock, scraper.match).call_count, 1)
 
     def test_low_confidence_gapped_package_still_requires_confirmation(self):
         scraper = self._low_confidence_package_scraper(episode_count=13)
         plans, stats = Organizer(
-            client=self._boruto_tree(list(range(1, 12)) + [13]), scraper=scraper,
+            client=cast(GuangYaClient, self._boruto_tree(list(range(1, 12)) + [13])), scraper=scraper,
         ).organize("source", self._rules(), dry_run=True, automatic=True)
 
         self.assertTrue(all(plan.action == "skip" for plan in plans))
@@ -2304,9 +2310,9 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
     def test_low_confidence_duplicate_episode_package_fails_closed(self):
         scraper = self._low_confidence_package_scraper()
         plans, stats = Organizer(
-            client=self._boruto_tree(
+            client=cast(GuangYaClient, self._boruto_tree(
                 list(range(1, 13)), duplicate_first=True
-            ),
+            )),
             scraper=scraper,
         ).organize("source", self._rules(), dry_run=True, automatic=True)
 
@@ -2317,7 +2323,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
     def test_low_confidence_multiple_candidates_fail_closed(self):
         scraper = self._low_confidence_package_scraper(multiple_candidates=True)
         plans, stats = Organizer(
-            client=self._boruto_tree(list(range(1, 13))), scraper=scraper,
+            client=cast(GuangYaClient, self._boruto_tree(list(range(1, 13)))), scraper=scraper,
         ).organize("source", self._rules(), dry_run=True, automatic=True)
 
         self.assertTrue(all(plan.action == "skip" for plan in plans))
@@ -2327,7 +2333,7 @@ class DirectoryIdentityCacheTests(IsolatedDatabaseTestCase):
     def test_directory_identity_proof_does_not_bypass_tmdb_episode_range(self):
         scraper = self._low_confidence_package_scraper(episode_count=11)
         plans, stats = Organizer(
-            client=self._boruto_tree(list(range(1, 13))), scraper=scraper,
+            client=cast(GuangYaClient, self._boruto_tree(list(range(1, 13)))), scraper=scraper,
         ).organize("source", self._rules(), dry_run=True, automatic=True)
 
         self.assertEqual([plan.action for plan in plans[:11]], ["move"] * 11)

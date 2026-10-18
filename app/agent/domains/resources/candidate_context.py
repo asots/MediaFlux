@@ -101,7 +101,7 @@ def attach_resource_candidate_reference(
         ToolReference(
             kind="resource_candidates",
             value=value,
-            ttl_seconds=max(1, int(ttl_seconds)),
+            ttl_seconds=max(1, ttl_seconds),
         )
     )
     return result
@@ -110,7 +110,7 @@ def attach_resource_candidate_reference(
 def merge_resource_candidate_references(selections: list[tuple[ToolReference, dict[str, Any]]], *, status: str) -> ToolReference:
     """组合既有已核验候选，保留私有句柄和核验上下文；不重新解析发布名或签发下载授权。"""
     candidates = [{**deepcopy(candidate), "position": position} for position, (_ref, candidate) in enumerate(selections, 1)]
-    snapshot = {"search_id": new_resource_search_id(), "search_status": status, "candidates": candidates}
+    snapshot: dict[str, Any] = {"search_id": new_resource_search_id(), "search_status": status, "candidates": candidates}
     if not selections or validate_safe_resource_snapshot(snapshot) is None:
         raise ValueError("invalid combined resource candidates")
     if all("_private_items" in reference.value for reference, _candidate in selections):
@@ -314,9 +314,9 @@ class RecentResourceCandidateStore:
         wall_clock: Callable[[], float] = time.time,
         repository: AgentSessionContextRepository | None = None,
     ) -> None:
-        self.ttl_seconds = max(1, int(ttl_seconds))
-        self.max_entries = max(1, int(max_entries))
-        self.max_snapshots_per_owner = max(1, min(int(max_snapshots_per_owner), 16))
+        self.ttl_seconds = max(1, ttl_seconds)
+        self.max_entries = max(1, max_entries)
+        self.max_snapshots_per_owner = max(1, min(max_snapshots_per_owner, 16))
         self._clock = clock
         self._wall_clock = wall_clock
         self._repository = repository
@@ -327,7 +327,7 @@ class RecentResourceCandidateStore:
         )
 
     def capture(self, *, owner: str, result: ToolResult, search_id: str = "") -> str:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return ""
         effective_search_id = search_id or new_resource_search_id()
@@ -358,7 +358,7 @@ class RecentResourceCandidateStore:
         return effective_search_id
 
     def get(self, *, owner: str, search_id: str = "") -> dict[str, Any] | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return None
         with self._owner_lock(owner_key):
@@ -384,7 +384,7 @@ class RecentResourceCandidateStore:
             self._entries.clear()
 
     def clear_owner(self, *, owner: str) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return False
         removed = False
@@ -480,7 +480,7 @@ def _safe_snapshot(result: ToolResult) -> dict[str, Any]:
             if len(candidates) >= MAX_RESOURCE_CANDIDATES:
                 break
         return {
-            "search_status": _safe_text(str(result.status or ""), 40),
+            "search_status": _safe_text((result.status or ""), 40),
             "candidates": candidates,
         }
 
@@ -574,7 +574,7 @@ def _safe_snapshot(result: ToolResult) -> dict[str, Any]:
             candidates.append(projected)
 
     return {
-        "search_status": _safe_text(str(result.status or ""), 40),
+        "search_status": _safe_text((result.status or ""), 40),
         "candidates": candidates,
     }
 

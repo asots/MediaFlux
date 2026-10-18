@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import json
-import unittest
 from dataclasses import replace
 from unittest.mock import patch
 from app import database as db
@@ -13,12 +12,7 @@ from tests import test_rss_guangya_torrent_input as _fixtures
 INFOHASH, TORRENT = _fixtures.INFOHASH, _fixtures.TORRENT
 
 
-class _RSSFixture:
-    setUp = _fixtures.RssGuangyaTorrentInputTests.setUp
-    client = _fixtures.RssGuangyaTorrentInputTests.client
-
-
-class FeedInputAudit(_RSSFixture, unittest.TestCase):
+class FeedInputAudit(_fixtures.RssTorrentFixture):
     def pipeline(self, enc):
         xml = f"""<?xml version="1.0"?><rss version="2.0"><channel><title>Test feed</title><link>https://feed.invalid</link><description>Fixture</description><item><title>[Group] Example - 01 [1080p]</title><guid>item1</guid><link>https://feed.invalid/detail/1</link>{enc}</item></channel></rss>""".encode()
 
@@ -98,7 +92,7 @@ class FeedInputAudit(_RSSFixture, unittest.TestCase):
         self.assertEqual(client.torrent_resolve_calls, [TORRENT])
 
 
-class ContentIdentityAudit(_RSSFixture, unittest.TestCase):
+class ContentIdentityAudit(_fixtures.RssTorrentFixture):
     def pipeline(self, urls):
         client = self.client()
         normalize = offline.GuangYaClient.normalize_offline_files
@@ -162,7 +156,7 @@ class ContentIdentityAudit(_RSSFixture, unittest.TestCase):
         )
 
 
-class ContentIdentityConcurrencyTests(_RSSFixture, unittest.TestCase):
+class ContentIdentityConcurrencyTests(_fixtures.RssTorrentFixture):
     def test_parallel_http_sources_submit_one_cloud_task(self):
         from concurrent.futures import ThreadPoolExecutor
         import threading
@@ -280,6 +274,7 @@ class ContentIdentityConcurrencyTests(_RSSFixture, unittest.TestCase):
                 )
             self.assertEqual(db.purge_expired_download_request_torrent_data(30), 1)
             stored = db.get_download_request(first["request_id"])
+            assert stored is not None
             self.assertIsNone(stored["torrent_data"])
             self.assertEqual(stored["source_value"], raw.source_value)
             retried = resubmit_download_request(first["request_id"], "guangya")

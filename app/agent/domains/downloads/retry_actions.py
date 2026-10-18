@@ -239,7 +239,7 @@ def retry_download_submission_confirmed(
             suggestions=["重新发起下载请求重投并确认最新状态。"],
         )
     if not secrets.compare_digest(
-        str(state["fingerprint"]), str(expected_context or "")
+        str(state["fingerprint"]), (expected_context or "")
     ):
         return ToolResult(
             ok=False,

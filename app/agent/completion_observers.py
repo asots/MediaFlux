@@ -97,7 +97,7 @@ class _CompletionTracker:
     value: dict[str, Any]
 
 
-def _bounded_int(value: object) -> int:
+def _bounded_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError, OverflowError):
@@ -157,7 +157,7 @@ def _background_data(
         # execute 的公开范围沿用了 preview DTO；终态不能继续声称未写云端。
         data.pop("cloud_write", None)
         data["operation_ref"] = operation_ref
-    job = {"status": status, "last_status": status, "timed_out": timed_out}
+    job: dict[str, Any] = {"status": status, "last_status": status, "timed_out": timed_out}
     for key in ("stats", "started_at", "finished_at", "progress"):
         value = task.get(key)
         if value not in (None, ""):
@@ -236,7 +236,7 @@ def _safe_strm_result(row: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     }.get(raw_status, "unknown")
     try:
         payload = json.loads(str(_row_value(row, "result", "{}") or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         payload = {}
     raw_stats = payload.get("stats") if isinstance(payload, dict) else None
     stats = (
@@ -282,7 +282,7 @@ def _strm_status(tracker: _CompletionTracker) -> ToolResult:
             },
         )
 
-    status, stats = _safe_strm_result(row)
+    status, stats = _safe_strm_result(dict(row))
     summary = {
         "running": "STRM 同步任务正在运行",
         "completed": "STRM 同步已完成",
@@ -438,7 +438,7 @@ def _patrol_status(tracker: _CompletionTracker) -> ToolResult:
     result = get_library_patrol_status({})
     data = dict(result.data) if isinstance(result.data, dict) else {}
     data["task"] = {
-        "status": str(result.status or ""),
+        "status": (result.status or ""),
         "started_at": str(row["last_started_at"] or ""),
         "finished_at": current_finished,
         "stats": {
@@ -471,7 +471,7 @@ async def _poll(
             {"guangya_task": tracker.value},
             context,
         )
-        status = str(snapshot.status or "").strip().casefold()
+        status = (snapshot.status or "").strip().casefold()
         return (
             snapshot,
             status,
@@ -507,7 +507,7 @@ async def _poll(
             {"job_id": str(tracker.value.get("job_id") or ""), "limit": 1},
             context,
         )
-        status = str(snapshot.status or "").strip().casefold()
+        status = (snapshot.status or "").strip().casefold()
         return (
             snapshot,
             status,
@@ -517,12 +517,12 @@ async def _poll(
         snapshot = await asyncio.to_thread(_strm_status, tracker)
         return (
             snapshot,
-            str(snapshot.status or "").strip().casefold(),
+            (snapshot.status or "").strip().casefold(),
             _snapshot_task(snapshot)[1],
         )
     if tracker.kind == "library_patrol":
         snapshot = await asyncio.to_thread(_patrol_status, tracker)
-        status = str(snapshot.status or "").strip().casefold()
+        status = (snapshot.status or "").strip().casefold()
         return snapshot, status, _snapshot_task(snapshot)[1]
     raise RuntimeError("unsupported completion tracker")
 
@@ -535,7 +535,7 @@ def _terminal_result(
     tracker: _CompletionTracker,
 ) -> ToolResult:
     public_status = status
-    ok = bool(snapshot.ok)
+    ok = (snapshot.ok)
     summary = sanitize_public_text(snapshot.summary, limit=500) or result.summary
     suggestions = list(dict.fromkeys([*result.suggestions, *snapshot.suggestions]))
     error = snapshot.error or result.error

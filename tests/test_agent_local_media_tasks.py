@@ -242,8 +242,10 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             prepared = service.prepare(
                 "local_media.retry_task", {"task_number": 1}, owner="owner-a"
             )
+            get_local_media_task_result = db.get_local_media_task(task_id, owner="admin")
+            assert get_local_media_task_result is not None
             self.assertEqual(
-                db.get_local_media_task(task_id, owner="admin").status, "failed"
+                get_local_media_task_result.status, "failed"
             )
             confirmed = service.confirm(
                 prepared["action_plan"]["plan_id"], owner="owner-a"
@@ -253,7 +255,9 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         self.assertEqual(confirmed["result"]["data"]["operation"], "retry")
         self.assertNotIn("season", confirmed["result"]["data"])
         self.assertNotIn("episode", confirmed["result"]["data"])
+        assert after is not None
         self.assertEqual(after.status, "waiting_stable")
+        assert before is not None
         self.assertEqual(
             (after.season_override, after.episode_override),
             (before.season_override, before.episode_override),
@@ -292,14 +296,17 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             {"scope": "attention", "limit": 12},
             owner="owner-a",
         )
+        test_case = self
+
         class RecordingService:
             calls: list[tuple[str, int]] = []
 
             def execute_task(self, owner, current_task_id, qb_client=None):
                 del qb_client
                 current = db.get_local_media_task(current_task_id, owner=owner)
-                self.assertEqual(current.status, "recognizing")
-                self.assertEqual(
+                assert current is not None
+                test_case.assertEqual(current.status, "recognizing")
+                test_case.assertEqual(
                     (current.season_override, current.episode_override), (2, 12)
                 )
                 self.calls.append((owner, current_task_id))
@@ -310,7 +317,6 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
                 return {"status": "completed", "task_id": current_task_id}
 
         recording = RecordingService()
-        recording.assertEqual = self.assertEqual
         qb_client = Mock()
         scheduler = LocalMediaScheduler(
             service=recording, qb_factory=lambda: qb_client,
@@ -329,6 +335,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
                 owner="owner-a",
             )
             unchanged = db.get_local_media_task(task_id, owner="admin")
+            assert unchanged is not None
             self.assertEqual(unchanged.status, "requires_manual")
             self.assertEqual(
                 (unchanged.season_override, unchanged.episode_override), (2, 24)
@@ -343,8 +350,10 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
 
         queued = db.get_local_media_task(task_id, owner="admin")
         self.assertEqual(confirmed["result"]["status"], "accepted")
+        assert queued is not None
         self.assertEqual(queued.status, "waiting_stable")
         self.assertEqual((queued.season_override, queued.episode_override), (2, 12))
+        assert before is not None
         self.assertEqual(queued.version, before.version + 1)
         self.assertNotEqual(queued.operation_token, before.operation_token)
         self.assertEqual(db.list_local_media_task_items(task_id, owner="admin"), [])
@@ -352,6 +361,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         with patch("app.modules.local_media_scheduler.notify_local_media_task"):
             self.assertEqual(scheduler.run_once(), 1)
         after = db.get_local_media_task(task_id, owner="admin")
+        assert after is not None
         self.assertEqual(after.status, "completed")
         self.assertEqual(recording.calls, [("admin", task_id)])
         qb_client.close.assert_called_once_with()
@@ -364,6 +374,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             episode=None,
         )
         pending = db.get_local_media_task(task_id, owner="admin")
+        assert pending is not None
         self.assertTrue(db.claim_local_media_confirmation_task(
             task_id,
             confirmed_snapshot_digest="confirmed-source-digest", owner="admin",
@@ -386,6 +397,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         ))
 
         selected = db.get_local_media_task(task_id, owner="admin")
+        assert selected is not None
         self.assertEqual(selected.status, "requires_manual")
         self.assertEqual(selected.tmdb_id, "261403")
         self.assertEqual(selected.media_type, "tv")
@@ -418,6 +430,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
 
         after = db.get_local_media_task(task_id, owner="admin")
         self.assertEqual(confirmed["result"]["data"]["operation"], "remap_episode")
+        assert after is not None
         self.assertEqual(after.status, "waiting_stable")
         self.assertEqual((after.season_override, after.episode_override), (2, 12))
         scheduler.reload.assert_called_once_with()
@@ -503,8 +516,10 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         with self.assertRaises(AgentToolError) as stale:
             service.confirm(prepared["action_plan"]["plan_id"], owner="owner-a")
         self.assertEqual(stale.exception.code, "confirmation_stale")
+        get_local_media_task_result_2 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_2 is not None
         self.assertEqual(
-            db.get_local_media_task(task_id, owner="admin").status, "failed"
+            get_local_media_task_result_2.status, "failed"
         )
         reset_agent_service_for_tests()
         with db.get_conn() as conn:
@@ -718,6 +733,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         ref = second.task(owner="owner-a", number=1)
         self.assertEqual(ref, _TaskRef(9, 3, "requires_manual", 4))
         self.assertIsNone(second.task(owner="owner-b", number=1))
+        assert ref is not None
         inspection_number = second.capture_inspection(
             owner="owner-a",
             task=ref,
@@ -726,7 +742,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         )
         third = LocalMediaAgentContextStore(repository=repository)
         inspection = third.inspection(owner="owner-a", number=inspection_number)
-        self.assertIsNotNone(inspection)
+        assert (inspection) is not None
         self.assertEqual(inspection.task, ref)
         self.assertIsNone(third.inspection(owner="owner-b", number=inspection_number))
         third.clear_owner(owner="owner-a")
@@ -762,11 +778,13 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             numbers = sorted(pool.map(capture, range(2)))
         self.assertEqual(numbers, [1, 2])
         restored = LocalMediaAgentContextStore(repository=repository)
+        inspections = [restored.inspection(owner="owner-a", number=number) for number in numbers]
+        task_ids = set()
+        for inspection in inspections:
+            assert inspection is not None
+            task_ids.add(inspection.task.task_id)
         self.assertEqual(
-            {
-                restored.inspection(owner="owner-a", number=number).task.task_id
-                for number in numbers
-            },
+            task_ids,
             {9, 10},
         )
 
@@ -776,11 +794,13 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         second = SimpleNamespace(id=2, version=1, status="requires_manual", source_id=2)
         store.capture_tasks(owner="owner-a", tasks=[first])
         ref_a = store.task(owner="owner-a", number=1)
+        assert ref_a is not None
         store.capture_inspection(
             owner="owner-a", task=ref_a, inspection_id="a", digest="a"
         )
         store.capture_tasks(owner="owner-b", tasks=[second])
         ref_b = store.task(owner="owner-b", number=1)
+        assert ref_b is not None
         store.capture_inspection(
             owner="owner-b", task=ref_b, inspection_id="b", digest="b"
         )
@@ -804,9 +824,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
                 digest="digest-private",
             )
             self.assertEqual(inspection_number, 1)
-            self.assertIsNotNone(
-                store.inspection(owner="owner-a", number=inspection_number)
-            )
+            assert (store.inspection(owner="owner-a", number=inspection_number)) is not None
         self.assertIsNone(store.task(owner="owner-a", number=1))
         self.assertEqual(buffer.commit(), 1)
         restored = LocalMediaAgentContextStore(repository=repository)
@@ -814,7 +832,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             restored.task(owner="owner-a", number=1),
             _TaskRef(9, 3, "requires_manual", 4),
         )
-        self.assertIsNotNone(restored.inspection(owner="owner-a", number=1))
+        assert (restored.inspection(owner="owner-a", number=1)) is not None
 
     def test_context_store_discard_blocks_late_context_resurrection(self) -> None:
         repository = SQLiteAgentSessionContextRepository(

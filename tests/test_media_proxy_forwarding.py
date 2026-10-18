@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from typing import cast
 
+from uvicorn._types import HTTPScope, WebSocketScope
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.modules.media_proxy import _apply_canonical_forwarded_headers
@@ -58,8 +60,14 @@ class MediaProxyForwardingMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             app,
             trusted_hosts=trusted_hosts or ["172.18.0.1/32"],
         )
+        async def receive():
+            raise AssertionError("转发头中间件不应读取请求体")
+
+        async def send(_event):
+            raise AssertionError("转发头中间件不应发送响应")
+
         await middleware(
-            {
+            cast(HTTPScope | WebSocketScope, {
                 "type": scope_type,
                 "client": (peer, 43123),
                 "scheme": "ws" if scope_type == "websocket" else "http",
@@ -67,9 +75,9 @@ class MediaProxyForwardingMiddlewareTests(unittest.IsolatedAsyncioTestCase):
                     (b"x-forwarded-for", forwarded_for.encode("ascii")),
                     (b"x-forwarded-proto", b"https"),
                 ],
-            },
-            None,
-            None,
+            }),
+            receive,
+            send,
         )
         return captured
 

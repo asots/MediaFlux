@@ -311,14 +311,14 @@ def notify_local_media_task(
     status = str((result or {}).get("status") or getattr(task, "status", ""))
     importance = (
         NotificationImportance.ERROR
-        if event.title.startswith(("❌", "⚠️"))
+        if str(event.title).startswith(("❌", "⚠️"))
         else NotificationImportance.ACTION
         if status == "requires_manual"
         else NotificationImportance.RESULT
     )
     return bool(
         publish_notification_thread(
-            f"local-media:{int(task_id)}",
+            f"local-media:{task_id}",
             event,
             topic=NotificationTopic.LOCAL_MEDIA,
             importance=importance,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import json
 import unittest
 from dataclasses import replace
@@ -221,7 +223,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
     def remote(self, path):
         return "/jellyfin/" + path.relative_to(self.fx.media_root).as_posix()
 
-    def payload(self, kind, root, *paths, mode="mf"):
+    def payload(self, kind, root, *paths, mode="mf") -> dict[str, Any]:
         payload = self.fx.payload(*paths, mode=mode)
         payload["scopes"] = [
             {

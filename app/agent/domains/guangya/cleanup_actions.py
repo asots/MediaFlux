@@ -7,6 +7,7 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,7 @@ from app.agent.public_safety import sanitize_public_text, sanitize_untrusted_fil
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
+    PersistedAgentContext,
 )
 from app.clients.guangya import GuangYaClient
 from app.modules.guangya_residual_cleanup import (
@@ -150,13 +152,13 @@ def _from_payload(
         preview_safe=preview,
         request_binding=request_binding,
         updated_at=time.monotonic(),
-        generation=max(0, int(generation or 0)),
-        revision=max(0, int(revision or 0)),
+        generation=max(0, (generation or 0)),
+        revision=max(0, (revision or 0)),
     )
 
 
 def _request_binding(context: ToolContext) -> str:
-    request_id = str(context.request_id or "").strip()
+    request_id = (context.request_id or "").strip()
     if not request_id:
         return ""
     return confirmation_context_fingerprint(
@@ -185,13 +187,13 @@ def _configured_cleanup_sources() -> list[dict[str, str]]:
             (rules.secondary_dir_id, rules.secondary_dir_name or "光鸭二次分流目录")
         )
     for source_id, name in extras:
-        normalized = str(source_id or "").strip()
+        normalized = (source_id or "").strip()
         if (
             normalized
             and normalized != "0"
-            and all(str(item.get("id") or "") != normalized for item in sources)
+            and all((item.get("id") or "") != normalized for item in sources)
         ):
-            sources.append({"id": normalized, "name": str(name or "光鸭执行目录")})
+            sources.append({"id": normalized, "name": (name or "光鸭执行目录")})
     return sources
 
 
@@ -424,7 +426,7 @@ class GuangyaCleanupActions:
 
     def clear_guangya_cleanup_context(self, *, owner: str) -> None:
         """清除 owner 的内存缓存；SQLite epoch 是唯一有效性权威。"""
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return
         with self._lock:
@@ -433,7 +435,7 @@ class GuangyaCleanupActions:
     def _begin(self, owner: str) -> AgentContextWriteGuard:
         if self._repository is None:
             return AgentContextWriteGuard(generation=0, revision=0)
-        begin = getattr(self._repository, "begin_context", None)
+        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
         if not callable(begin):
             return AgentContextWriteGuard(generation=0, revision=0)
         return begin(owner=owner, context_type=_CONTEXT_TYPE)
@@ -443,7 +445,7 @@ class GuangyaCleanupActions:
         owner: str,
     ) -> tuple[_Flow | None, AgentContextWriteGuard]:
         if self._repository is not None:
-            begin_update = getattr(self._repository, "begin_context_update", None)
+            begin_update: Callable[..., tuple[PersistedAgentContext | None, AgentContextWriteGuard]] | None = getattr(self._repository, "begin_context_update", None)
             if callable(begin_update):
                 persisted, guard = begin_update(
                     owner=owner,
@@ -467,7 +469,7 @@ class GuangyaCleanupActions:
         flow.updated_at = time.monotonic()
         if self._repository is not None:
             try:
-                guarded = getattr(self._repository, "replace_latest_guarded", None)
+                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
                 if callable(guarded):
                     if flow.generation <= 0:
                         return False
@@ -505,7 +507,7 @@ class GuangyaCleanupActions:
         return True
 
     def _flow(self, owner: str) -> _Flow | None:
-        owner = str(owner or "").strip()
+        owner = (owner or "").strip()
         if not owner:
             return None
         if self._repository is not None:
@@ -602,12 +604,12 @@ class GuangyaCleanupActions:
                 raise AgentToolError("光鸭账号尚未连接", code="precondition_failed")
             if requested_path:
                 target = resolve_workspace_path(client, requested_path)
-                if not target.is_dir or str(target.file_id) in {"", "0"}:
+                if not target.is_dir or (target.file_id) in {"", "0"}:
                     raise AgentToolError(
                         "指定的光鸭清理范围不是有效目录",
                         code="precondition_failed",
                     )
-                sources = [{"id": str(target.file_id), "name": str(target.name)}]
+                sources = [{"id": (target.file_id), "name": (target.name)}]
             else:
                 sources = _configured_cleanup_sources()
             plan = build_cleanup_plan(
@@ -820,7 +822,7 @@ class GuangyaCleanupActions:
             )
             client = GuangYaClient()
             try:
-                if not client.logged_in or int(client.credential_generation) != int(
+                if not client.logged_in or (client.credential_generation) != int(
                     plan["credential_generation"]
                 ):
                     raise GuangYaCleanupPlanStale("光鸭登录凭据已变化，请重新预览")
@@ -887,7 +889,7 @@ class GuangyaCleanupActions:
             plan = load_cleanup_plan(
                 flow.plan_id, owner=context.owner, expected_fingerprint=flow.fingerprint
             )
-            if _confirmation_fingerprint(flow, plan) != str(expected_context or ""):
+            if _confirmation_fingerprint(flow, plan) != (expected_context or ""):
                 raise AgentToolError(
                     "残留清理预览已变化，请重新预检", code="confirmation_stale"
                 )

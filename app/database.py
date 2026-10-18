@@ -29,10 +29,13 @@ from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from app.config import PATHS
 from app.logger import get_logger
-from app.modules.media_identity import normalize_media_number as _normalize_organize_position
+from app.modules.media_identity import (
+    normalize_media_number as _normalize_organize_position,
+)
 from app.private_files import protect_sqlite_files
 from app.runtime_paths import get_runtime_paths
 
@@ -110,7 +113,7 @@ def _observe_sqlite_contention(
         "SQLite contention kind=%s phase=%s elapsed_ms=%s total=%s",
         kind,
         normalized_phase,
-        max(0, int(elapsed_ms)),
+        max(0, elapsed_ms),
         total,
     )
 
@@ -162,7 +165,7 @@ def configure_database(path: Path, *, test_mode: bool = False) -> Path:
     global DB_PATH, _configured_test_mode
     with _lock:
         DB_PATH = configured_path
-        _configured_test_mode = bool(test_mode)
+        _configured_test_mode = test_mode
     # 数据库路径可在测试、恢复或运维切换中复用；清空一次性 WAL 协商缓存，
     # 避免同路径的新文件继承旧连接状态。
     with _wal_setup_lock:
@@ -195,9 +198,9 @@ def _database_file_identity(path: Path) -> tuple[int, int, int] | None:
     except OSError:
         return None
     return (
-        int(metadata.st_dev),
-        int(metadata.st_ino),
-        int(metadata.st_ctime_ns),
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_ctime_ns,
     )
 
 
@@ -262,7 +265,7 @@ def _run_schema_savepoint(
     try:
         operation(conn)
         if next_version is not None:
-            conn.execute(f"PRAGMA user_version={int(next_version)}")
+            conn.execute(f"PRAGMA user_version={next_version}")
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
     except BaseException:
         rolled_back = False
@@ -288,7 +291,7 @@ def _run_schema_savepoint(
 def _execute_schema_script(conn: sqlite3.Connection, script: str) -> None:
     """逐语句执行 schema，使外层 SAVEPOINT 能真正覆盖全部 DDL。"""
     buffer = ""
-    for line in str(script or "").splitlines(keepends=True):
+    for line in (script or "").splitlines(keepends=True):
         buffer += line
         if not sqlite3.complete_statement(buffer):
             continue
@@ -444,8 +447,8 @@ def finalize_provider_action_history_for_plans(
     这里只更新现有 ``executing`` 行，绝不补插。这样 Provider 计划终态与
     审计在同一事务内收敛，同时不会在隐私清理后重新创建主体记录。
     """
-    normalized_plans = {str(ref or "").strip().upper() for ref in plan_refs} - {""}
-    normalized_status = str(status or "").strip().casefold()
+    normalized_plans = {(ref or "").strip().upper() for ref in plan_refs} - {""}
+    normalized_status = (status or "").strip().casefold()
     if not normalized_plans or normalized_status not in {
         "succeeded",
         "failed",
@@ -466,7 +469,7 @@ def finalize_provider_action_history_for_plans(
         "outcome_unknown": "outcome_unknown",
     }
     normalized_error = re.sub(
-        r"[^a-z0-9_]+", "_", str(error_code or "").strip().casefold()
+        r"[^a-z0-9_]+", "_", (error_code or "").strip().casefold()
     ).strip("_")[:64]
     if not normalized_error:
         normalized_error = fallback_errors[normalized_status]
@@ -478,7 +481,7 @@ def finalize_provider_action_history_for_plans(
     ).fetchall():
         try:
             details = json.loads(str(row["safe_details"] or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             continue
         if (
             isinstance(details, dict)
@@ -496,7 +499,7 @@ def finalize_provider_action_history_for_plans(
                 1 if normalized_status == "succeeded" else 0,
                 labels[normalized_status],
                 normalized_error,
-                str(timestamp or now()),
+                (timestamp or now()),
                 history_id,
             )
             for history_id in history_ids
@@ -532,7 +535,7 @@ def recover_interrupted_provider_plans(
     # 隐私清理已抹除上下文的运行计划只为等待旧 writer 收束；确认已无存活
     # 执行者后直接删除，避免重新保留主体数据。
     conn.execute("DELETE FROM agent_provider_plans WHERE context_fingerprint=''")
-    return max(0, int(recovered or 0))
+    return max(0, (recovered or 0))
 
 
 def _try_acquire_local_media_recovery_lock():
@@ -550,9 +553,16 @@ def _try_acquire_local_media_recovery_lock():
 def init_db() -> None:
     """初始化首个正式数据库基线，并恢复上次异常中断的运行状态。"""
     from app.repositories import (
-        agent_download_verification, agent_jobs, agent_library_patrol,
-        agent_provider_plans, download_requests, local_media, media_proxy,
-        organize_history, rss, strm,
+        agent_download_verification,
+        agent_jobs,
+        agent_library_patrol,
+        agent_provider_plans,
+        download_requests,
+        local_media,
+        media_proxy,
+        organize_history,
+        rss,
+        strm,
     )
 
     with _lock:
@@ -786,11 +796,11 @@ def add_organize_delete_audit(
                 file_id,
                 file_name,
                 parent_id,
-                int(size or 0),
+                (size or 0),
                 gcid,
                 replacement_file_id,
                 replacement_name,
-                int(replacement_size or 0),
+                (replacement_size or 0),
                 replacement_gcid,
                 reason,
                 status,
@@ -800,7 +810,8 @@ def add_organize_delete_audit(
                 timestamp,
             ),
         )
-        return int(cur.lastrowid)
+        assert cur.lastrowid is not None
+        return cur.lastrowid
 
 
 def update_organize_delete_audit(audit_id: int, **fields) -> bool:
@@ -813,7 +824,7 @@ def update_organize_delete_audit(audit_id: int, **fields) -> bool:
     if not sets:
         return False
     sets.append("updated_at=?")
-    values.extend([now(), int(audit_id)])
+    values.extend([now(), audit_id])
     with get_conn() as conn:
         cur = conn.execute(
             f"UPDATE organize_delete_audit SET {', '.join(sets)} WHERE id=?", values
@@ -824,7 +835,7 @@ def update_organize_delete_audit(audit_id: int, **fields) -> bool:
 def get_organize_delete_audit(audit_id: int) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM organize_delete_audit WHERE id=?", (int(audit_id),)
+            "SELECT * FROM organize_delete_audit WHERE id=?", (audit_id,)
         ).fetchone()
 
 
@@ -836,9 +847,9 @@ def list_organize_delete_audits(
     params: list = []
     if organize_log_id is not None:
         sql += " WHERE organize_log_id=?"
-        params.append(int(organize_log_id))
+        params.append(organize_log_id)
     sql += " ORDER BY id DESC LIMIT ?"
-    params.append(max(1, min(int(limit or 100), 1000)))
+    params.append(max(1, min((limit or 100), 1000)))
     with get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -916,14 +927,15 @@ def add_organize_log(
                 error,
                 release_parse_json,
                 parent_log_id,
-                str(operation_token or "").strip(),
+                (operation_token or "").strip(),
                 1,
                 1 if incomplete else 0,
                 timestamp,
                 timestamp,
             ),
         )
-        return int(cur.lastrowid)
+        assert cur.lastrowid is not None
+        return cur.lastrowid
 
     if _conn is not None:
         return insert(_conn)
@@ -999,9 +1011,9 @@ def resolve_pending_organize_logs(
     因此仅兼容包含人工确认语义的旧跳过记录。记录保留用于审计，但统一
     时间线会隐藏 ``confirmed`` 前置记录，只展示最终成功入库结果。
     """
-    normalized_source = str(source or "").strip()
-    normalized_file_id = str(file_id or "").strip()
-    upper_bound = max(0, int(before_log_id or 0))
+    normalized_source = (source or "").strip()
+    normalized_file_id = (file_id or "").strip()
+    upper_bound = max(0, (before_log_id or 0))
     if not normalized_source or not normalized_file_id or upper_bound <= 0:
         return 0
 
@@ -1045,21 +1057,21 @@ def finalize_pending_organize_logs(
     confirmation_actor: str = "",
 ) -> int:
     """结束仍待人工处理的整理日志；用于取消或不可重试失败。"""
-    normalized_status = str(status or "").strip()
+    normalized_status = (status or "").strip()
     if normalized_status not in {"skipped", "failed"}:
         raise ValueError("不支持的人工确认终态")
-    normalized_source = str(source or "").strip()
+    normalized_source = (source or "").strip()
     normalized_ids = list(
         dict.fromkeys(
-            str(item or "").strip() for item in file_ids if str(item or "").strip()
+            (item or "").strip() for item in file_ids if (item or "").strip()
         )
     )
     if not normalized_source or not normalized_ids:
         return 0
     placeholders = ",".join("?" for _ in normalized_ids)
     stamp = now()
-    message = str(error or "").strip()
-    actor = str(confirmation_actor or "").strip().lower()
+    message = (error or "").strip()
+    actor = (confirmation_actor or "").strip().lower()
     if actor not in {"", "human", "agent"}:
         raise ValueError("确认执行者无效")
     with get_conn() as conn:
@@ -1092,8 +1104,8 @@ def mark_organize_logs_confirmation_actor(
     operation_token: str, actor: str
 ) -> int:
     """给一次确认执行新产生的光鸭日志标记来源，不改变业务状态。"""
-    token = str(operation_token or "").strip()
-    normalized_actor = str(actor or "").strip().lower()
+    token = (operation_token or "").strip()
+    normalized_actor = (actor or "").strip().lower()
     if not token or normalized_actor not in {"human", "agent"}:
         return 0
     with get_conn() as conn:
@@ -1102,7 +1114,7 @@ def mark_organize_logs_confirmation_actor(
             "WHERE operation_token=?",
             (normalized_actor, now(), token),
         )
-        return int(cursor.rowcount)
+        return cursor.rowcount
 
 
 def _organize_log_filters(
@@ -1125,7 +1137,7 @@ def list_organize_logs(
 ) -> list[sqlite3.Row]:
     filters, params = _organize_log_filters(status, keyword)
     sql = "SELECT * FROM organize_log" + filters + " ORDER BY id DESC LIMIT ? OFFSET ?"
-    params.extend([max(1, int(limit)), max(0, int(offset))])
+    params.extend([max(1, limit), max(0, offset)])
     with get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -1143,13 +1155,13 @@ def list_organize_logs_after(after_id: int) -> list[sqlite3.Row]:
     with get_conn() as conn:
         return conn.execute(
             "SELECT * FROM organize_log WHERE id>? ORDER BY id ASC",
-            (max(0, int(after_id or 0)),),
+            (max(0, (after_id or 0)),),
         ).fetchall()
 
 
 def list_organize_logs_by_operation_token(operation_token: str) -> list[sqlite3.Row]:
     """精确读取单次整理调用写入的全部审计记录。"""
-    token = str(operation_token or "").strip()
+    token = (operation_token or "").strip()
     if not token:
         return []
     with get_conn() as conn:
@@ -1161,7 +1173,7 @@ def list_organize_logs_by_operation_token(operation_token: str) -> list[sqlite3.
 
 def list_organize_root_identities(media_root_path: str) -> list[sqlite3.Row]:
     """精确读取目标根目录历史媒体身份，不依赖通用日志分页窗口。"""
-    prefix = str(media_root_path or "").strip("/")
+    prefix = (media_root_path or "").strip("/")
     if not prefix:
         return []
     branch = prefix + "/"
@@ -1201,8 +1213,8 @@ _TIMELINE_ORIGIN_VALUES = {"all", "guangya", "local"}
 def _organize_timeline_query(
     *, owner: str = "admin", origin: str = "all", status: str = "", keyword: str = ""
 ) -> tuple[str, list[object]]:
-    normalized_origin = str(origin or "all").strip().lower()
-    normalized_status = str(status or "").strip().lower()
+    normalized_origin = (origin or "all").strip().lower()
+    normalized_status = (status or "").strip().lower()
     if normalized_origin not in _TIMELINE_ORIGIN_VALUES:
         raise ValueError("不支持的整理来源")
     if normalized_status and normalized_status not in _TIMELINE_STATUS_VALUES:
@@ -1292,7 +1304,7 @@ def _organize_timeline_query(
     elif normalized_status:
         sql += " AND status=?"
         params.append(normalized_status)
-    clean_keyword = str(keyword or "").strip()
+    clean_keyword = (keyword or "").strip()
     if clean_keyword:
         value = f"%{clean_keyword}%"
         sql += " AND (original_path LIKE ? OR original_name LIKE ? OR new_path LIKE ? OR current_name LIKE ? OR title LIKE ? OR error LIKE ? OR warning LIKE ? OR source_label LIKE ?)"
@@ -1313,7 +1325,7 @@ def list_organize_timeline(
         owner=owner, origin=origin, status=status, keyword=keyword
     )
     sql += " ORDER BY updated_at DESC, origin DESC, id DESC LIMIT ? OFFSET ?"
-    params.extend([max(1, int(limit)), max(0, int(offset))])
+    params.extend([max(1, limit), max(0, offset)])
     with get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -1348,12 +1360,12 @@ def count_organize_timeline_by_status(*, owner: str = "admin") -> dict[str, int]
 
 def get_agent_organize_audit(
     *, owner: str = "admin", origin: str = "all", status: str = "all", limit: int = 10
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """为 Agent 返回整理时间线的固定脱敏视图，不暴露路径、标识或错误正文。"""
-    normalized_status = str(status or "all").strip().lower()
+    normalized_status = (status or "all").strip().lower()
     if normalized_status not in _TIMELINE_STATUS_VALUES | {"all"}:
         raise ValueError("不支持的整理状态")
-    safe_limit = max(1, min(int(limit), 50))
+    safe_limit = max(1, min(limit, 50))
     base_sql, params = _organize_timeline_query(
         owner=owner,
         origin=origin,
@@ -1415,7 +1427,7 @@ def claim_organize_log_operation(
     allowed_statuses: tuple[str, ...],
     expected_version: int | None = None,
 ) -> bool:
-    statuses = tuple(dict.fromkeys(str(item) for item in allowed_statuses if str(item)))
+    statuses = tuple(dict.fromkeys(item for item in allowed_statuses if item))
     if not statuses or not operation_token:
         return False
     placeholders = ",".join("?" for _ in statuses)
@@ -1426,7 +1438,7 @@ def claim_organize_log_operation(
     params: list = [next_status, operation_token, now(), log_id, *statuses]
     if expected_version is not None:
         sql += " AND version=?"
-        params.append(int(expected_version))
+        params.append(expected_version)
     with get_conn() as conn:
         cur = conn.execute(sql, params)
         return cur.rowcount == 1
@@ -1442,7 +1454,7 @@ def claim_organize_log_operations_batch(
     allowed_statuses: tuple[str, ...],
 ) -> bool:
     """在单一事务内认领整批日志；任一版本/状态漂移则全部回滚。"""
-    statuses = tuple(dict.fromkeys(str(item) for item in allowed_statuses if str(item)))
+    statuses = tuple(dict.fromkeys(item for item in allowed_statuses if item))
     if not entries or not statuses:
         return False
     placeholders = ",".join("?" for _ in statuses)
@@ -1480,8 +1492,8 @@ from app.repositories.organize_history import (  # noqa: E402,F401
     add_organize_operation_step,
     capture_organize_business_snapshot,
     finish_organize_operation_step,
-    list_organize_operation_steps,
     list_latest_reversible_organize_steps,
+    list_organize_operation_steps,
     list_pending_organize_probe_steps,
     restore_organize_business_snapshot,
 )
@@ -1634,21 +1646,15 @@ def clear_organize_logs() -> dict[str, int]:
                 f"DELETE FROM organize_log_items WHERE log_id IN ({id_placeholders})",
                 log_ids,
             )
-            deleted_guangya = int(
-                conn.execute(
-                    f"DELETE FROM organize_log WHERE id IN ({id_placeholders})",
-                    log_ids,
-                ).rowcount
-                or 0
-            )
+            deleted_guangya = conn.execute(
+                f"DELETE FROM organize_log WHERE id IN ({id_placeholders})",
+                log_ids,
+            ).rowcount or 0
 
-        deleted_local = int(
-            conn.execute(
-                f"DELETE FROM local_media_tasks WHERE status NOT IN ({local_placeholders})",
-                local_busy_statuses,
-            ).rowcount
-            or 0
-        )
+        deleted_local = conn.execute(
+            f"DELETE FROM local_media_tasks WHERE status NOT IN ({local_placeholders})",
+            local_busy_statuses,
+        ).rowcount or 0
 
     return {
         "deleted": deleted_guangya + deleted_local,
@@ -1750,14 +1756,14 @@ def purge_expired_agent_task_history(
     next_cleanup_at: str,
     terminal_before: str,
     limit_per_table: int = 500,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """跨进程限频清理 Agent 终态历史，绝不删除待执行或持有租约的任务。"""
-    current = str(current_time or "").strip()
-    next_run = str(next_cleanup_at or "").strip()
-    cutoff = str(terminal_before or "").strip()
+    current = (current_time or "").strip()
+    next_run = (next_cleanup_at or "").strip()
+    cutoff = (terminal_before or "").strip()
     if not current or not next_run or not cutoff:
         raise ValueError("Agent 历史清理时间参数不能为空")
-    limit = max(1, min(int(limit_per_table), 5000))
+    limit = max(1, min(limit_per_table, 5000))
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
@@ -1852,17 +1858,17 @@ def purge_expired_agent_task_history(
         return {
             "performed": True,
             "next_cleanup_at": next_run,
-            "download_verifications": max(0, int(verification.rowcount)),
+            "download_verifications": max(0, verification.rowcount),
             "download_verification_notification_outbox": max(
-                0, int(verification_notifications.rowcount)
+                0, verification_notifications.rowcount
             ),
-            "patrol_notification_outbox": max(0, int(notifications.rowcount)),
-            "action_history": max(0, int(action_history.rowcount)),
-            "jobs": max(0, int(jobs.rowcount)),
-            "provider_plans": max(0, int(provider_plans.rowcount)),
-            "organize_operation_jobs": max(0, int(organize_jobs.rowcount)),
-            "missing_media_workflows": max(0, int(workflows.rowcount)),
-            "web_search_usage": max(0, int(web_usage.rowcount)),
+            "patrol_notification_outbox": max(0, notifications.rowcount),
+            "action_history": max(0, action_history.rowcount),
+            "jobs": max(0, jobs.rowcount),
+            "provider_plans": max(0, provider_plans.rowcount),
+            "organize_operation_jobs": max(0, organize_jobs.rowcount),
+            "missing_media_workflows": max(0, workflows.rowcount),
+            "web_search_usage": max(0, web_usage.rowcount),
         }
 
 
@@ -1870,8 +1876,8 @@ def purge_agent_subject_data(
     *, owner: str, principal: str | None = None
 ) -> dict[str, int]:
     """清除一个主体的全部 Agent 持久化数据；与单会话删除语义明确分离。"""
-    normalized_owner = str(owner or "").strip()
-    normalized_principal = str(principal if principal is not None else owner).strip()
+    normalized_owner = (owner or "").strip()
+    normalized_principal = (principal if principal is not None else owner).strip()
     if not normalized_owner or len(normalized_owner) > 512 or not normalized_principal:
         raise ValueError("Agent 隐私清理主体无效")
     from app.modules.web_secret import get_web_secret
@@ -1929,7 +1935,7 @@ def purge_agent_subject_data(
             cursor = conn.execute(
                 f"DELETE FROM {table} WHERE {column}=?", (digests[digest_key],)
             )
-            deleted[key] = max(0, int(cursor.rowcount or 0))
+            deleted[key] = max(0, (cursor.rowcount or 0))
         # 已进入远端写操作的任务不能直接删行：执行线程可能已持有参数快照。
         # 先最小化持久数据并设置取消位，worker 会在真正写入前再次检查；
         # 未运行任务和终态可立即删除。
@@ -1945,8 +1951,8 @@ def purge_agent_subject_data(
             "DELETE FROM organize_operation_jobs WHERE owner_digest=? AND status<>'running'",
             (digests["jobs"],),
         )
-        deleted["organize_operation_jobs"] = max(0, int(running.rowcount or 0)) + max(
-            0, int(removable.rowcount or 0)
+        deleted["organize_operation_jobs"] = max(0, (running.rowcount or 0)) + max(
+            0, (removable.rowcount or 0)
         )
         provider_running = conn.execute(
             "UPDATE agent_provider_plans SET "
@@ -1962,8 +1968,8 @@ def purge_agent_subject_data(
             "DELETE FROM agent_provider_plans WHERE owner_digest=? AND status<>'running'",
             (digests["provider_plans"],),
         )
-        scrubbed_provider_plans = max(0, int(provider_running.rowcount or 0))
-        removed_provider_plans = max(0, int(provider_removable.rowcount or 0))
+        scrubbed_provider_plans = max(0, (provider_running.rowcount or 0))
+        removed_provider_plans = max(0, (provider_removable.rowcount or 0))
         deleted["provider_plans_scrubbed_running"] = scrubbed_provider_plans
         deleted["provider_plans_deleted"] = removed_provider_plans
         deleted["provider_plans"] = scrubbed_provider_plans + removed_provider_plans
@@ -2057,8 +2063,8 @@ from app.repositories.media_subscriptions import (  # noqa: E402,F401
     list_media_subscription_workflows,
     list_media_subscriptions,
     media_subscription_check_is_active,
-    media_subscription_mutation_snapshot,
     media_subscription_identity_snapshot,
+    media_subscription_mutation_snapshot,
     reconcile_media_download_admissions,
     reconcile_startup_media_download_admissions,
     recover_stale_media_subscription_checks,
@@ -2106,13 +2112,6 @@ from app.repositories.rss import (  # noqa: E402,F401
     update_rss_subscription,
 )
 
-from app.repositories.strm_request_ownership import (  # noqa: E402,F401
-    current_strm_request_owners,
-    has_pending_strm_request_refresh,
-    request_owners_for_work,
-    update_strm_request_state,
-)
-
 # ===== STRM 索引 =====
 # 统一数据访问门面：核心索引 CRUD 按业务域拆分并共享同一实现。
 from app.repositories.strm import (  # noqa: E402,F401
@@ -2123,7 +2122,6 @@ from app.repositories.strm import (  # noqa: E402,F401
     claim_due_strm_metadata_jobs,
     claim_strm_change_targets,
     complete_strm_change_target,
-    settle_strm_metadata_job,
     count_due_strm_change_targets,
     count_pending_strm_change_targets,
     count_strm_metadata_jobs,
@@ -2142,9 +2140,9 @@ from app.repositories.strm import (  # noqa: E402,F401
     list_strm_index_by_prefix,
     list_strm_indexes_by_file_id,
     list_strm_installation_rows,
+    list_strm_metadata_queue,
     list_strm_path_cleanup,
     list_strm_path_owners,
-    list_strm_metadata_queue,
     list_strm_refresh_entries,
     merge_strm_changes,
     recover_stale_strm_change_targets,
@@ -2155,9 +2153,16 @@ from app.repositories.strm import (  # noqa: E402,F401
     requeue_strm_metadata_jobs,
     reschedule_strm_change_targets,
     seconds_until_next_strm_change_target,
+    settle_strm_metadata_job,
     strm_metadata_job_is_current,
     upsert_strm_index,
     upsert_strm_index_batch,
+)
+from app.repositories.strm_request_ownership import (  # noqa: E402,F401
+    current_strm_request_owners,
+    has_pending_strm_request_refresh,
+    request_owners_for_work,
+    update_strm_request_state,
 )
 
 _STRM_SOURCE_SNAPSHOT_KEY = "strm.configured_sources.snapshot.v1"
@@ -2188,7 +2193,7 @@ def _write_strm_source_snapshot(
     payload = json.dumps(
         {
             "version": 1,
-            "strm_root": str(strm_root or ""),
+            "strm_root": (strm_root or ""),
             "sources": [
                 {"id": source_id, "name": source_name}
                 for source_id, source_name in sources.items()
@@ -2223,7 +2228,7 @@ def _read_strm_source_snapshot(
             _normalize_strm_source_snapshot(raw_sources),
             str(payload.get("strm_root") or ""),
         )
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         logger.warning("STRM 来源快照损坏，已按当前配置重建")
         return None
 
@@ -2323,9 +2328,9 @@ def enqueue_strm_retired_source(
             "ON CONFLICT(source_id) DO UPDATE SET source_name=excluded.source_name,"
             "strm_root=excluded.strm_root,updated_at=excluded.updated_at,last_error=''",
             (
-                str(source_id),
-                str(source_name or ""),
-                str(strm_root or ""),
+                source_id,
+                (source_name or ""),
+                (strm_root or ""),
                 timestamp,
                 timestamp,
             ),
@@ -2333,7 +2338,7 @@ def enqueue_strm_retired_source(
 
 
 def cancel_strm_retired_sources(source_ids: list[str]) -> int:
-    ids = list(dict.fromkeys(str(item) for item in source_ids if str(item)))
+    ids = list(dict.fromkeys(item for item in source_ids if item))
     if not ids:
         return 0
     placeholders = ",".join("?" for _ in ids)
@@ -2356,14 +2361,14 @@ def update_strm_retired_source_error(source_id: str, error: str) -> None:
         conn.execute(
             "UPDATE strm_retired_sources SET attempts=attempts+1,last_error=?,updated_at=? "
             "WHERE source_id=?",
-            (str(error or "")[:500], now(), str(source_id)),
+            ((error or "")[:500], now(), source_id),
         )
 
 
 def delete_strm_retired_source(source_id: str) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "DELETE FROM strm_retired_sources WHERE source_id=?", (str(source_id),)
+            "DELETE FROM strm_retired_sources WHERE source_id=?", (source_id,)
         )
         return cur.rowcount
 
@@ -2403,14 +2408,14 @@ def record_strm_failure(
             "target_rel_path=excluded.target_rel_path,error=excluded.error,status='open',"
             "failure_count=strm_failures.failure_count+1,updated_at=excluded.updated_at,resolved_at=NULL",
             (
-                str(source_id),
-                str(source_name or ""),
-                str(file_id),
-                str(parent_id or ""),
-                str(filename),
+                source_id,
+                (source_name or ""),
+                file_id,
+                (parent_id or ""),
+                filename,
                 action,
-                str(rel_dir or ""),
-                str(target_rel_path or ""),
+                (rel_dir or ""),
+                (target_rel_path or ""),
                 _sanitize_strm_failure_error(error),
                 timestamp,
                 timestamp,
@@ -2418,7 +2423,7 @@ def record_strm_failure(
         )
         row = conn.execute(
             "SELECT id FROM strm_failures WHERE source_id=? AND file_id=? AND action=?",
-            (str(source_id), str(file_id), action),
+            (source_id, file_id, action),
         ).fetchone()
         return int(row["id"])
 
@@ -2440,25 +2445,25 @@ def list_strm_failures(
         values.append(status)
     if source_id:
         clauses.append("source_id=?")
-        values.append(str(source_id))
+        values.append(source_id)
     if action:
         clauses.append("action=?")
-        values.append(str(action))
+        values.append(action)
     if before_id is not None:
         clauses.append("id<?")
-        values.append(int(before_id))
+        values.append(before_id)
     if ids is not None:
-        normalized = list(dict.fromkeys(int(item) for item in ids))
+        normalized = list(dict.fromkeys(ids))
         if not normalized:
             return []
         clauses.append(f"id IN ({','.join('?' for _ in normalized)})")
         values.extend(normalized)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    values.append(max(1, min(int(limit or 200), 1000)))
+    values.append(max(1, min((limit or 200), 1000)))
     offset_sql = ""
     if offset > 0:
         offset_sql = " OFFSET ?"
-        values.append(max(0, int(offset)))
+        values.append(max(0, offset))
     with get_conn() as conn:
         return conn.execute(
             f"SELECT * FROM strm_failures{where} ORDER BY id DESC LIMIT ?{offset_sql}",
@@ -2479,7 +2484,7 @@ def get_strm_failure_retry_snapshot(
     if action:
         clauses.append("action=?")
         values.append(action)
-    values.append(max(1, min(int(limit or 101), 1000)))
+    values.append(max(1, min((limit or 101), 1000)))
     with get_conn() as conn:
         return conn.execute(
             "SELECT id,action,failure_count,retry_count,updated_at FROM strm_failures WHERE "
@@ -2490,7 +2495,7 @@ def get_strm_failure_retry_snapshot(
 
 
 def claim_strm_failures(ids: list[int], *, limit: int = 1000) -> list[sqlite3.Row]:
-    normalized = list(dict.fromkeys(int(item) for item in ids))[: max(1, int(limit))]
+    normalized = list(dict.fromkeys(ids))[: max(1, limit)]
     if not normalized:
         return []
     placeholders = ",".join("?" for _ in normalized)
@@ -2530,10 +2535,10 @@ def count_strm_failures(
         values.append(status)
     if source_id:
         clauses.append("source_id=?")
-        values.append(str(source_id))
+        values.append(source_id)
     if action:
         clauses.append("action=?")
-        values.append(str(action))
+        values.append(action)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     with get_conn() as conn:
         return int(
@@ -2576,7 +2581,7 @@ def summarize_strm_failures() -> dict:
     }
 
 
-def get_strm_failure_triage_summary() -> dict[str, object]:
+def get_strm_failure_triage_summary() -> dict[str, Any]:
     """只读聚合 STRM 失败账本，不读取对象标识、路径、文件名或错误正文。"""
     statuses = ("open", "retrying", "resolved")
     actions = ("generate", "metadata")
@@ -2595,7 +2600,7 @@ def get_strm_failure_triage_summary() -> dict[str, object]:
         action: {"total": 0, "open": 0, "retrying": 0, "resolved": 0}
         for action in actions
     }
-    summary: dict[str, object] = {
+    summary: dict[str, Any] = {
         "total": 0,
         "open": 0,
         "retrying": 0,
@@ -2629,7 +2634,7 @@ def resolve_strm_failure(failure_id: int, *, expected_status: str = "retrying") 
         cur = conn.execute(
             "UPDATE strm_failures SET status='resolved',updated_at=?,resolved_at=? "
             "WHERE id=? AND status=?",
-            (timestamp, timestamp, int(failure_id), str(expected_status)),
+            (timestamp, timestamp, failure_id, expected_status),
         )
         return cur.rowcount == 1
 
@@ -2641,7 +2646,7 @@ def _resolve_strm_failure_for_item_conn(
     cur = conn.execute(
         "UPDATE strm_failures SET status='resolved',updated_at=?,resolved_at=? "
         "WHERE source_id=? AND file_id=? AND action=? AND status='open'",
-        (timestamp, timestamp, str(source_id), str(file_id), str(action)),
+        (timestamp, timestamp, source_id, file_id, action),
     )
     return cur.rowcount
 
@@ -2662,10 +2667,10 @@ def resolve_strm_failures_for_items(
     chunk_size: int = 400,
 ) -> int:
     """批量关闭同一来源/动作下已成功落盘的 STRM 失败项。"""
-    ids = list(dict.fromkeys(str(item) for item in file_ids if str(item)))
+    ids = list(dict.fromkeys(item for item in file_ids if item))
     if not ids:
         return 0
-    safe_chunk = max(1, min(int(chunk_size or 400), 400))
+    safe_chunk = max(1, min((chunk_size or 400), 400))
     timestamp = now()
     updated = 0
     with get_conn() as conn:
@@ -2676,9 +2681,9 @@ def resolve_strm_failures_for_items(
                 "UPDATE strm_failures SET status='resolved',updated_at=?,resolved_at=? "
                 "WHERE source_id=? AND action=? AND status='open' "
                 f"AND file_id IN ({placeholders})",
-                [timestamp, timestamp, str(source_id), str(action), *chunk],
+                [timestamp, timestamp, source_id, action, *chunk],
             )
-            updated += int(cur.rowcount or 0)
+            updated += (cur.rowcount or 0)
     return updated
 
 
@@ -2693,8 +2698,8 @@ def mark_strm_failure_stale(
             (
                 _sanitize_strm_failure_error(error),
                 now(),
-                int(failure_id),
-                str(expected_status),
+                failure_id,
+                expected_status,
             ),
         )
         return cur.rowcount == 1
@@ -2711,8 +2716,8 @@ def release_strm_failure_retry(
             (
                 _sanitize_strm_failure_error(error),
                 now(),
-                int(failure_id),
-                str(expected_status),
+                failure_id,
+                expected_status,
             ),
         )
         return cur.rowcount == 1
@@ -2736,16 +2741,16 @@ def update_strm_failure_retry(
             "failure_count=failure_count+1,updated_at=?,resolved_at=NULL "
             "WHERE id=? AND status=?",
             (
-                str(source_id),
-                str(source_name or ""),
+                source_id,
+                (source_name or ""),
                 str(file.parent_id or ""),
                 str(file.name),
-                str(rel_dir or ""),
-                str(target_rel_path or ""),
+                (rel_dir or ""),
+                (target_rel_path or ""),
                 _sanitize_strm_failure_error(error),
                 now(),
-                int(failure_id),
-                str(expected_status),
+                failure_id,
+                expected_status,
             ),
         )
         return cur.rowcount == 1
@@ -2763,7 +2768,7 @@ def delete_strm_failures(
     clauses: list[str] = []
     values: list[object] = []
     if not all_items and ids is not None:
-        normalized = list(dict.fromkeys(int(item) for item in ids if int(item) > 0))
+        normalized = list(dict.fromkeys(item for item in ids if item > 0))
         if not normalized:
             return 0
         clauses.append(f"id IN ({','.join('?' for _ in normalized)})")
@@ -2774,14 +2779,14 @@ def delete_strm_failures(
             values.append(status)
         if source_id:
             clauses.append("source_id=?")
-            values.append(str(source_id))
+            values.append(source_id)
         if action:
             clauses.append("action=?")
-            values.append(str(action))
+            values.append(action)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     with get_conn() as conn:
         cur = conn.execute("DELETE FROM strm_failures" + where, values)
-        return int(cur.rowcount or 0)
+        return (cur.rowcount or 0)
 
 
 _UUID_TEST_SOURCE_RE = re.compile(
@@ -2814,7 +2819,7 @@ def _configured_strm_source_ids() -> set[str]:
 
 
 def _strm_source_id(source: str) -> str:
-    source = str(source or "").strip()
+    source = (source or "").strip()
     for prefix in ("guangya:", "guangya-meta:"):
         if source.startswith(prefix):
             return source[len(prefix) :]
@@ -2826,7 +2831,7 @@ def _classify_strm_index_row(
 ) -> dict[str, bool]:
     path = Path(str(row["strm_path"] or "")).expanduser()
     if not path.is_absolute():
-        path = Path(str(strm_root or "")).expanduser() / path
+        path = Path(strm_root or "").expanduser() / path
     resolved_path = path.resolve(strict=False)
     in_temp_dir = resolved_path.is_relative_to(temp_root)
     exists = resolved_path.is_file()
@@ -2844,7 +2849,7 @@ def _classify_strm_index_row(
 
 
 def _strm_index_kind(source: str) -> str:
-    source = str(source or "").strip()
+    source = (source or "").strip()
     if (
         source.startswith("guangya-meta:")
         or source.startswith("local-meta:")
@@ -2870,7 +2875,7 @@ def list_strm_index_diagnostics(strm_root: str) -> dict:
             "SELECT id,source,strm_path FROM strm_index ORDER BY id"
         ).fetchall()
 
-    result = {
+    result: dict = {
         "total": len(rows),
         "existing": 0,
         "missing": 0,
@@ -2980,7 +2985,7 @@ def create_organize_confirmation(
                 timestamp,
                 timestamp,
                 timestamp,
-                str(fingerprint),
+                fingerprint,
             ),
         )
         cursor = conn.execute(
@@ -2989,27 +2994,28 @@ def create_organize_confirmation(
             "organize_task_id,rollup_applied,review_status,expires_at,created_at,updated_at"
             ") VALUES(?,?,?,?,?,?,'pending',?,0,?,?,?,?)",
             (
-                str(token),
-                str(fingerprint),
-                str(chat_id or ""),
-                str(source_name or ""),
-                str(directory_path or ""),
+                token,
+                fingerprint,
+                (chat_id or ""),
+                (source_name or ""),
+                (directory_path or ""),
                 encoded,
-                str(organize_task_id or ""),
+                (organize_task_id or ""),
                 ("pending" if review_ready else "waiting") if review_requested else "",
-                str(expires_at),
+                expires_at,
                 timestamp,
                 timestamp,
             ),
         )
-        return int(cursor.lastrowid)
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
 
 
 def get_organize_confirmation(token: str) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
             "SELECT * FROM organize_confirmations WHERE token=?",
-            (str(token or ""),),
+            ((token or ""),),
         ).fetchone()
 
 
@@ -3021,7 +3027,7 @@ def activate_organize_confirmation_review(token: str) -> bool:
             "UPDATE organize_confirmations SET review_status='pending',updated_at=? "
             "WHERE token=? AND status='pending' AND review_status='waiting' "
             "AND expires_at>?",
-            (timestamp, str(token or ""), timestamp),
+            (timestamp, (token or ""), timestamp),
         )
         return cursor.rowcount == 1
 
@@ -3055,7 +3061,7 @@ def recover_interrupted_organize_confirmation_reviews() -> int:
             "AND review_attempts<3",
             (timestamp,),
         )
-        return int(failed.rowcount) + int(recovered.rowcount)
+        return failed.rowcount + recovered.rowcount
 
 
 def claim_next_organize_confirmation_review() -> sqlite3.Row | None:
@@ -3098,7 +3104,7 @@ def stage_organize_confirmation_review_result(
         cursor = conn.execute(
             "UPDATE organize_confirmations SET review_result_json=?,updated_at=? "
             "WHERE token=? AND review_status='running' AND status='pending'",
-            (encoded, now(), str(token or "")),
+            (encoded, now(), (token or "")),
         )
         return cursor.rowcount == 1
 
@@ -3110,7 +3116,7 @@ def complete_organize_confirmation_review(
     result: dict | None = None,
 ) -> bool:
     """保存最小复核回执；模型上下文与工具原始载荷不会持久化。"""
-    normalized_status = str(status or "").strip().lower()
+    normalized_status = (status or "").strip().lower()
     if normalized_status not in {
         "approved", "abstained", "failed", "cancelled"
     }:
@@ -3129,7 +3135,7 @@ def complete_organize_confirmation_review(
                 encoded,
                 timestamp,
                 timestamp,
-                str(token or ""),
+                (token or ""),
             ),
         )
         return cursor.rowcount == 1
@@ -3139,14 +3145,14 @@ def list_organize_confirmations_for_task(
     organize_task_id: str, *, chat_id: str = ""
 ) -> list[sqlite3.Row]:
     """返回同一整理汇总关联的全部确认记录。"""
-    task_id = str(organize_task_id or "").strip()
+    task_id = (organize_task_id or "").strip()
     if not task_id:
         return []
     params: list[object] = [task_id]
     chat_clause = ""
-    if str(chat_id or "").strip():
+    if (chat_id or "").strip():
         chat_clause = " AND chat_id=?"
-        params.append(str(chat_id or "").strip())
+        params.append((chat_id or "").strip())
     with get_conn() as conn:
         return conn.execute(
             "SELECT * FROM organize_confirmations WHERE organize_task_id=?"
@@ -3158,7 +3164,7 @@ def list_organize_confirmations_for_task(
 
 def list_unapplied_organize_confirmation_tasks(limit: int = 50) -> list[sqlite3.Row]:
     """列出有终态但尚未回写原汇总的父任务，供启动恢复与定时收口。"""
-    resolved_limit = max(1, min(int(limit or 50), 500))
+    resolved_limit = max(1, min((limit or 50), 500))
     with get_conn() as conn:
         return conn.execute(
             "SELECT organize_task_id,chat_id,MIN(id) AS first_id "
@@ -3174,21 +3180,21 @@ def mark_organize_confirmation_rollup_applied(
     organize_task_id: str, *, chat_id: str = ""
 ) -> int:
     """标记父任务当前全部确认记录已经投影到整理汇总。"""
-    task_id = str(organize_task_id or "").strip()
+    task_id = (organize_task_id or "").strip()
     if not task_id:
         return 0
     params: list[object] = [now(), task_id]
     chat_clause = ""
-    if str(chat_id or "").strip():
+    if (chat_id or "").strip():
         chat_clause = " AND chat_id=?"
-        params.append(str(chat_id or "").strip())
+        params.append((chat_id or "").strip())
     with get_conn() as conn:
         cursor = conn.execute(
             "UPDATE organize_confirmations SET rollup_applied=1,updated_at=? "
             "WHERE organize_task_id=?" + chat_clause,
             params,
         )
-        return int(cursor.rowcount)
+        return cursor.rowcount
 
 
 def bind_organize_confirmation_message(
@@ -3205,16 +3211,16 @@ def bind_organize_confirmation_message(
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT chat_id,payload_json FROM organize_confirmations WHERE token=?",
-            (str(token or ""),),
+            ((token or ""),),
         ).fetchone()
         if row is None:
             raise ValueError("确认操作不存在或已失效")
         expected_chat = str(row["chat_id"] or "")
-        if expected_chat and expected_chat != str(chat_id or ""):
+        if expected_chat and expected_chat != (chat_id or ""):
             raise ValueError("确认操作不存在或已失效")
         try:
             payload = json.loads(str(row["payload_json"] or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError("确认任务数据损坏，请重新执行整理") from exc
         if not isinstance(payload, dict):
             raise ValueError("确认任务数据损坏，请重新执行整理")
@@ -3224,7 +3230,7 @@ def bind_organize_confirmation_message(
             (
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 now(),
-                str(token or ""),
+                (token or ""),
             ),
         )
 
@@ -3233,7 +3239,7 @@ def claim_organize_confirmation(
     token: str, *, chat_id: str, selected_index: int, actor: str = "human"
 ) -> sqlite3.Row:
     """原子认领待确认按钮；过期、越权和重放统一拒绝。"""
-    normalized_actor = str(actor or "human").strip().lower()
+    normalized_actor = (actor or "human").strip().lower()
     if normalized_actor not in {"human", "agent"}:
         raise ValueError("确认执行者无效")
     timestamp = now()
@@ -3244,12 +3250,12 @@ def claim_organize_confirmation(
         queued_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
         row = conn.execute(
             "SELECT * FROM organize_confirmations WHERE token=?",
-            (str(token or ""),),
+            ((token or ""),),
         ).fetchone()
         if row is None:
             raise ValueError("确认操作不存在或已失效")
         expected_chat = str(row["chat_id"] or "")
-        if expected_chat and expected_chat != str(chat_id or ""):
+        if expected_chat and expected_chat != (chat_id or ""):
             raise ValueError("确认操作不存在或已失效")
         if str(row["status"] or "") != "pending":
             raise ValueError("该确认操作已处理")
@@ -3287,7 +3293,7 @@ def claim_organize_confirmation(
                 "WHERE id=? AND status='pending' "
                 "AND (?<>'agent' OR review_status='running')",
                 (
-                    int(selected_index), queued_at, normalized_actor,
+                    selected_index, queued_at, normalized_actor,
                     normalized_actor, normalized_actor,
                     normalized_actor, timestamp,
                     normalized_actor, timestamp,
@@ -3301,6 +3307,7 @@ def claim_organize_confirmation(
             ).fetchone()
     if expired:
         raise ValueError("确认操作已过期，请重新执行整理")
+    assert claimed is not None
     return claimed
 
 
@@ -3319,12 +3326,12 @@ def cancel_organize_confirmation(
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM organize_confirmations WHERE token=?",
-            (str(token or ""),),
+            ((token or ""),),
         ).fetchone()
         if row is None:
             raise ValueError("确认操作不存在或已失效")
         expected_chat = str(row["chat_id"] or "")
-        if expected_chat and expected_chat != str(chat_id or ""):
+        if expected_chat and expected_chat != (chat_id or ""):
             raise ValueError("确认操作不存在或已失效")
         if str(row["status"] or "") != "pending":
             raise ValueError("该确认操作已处理")
@@ -3360,7 +3367,7 @@ def cancel_organize_confirmation(
                     json.dumps(
                         {
                             "cancelled": True,
-                            "resolution": str(resolution or "cancelled"),
+                            "resolution": (resolution or "cancelled"),
                         },
                         ensure_ascii=False,
                     ),
@@ -3375,12 +3382,12 @@ def cancel_organize_confirmation(
             cancelled = conn.execute(
                 "SELECT * FROM organize_confirmations WHERE id=?", (int(row["id"]),)
             ).fetchone()
-            if enqueue_delivery and str(event_json or ""):
+            if enqueue_delivery and (event_json or ""):
                 telegram_notifications._enqueue_confirmation_delivery(
                     conn,
                     token=token,
                     event_json=event_json,
-                    chat_id=expected_chat or str(chat_id or ""),
+                    chat_id=expected_chat or (chat_id or ""),
                     message_id=message_id,
                     timestamp=timestamp,
                 )
@@ -3394,13 +3401,13 @@ def list_due_pending_organize_confirmations(
 ) -> list[sqlite3.Row]:
     """列出到期但尚未选择的候选；终态与回执由单条原子接口提交。"""
     timestamp = now()
-    resolved_limit = max(1, min(int(limit or 100), 500))
+    resolved_limit = max(1, min((limit or 100), 500))
     with get_conn() as conn:
         params: list[object] = [timestamp]
         token_clause = ""
-        if str(token or "").strip():
+        if (token or "").strip():
             token_clause = " AND token=?"
-            params.append(str(token or "").strip())
+            params.append((token or "").strip())
         params.append(resolved_limit)
         return conn.execute(
             "SELECT * FROM organize_confirmations WHERE status='pending' "
@@ -3437,7 +3444,7 @@ def expire_organize_confirmation_with_delivery(
                 timestamp,
                 timestamp,
                 timestamp,
-                str(token or ""),
+                (token or ""),
                 timestamp,
             ),
         )
@@ -3454,7 +3461,7 @@ def expire_organize_confirmation_with_delivery(
             )
         return conn.execute(
             "SELECT * FROM organize_confirmations WHERE token=?",
-            (str(token or ""),),
+            ((token or ""),),
         ).fetchone()
 
 
@@ -3473,7 +3480,7 @@ def get_organize_confirmation_queue_position(row_id: int) -> int:
         target = conn.execute(
             "SELECT id,COALESCE(queued_at,created_at) AS queue_time "
             "FROM organize_confirmations WHERE id=?",
-            (int(row_id),),
+            (row_id,),
         ).fetchone()
         if target is None:
             return 0
@@ -3483,10 +3490,10 @@ def get_organize_confirmation_queue_position(row_id: int) -> int:
             "COALESCE(queued_at,created_at)<? OR "
             "(COALESCE(queued_at,created_at)=? AND id<?))))",
             (
-                int(row_id),
+                row_id,
                 str(target["queue_time"] or ""),
                 str(target["queue_time"] or ""),
-                int(row_id),
+                row_id,
             ),
         ).fetchone()
     return int(row["total"] or 0) if row is not None else 0
@@ -3500,13 +3507,13 @@ def claim_queued_organize_confirmation(token: str) -> sqlite3.Row | None:
         cursor = conn.execute(
             "UPDATE organize_confirmations SET status='running',error='',updated_at=? "
             "WHERE token=? AND status='queued'",
-            (timestamp, str(token or "")),
+            (timestamp, (token or "")),
         )
         if cursor.rowcount != 1:
             return None
         return conn.execute(
             "SELECT * FROM organize_confirmations WHERE token=?",
-            (str(token or ""),),
+            ((token or ""),),
         ).fetchone()
 
 
@@ -3516,7 +3523,7 @@ def requeue_organize_confirmation(token: str, error: str = "") -> None:
         conn.execute(
             "UPDATE organize_confirmations SET status='queued',error=?,updated_at=? "
             "WHERE token=? AND status='running'",
-            (str(error or ""), now(), str(token or "")),
+            ((error or ""), now(), (token or "")),
         )
 
 
@@ -3535,7 +3542,7 @@ def update_organize_confirmation(token: str, **fields) -> None:
     if not sets:
         return
     sets.append("updated_at=?")
-    values.extend([now(), str(token or "")])
+    values.extend([now(), (token or "")])
     with get_conn() as conn:
         conn.execute(
             f"UPDATE organize_confirmations SET {','.join(sets)} WHERE token=?",
@@ -3554,7 +3561,7 @@ def release_organize_confirmation(
             "UPDATE organize_confirmations SET status='pending',selected_index=NULL,"
             f"queued_at=NULL,task_id='',error=?,completed_at=NULL,updated_at=? "
             f"WHERE token=? AND status IN ({placeholders})",
-            (str(error or ""), now(), str(token or ""), *statuses),
+            ((error or ""), now(), (token or ""), *statuses),
         )
 
 
@@ -3575,13 +3582,15 @@ def complete_organize_confirmation_with_delivery(
             "UPDATE organize_confirmations SET status='completed',result_json=?,error='',"
             "completed_at=?,rollup_applied=0,updated_at=? "
             "WHERE token=? AND status='running'",
-            (str(result_json or "{}"), timestamp, timestamp, str(token or "")),
+            ((result_json or "{}"), timestamp, timestamp, (token or "")),
         )
         if cursor.rowcount != 1:
             raise ValueError("确认操作不存在或已失效")
         # 收尾意图与确认终态同事务落盘；即使回执静默或随后进程中断，
         # 下载隔离目录也能由后台安全恢复，而不是永久留下旧待处理状态。
-        from app.repositories.download_staging_reconcile import enqueue_confirmation_cleanup
+        from app.repositories.download_staging_reconcile import (
+            enqueue_confirmation_cleanup,
+        )
 
         enqueue_confirmation_cleanup(conn, token=token, timestamp=timestamp)
         if enqueue_delivery:
@@ -3617,11 +3626,11 @@ def fail_organize_confirmation_with_delivery(
                 "expires_at=CASE WHEN ?<>'' THEN ? ELSE expires_at END,updated_at=? "
                 "WHERE token=? AND status IN ('queued','running')",
                 (
-                    str(error or ""),
-                    str(retry_expires_at or ""),
-                    str(retry_expires_at or ""),
+                    (error or ""),
+                    (retry_expires_at or ""),
+                    (retry_expires_at or ""),
                     timestamp,
-                    str(token or ""),
+                    (token or ""),
                 ),
             )
         else:
@@ -3629,7 +3638,7 @@ def fail_organize_confirmation_with_delivery(
                 "UPDATE organize_confirmations SET status='failed',error=?,completed_at=?,"
                 "rollup_applied=0,updated_at=? "
                 "WHERE token=? AND status IN ('queued','running')",
-                (str(error or ""), timestamp, timestamp, str(token or "")),
+                ((error or ""), timestamp, timestamp, (token or "")),
             )
         if cursor.rowcount != 1:
             raise ValueError("确认操作不存在或已失效")
@@ -3653,11 +3662,11 @@ def claim_due_organize_confirmation_delivery(
     """原子领取一条到期回执；租约代数防止迟到 worker 覆盖新结果。"""
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        params: list[object] = [str(current_time), str(stale_before)]
+        params: list[object] = [current_time, stale_before]
         token_clause = ""
-        if str(token or ""):
+        if (token or ""):
             token_clause = " AND confirmation_token=?"
-            params.append(str(token))
+            params.append(token)
         row = conn.execute(
             "SELECT * FROM organize_confirmation_delivery_outbox WHERE (("
             "status IN ('pending','retry_wait') AND next_attempt_at<=?) OR "
@@ -3673,7 +3682,7 @@ def claim_due_organize_confirmation_delivery(
             "lease_generation=lease_generation+1,updated_at=? WHERE id=? AND "
             "lease_generation=? AND status=?",
             (
-                str(current_time),
+                current_time,
                 int(row["id"]),
                 int(row["lease_generation"]),
                 str(row["status"]),
@@ -3695,10 +3704,10 @@ def complete_organize_confirmation_delivery(
             "UPDATE organize_confirmation_delivery_outbox SET status='sent',sent_at=?,"
             "last_error='',updated_at=? WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                str(sent_at),
-                str(sent_at),
-                int(delivery_id),
-                int(expected_lease_generation),
+                sent_at,
+                sent_at,
+                delivery_id,
+                expected_lease_generation,
             ),
         )
         return cursor.rowcount == 1
@@ -3717,11 +3726,11 @@ def retry_organize_confirmation_delivery(
             "attempts=attempts+1,next_attempt_at=?,last_error=?,updated_at=? "
             "WHERE id=? AND status='sending' AND lease_generation=?",
             (
-                str(next_attempt_at),
-                str(error or "DeliveryFailed")[:500],
+                next_attempt_at,
+                (error or "DeliveryFailed")[:500],
                 now(),
-                int(delivery_id),
-                int(expected_lease_generation),
+                delivery_id,
+                expected_lease_generation,
             ),
         )
         return cursor.rowcount == 1
@@ -3731,7 +3740,7 @@ def get_organize_confirmation_delivery(token: str) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
             "SELECT * FROM organize_confirmation_delivery_outbox WHERE confirmation_token=?",
-            (str(token or ""),),
+            ((token or ""),),
         ).fetchone()
 
 
@@ -3754,17 +3763,17 @@ def create_gcid_import_task(
     file_count: int,
     total_size: int,
 ) -> int:
-    token = str(operation_token or "").strip()
-    digest = str(manifest_digest or "").strip().lower()
-    target = str(target_dir_id or "").strip()
+    token = (operation_token or "").strip()
+    digest = (manifest_digest or "").strip().lower()
+    target = (target_dir_id or "").strip()
     if not token or len(token) > 256:
         raise ValueError("operation_token 无效")
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise ValueError("manifest_digest 无效")
     if not target or len(target) > 256:
         raise ValueError("target_dir_id 无效")
-    count = int(file_count)
-    size = int(total_size)
+    count = file_count
+    size = total_size
     if count < 0 or size < 0:
         raise ValueError("文件统计不能为负数")
     timestamp = now()
@@ -3811,7 +3820,7 @@ def replace_gcid_import_items(task_id: int, items: list[dict]) -> None:
         seen.add(path.casefold())
         normalized.append(
             (
-                int(task_id),
+                task_id,
                 path,
                 size,
                 gcid,
@@ -3825,12 +3834,12 @@ def replace_gcid_import_items(task_id: int, items: list[dict]) -> None:
     with get_conn() as conn:
         if (
             conn.execute(
-                "SELECT 1 FROM gcid_import_tasks WHERE id=?", (int(task_id),)
+                "SELECT 1 FROM gcid_import_tasks WHERE id=?", (task_id,)
             ).fetchone()
             is None
         ):
             raise ValueError("GCID 导入任务不存在")
-        conn.execute("DELETE FROM gcid_import_items WHERE task_id=?", (int(task_id),))
+        conn.execute("DELETE FROM gcid_import_items WHERE task_id=?", (task_id,))
         conn.executemany(
             "INSERT INTO gcid_import_items("
             "task_id,path,size,gcid,status,remote_file_id,error,created_at,updated_at"
@@ -3850,7 +3859,7 @@ def update_gcid_import_task(
     updates: list[str] = []
     params: list = []
     if status is not None:
-        normalized_status = str(status).strip()
+        normalized_status = status.strip()
         if normalized_status not in _GCID_IMPORT_TASK_STATUSES:
             raise ValueError("GCID 导入任务状态无效")
         updates.append("status=?")
@@ -3860,19 +3869,19 @@ def update_gcid_import_task(
         ("failed_count", failed_count),
     ):
         if value is not None:
-            normalized_count = int(value)
+            normalized_count = value
             if normalized_count < 0:
                 raise ValueError("GCID 导入任务计数不能为负数")
             updates.append(f"{key}=?")
             params.append(normalized_count)
     if error is not None:
         updates.append("error=?")
-        params.append(str(error)[:1000])
+        params.append(error[:1000])
     if not updates:
         return
     updates.append("updated_at=?")
     params.append(now())
-    params.append(int(task_id))
+    params.append(task_id)
     with get_conn() as conn:
         cursor = conn.execute(
             f"UPDATE gcid_import_tasks SET {', '.join(updates)} WHERE id=?", params
@@ -3884,7 +3893,7 @@ def update_gcid_import_task(
 def get_gcid_import_task(task_id: int) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM gcid_import_tasks WHERE id=?", (int(task_id),)
+            "SELECT * FROM gcid_import_tasks WHERE id=?", (task_id,)
         ).fetchone()
 
 
@@ -3892,7 +3901,7 @@ def list_gcid_import_tasks(limit: int = 30) -> list[sqlite3.Row]:
     with get_conn() as conn:
         return conn.execute(
             "SELECT * FROM gcid_import_tasks ORDER BY id DESC LIMIT ?",
-            (max(1, min(int(limit or 30), 200)),),
+            (max(1, min((limit or 30), 200)),),
         ).fetchall()
 
 
@@ -3900,7 +3909,7 @@ def list_gcid_import_items(
     task_id: int, status: str = "", *, limit: int | None = None
 ) -> list[sqlite3.Row]:
     sql = "SELECT * FROM gcid_import_items WHERE task_id=?"
-    params: list = [int(task_id)]
+    params: list = [task_id]
     if status:
         if status not in _GCID_IMPORT_ITEM_STATUSES:
             raise ValueError("GCID 导入明细状态无效")
@@ -3909,7 +3918,7 @@ def list_gcid_import_items(
     sql += " ORDER BY id"
     if limit is not None:
         sql += " LIMIT ?"
-        params.append(max(0, int(limit)))
+        params.append(max(0, limit))
     with get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -3924,6 +3933,7 @@ def add_task_run(
             "VALUES(?,?,?,?,?)",
             (task_name, trigger_type, status, now(), result),
         )
+        assert cur.lastrowid is not None
         return cur.lastrowid
 
 
@@ -3972,13 +3982,13 @@ def add_agent_action_history(
     connection: sqlite3.Connection | None = None,
 ) -> int:
     """写入一条脱敏 Agent 动作审计；调用方只能传入安全投影。"""
-    normalized_owner = str(owner_digest or "").strip().lower()
-    normalized_tool = str(tool_name or "").strip()
-    normalized_risk = str(risk or "").strip()
-    normalized_status = str(status or "").strip()
-    normalized_summary = str(summary or "").strip()
-    normalized_error = str(error_code or "").strip()
-    normalized_confirmation = str(confirmation_id or "").strip()
+    normalized_owner = (owner_digest or "").strip().lower()
+    normalized_tool = (tool_name or "").strip()
+    normalized_risk = (risk or "").strip()
+    normalized_status = (status or "").strip()
+    normalized_summary = (summary or "").strip()
+    normalized_error = (error_code or "").strip()
+    normalized_confirmation = (confirmation_id or "").strip()
     if not re.fullmatch(r"[0-9a-f]{64}", normalized_owner):
         raise ValueError("Agent 审计身份摘要无效")
     if not normalized_tool or len(normalized_tool) > 128:
@@ -4015,9 +4025,9 @@ def add_agent_action_history(
     )
     if len(encoded.encode("utf-8")) > 4096:
         raise ValueError("Agent 审计详情过大")
-    elapsed = max(0, min(int(elapsed_ms or 0), 86_400_000))
-    finished = str(finished_at or now()).strip()
-    started = str(started_at or finished).strip()
+    elapsed = max(0, min((elapsed_ms or 0), 86_400_000))
+    finished = (finished_at or now()).strip()
+    started = (started_at or finished).strip()
 
     def write(conn: sqlite3.Connection) -> int:
         history_id = 0
@@ -4073,7 +4083,8 @@ def add_agent_action_history(
                     finished,
                 ),
             )
-            history_id = int(cursor.lastrowid)
+            assert cursor.lastrowid is not None
+            history_id = cursor.lastrowid
         conn.execute(
             "DELETE FROM agent_action_history WHERE owner_digest=? AND id NOT IN ("
             "SELECT id FROM agent_action_history WHERE owner_digest=? "
@@ -4117,13 +4128,12 @@ def list_agent_action_history(
     *, owner_digest: str, limit: int = 20, outcome: str = "all"
 ) -> list[sqlite3.Row]:
     """倒序读取 Agent 动作审计；只支持固定结果分类与有界条数。"""
-    normalized_owner = str(owner_digest or "").strip().lower()
+    normalized_owner = (owner_digest or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", normalized_owner):
         raise ValueError("Agent 审计身份摘要无效")
-    bounded_limit = int(limit)
-    if bounded_limit < 1 or bounded_limit > 50:
+    if limit < 1 or limit > 50:
         raise ValueError("Agent 审计查询条数必须为 1 到 50")
-    normalized_outcome = str(outcome or "all").strip().lower()
+    normalized_outcome = (outcome or "all").strip().lower()
     if normalized_outcome not in {"all", "success", "failed"}:
         raise ValueError("Agent 审计结果筛选无效")
     sql = (
@@ -4137,17 +4147,14 @@ def list_agent_action_history(
     elif normalized_outcome == "failed":
         sql += " AND ok=0 AND status NOT IN ('executing','outcome_unknown')"
     sql += " ORDER BY id DESC LIMIT ?"
-    params.append(bounded_limit)
+    params.append(limit)
     with get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 
 
 def get_task_run(run_id: int) -> sqlite3.Row | None:
     """按运行记录 ID 精确读取后台任务，供跨进程恢复关联。"""
-    try:
-        normalized_id = int(run_id or 0)
-    except (TypeError, ValueError):
-        return None
+    normalized_id = run_id or 0
     if normalized_id <= 0:
         return None
     with get_conn() as conn:
@@ -4229,7 +4236,7 @@ def get_dashboard_automation_summary() -> dict:
     }
 
 
-def get_agent_persistent_health_summary() -> dict[str, dict[str, object]]:
+def get_agent_persistent_health_summary() -> dict[str, dict[str, Any]]:
     """返回 Agent 持久自动化的匿名健康汇总，不读取标题、路径或错误正文。"""
     with get_conn() as conn:
         verification_row = conn.execute(
@@ -4261,7 +4268,7 @@ def get_agent_persistent_health_summary() -> dict[str, dict[str, object]]:
         for key in verification_keys
     }
     if patrol_row is None:
-        patrol: dict[str, object] = {
+        patrol: dict[str, Any] = {
             "status": "not_created",
             "outcome": "",
             "checked_series_count": 0,
@@ -4314,65 +4321,64 @@ from app.repositories.discovery import (  # noqa: E402,F401
     upsert_media_external_id,
 )
 
-
 # ===== 本地媒体自动整理 =====
 from app.repositories.local_media import (  # noqa: E402,F401
     _LOCAL_MEDIA_TERMINAL_TASK_STATUSES,
-    _local_media_owner,
-    _canonical_local_media_content_path,
     _active_local_media_task_for_path,
+    _bind_qb_hash_to_active_local_media_task,
+    _canonical_local_media_content_path,
+    _latest_terminal_local_media_task_for_path,
+    _local_media_age_bucket_sql,
+    _local_media_owner,
     _local_media_source_has_active_task,
     _local_media_target_signature,
-    _latest_terminal_local_media_task_for_path,
     _normalize_local_media_task_path,
-    _bind_qb_hash_to_active_local_media_task,
-    create_local_media_source,
-    save_local_media_source_bundle,
-    get_local_media_source,
-    list_local_media_sources,
-    upsert_local_library_target,
-    list_local_library_bindings,
-    list_local_library_targets,
-    replace_local_library_targets,
-    create_local_media_task,
+    add_local_media_operation_step,
+    add_local_media_task_item,
+    claim_local_media_confirmation_task,
+    claim_local_media_task,
     create_and_link_qb_local_media_task,
-    list_download_requests_for_local_media_task,
-    get_local_media_task,
-    list_local_media_tasks,
-    list_local_media_qb_write_conflicts,
-    list_waiting_local_media_tasks,
+    create_local_media_source,
+    create_local_media_task,
+    delete_local_media_source,
     delete_local_media_tasks,
     get_local_media_diagnostic_summary,
-    _local_media_age_bucket_sql,
-    get_local_media_review_queue_summary,
     get_local_media_history_summary,
-    prepare_manual_local_media_task,
-    claim_local_media_task,
-    claim_local_media_confirmation_task,
-    update_local_media_task,
-    reconcile_local_media_downloads,
-    add_local_media_task_item,
-    list_local_media_task_items,
-    add_local_media_operation_step,
-    update_local_media_operation_step,
+    get_local_media_review_queue_summary,
+    get_local_media_source,
+    get_local_media_task,
+    list_download_requests_for_local_media_task,
+    list_local_library_bindings,
+    list_local_library_targets,
     list_local_media_operation_steps,
-    update_local_media_source,
-    delete_local_media_source,
+    list_local_media_qb_write_conflicts,
+    list_local_media_sources,
+    list_local_media_task_items,
+    list_local_media_tasks,
+    list_waiting_local_media_tasks,
+    prepare_manual_local_media_task,
+    reconcile_local_media_downloads,
+    replace_local_library_targets,
     reset_local_media_task,
     reset_local_media_task_if_current,
+    save_local_media_source_bundle,
+    update_local_media_operation_step,
+    update_local_media_source,
+    update_local_media_task,
+    upsert_local_library_target,
 )
 
 
 def _agent_workspace_title_pattern(query: str) -> str:
     """为 Agent 标题搜索转义 LIKE 通配符，避免把用户输入解释为查询语法。"""
     value = (
-        str(query or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        (query or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     )
     return f"%{value}%"
 
 
-def _agent_workspace_search_rows(sql: str, query: str, limit: int) -> dict[str, object]:
-    safe_limit = max(1, min(int(limit), 20))
+def _agent_workspace_search_rows(sql: str, query: str, limit: int) -> dict[str, Any]:
+    safe_limit = max(1, min(limit, 20))
     with get_conn() as conn:
         rows = conn.execute(
             sql, (_agent_workspace_title_pattern(query), safe_limit + 1)
@@ -4383,7 +4389,7 @@ def _agent_workspace_search_rows(sql: str, query: str, limit: int) -> dict[str, 
     }
 
 
-def search_agent_workspace_rss(query: str, *, limit: int = 8) -> dict[str, object]:
+def search_agent_workspace_rss(query: str, *, limit: int = 8) -> dict[str, Any]:
     """仅按 RSS 标题搜索并读取公开状态字段。"""
     return _agent_workspace_search_rows(
         "SELECT title,status,processed,pub_date,created_at FROM rss_entries "
@@ -4395,9 +4401,9 @@ def search_agent_workspace_rss(query: str, *, limit: int = 8) -> dict[str, objec
 
 def search_agent_workspace_downloads(
     query: str, *, limit: int = 8
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """仅按下载标题搜索；不读取路径、任务标识、源值或错误正文。"""
-    safe_limit = max(1, min(int(limit), 20))
+    safe_limit = max(1, min(limit, 20))
     pattern = _agent_workspace_title_pattern(query)
     with get_conn() as conn:
         rows = conn.execute(
@@ -4420,9 +4426,9 @@ def search_agent_workspace_downloads(
     }
 
 
-def search_agent_workspace_organize(query: str, *, limit: int = 8) -> dict[str, object]:
+def search_agent_workspace_organize(query: str, *, limit: int = 8) -> dict[str, Any]:
     """仅按已识别标题搜索整理历史；不读取文件名、路径、ID 或错误正文。"""
-    safe_limit = max(1, min(int(limit), 20))
+    safe_limit = max(1, min(limit, 20))
     pattern = _agent_workspace_title_pattern(query)
     with get_conn() as conn:
         rows = conn.execute(
@@ -4441,9 +4447,9 @@ def search_agent_workspace_organize(query: str, *, limit: int = 8) -> dict[str, 
 
 def search_agent_workspace_local_media(
     query: str, *, owner: str = "admin", limit: int = 8
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """仅按本地媒体任务标题搜索安全状态字段。"""
-    safe_limit = max(1, min(int(limit), 20))
+    safe_limit = max(1, min(limit, 20))
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT title,media_type,year,status,trigger,created_at,updated_at "
@@ -4465,10 +4471,10 @@ def claim_agent_action_lease(lease_key: str, *, ttl_seconds: int = 90) -> str | 
     """跨 owner/Worker 原子领取短期外部动作去重租约。"""
     import uuid
 
-    normalized = str(lease_key or "").strip().lower()
+    normalized = (lease_key or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", normalized):
         raise ValueError("Agent 动作租约键无效")
-    ttl = max(5, min(int(ttl_seconds), 300))
+    ttl = max(5, min(ttl_seconds, 300))
     current = time.time()
     token = uuid.uuid4().hex
     with get_conn() as conn:

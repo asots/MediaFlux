@@ -1,12 +1,13 @@
 """Indexer 运行时单例与配置装配。"""
 from __future__ import annotations
 
-import atexit
 import asyncio
+import atexit
 import inspect
 import threading
 from collections.abc import Awaitable
-from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any, TypeVar
 
 from app import config
@@ -395,7 +396,7 @@ def _bounded_int(key: str, default: int, minimum: int, maximum: int) -> int:
 
 
 def _user_agent() -> str:
-    raw = str(config.get("INDEXER_USER_AGENT", "MediaFlux/1.0") or "")
+    raw = (config.get("INDEXER_USER_AGENT", "MediaFlux/1.0") or "")
     value = raw.strip()
     if not value or len(value) > 256 or "\r" in raw or "\n" in raw:
         return "MediaFlux/1.0"
@@ -418,9 +419,7 @@ def build_indexer_service() -> IndexerService:
         btbtla_page_size=max_results_per_site,
         btbtla_cache_ttl_seconds=cache_ttl_seconds,
     )
-    raw_sites = str(
-        config.get("INDEXER_ENABLED_SITES", ",".join(DEFAULT_INDEXER_SITE_IDS)) or ""
-    )
+    raw_sites = (config.get("INDEXER_ENABLED_SITES", ",".join(DEFAULT_INDEXER_SITE_IDS)) or "")
     known_sites = {
         site_id.strip().lower()
         for site_id in raw_sites.split(",")

@@ -8,41 +8,47 @@
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
 import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Generator, Callable
 from concurrent.futures import (
     FIRST_COMPLETED,
+    Future,
     ThreadPoolExecutor,
     wait,
 )
+from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import asdict, dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urlencode
 
 import requests
-from urllib3.util import Retry
+from requests.adapters import HTTPAdapter, Retry
 
 from app import database as db
-from app.repositories.strm import StrmRefreshPolicy, resolve_strm_failure_with_refresh
-from app.config import get, get_int
 from app.clients.guangya import (
-    DirectoryEntryLimitError, GuangYaClient, GuangYaFile, close_guangya_client,
+    DirectoryEntryLimitError,
+    GuangYaClient,
+    GuangYaFile,
+    close_guangya_client,
 )
+from app.config import get, get_int
 from app.logger import get_logger, redact_sensitive_text
 from app.modules.process_lock import CrossProcessLock
 from app.modules.strm_notifications import append_change, relative_change
 from app.modules.strm_recovery import reconcile_historical_strm, recover_pending_paths
+from app.repositories.strm import StrmRefreshPolicy, resolve_strm_failure_with_refresh
 
 logger = get_logger(__name__)
 
@@ -50,7 +56,7 @@ logger = get_logger(__name__)
 @contextmanager
 def _guangya_client_scope(
     client: GuangYaClient | None,
-) -> Iterator[GuangYaClient]:
+) -> Generator[GuangYaClient, None, None]:
     """仅释放当前调用内部创建的光鸭客户端。"""
     owned_client = client is None
     runtime_client = client or GuangYaClient(background_reads=True)
@@ -86,7 +92,7 @@ def _get_metadata_session() -> requests.Session:
                     raise_on_status=False,
                     backoff_factor=0.3,
                 )
-                adapter = requests.adapters.HTTPAdapter(
+                adapter = HTTPAdapter(
                     pool_connections=32,
                     pool_maxsize=32,
                     max_retries=retries,
@@ -196,7 +202,7 @@ class CleanupDecision:
 
     @property
     def cleanup_allowed(self) -> bool:
-        return bool(
+        return (
             self.scan_completed
             and not self.scan_partial
             and not self.provider_error
@@ -204,13 +210,13 @@ class CleanupDecision:
             and self.snapshot_consistent
         )
 
-    def as_dict(self) -> dict[str, object]:
+    def as_dict(self) -> dict[str, Any]:
         return {
-            "scan_completed": bool(self.scan_completed),
-            "scan_partial": bool(self.scan_partial),
-            "provider_error": bool(self.provider_error),
-            "cancelled": bool(self.cancelled),
-            "snapshot_consistent": bool(self.snapshot_consistent),
+            "scan_completed": self.scan_completed,
+            "scan_partial": self.scan_partial,
+            "provider_error": self.provider_error,
+            "cancelled": self.cancelled,
+            "snapshot_consistent": self.snapshot_consistent,
             "cleanup_allowed": self.cleanup_allowed,
             "reasons": list(self.reasons),
         }
@@ -226,8 +232,8 @@ def evaluate_cleanup_decision(
     """把散落的安全条件收敛成一次可审计判定。"""
     scan_incomplete = bool((stats or {}).get("scan_incomplete"))
     stopped = bool(cancelled or (stats or {}).get("stopped"))
-    provider_error = int(scan_errors or 0) > 0
-    snapshot_consistent = int(consistency_errors or 0) == 0
+    provider_error = (scan_errors or 0) > 0
+    snapshot_consistent = (consistency_errors or 0) == 0
     reasons: list[str] = []
     if scan_incomplete:
         reasons.append(
@@ -377,7 +383,7 @@ def safe_path_component(
     只要清洗改变原名，就加入基于原始名称的稳定哈希，避免 ``A\\B`` 与
     ``A_B`` 等名称在清洗后碰撞。超长名称保留扩展名和调用方后缀。
     """
-    raw = str(name or "")
+    raw = (name or "")
     cleaned = "".join(
         "_" if char in '/\\<>:"|?*' or ord(char) < 32 else char
         for char in raw
@@ -414,13 +420,13 @@ _ADULT_IDENTITY_TAG = re.compile(
 
 def _jellyfin_visible_name(value: str) -> str:
     """移除 Jellyfin 不识别的成人媒体内部身份标记。"""
-    cleaned = _ADULT_IDENTITY_TAG.sub(" ", str(value or ""))
+    cleaned = _ADULT_IDENTITY_TAG.sub(" ", (value or ""))
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return re.sub(r"\s+(?=\.[A-Za-z0-9]{1,8}$)", "", cleaned)
 
 
 def _safe_rel_parts(rel_dir: str) -> list[str]:
-    parts = [part for part in str(rel_dir or "").replace("\\", "/").split("/") if part]
+    parts = [part for part in (rel_dir or "").replace("\\", "/").split("/") if part]
     return [safe_path_component(_jellyfin_visible_name(part)) for part in parts]
 
 
@@ -500,7 +506,7 @@ def _metadata_queue_payload(
     source_name: str,
     force: bool = False,
     refresh_policy: StrmRefreshPolicy | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """生成不含签名直链的持久化元数据任务快照。"""
     target = _metadata_target(file, rel_dir, strm_root)
     try:
@@ -508,16 +514,16 @@ def _metadata_queue_payload(
     except ValueError:
         target_rel_path = str(target)
     return {
-        "source_id": str(source_id),
-        "source_name": str(source_name or source_id),
-        "file_id": str(file.file_id),
-        "parent_id": str(file.parent_id or ""),
-        "filename": str(file.name),
-        "etag": str(file.etag or ""),
-        "size": max(0, int(file.size or 0)),
-        "rel_dir": str(rel_dir or ""),
+        "source_id": source_id,
+        "source_name": (source_name or source_id),
+        "file_id": file.file_id,
+        "parent_id": (file.parent_id or ""),
+        "filename": file.name,
+        "etag": (file.etag or ""),
+        "size": max(0, (file.size or 0)),
+        "rel_dir": (rel_dir or ""),
         "target_rel_path": target_rel_path,
-        "force": bool(force),
+        "force": force,
         "refresh_policy": asdict(refresh_policy or StrmRefreshPolicy(
             media_root=str((Path(strm_root).expanduser() / STRM_SUBDIR).resolve()),
         )),
@@ -717,7 +723,7 @@ def _rollback_index(
         logger.error("回滚 STRM 索引失败 file=%s type=%s", new_file_id, type(exc).__name__)
 
 
-def build_play_url(base_url: str, file_id: str, etag: str,
+def build_play_url(base_url: str, file_id: str | int, etag: str,
                    size: str | int, filename: str) -> str:
     """构造 302 反代播放地址。"""
     from app.modules.playgy_signing import encode_playgy_path_token, sign_playgy
@@ -726,13 +732,13 @@ def build_play_url(base_url: str, file_id: str, etag: str,
     safe_size = size or 0
     signature = sign_playgy(file_id, safe_etag, safe_size)
     query_params = {"v": "1", "sig": signature}
-    if "/" in str(file_id) or "/" in str(safe_etag):
+    if "/" in str(file_id) or "/" in safe_etag:
         path_file_id = encode_playgy_path_token(str(file_id))
-        path_etag = encode_playgy_path_token(str(safe_etag))
+        path_etag = encode_playgy_path_token(safe_etag)
         query_params["enc"] = "b64"
     else:
         path_file_id = str(file_id)
-        path_etag = str(safe_etag)
+        path_etag = safe_etag
     segments = (path_file_id, path_etag, safe_size, filename)
     encoded_path = "/".join(quote(str(segment), safe="") for segment in segments)
     query = urlencode(query_params)
@@ -786,7 +792,7 @@ def prepare_metadata_download(
 ) -> PreparedMetadataDownload:
     """只把元数据流式下载到同目录临时文件，不触碰正式目标。"""
     byte_limit = _metadata_file_limit()
-    declared_file_size = int(file.size or 0)
+    declared_file_size = (file.size or 0)
     if declared_file_size < 0 or declared_file_size > byte_limit:
         raise ValueError("元数据文件超过下载大小上限")
     deadline_seconds = _metadata_download_deadline_seconds()
@@ -809,11 +815,11 @@ def prepare_metadata_download(
             remaining = deadline_seconds - (time.monotonic() - started)
             if remaining <= 0:
                 raise TimeoutError("元数据下载超过总时限")
-            url = str(download_url or "")
+            url = (download_url or "")
             if not url or (attempt > 0 and client is not None):
                 if client is None:
                     raise RuntimeError("缺少元数据下载客户端")
-                url = str(client.get_download_url(file.file_id) or "")
+                url = (client.get_download_url(file.file_id) or "")
             if not url:
                 raise RuntimeError("无法获取元数据下载直链")
             with requester(
@@ -871,7 +877,7 @@ def prepare_metadata_download(
 
 def _candidate_sort_key(candidate: tuple[GuangYaFile, str]) -> tuple:
     file, _rel_dir = candidate
-    return (-int(file.size or 0), str(file.file_id), str(file.etag), str(file.name))
+    return (-(file.size or 0), file.file_id, file.etag, file.name)
 
 
 def _record_candidate(
@@ -892,10 +898,10 @@ def _record_candidate(
     winners[target_text] = (winner[0], winner[1], current[2] + 1)
 
 
-def _build_video_index_maps(existing_rows: list) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+def _build_video_index_maps(existing_rows: list) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """把视频索引构造成 file_id 与 path 双索引，保留同路径多行语义。"""
-    by_id: dict[str, object] = {}
-    by_path: dict[str, dict[str, object]] = {}
+    by_id: dict[str, Any] = {}
+    by_path: dict[str, dict[str, Any]] = {}
     for row in existing_rows:
         file_id = str(_row_field(row, "file_id", "") or "")
         path = str(_row_field(row, "strm_path", "") or "")
@@ -908,8 +914,8 @@ def _build_video_index_maps(existing_rows: list) -> tuple[dict[str, object], dic
 
 def _flush_fingerprint_backfills(
     source_key: str,
-    items: list[dict[str, object]],
-    existing_by_id: dict[str, object],
+    items: list[dict[str, Any]],
+    existing_by_id: dict[str, Any],
 ) -> None:
     """按最终索引过滤并一次补写，避免复活淘汰对象或覆盖迁移后的快照。"""
     current_items = []
@@ -932,14 +938,14 @@ def _flush_fingerprint_backfills(
 
 
 def _update_video_index_snapshot(
-    existing_by_id: dict[str, object],
-    existing_by_path: dict[str, dict[str, object]],
+    existing_by_id: dict[str, Any],
+    existing_by_path: dict[str, dict[str, Any]],
     file: GuangYaFile,
     expected: Path,
     content_fingerprint: str | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """安装成功后 O(1) 维护双索引；同目标路径冲突按 bucket 清理。"""
-    file_id = str(file.file_id)
+    file_id = file.file_id
     expected_text = str(expected)
     current = existing_by_id.get(file_id)
     if current is not None:
@@ -958,9 +964,9 @@ def _update_video_index_snapshot(
         existing_by_path.pop(expected_text, None)
     snapshot = {
         "file_id": file_id,
-        "etag": str(file.etag or ""),
-        "size": int(file.size or 0),
-        "filename": str(file.name or ""),
+        "etag": (file.etag or ""),
+        "size": (file.size or 0),
+        "filename": (file.name or ""),
         "strm_path": expected_text,
         "content_fingerprint": content_fingerprint or _content_fingerprint(expected),
     }
@@ -976,17 +982,17 @@ def _install_video_candidate(
     base_url: str,
     strm_root: str,
     source_key: str,
-    existing_by_id: dict[str, object],
-    existing_by_path: dict[str, dict[str, object]],
+    existing_by_id: dict[str, Any],
+    existing_by_path: dict[str, dict[str, Any]],
     *, refresh_policy: StrmRefreshPolicy | None = None,
 ) -> tuple[int, str]:
     """事务式安装视频赢家；失败时仅回滚仍由本事务持有的内容。"""
-    current_raw = existing_by_id.get(str(file.file_id))
+    current_raw = existing_by_id.get(file.file_id)
     current = _row_snapshot(current_raw) if current_raw else None
     conflicts = [
         _row_snapshot(row)
         for conflicting_id, row in existing_by_path.get(str(expected), {}).items()
-        if conflicting_id != str(file.file_id)
+        if conflicting_id != file.file_id
     ]
     previous_path = _safe_indexed_path(
         current["strm_path"] if current else "", strm_root
@@ -1059,7 +1065,7 @@ def _install_video_candidate(
             cleaned = int(state["previous_deleted"])
         _discard_backup(target_backup)
         _discard_backup(previous_backup)
-        return cleaned, str(state["installed_fingerprint"] or "")
+        return cleaned, (state["installed_fingerprint"] or "")
     except Exception:
         try:
             _restore_installed_file(
@@ -1071,7 +1077,7 @@ def _install_video_candidate(
                 _discard_backup(previous_backup)
         finally:
             _rollback_index(
-                source_key, str(file.file_id), current, conflicts, index_changed
+                source_key, file.file_id, current, conflicts, index_changed
             )
         raise
 
@@ -1079,7 +1085,7 @@ def _install_video_candidate(
 def _video_generation_is_update(
     file_id: object,
     expected: Path,
-    existing_by_id: dict[str, object],
+    existing_by_id: dict[str, Any],
 ) -> bool:
     """同一远端文件的内容修复或路径迁移都属于更新，而不是新建。"""
     return expected.is_file() or str(file_id) in existing_by_id
@@ -1099,13 +1105,13 @@ def _install_metadata_candidate(
 ) -> int:
     """事务式安装元数据；失败时仅回滚仍由本事务持有的内容。"""
     current_raw = next(
-        (row for row in existing_rows if str(row["file_id"]) == str(file.file_id)),
+        (row for row in existing_rows if str(row["file_id"]) == file.file_id),
         None,
     )
     current = _row_snapshot(current_raw) if current_raw else None
     conflicts = [
         _row_snapshot(row) for row in existing_rows
-        if str(row["file_id"]) != str(file.file_id)
+        if str(row["file_id"]) != file.file_id
         and str(row["strm_path"] or "") == str(expected)
     ]
     previous_path = _safe_indexed_path(
@@ -1166,7 +1172,7 @@ def _install_metadata_candidate(
                 _discard_backup(previous_backup)
         finally:
             _rollback_index(
-                source_key, str(file.file_id), current, conflicts, index_changed
+                source_key, file.file_id, current, conflicts, index_changed
             )
         raise
     finally:
@@ -1174,12 +1180,12 @@ def _install_metadata_candidate(
 
 
 def _prepare_strm_metadata_job_with_client(
-    job: dict[str, object],
+    job: dict[str, Any],
     strm_root: str,
     *,
     client: GuangYaClient,
     should_stop: Callable[[], bool] | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """使用已确定所有权的客户端准备一个元数据任务。"""
     runtime_client = client
     file_id = str(job.get("file_id") or "")
@@ -1212,7 +1218,7 @@ def _prepare_strm_metadata_job_with_client(
         # 安装成功而 ACK 前中断时，复用同一索引/指纹判定补交接，不重新
         # 获取直链和下载。这里不持写锁；commit 仍必须再次确认本地文件。
         return {"file": remote, "rel_dir": rel_dir, "prepared": None}
-    url = str(runtime_client.get_download_url(file_id) or "")
+    url = (runtime_client.get_download_url(file_id) or "")
     if not url:
         raise RuntimeError("无法获取元数据下载直链")
     prepared = prepare_metadata_download(
@@ -1223,12 +1229,12 @@ def _prepare_strm_metadata_job_with_client(
 
 
 def prepare_strm_metadata_job(
-    job: dict[str, object],
+    job: dict[str, Any],
     strm_root: str,
     *,
     client: GuangYaClient | None = None,
     should_stop: Callable[[], bool] | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """在不持有 STRM 写锁时校验远端快照并下载到临时文件。"""
     with _guangya_client_scope(client) as runtime_client:
         return _prepare_strm_metadata_job_with_client(
@@ -1240,12 +1246,12 @@ def prepare_strm_metadata_job(
 
 
 def commit_strm_metadata_job(
-    job: dict[str, object],
-    prepared_job: dict[str, object],
+    job: dict[str, Any],
+    prepared_job: dict[str, Any],
     strm_root: str,
     *,
     should_stop: Callable[[], bool] | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """在 STRM 写锁内原子安装已下载的元数据并更新索引。"""
     file_id = str(job.get("file_id") or "")
     source_id = str(job.get("source_id") or "")
@@ -1300,22 +1306,22 @@ def _remove_indexed_item(
     source_key: str,
     file_id: str,
     strm_root: str,
-    existing_by_id: dict[str, object],
-    existing_by_path: dict[str, dict[str, object]],
+    existing_by_id: dict[str, Any],
+    existing_by_path: dict[str, dict[str, Any]],
     *, refresh_policy: StrmRefreshPolicy | None = None,
 ) -> tuple[int, Path | None]:
     """精准移除单个索引项；共享路径仍有其他 owner 时不删除本地文件。"""
-    current_raw = existing_by_id.get(str(file_id))
+    current_raw = existing_by_id.get(file_id)
     if current_raw is None:
         return 0, None
     current = _row_snapshot(current_raw)
     indexed_path = _safe_indexed_path(current["strm_path"], strm_root)
     path_bucket = existing_by_path.get(str(current["strm_path"]), {})
-    shared_path = any(item_id != str(file_id) for item_id in path_bucket)
+    shared_path = any(item_id != file_id for item_id in path_bucket)
     local_file_exists = bool(
         indexed_path and not shared_path and indexed_path.is_file()
     )
-    backup = _copy_backup(indexed_path) if local_file_exists else None
+    backup = _copy_backup(indexed_path) if local_file_exists and indexed_path is not None else None
     deleted = False
     try:
         if local_file_exists and indexed_path:
@@ -1323,7 +1329,7 @@ def _remove_indexed_item(
                 indexed_path, [current], "删除失效 STRM"
             )
         db.delete_strm_index_ids(
-            source_key, [str(file_id)], refresh_policy=refresh_policy,
+            source_key, [file_id], refresh_policy=refresh_policy,
             refresh_paths=[str(indexed_path)] if indexed_path and not shared_path else [],
         )
         _discard_backup(backup)
@@ -1334,21 +1340,21 @@ def _remove_indexed_item(
             _discard_backup(backup)
         _restore_index_row(source_key, current)
         raise
-    existing_by_id.pop(str(file_id), None)
-    path_bucket.pop(str(file_id), None)
+    existing_by_id.pop(file_id, None)
+    path_bucket.pop(file_id, None)
     if not path_bucket:
         existing_by_path.pop(str(current["strm_path"]), None)
     return (1 if deleted else 0), indexed_path
 
 def _incremental_rel_dir(rel_dir: str, rel_prefix: str = "") -> str:
     raw_parts = [
-        part for part in str(rel_dir or "").replace("\\", "/").split("/")
+        part for part in (rel_dir or "").replace("\\", "/").split("/")
         if part not in {"", "."}
     ]
     if any(part == ".." for part in raw_parts):
         raise ValueError("STRM 精准增量目录包含非法上级路径")
     parts = [safe_path_component(part) for part in raw_parts]
-    prefix = str(rel_prefix or "").strip()
+    prefix = (rel_prefix or "").strip()
     if prefix:
         parts.insert(0, safe_path_component(prefix))
     return str(Path(*parts)) if parts else ""
@@ -1357,7 +1363,11 @@ def _incremental_rel_dir(rel_dir: str, rel_prefix: str = "") -> str:
 _INCREMENTAL_PARENT_BATCH_MIN_FILES = 4
 _INCREMENTAL_PARENT_BATCH_MAX_ITEMS = 5_000
 _INCREMENTAL_PARENT_BATCH_MIN_ITEM_BUDGET = 400
-_REMOTE_FILE_NOT_PREFETCHED = object()
+class _RemoteFileState(Enum):
+    NOT_PREFETCHED = "not_prefetched"
+
+
+_REMOTE_FILE_NOT_PREFETCHED = _RemoteFileState.NOT_PREFETCHED
 
 
 def _validate_incremental_remote_file(
@@ -1374,13 +1384,13 @@ def _validate_incremental_remote_file(
     expected_etag = str(change.get("etag") or "")
     expected_parent = str(change.get("parent_id") or "")
     expected_size = int(change.get("size") or 0)
-    if expected_name and str(current.name or "") != expected_name:
+    if expected_name and (current.name or "") != expected_name:
         raise RuntimeError(f"STRM 精准增量对象名称已变化：{file_id}")
-    if expected_etag and str(current.etag or "") != expected_etag:
+    if expected_etag and (current.etag or "") != expected_etag:
         raise RuntimeError(f"STRM 精准增量对象版本已变化：{file_id}")
-    if expected_size and int(current.size or 0) != expected_size:
+    if expected_size and (current.size or 0) != expected_size:
         raise RuntimeError(f"STRM 精准增量对象大小已变化：{file_id}")
-    if expected_parent and str(current.parent_id or "") != expected_parent:
+    if expected_parent and (current.parent_id or "") != expected_parent:
         raise RuntimeError(f"STRM 精准增量对象位置已变化：{file_id}")
     return current
 
@@ -1389,7 +1399,7 @@ def _incremental_remote_file(
     client,
     change: dict,
     *,
-    prefetched: GuangYaFile | None | object = _REMOTE_FILE_NOT_PREFETCHED,
+    prefetched: GuangYaFile | None | _RemoteFileState = _REMOTE_FILE_NOT_PREFETCHED,
 ) -> GuangYaFile:
     """读取并验证单个远端对象；父目录快照命中时不再逐文件请求。"""
     file_id = str(change.get("file_id") or "").strip()
@@ -1475,13 +1485,13 @@ def _incremental_parent_snapshots(
 
 
 def _metadata_state_matches(row, file: GuangYaFile, expected: Path) -> bool:
-    return bool(
-        str(row["file_id"]) == str(file.file_id)
-        and str(row["etag"] or "") == str(file.etag or "")
-        and int(row["size"] or 0) == int(file.size or 0)
+    return (
+        str(row["file_id"]) == file.file_id
+        and str(row["etag"] or "") == (file.etag or "")
+        and int(row["size"] or 0) == (file.size or 0)
         and str(row["strm_path"] or "") == str(expected)
         and expected.is_file()
-        and (not file.size or expected.stat().st_size == int(file.size))
+        and (not file.size or expected.stat().st_size == file.size)
         and _fingerprint_matches(expected, _row_field(row, "content_fingerprint", ""))
     )
 
@@ -1506,8 +1516,8 @@ class _BoundedProgress:
     def emit(self, stage: str, completed: int, total: int, detail: str) -> None:
         if not self.callback:
             return
-        bounded_total = max(1, int(total or 0))
-        bounded_completed = max(0, min(int(completed or 0), bounded_total))
+        bounded_total = max(1, (total or 0))
+        bounded_completed = max(0, min((completed or 0), bounded_total))
         percent = int(bounded_completed * 100 / bounded_total)
         bucket = min(100, (percent // 10) * 10)
         if self._last.get(stage) == bucket:
@@ -1542,8 +1552,8 @@ def _record_failure(
     rel_dir: str, target: Path, strm_root: str, error: object,
 ) -> int:
     return db.record_strm_failure(
-        source_id=source_id, source_name=source_name, file_id=str(file.file_id),
-        parent_id=str(file.parent_id or ""), filename=file.name, action=action,
+        source_id=source_id, source_name=source_name, file_id=file.file_id,
+        parent_id=(file.parent_id or ""), filename=file.name, action=action,
         rel_dir=rel_dir, target_rel_path=_failure_target_rel_path(target, strm_root),
         error=error,
     )
@@ -1603,9 +1613,9 @@ def _sync_strm_incremental_impl(
     exts = video_exts or DEFAULT_VIDEO_EXTS
     metadata = metadata_exts or set()
     threshold_bytes = skip_threshold_mb * 1024 * 1024
-    display_source_name = str(source_name or rel_prefix or source_dir_id)
+    display_source_name = (source_name or rel_prefix or source_dir_id)
     progress = _BoundedProgress(on_progress)
-    stats = {
+    stats: dict[str, Any] = {
         "total": 0, "generated": 0, "created": 0, "updated": 0,
         "skipped": 0, "failed": 0,
         "duplicates_skipped": 0,
@@ -1630,7 +1640,7 @@ def _sync_strm_incremental_impl(
         "fallback_required": False, "fallback_reason": "",
     }
     pending_resolutions = {"generate": set(), "metadata": set()}
-    fingerprint_backfills: list[dict[str, object]] = []
+    fingerprint_backfills: list[dict[str, Any]] = []
 
     def stop_requested(stage: str) -> bool:
         if stats["stopped"]:
@@ -1648,7 +1658,7 @@ def _sync_strm_incremental_impl(
             stats["fallback_required"] = True
             stats["fallback_reason"] = "整理联动包含无效 STRM 变更项"
             return stats
-        if str(raw.get("source_id") or "") != str(source_dir_id):
+        if str(raw.get("source_id") or "") != source_dir_id:
             stats["fallback_required"] = True
             stats["fallback_reason"] = "整理联动 STRM 来源与配置不一致"
             return stats
@@ -1737,8 +1747,8 @@ def _sync_strm_incremental_impl(
                 is_current = bool(
                     current
                     and str(_row_field(current, "strm_path", "") or "") == str(expected)
-                    and str(_row_field(current, "etag", "") or "") == str(file.etag or "")
-                    and int(_row_field(current, "size", 0) or 0) == int(file.size or 0)
+                    and str(_row_field(current, "etag", "") or "") == (file.etag or "")
+                    and int(_row_field(current, "size", 0) or 0) == (file.size or 0)
                     and content_matches
                 )
                 if is_current:
@@ -1794,7 +1804,7 @@ def _sync_strm_incremental_impl(
                             refresh_policy=refresh_policy,
                         )
                     ])
-                    if int(queued.get("failed", 0) or 0):
+                    if (queued.get("failed", 0) or 0):
                         stats["metadata_queue_failed"] += 1
                     else:
                         stats["metadata_queued"] += 1
@@ -1989,14 +1999,14 @@ def _sync_strm_impl(
     scan_worker_count = max(
         1,
         min(
-            int(scan_workers or get_int("STRM_SCAN_WORKERS", DEFAULT_SCAN_WORKERS)),
+            (scan_workers or get_int("STRM_SCAN_WORKERS", DEFAULT_SCAN_WORKERS)),
             MAX_SCAN_WORKERS,
         ),
     )
     verify_worker_count = max(
         1,
         min(
-            int(
+            (
                 verify_workers
                 or get_int("STRM_VERIFY_WORKERS", DEFAULT_VERIFY_WORKERS)
             ),
@@ -2005,7 +2015,7 @@ def _sync_strm_impl(
     )
     max_directories, max_entries, max_candidates, scan_deadline_seconds = _scan_limits()
 
-    stats = {
+    stats: dict[str, Any] = {
         "total": 0, "generated": 0, "created": 0, "updated": 0,
         "skipped": 0, "failed": 0,
         "duplicates_skipped": 0,
@@ -2037,7 +2047,7 @@ def _sync_strm_impl(
     }
     source_key = f"guangya:{source_dir_id}"
     metadata_source_key = f"guangya-meta:{source_dir_id}"
-    display_source_name = str(source_name or rel_prefix or source_dir_id)
+    display_source_name = (source_name or rel_prefix or source_dir_id)
     progress = _BoundedProgress(on_progress)
     seen_ids: set[str] = set()
     metadata_seen_ids: set[str] = set()
@@ -2106,7 +2116,7 @@ def _sync_strm_impl(
                 should_stop=page_scan_stop_requested,
             )
             return (
-                _source_snapshot_directories(snapshot, str(initial_dir_id), observed_dirs)
+                _source_snapshot_directories(snapshot, initial_dir_id, observed_dirs)
                 if snapshot is not None else None
             )
 
@@ -2173,7 +2183,7 @@ def _sync_strm_impl(
             max_workers=scan_worker_count,
             thread_name_prefix="strm-dir-scan",
         ) as executor:
-            inflight: dict[object, tuple[str | None, tuple[str, ...]]] = {}
+            inflight: dict[Future, tuple[str | None, tuple[str, ...]]] = {}
             while (pending_dirs or inflight) and not scan_abort.is_set():
                 if stop_requested("scan"):
                     abort_scan()
@@ -2193,7 +2203,7 @@ def _sync_strm_impl(
                     inflight[executor.submit(read_snapshot, len(pending_dirs))] = (None, ())
                 while not want_snapshot and pending_dirs and len(inflight) < scan_worker_count:
                     dir_id, rel_parts = pending_dirs.popleft()
-                    identity = str(dir_id)
+                    identity = dir_id
                     if identity in visited_dir_ids:
                         continue
                     if len(visited_dir_ids) >= max_directories:
@@ -2320,12 +2330,12 @@ def _sync_strm_impl(
     progress.emit("scan", 0, 1, "扫描云端目录")
     begin_metrics = getattr(client, "begin_read_metrics", None)
     end_metrics = getattr(client, "end_read_metrics", None)
-    read_metrics = begin_metrics() if callable(begin_metrics) else None
+    read_metrics = client.begin_read_metrics() if callable(begin_metrics) else None
     try:
         scan_tree(source_dir_id, (prefix,) if prefix else ())
     finally:
         if read_metrics is not None and callable(end_metrics):
-            stats.update(end_metrics(read_metrics))
+            stats.update(client.end_read_metrics(read_metrics))
     progress.emit("scan", 1, 1, "扫描云端目录")
     stats["scan_elapsed_seconds"] = round(time.monotonic() - scan_started, 3)
     if stop_requested("scan"):
@@ -2345,7 +2355,7 @@ def _sync_strm_impl(
 
     existing_rows = db.list_strm_index(source_key)
     existing_by_id, existing_by_path = _build_video_index_maps(existing_rows)
-    fingerprint_backfills: list[dict[str, object]] = []
+    fingerprint_backfills: list[dict[str, Any]] = []
     video_progress_total = len(video_candidates)
     for _file, _rel_dir, duplicate_count in video_candidates.values():
         stats["duplicates_skipped"] += duplicate_count
@@ -2364,15 +2374,15 @@ def _sync_strm_impl(
             ]:
                 file, rel_dir, _duplicate_count = video_candidates[target_text]
                 expected = Path(target_text)
-                current = existing_by_id.get(str(file.file_id))
+                current = existing_by_id.get(file.file_id)
                 expected_url = build_play_url(
                     base_url, file.file_id, file.etag, file.size, file.name
                 )
                 index_matches = bool(
                     current
                     and str(current["strm_path"] or "") == str(expected)
-                    and str(current["etag"] or "") == str(file.etag or "")
-                    and int(current["size"] or 0) == int(file.size or 0)
+                    and str(current["etag"] or "") == (file.etag or "")
+                    and int(current["size"] or 0) == (file.size or 0)
                 )
                 verify_future = (
                     verify_executor.submit(
@@ -2425,14 +2435,14 @@ def _sync_strm_impl(
                     content_matches, content_fingerprint = False, ""
                 # 同一批内更早候选可能更新或清理冲突索引，因此提交判定必须
                 # 重新读取内存快照；并发线程只负责文件读取，不拥有业务状态。
-                current = existing_by_id.get(str(file.file_id))
+                current = existing_by_id.get(file.file_id)
                 index_matches = bool(
                     current
                     and str(current["strm_path"] or "") == str(expected)
-                    and str(current["etag"] or "") == str(file.etag or "")
-                    and int(current["size"] or 0) == int(file.size or 0)
+                    and str(current["etag"] or "") == (file.etag or "")
+                    and int(current["size"] or 0) == (file.size or 0)
                 )
-                is_current = bool(index_matches and content_matches)
+                is_current = (index_matches and content_matches)
                 if is_current:
                     if str(
                         _row_field(current, "content_fingerprint", "") or ""
@@ -2449,9 +2459,9 @@ def _sync_strm_impl(
                             existing_by_id, existing_by_path, file, expected,
                             content_fingerprint,
                         )
-                    seen_ids.add(str(file.file_id))
+                    seen_ids.add(file.file_id)
                     stats["skipped"] += 1
-                    pending_resolutions["generate"].add(str(file.file_id))
+                    pending_resolutions["generate"].add(file.file_id)
                     progress.emit(
                         "generate", video_completed, video_progress_total,
                         "生成 STRM",
@@ -2468,10 +2478,10 @@ def _sync_strm_impl(
                     stats["cleaned"] += cleaned
                     if cleaned and current:
                         _track_change(stats, "removed", current["strm_path"], strm_root, on_refresh_paths=on_refresh_paths)
-                    seen_ids.add(str(file.file_id))
+                    seen_ids.add(file.file_id)
                     stats["generated"] += 1
                     stats["updated" if is_update else "created"] += 1
-                    pending_resolutions["generate"].add(str(file.file_id))
+                    pending_resolutions["generate"].add(file.file_id)
                     _track_change(stats, "generated", expected, strm_root, on_refresh_paths=on_refresh_paths)
                     _update_video_index_snapshot(
                         existing_by_id, existing_by_path, file, expected,
@@ -2515,18 +2525,18 @@ def _sync_strm_impl(
     if metadata:
         progress.emit("metadata", 0, metadata_progress_total, "同步元数据")
         existing_metadata_rows = db.list_strm_index(metadata_source_key)
-        metadata_rows_by_id: dict[str, object] = {}
-        metadata_rows_by_path: dict[str, list[object]] = {}
+        metadata_rows_by_id: dict[str, Any] = {}
+        metadata_rows_by_path: dict[str, list[sqlite3.Row | dict[str, Any]]] = {}
         for row in existing_metadata_rows:
             metadata_rows_by_id[str(row["file_id"])] = row
             metadata_rows_by_path.setdefault(str(row["strm_path"] or ""), []).append(row)
         planned_metadata_targets = {
-            target_text: str(candidate[0].file_id)
+            target_text: candidate[0].file_id
             for target_text, candidate in metadata_candidates.items()
         }
         if metadata_candidates:
             progress.emit("metadata", 0, metadata_progress_total, "排队伴随元数据")
-            queue_batch: list[dict[str, object]] = []
+            queue_batch: list[dict[str, Any]] = []
             queue_files: list[tuple[GuangYaFile, str, Path]] = []
 
             def flush_metadata_queue_batch() -> None:
@@ -2535,7 +2545,7 @@ def _sync_strm_impl(
                     return
                 try:
                     queued = db.enqueue_strm_metadata_jobs(queue_batch)
-                    failed_count = int(queued.get("failed", 0) or 0)
+                    failed_count = (queued.get("failed", 0) or 0)
                     stats["metadata_queue_failed"] += failed_count
                     stats["metadata_queued"] += max(0, len(queue_batch) - failed_count)
                 except Exception as exc:
@@ -2576,7 +2586,7 @@ def _sync_strm_impl(
                 file, rel_dir, duplicate_count = metadata_candidates[target_text]
                 stats["metadata_skipped"] += duplicate_count
                 expected = Path(target_text)
-                file_id = str(file.file_id)
+                file_id = file.file_id
                 current = metadata_rows_by_id.get(file_id)
                 metadata_seen_ids.add(file_id)
                 previous_path = _safe_indexed_path(
@@ -2637,7 +2647,7 @@ def _sync_strm_impl(
                     continue
                 if current and _metadata_state_matches(current, file, expected):
                     stats["metadata_skipped"] += 1
-                    pending_resolutions["metadata"].add(str(file.file_id))
+                    pending_resolutions["metadata"].add(file.file_id)
                     metadata_progress_completed += 1
                     progress.emit(
                         "metadata", metadata_progress_completed,
@@ -2744,7 +2754,7 @@ def _sync_strm_impl(
                         refresh_policy=refresh_policy,
                     )
                     stats["clean_skipped"] = (
-                        bool(stats["clean_skipped"])
+                        stats["clean_skipped"]
                         or bool(metadata_cleanup.get("skipped"))
                     )
                     for blocked_path in metadata_cleanup.get("blocked_paths", [])[:3]:
@@ -2900,14 +2910,14 @@ def parse_strm_sources(
 def plan_strm_sources(sources: list[dict[str, str]]) -> list[dict[str, str]]:
     name_counts: dict[str, int] = {}
     for source in sources:
-        name = str(source["name"])
+        name = source["name"]
         name_counts[name] = name_counts.get(name, 0) + 1
 
     multiple = len(sources) > 1
     planned = []
     for source in sources:
-        source_id = str(source["id"])
-        name = str(source["name"])
+        source_id = source["id"]
+        name = source["name"]
         prefix = f"{name} ({source_id[-6:]})" if name_counts[name] > 1 else name
         planned.append({
             "id": source_id,
@@ -2959,7 +2969,7 @@ def _directory_path_by_id(
     client: GuangYaClient | None, directory_id: str
 ) -> str:
     """用对象 ID 的祖先链解析目录路径；失败时返回未知，不猜测范围。"""
-    current_id = str(directory_id or "").strip()
+    current_id = (directory_id or "").strip()
     if not current_id:
         return ""
     if current_id == "0":
@@ -2974,10 +2984,10 @@ def _directory_path_by_id(
                 return ""
             visited.add(current_id)
             current = client.file_info(current_id)
-            if current is None or not current.is_dir or not str(current.name):
+            if current is None or not current.is_dir or not current.name:
                 return ""
-            parts.append(str(current.name))
-            current_id = str(current.parent_id or "0").strip() or "0"
+            parts.append(current.name)
+            current_id = (current.parent_id or "0").strip() or "0"
     except Exception:  # noqa: BLE001 - 范围判定失败只能安全降级
         return ""
     return "/" + "/".join(reversed(parts)) if parts else "/"
@@ -3030,7 +3040,7 @@ def cloud_change_sources(client: GuangYaClient | None) -> dict[str, str] | None:
         sources, error = configured_strm_source_plans()
         if error:
             return None
-        return {str(source["id"]): _directory_path_by_id(client, str(source["id"])) for source in sources}
+        return {source["id"]: _directory_path_by_id(client, source["id"]) for source in sources}
     except Exception:  # 来源异常不能覆盖真实云端写入结果
         return None
 
@@ -3054,7 +3064,7 @@ def trigger_cloud_changes(operations: list[dict], *, sources: dict[str, str] | N
                 or any(root == directory or root.startswith(directory + "/") for directory in directories)
             ):
                 selected.add(source_id)
-    stats = {"strm_scope_unknown": 1} if unknown else {}
+    stats: dict[str, Any] = {"strm_scope_unknown": 1} if unknown else {}
     if not selected:
         return stats or {"strm_trigger_skipped": 1}
     try:
@@ -3086,7 +3096,7 @@ def _retry_runtime_config() -> tuple[dict, str]:
 def capture_strm_retry_runtime_config() -> tuple[dict, str]:
     """冻结一次已解析的 STRM 重试配置，供确认动作在执行时复用。"""
     runtime, error = _retry_runtime_config()
-    return deepcopy(runtime), str(error or "")
+    return deepcopy(runtime), (error or "")
 
 
 @dataclass(frozen=True)
@@ -3111,7 +3121,7 @@ def _locate_retry_files(
     remaining = set(wanted)
     wanted_files = {file_id for _, file_id in wanted}
     wanted_sources = {source_id for source_id, _ in wanted}
-    exhausted = wanted_sources - {str(source["id"]) for source in sources}
+    exhausted = wanted_sources - {source["id"] for source in sources}
     alternatives: dict[str, tuple[GuangYaFile, str, dict[str, str]]] = {}
     max_directories, max_entries, _max_candidates, deadline_seconds = _scan_limits()
     scan_deadline = time.monotonic() + deadline_seconds
@@ -3139,14 +3149,14 @@ def _locate_retry_files(
         abort_scan = True
         return True
 
-    for source in sorted(sources, key=lambda item: str(item["id"]) not in wanted_sources):
+    for source in sorted(sources, key=lambda item: item["id"] not in wanted_sources):
         if abort_scan or not remaining:
             break
-        source_id = str(source["id"])
+        source_id = source["id"]
         try:
-            prefix = str(source.get("rel_prefix") or "")
+            prefix = (source.get("rel_prefix") or "")
             initial = (safe_path_component(prefix),) if prefix else ()
-            stack = [(source_id, initial)]
+            stack: list[tuple[str, tuple[str, ...]]] = [(source_id, initial)]
             visited_dir_ids: set[str] = set()
             while stack and remaining:
                 if scan_stop_requested():
@@ -3206,13 +3216,13 @@ def _locate_retry_files(
 
 def _retry_result(trigger_type: str, *, requested: int = 0) -> dict:
     return {
-        "ok": True, "requested": int(requested), "matched": 0,
+        "ok": True, "requested": requested, "matched": 0,
         "resolved": 0, "failed": 0, "missing": 0, "stale": 0,
         "deferred": 0, "attempted": 0, "batches": 0,
         "scan_incomplete": False, "scan_limit_reason": "",
         "scan_directories": 0, "scan_entries": 0,
         "stopped": False, "stop_stage": "",
-        "trigger_type": str(trigger_type),
+        "trigger_type": trigger_type,
     }
 
 
@@ -3293,7 +3303,7 @@ def _process_claimed_strm_failures(
                         maps = _build_video_index_maps(db.list_strm_index(source_key))
                         index_maps[source_key] = maps
                     existing_by_id, existing_by_path = maps
-                    current_before_install = existing_by_id.get(str(file.file_id))
+                    current_before_install = existing_by_id.get(file.file_id)
                     cleaned, installed_fingerprint = _install_video_candidate(
                         file, rel_dir, target, base_url, strm_root, source_key,
                         existing_by_id, existing_by_path,
@@ -3303,7 +3313,7 @@ def _process_claimed_strm_failures(
                         installed_fingerprint,
                     )
                 elif action == "metadata":
-                    url = str(client.get_download_url(file.file_id) or "")
+                    url = (client.get_download_url(file.file_id) or "")
                     if not url:
                         raise RuntimeError("无法获取元数据下载直链")
                     source_key = source["metadata_source_key"]
@@ -3312,12 +3322,12 @@ def _process_claimed_strm_failures(
                         maps = _build_video_index_maps(db.list_strm_index(source_key))
                         index_maps[source_key] = maps
                     existing_by_id, existing_by_path = maps
-                    current_before_install = existing_by_id.get(str(file.file_id))
+                    current_before_install = existing_by_id.get(file.file_id)
                     # 安装器只需当前 file_id 与目标路径所有者，不逐项复制/扫描
                     # 全来源索引；仍保留同路径多所有者的冲突与回滚语义。
                     related = dict(existing_by_path.get(str(target), {}))
                     if current_before_install is not None:
-                        related[str(file.file_id)] = current_before_install
+                        related[file.file_id] = current_before_install
                     cleaned = _install_metadata_candidate(
                         file, rel_dir, target, strm_root, source_key,
                         list(related.values()), url, should_stop=should_stop,
@@ -3370,7 +3380,7 @@ def _retry_strm_failures_locked(
     on_progress=None, runtime_config: Optional[dict] = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict:
-    normalized = list(dict.fromkeys(int(item) for item in ids))
+    normalized = list(dict.fromkeys(item for item in ids))
     candidates = db.list_strm_failures(status="open", ids=normalized, limit=1000)
     result = _retry_result(trigger_type, requested=len(normalized))
     result["attempted"] = len(normalized)
@@ -3459,8 +3469,8 @@ def retry_all_strm_failures(
         while True:
             candidates = db.list_strm_failures(
                 status="open",
-                source_id=str(source_id or "").strip(),
-                action=str(action or ""),
+                source_id=(source_id or "").strip(),
+                action=(action or ""),
                 before_id=before_id,
                 limit=1000,
             )
@@ -3538,7 +3548,7 @@ def clean_retired_strm_sources(
     refresh_policy: StrmRefreshPolicy | None = None,
 ) -> dict:
     """清理已从配置移除的来源；仅删除可证明由 MediaFlux 生成的文件。"""
-    active_ids = {str(item) for item in active_source_ids if str(item)}
+    active_ids = {item for item in active_source_ids if item}
     if not active_ids_complete:
         # 活跃来源集不完整时无法证明某个来源确已退役，必须整体保留。
         blocked = len(db.list_strm_retired_sources())
@@ -3567,7 +3577,7 @@ def clean_retired_strm_sources(
         for row in db.list_strm_index_by_prefix(prefix)
         if str(row["source"] or "") in active_namespaces and str(row["strm_path"] or "")
     }
-    result = {
+    result: dict[str, Any] = {
         "sources": 0, "cleaned": 0, "index_cleaned": 0,
         "empty_dirs_cleaned": 0, "blocked": 0, "removed_paths": [],
         "removed_dir_paths": [], "empty_dir_roots": [],

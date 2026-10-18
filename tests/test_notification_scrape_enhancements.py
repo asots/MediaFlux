@@ -6,20 +6,22 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock, patch
 
-from tests.support import release_parse_result
-
-from app.clients.tmdb import TMDBClient
-from app.modules.scraper import Candidate, MatchResult, TMDBScraper
+from app import notifier
 from app.clients.guangya import GuangYaClient, GuangYaFile
+from app.clients.tmdb import TMDBClient
 from app.modules.organize import Organizer, OrganizeRules
 from app.modules.scheduler import STRMScheduler
+from app.modules.scraper import Candidate, MatchResult, TMDBScraper
 from app.modules.strm import sync_strm
-from app import notifier
 from app.notifier import NOTIFICATION_SECTION_BREAK, NotificationEvent
-from tests.support import IsolatedDatabaseTestCase
-from tests.support import PagedDirectoryTestMixin
+from tests.support import (
+    IsolatedDatabaseTestCase,
+    PagedDirectoryTestMixin,
+    release_parse_result,
+)
 
 
 class _RaisingTMDBClient:
@@ -97,7 +99,7 @@ class TMDBDiagnosticTests(unittest.TestCase):
         session.get.assert_not_called()
 
     def test_request_failure_is_not_reported_as_no_result(self):
-        scraper = TMDBScraper(client=_RaisingTMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _RaisingTMDBClient()))
         with patch.object(scraper, "_get_lock", return_value=None):
             result = scraper.match("Dilig.2024.1080p.WEB-DL.mkv")
 
@@ -106,7 +108,7 @@ class TMDBDiagnosticTests(unittest.TestCase):
         self.assertIn("连接超时", result.error)
 
     def test_successful_empty_search_is_no_result(self):
-        scraper = TMDBScraper(client=_EmptyTMDBClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _EmptyTMDBClient()))
         result = scraper.deterministic_recognize("Dilig.2024.1080p.WEB-DL.mkv")
 
         self.assertEqual(result.status, "no_result")
@@ -423,7 +425,7 @@ class TelegramStrmCleanupNotificationTests(unittest.TestCase):
         self.assertEqual(scheduler.run_blocking.call_args.kwargs["sync_mode"], "full")
         send_mock.assert_called_once()
         event = send_mock.call_args.args[0]
-        self.assertIsInstance(event, NotificationEvent)
+        assert isinstance(event, NotificationEvent)
         self.assertEqual(event.title, "光鸭 STRM 同步全部完成")
         self.assertEqual(event.layout, "compact_report")
         self.assertFalse(event.field_emojis)
@@ -442,6 +444,7 @@ class TelegramStrmCleanupNotificationTests(unittest.TestCase):
         self.assertEqual(fields["元数据"], "4 更新 · 3 后台排队")
         self.assertEqual(fields["清理"], "🗑 1 无效 STRM ｜ 📁 2 空目录 ｜ 🗃 1 失效元数据")
         self.assertEqual(fields["媒体库"], "Jellyfin 刷新成功 🎯")
+        assert isinstance(fields["来源概览"], str)
         self.assertIn("└ • 整理<&>：80 文件 · 2 新建 · 1 更新 · 5 跳过", fields["来源概览"])
         self.assertIn("3 元数据排队 (2.10s)", fields["来源概览"])
         self.assertEqual(event.footer, "本轮 2 条清理明细已记录到 Web 运行记录。")
@@ -609,7 +612,7 @@ class StrmDetailedNotificationTests(IsolatedDatabaseTestCase):
             "app.modules.strm.db.list_strm_index", return_value=[]
         ):
             stats = sync_strm(
-                "root", "http://media", root, client=_FailingTreeClient(),
+                "root", "http://media", root, client=cast(GuangYaClient, _FailingTreeClient()),
                 clean_invalid=False,
             )
 
@@ -671,6 +674,7 @@ class StrmDetailedNotificationTests(IsolatedDatabaseTestCase):
             trigger_type="cron", sources=[], strm_root="/strm",
         )
         scheduler_fields = dict(scheduler_event.fields)
+        assert isinstance(scheduler_fields["云端请求"], str)
         self.assertIn("限流重试 0 次", scheduler_fields["云端请求"])
         self.assertNotIn("准入等待", scheduler_fields)
 
@@ -746,7 +750,7 @@ class ScrapePreviewApiTests(unittest.TestCase):
                 "filename": "The.Furious.2026.2160p.WEB-DL.H.265-DreamHD.mkv"
             })
 
-        payload = json.loads(response.body)
+        payload = json.loads(bytes(response.body))
         self.assertEqual(payload["diagnostic"]["status"], "low_confidence")
         self.assertEqual(payload["diagnostic"]["threshold"], 0.9)
         self.assertEqual(payload["match"]["original_title"], "The Furious")
@@ -825,7 +829,7 @@ class GuangYaFileInfoTests(unittest.TestCase):
 
         item = client.file_info("1928176823132528739")
 
-        self.assertIsNotNone(item)
+        assert (item) is not None
         self.assertEqual(item.file_id, "1928176823132528739")
         self.assertEqual(item.parent_id, "1927445875113771071")
         self.assertEqual(item.name, "封神第二部.mkv")
@@ -838,6 +842,7 @@ class GuangYaFileInfoTests(unittest.TestCase):
 
     def test_reorganize_notification_disabled_is_silent_not_a_warning(self):
         from types import SimpleNamespace
+
         from app.modules.organize_correction import OrganizeCorrectionService
 
         service = SimpleNamespace()
@@ -846,14 +851,17 @@ class GuangYaFileInfoTests(unittest.TestCase):
             "app.modules.telegram_notification_center.publish_notification_event"
         ) as publisher:
             warnings = OrganizeCorrectionService._notify_reorganize_result(
-                service, {}, [], rules,
+                cast(OrganizeCorrectionService, service), {}, [], cast(OrganizeRules, rules),
             )
 
         self.assertEqual(warnings, [])
         publisher.assert_not_called()
 
     def test_snapshot_validation_reports_unreadable_detail_before_position_drift(self):
-        from app.modules.organize_correction import CorrectionItem, OrganizeCorrectionService
+        from app.modules.organize_correction import (
+            CorrectionItem,
+            OrganizeCorrectionService,
+        )
 
         client = Mock()
         client.file_info.return_value = GuangYaFile("", "", False, parent_id="0")

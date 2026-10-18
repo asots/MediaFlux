@@ -1,4 +1,7 @@
 """Explicit generation profiles at the real, offline HTTP boundary."""
+from starlette.responses import JSONResponse
+from starlette.requests import Request
+from typing import cast
 import asyncio
 import json
 import socket
@@ -405,7 +408,8 @@ def test_invalid_configuration_no_save_no_post(bad, local_config, caplog):
     from app.routes.api import save_config
 
     before = local_config.read_bytes()
-    result = save_config(admin_request(), {KEY: bad})
+    result = save_config(cast(Request, admin_request()), {KEY: bad})
+    assert isinstance(result, JSONResponse)
     assert result.status_code == 400
     assert b'secret-sentinel' not in result.body
     assert local_config.read_bytes() == before
@@ -442,7 +446,7 @@ def test_profile_limits_and_empty_defaults(local_config, config_api):
     assert config_api.get('/api/config').json()[KEY] == '[]'
     value = ProviderSettings.from_config()
     with pytest.raises(FrozenInstanceError):
-        value.generation_profiles_json = '[]'
+        setattr(value, 'generation_profiles_json', '[]')
 
 
 def test_deployment_managed_fields_and_unknown_keys_unchanged(local_config, config_api, monkeypatch):
@@ -597,6 +601,7 @@ def test_explicit_profile_preserves_bound_native_auto(protocol, unsupported):
     )
 
     messages = native_messages(protocol)
+    assert messages[0].provider_state is not None
     original = messages[0].provider_state.layout_json
     result = wire([http_error(404) if unsupported else None, None],
                   messages=messages, generation_profiles_json=profiles('fixture', protocol))

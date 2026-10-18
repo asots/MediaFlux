@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 import unittest
 from copy import deepcopy
 from unittest import mock
@@ -30,8 +31,8 @@ class ReadClient(GuangYaClient):
             getattr(self._raw, name).return_value = payload
 
     @property
-    def raw(self):
-        return self._raw
+    def raw(self) -> mock.Mock:
+        return cast(mock.Mock, self._raw)
 
 
 class GuangYaReadContractTests(unittest.TestCase):
@@ -89,6 +90,7 @@ class GuangYaReadContractTests(unittest.TestCase):
             with self.subTest(limit=limit):
                 client = ReadClient({"data": {"total": 0, "list": []}})
                 self.assertEqual(list(client.iter_dir(max_items=limit)), [])
+                assert client.raw is not None
                 self.assertEqual(client.raw.fs_files.call_args.kwargs["page_size"], size)
 
     def test_root_directory_keeps_zero_parent_for_entries_without_parent_field(self):
@@ -100,6 +102,7 @@ class GuangYaReadContractTests(unittest.TestCase):
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].parent_id, "0")
+        assert client.raw is not None
         self.assertIsNone(client.raw.fs_files.call_args.kwargs["parent_id"])
 
     def test_large_directory_reads_complete_result_in_two_pages(self):
@@ -107,6 +110,7 @@ class GuangYaReadContractTests(unittest.TestCase):
         client = ReadClient(None)
         def files(*, parent_id, page, page_size):
             return {"data": {"total": len(rows), "list": rows[page * page_size:(page + 1) * page_size]}}
+        assert client.raw is not None
         client.raw.fs_files.side_effect = files
         self.assertEqual([f.file_id for f in client.list_dir()], [str(i) for i in range(1201)])
         self.assertEqual(client.raw.fs_files.call_count, 2)
@@ -117,14 +121,17 @@ class GuangYaReadContractTests(unittest.TestCase):
         client = ReadClient(None)
         def files(*, parent_id, page, page_size):
             return {"data": {"total": len(rows), "list": rows[page * page_size:(page + 1) * page_size]}}
+        assert client.raw is not None
         client.raw.fs_files.side_effect = files
         with self.assertRaises(DirectoryEntryLimitError):
             list(client.iter_dir(max_items=2))
+        assert client.raw is not None
         self.assertEqual(client.raw.fs_files.call_count, 1)
         self.assertEqual(client.raw.fs_files.call_args.kwargs["page_size"], 3)
 
     def test_directory_pagination_accepts_stable_total_across_pages(self):
         client = ReadClient(None)
+        assert client.raw is not None
         client.raw.fs_files.side_effect = [
             {"data": {"total": 2, "list": [{"fileId": "a", "fileName": "A"}]}},
             {"data": {"total": 2, "list": [{"fileId": "b", "fileName": "B"}], "hasMore": False}},
@@ -146,6 +153,7 @@ class GuangYaReadContractTests(unittest.TestCase):
         )
         for first, second in cases:
             client = ReadClient(None)
+            assert client.raw is not None
             client.raw.fs_files.side_effect = [
                 {"data": first}, {"data": second},
             ]
@@ -153,6 +161,7 @@ class GuangYaReadContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "分页总数发生变化") as caught:
                     client.list_dir()
                 self.assertNotIn("private", str(caught.exception))
+                assert client.raw is not None
                 self.assertEqual(client.raw.fs_files.call_count, 2)
 
     def test_directory_iterator_can_stop_before_unrelated_malformed_item(self):
@@ -165,6 +174,7 @@ class GuangYaReadContractTests(unittest.TestCase):
         # 精准定位找到目标可立即结束；完整枚举仍必须暴露坏条目。
         with self.assertRaises(ValueError):
             next(items)
+        assert client.raw is not None
         self.assertEqual(client.raw.fs_files.call_count, 1)
 
     def test_directory_snapshot_budget_refusal_uses_one_authoritative_page(self):
@@ -173,6 +183,7 @@ class GuangYaReadContractTests(unittest.TestCase):
             for index in range(1000)
         ]
         client = ReadClient(None)
+        assert client.raw is not None
         client.raw.fs_files.return_value = {"msg": "success", "data": {
             "total": 1001, "list": rows, "hasMore": True,
         }}
@@ -187,6 +198,7 @@ class GuangYaReadContractTests(unittest.TestCase):
         ]
         client = ReadClient({"data": {"total": 2, "list": rows}})
         snapshot = client.read_directory_snapshot(request_budget=3, max_items=2)
+        assert snapshot is not None
         self.assertEqual(set(snapshot), {"a", "b"})
         self.assertTrue(all(file.parent_id == "0" for file in snapshot.values()))
         self.assertEqual([c.kwargs["parent_id"] for c in client.raw.fs_files.call_args_list], ["*", "*", None])
@@ -196,20 +208,26 @@ class GuangYaReadContractTests(unittest.TestCase):
         client = ReadClient(None)
         def files(*, parent_id, page, page_size):
             return {"data": {"total": len(rows), "list": rows[page * page_size:(page + 1) * page_size]}}
+        assert client.raw is not None
         client.raw.fs_files.side_effect = files
         with self.assertRaisesRegex(RuntimeError, "超过请求预算"):
             client.read_directory_snapshot(request_budget=5, max_items=2000)
+        assert client.raw is not None
         self.assertEqual(client.raw.fs_files.call_count, 5)
         client.raw.fs_files.reset_mock()
-        self.assertEqual(len(client.read_directory_snapshot(request_budget=6, max_items=2000)), 1001)
+        snapshot = client.read_directory_snapshot(request_budget=6, max_items=2000)
+        assert snapshot is not None
+        self.assertEqual(len(snapshot), 1001)
         self.assertEqual(client.raw.fs_files.call_count, 6)
 
     def test_directory_snapshot_missing_parent_must_be_proven_by_root_listing(self):
         client = ReadClient(None)
         first = {"data": {"total": 1, "list": [{"fileId": "a", "fileName": "A"}]}}
+        assert client.raw is not None
         client.raw.fs_files.side_effect = [first, first, {"data": {"total": 0, "list": []}}]
         with self.assertRaisesRegex(RuntimeError, "根目录列表不一致"):
             client.read_directory_snapshot(request_budget=3, max_items=2)
+        assert client.raw is not None
         self.assertEqual(client.raw.fs_files.call_count, 3)
 
     def test_directory_snapshot_rejects_same_total_replacement_and_field_change(self):
@@ -229,21 +247,25 @@ class GuangYaReadContractTests(unittest.TestCase):
         )
         for replacement in replacements:
             client = ReadClient(None)
+            assert client.raw is not None
             client.raw.fs_files.side_effect = [
                 {"msg": "success", "data": {"total": 2, "list": deepcopy(original)}},
                 {"msg": "success", "data": {"total": 2, "list": deepcopy(replacement)}},
             ]
             with self.subTest(replacement=replacement), self.assertRaisesRegex(RuntimeError, "两轮快照不一致"):
                 client.read_directory_snapshot(request_budget=3, max_items=2)
+            assert client.raw is not None
             self.assertEqual(client.raw.fs_files.call_count, 2)
 
     def test_directory_snapshot_cancellation_is_an_error_not_a_partial_snapshot(self):
         before_request = ReadClient(None)
         with self.assertRaisesRegex(RuntimeError, "已取消"):
             before_request.read_directory_snapshot(request_budget=2, max_items=10, should_stop=lambda: True)
+        assert before_request.raw is not None
         before_request.raw.fs_files.assert_not_called()
 
         after_first_request = ReadClient(None)
+        assert after_first_request.raw is not None
         after_first_request.raw.fs_files.return_value = {"msg": "success", "data": {
             "total": 1, "list": [{"fileId": "a", "fileName": "A", "parentId": "0"}],
         }}
@@ -253,6 +275,7 @@ class GuangYaReadContractTests(unittest.TestCase):
                 max_items=10,
                 should_stop=lambda: after_first_request.raw.fs_files.call_count > 0,
             )
+        assert after_first_request.raw is not None
         after_first_request.raw.fs_files.assert_called_once()
 
     def test_directory_snapshot_rejects_invalid_identity_parent_and_total_contracts(self):
@@ -265,9 +288,11 @@ class GuangYaReadContractTests(unittest.TestCase):
         )
         for label, data, message in cases:
             client = ReadClient(None)
+            assert client.raw is not None
             client.raw.fs_files.return_value = {"msg": "success", "data": data}
             with self.subTest(label=label), self.assertRaisesRegex(RuntimeError, message):
                 client.read_directory_snapshot(request_budget=10, max_items=10)
+            assert client.raw is not None
             self.assertEqual(client.raw.fs_files.call_count, 3 if label == "duplicate id" else 1)
 
     def test_directory_snapshot_rejects_changed_total_and_server_page_shrink(self):
@@ -276,6 +301,7 @@ class GuangYaReadContractTests(unittest.TestCase):
             for index in range(1000)
         ]
         changed_total = ReadClient(None)
+        assert changed_total.raw is not None
         changed_total.raw.fs_files.side_effect = [
             {"msg": "success", "data": {"total": 1001, "list": rows, "hasMore": True}},
             {"msg": "success", "data": {"total": 1002, "list": [{
@@ -284,15 +310,18 @@ class GuangYaReadContractTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(RuntimeError, "分页总数发生变化"):
             changed_total.read_directory_snapshot(request_budget=5, max_items=2000)
+        assert changed_total.raw is not None
         self.assertEqual(changed_total.raw.fs_files.call_count, 2)
 
         shrunk = ReadClient(None)
+        assert shrunk.raw is not None
         shrunk.raw.fs_files.return_value = {"msg": "success", "data": {
             "total": 1001, "list": rows[:500], "hasMore": True,
         }}
         with self.assertRaisesRegex(RuntimeError, "服务端缩页"):
             shrunk.read_directory_snapshot(request_budget=5, max_items=2000)
         # 缩页按协议错误处理，不降级成成本拒绝或继续超预算翻页。
+        assert shrunk.raw is not None
         shrunk.raw.fs_files.assert_called_once()
 
     def test_unstable_snapshot_is_discarded_not_deduped_and_stable_rounds_are_required(self):
@@ -301,8 +330,10 @@ class GuangYaReadContractTests(unittest.TestCase):
         bad = {"data": {"total": 2, "list": [a, a]}}
         good = {"data": {"total": 2, "list": [a, b]}}
         client = ReadClient(None)
+        assert client.raw is not None
         client.raw.fs_files.side_effect = [bad, good, good, good]
         result = client.read_directory_snapshot(request_budget=4, max_items=2)
+        assert result is not None
         self.assertEqual(set(result), {"a", "b"})
         self.assertEqual(client.raw.fs_files.call_count, 4)
         self.assertEqual([c.kwargs["parent_id"] for c in client.raw.fs_files.call_args_list], ["*", "*", "*", None])
@@ -310,13 +341,16 @@ class GuangYaReadContractTests(unittest.TestCase):
     def test_snapshot_retry_never_exceeds_original_budget_or_returns_partial_data(self):
         a = {"fileId": "a", "fileName": "A", "parentId": "0"}
         client = ReadClient(None)
+        assert client.raw is not None
         client.raw.fs_files.return_value = {"data": {"total": 2, "list": [a, a]}}
         with self.assertRaisesRegex(RuntimeError, "重复file_id"):
             client.read_directory_snapshot(request_budget=2, max_items=2)
+        assert client.raw is not None
         self.assertEqual(client.raw.fs_files.call_count, 1)
 
     def test_directory_terminal_page_without_total_checks_locked_count(self):
         enough = ReadClient(None)
+        assert enough.raw is not None
         enough.raw.fs_files.side_effect = [
             {"data": {"total": 2, "list": [
                 {"fileId": "a", "fileName": "A"}, {"fileId": "b", "fileName": "B"},
@@ -326,6 +360,7 @@ class GuangYaReadContractTests(unittest.TestCase):
         self.assertEqual([item.file_id for item in enough.list_dir()], ["a", "b"])
 
         short = ReadClient(None)
+        assert short.raw is not None
         short.raw.fs_files.side_effect = [
             {"data": {"total": 3, "list": [
                 {"fileId": "a", "fileName": "A"}, {"fileId": "b", "fileName": "B"},
@@ -334,10 +369,12 @@ class GuangYaReadContractTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(RuntimeError, "条目数与总数不一致"):
             short.list_dir()
+        assert short.raw is not None
         self.assertEqual(short.raw.fs_files.call_count, 2)
 
     def test_directory_duplicate_ids_do_not_block_page_progress(self):
         client = ReadClient(None)
+        assert client.raw is not None
         client.raw.fs_files.side_effect = [
             {"data": {"total": 2, "list": [{"fileId": "a", "fileName": "A"}]}},
             {"data": {"total": 2, "list": [
@@ -350,6 +387,7 @@ class GuangYaReadContractTests(unittest.TestCase):
 
     def test_directory_total_ignores_bool_until_valid_total_appears(self):
         client = ReadClient(None)
+        assert client.raw is not None
         client.raw.fs_files.side_effect = [
             {"data": {"total": True, "list": [{"fileId": "a", "fileName": "A"}], "hasMore": True}},
             {"data": {"total": 2, "list": [{"fileId": "b", "fileName": "B"}], "hasMore": False}},
@@ -359,6 +397,7 @@ class GuangYaReadContractTests(unittest.TestCase):
 
     def test_directory_cancellation_and_item_budget_keep_existing_behavior(self):
         cancelled = ReadClient(None)
+        assert cancelled.raw is not None
         cancelled.raw.fs_files.return_value = {"data": {
             "total": 2, "list": [{"fileId": "a", "fileName": "A"}],
         }}
@@ -367,6 +406,7 @@ class GuangYaReadContractTests(unittest.TestCase):
         cancelled.raw.fs_files.assert_called_once()
 
         limited = ReadClient(None)
+        assert limited.raw is not None
         limited.raw.fs_files.side_effect = [
             {"data": {"total": 3, "list": [
                 {"fileId": "a", "fileName": "A"}, {"fileId": "b", "fileName": "B"},
@@ -375,6 +415,7 @@ class GuangYaReadContractTests(unittest.TestCase):
         ]
         with self.assertRaises(DirectoryEntryLimitError):
             list(limited.iter_dir(max_items=2))
+        assert limited.raw is not None
         self.assertEqual(limited.raw.fs_files.call_count, 2)
 
     def test_error_on_second_page_does_not_return_first_page_as_complete(self):
@@ -392,6 +433,7 @@ class GuangYaReadContractTests(unittest.TestCase):
             "total": 2, "list": [{"taskId": "a", "fileName": "A", "status": 2}],
             "cursor": "private-cursor", "hasMore": True,
         }})
+        assert client.raw is not None
         client.raw.request.return_value = httpx.Response(200, json={"msg": "success", "data": {
             "total": 2, "list": [{"taskId": "b", "fileName": "B", "status": 2}],
             "cursor": "next-cursor", "hasMore": False,
@@ -408,11 +450,13 @@ class GuangYaReadContractTests(unittest.TestCase):
             "total": 1, "list": [{"taskId": "a", "fileName": "A", "status": 2}],
             "cursor": "cursor", "hasMore": True,
         }})
+        assert client.raw is not None
         client.raw.request.return_value = httpx.Response(200, json={"msg": "success", "data": {
             "total": 1, "cursor": "cursor", "statusCounts": [],
         }})
         self.assertEqual(len(client.list_offline_tasks()), 1)
         client.raw.request.assert_called_once()
+        assert client.raw is not None
         client.raw.request.return_value = httpx.Response(200, json={"msg": "success", "data": {
             "total": 2, "cursor": "cursor", "statusCounts": [],
         }})
@@ -428,6 +472,7 @@ class GuangYaReadContractTests(unittest.TestCase):
             client = ReadClient(first)
             second = deepcopy(first)
             second["data"]["list"][0]["taskId"] = second_id
+            assert client.raw is not None
             client.raw.request.return_value = httpx.Response(200, json=second)
             with self.subTest(second_id=second_id), self.assertRaises(IncompleteOfflineTaskListError):
                 client.list_offline_tasks()
@@ -467,7 +512,7 @@ class GuangYaReadContractTests(unittest.TestCase):
 
     def test_share_preview_keeps_one_page_when_more_files_exist(self):
         first = {"fileId": "f1", "fileName": "one"}
-        cases = (
+        cases: tuple[dict[str, Any], ...] = (
             {"list": [first], "total": 2, "cursor": "next"},
             {"list": [{"fileId": f"f{i}", "fileName": str(i)} for i in range(200)]},
         )
@@ -618,6 +663,7 @@ class GuangYaAgentReadCompletionTests(unittest.TestCase):
         workspace_actions = workspace.GuangyaWorkspaceActions()
         with mock.patch.object(workspace_actions, "_read_observation_page", return_value=page):
             result = workspace_actions.query_guangya_filesystem({}, ToolContext())
+        assert result.model_data is not None
         entry = result.model_data["entries"][0]
         self.assertEqual((entry["kind"], entry["size"], entry["extension"]), ("video", 456, "mkv"))
         self.assertNotIn("file_id", entry)

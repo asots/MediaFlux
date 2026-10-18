@@ -14,7 +14,7 @@ _KIND_RE = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 
 
 def _terms(value: str) -> set[str]:
-    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    text = unicodedata.normalize("NFKC", (value or "")).casefold()
     latin = set(re.findall(r"[a-z0-9_]{2,}", text))
     cjk = "".join(char for char in text if "\u3400" <= char <= "\u9fff")
     grams = {cjk[index:index + 2] for index in range(max(0, len(cjk) - 1))}
@@ -26,8 +26,8 @@ class ProviderCatalog:
         self._operations: dict[str, ProviderOperationSpec] = {}
 
     def register(self, spec: ProviderOperationSpec) -> None:
-        operation = str(spec.operation_id or "").strip()
-        provider = str(spec.provider or "").strip()
+        operation = (spec.operation_id or "").strip()
+        provider = (spec.provider or "").strip()
         if not _OPERATION_RE.fullmatch(operation):
             raise ValueError(f"invalid provider operation: {operation}")
         if not _PROVIDER_RE.fullmatch(provider):
@@ -36,13 +36,13 @@ class ProviderCatalog:
             raise ValueError(f"duplicate provider operation: {operation}")
         if not isinstance(spec.risk, RiskLevel):
             raise TypeError(f"invalid provider operation risk: {operation}")
-        if not _KIND_RE.fullmatch(str(spec.result_kind or "")):
+        if not _KIND_RE.fullmatch((spec.result_kind or "")):
             raise ValueError(f"invalid provider result kind: {operation}")
         if not isinstance(spec.parameters, dict) or spec.parameters.get("type") != "object":
             raise ValueError(f"invalid provider parameter schema: {operation}")
-        if not 1 <= int(spec.max_items) <= 500:
+        if not 1 <= spec.max_items <= 500:
             raise ValueError(f"invalid provider max_items: {operation}")
-        if not 1 <= int(spec.timeout_seconds) <= 120:
+        if not 1 <= spec.timeout_seconds <= 120:
             raise ValueError(f"invalid provider timeout: {operation}")
         properties = spec.parameters.get("properties", {})
         if not isinstance(properties, dict):
@@ -53,7 +53,7 @@ class ProviderCatalog:
 
     def get(self, operation: str) -> ProviderOperationSpec:
         try:
-            return self._operations[str(operation or "").strip()]
+            return self._operations[(operation or "").strip()]
         except KeyError as exc:
             raise ProviderGatewayError(
                 "该 Provider 操作未开放", code="operation_not_allowed"
@@ -67,7 +67,7 @@ class ProviderCatalog:
         risk: RiskLevel | None = None,
         limit: int = 16,
     ) -> list[ProviderOperationSpec]:
-        normalized_provider = str(provider or "").strip()
+        normalized_provider = (provider or "").strip()
         candidates = [
             spec for spec in self._operations.values()
             if (not normalized_provider or spec.provider == normalized_provider)

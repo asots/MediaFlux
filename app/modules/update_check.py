@@ -117,7 +117,7 @@ def check_for_updates(
     try:
         with opener(request, timeout=timeout) as response:
             payload = json.loads(_read_response(response).decode("utf-8"))
-    except (HTTPError, URLError, OSError, TimeoutError, UnicodeError, ValueError) as exc:
+    except (HTTPError, URLError, OSError, UnicodeError, ValueError) as exc:
         raise UpdateCheckError(f"无法检查更新：{type(exc).__name__}") from exc
     if not isinstance(payload, list):
         raise UpdateCheckError("更新服务返回了无效数据")

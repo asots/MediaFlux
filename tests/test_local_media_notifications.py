@@ -142,8 +142,10 @@ class LocalMediaNotificationTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(event.actions, ())
         self.assertIn("Web", str(event.footer))
+        get_local_media_task_result = db.get_local_media_task(self.task_id, owner="admin")
+        assert get_local_media_task_result is not None
         self.assertEqual(
-            db.get_local_media_task(self.task_id, owner="admin").status,
+            get_local_media_task_result.status,
             "requires_manual",
         )
 

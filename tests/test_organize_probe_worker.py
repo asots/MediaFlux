@@ -1,6 +1,10 @@
 """整理后媒体规格后台补全回归测试。"""
 from __future__ import annotations
 
+from app.clients.guangya import GuangYaClient
+from threading import Thread
+from typing import cast
+
 from dataclasses import asdict
 from unittest.mock import patch
 
@@ -17,18 +21,18 @@ class _ProbeCompletionClient:
         self.renames: list[tuple[str, str]] = []
 
     def file_info(self, file_id: str):
-        return self.files.get(str(file_id))
+        return self.files.get(file_id)
 
     def list_dir(self, parent_id: str):
-        return [item for item in self.files.values() if item.parent_id == str(parent_id)]
+        return [item for item in self.files.values() if item.parent_id == parent_id]
 
     def rename(self, file_id: str, new_name: str):
-        current = self.files[str(file_id)]
-        self.files[str(file_id)] = GuangYaFile(
+        current = self.files[file_id]
+        self.files[file_id] = GuangYaFile(
             current.file_id, new_name, current.is_dir, current.size,
             current.etag, current.parent_id,
         )
-        self.renames.append((str(file_id), str(new_name)))
+        self.renames.append((file_id, new_name))
         return True
 
     def close(self):
@@ -156,7 +160,7 @@ class OrganizeProbeWorkerTests(IsolatedDatabaseTestCase):
             ),
         ])
         worker = OrganizeProbeWorker()
-        worker._client = client
+        worker._client = cast(GuangYaClient, client)
         profile = MediaProfile(
             resolution="1080p", video_codec="H.264", fps="23.976fps",
             audio_codec="AAC", audio_channels="2.0",
@@ -178,6 +182,7 @@ class OrganizeProbeWorkerTests(IsolatedDatabaseTestCase):
             expected.rsplit(".", 1)[0] + ".chs.srt",
         )
         row = db.get_organize_log(log_id)
+        assert row is not None
         self.assertEqual(row["current_name"], expected)
         items = [dict(item) for item in db.list_organize_log_items(log_id)]
         self.assertEqual(items[0]["current_name"], expected)
@@ -202,7 +207,7 @@ class OrganizeProbeWorkerTests(IsolatedDatabaseTestCase):
             ),
         ])
         worker = OrganizeProbeWorker()
-        worker._client = client
+        worker._client = cast(GuangYaClient, client)
 
         with patch(
             "app.modules.media_probe.probe_media_profile",
@@ -245,8 +250,8 @@ class OrganizeProbeWorkerTests(IsolatedDatabaseTestCase):
         client = FakeClient()
         replacement = FakeThread()
         old = FakeThread(alive=True, on_join=worker.start)
-        worker._thread = old
-        worker._client = client
+        worker._thread = cast(Thread, old)
+        worker._client = cast(GuangYaClient, client)
 
         with patch("app.modules.organize_probe_worker.threading.Thread", return_value=replacement):
             self.assertFalse(worker.stop(timeout=0.1))

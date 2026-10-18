@@ -6,17 +6,17 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Iterable, Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
 from app.clients.guangya import GuangYaClient, close_guangya_client
 from app.config import get, get_bool, get_int
+from app.indexers.providers.base import augment_public_magnet
 from app.logger import get_logger, redact_sensitive_text
 from app.modules.naming import sanitize_name
 from app.modules.special_media import is_sample_media_path
-from app.indexers.providers.base import augment_public_magnet
 
 logger = get_logger(__name__)
 
@@ -280,7 +280,7 @@ class OfflinePreviewStore:
         self._ttl_seconds = max(1.0, float(ttl_seconds))
         self._clock = clock
         self._token_factory = token_factory
-        self._max_entries = max(1, int(max_entries))
+        self._max_entries = max(1, max_entries)
         self._entries: dict[str, OfflinePreviewSnapshot] = {}
         self._lock = threading.RLock()
 
@@ -306,19 +306,19 @@ class OfflinePreviewStore:
         file_indexes: list[int],
         locked_indexes: list[int],
     ) -> str:
-        preview_id = str(self._token_factory() or "").strip()
+        preview_id = (self._token_factory() or "").strip()
         if not preview_id:
             raise RuntimeError("无法生成离线预览标识")
         now = self._clock()
         snapshot = OfflinePreviewSnapshot(
             preview_id=preview_id,
-            url=str(url or "").strip(),
-            title=str(title or "").strip(),
+            url=(url or "").strip(),
+            title=(title or "").strip(),
             rules=rules,
-            target_dir_id=str(target_dir_id or "0"),
-            target_dir_name=str(target_dir_name or ""),
-            file_indexes=tuple(int(value) for value in file_indexes),
-            locked_indexes=tuple(int(value) for value in locked_indexes),
+            target_dir_id=(target_dir_id or "0"),
+            target_dir_name=(target_dir_name or ""),
+            file_indexes=tuple(value for value in file_indexes),
+            locked_indexes=tuple(value for value in locked_indexes),
             expires_at=now + self._ttl_seconds,
         )
         with self._lock:
@@ -338,7 +338,7 @@ class OfflinePreviewStore:
         title: str,
         rules: OfflineRules,
     ) -> OfflinePreviewSnapshot:
-        key = str(preview_id or "").strip()
+        key = (preview_id or "").strip()
         now = self._clock()
         with self._lock:
             self._prune_locked(now)
@@ -346,8 +346,8 @@ class OfflinePreviewStore:
             if snapshot is None:
                 raise ValueError("预览已过期或已使用，请重新解析")
             context_matches = (
-                snapshot.url == str(url or "").strip()
-                and snapshot.title == str(title or "").strip()
+                snapshot.url == (url or "").strip()
+                and snapshot.title == (title or "").strip()
                 and snapshot.rules == rules
             )
             self._entries.pop(key, None)
@@ -389,12 +389,12 @@ class OfflineDecision:
 def _is_http_torrent_url(url: str, content_type: str = "") -> bool:
     """HTTP 是种子的传输载体，不是交给云盘保存的媒体文件协议。"""
     try:
-        parsed = urlparse(str(url or "").strip())
+        parsed = urlparse((url or "").strip())
     except ValueError:
         return False
     if parsed.scheme.lower() not in {"http", "https"}:
         return False
-    if str(content_type or "").split(";", 1)[0].strip().lower() in {
+    if (content_type or "").split(";", 1)[0].strip().lower() in {
         "application/x-bittorrent", "application/bittorrent",
     }:
         return True
@@ -412,11 +412,13 @@ def _prepare_offline_resource(
 ) -> tuple[str, bytes | None]:
     """三个离线入口共用种子载体转换；失败不能降级成普通 HTTP 文件下载。"""
     if not _is_http_torrent_url(url, content_type) and not (
-        torrent_data is not None and str(url).lower().startswith(("http://", "https://"))
+        torrent_data is not None and url.lower().startswith(("http://", "https://"))
     ):
         return url, torrent_data
     from app.modules.download_dispatcher import (
-        http_torrent_infohash_hint, parse_torrent_metadata, torrent_download_input,
+        http_torrent_infohash_hint,
+        parse_torrent_metadata,
+        torrent_download_input,
     )
     from app.modules.rss import _fetch_rss_payload
 
@@ -489,8 +491,8 @@ def analyze_offline_url(
 
 
 def _offline_staging_name(title: str, task_key: str) -> str:
-    label = str(title or "离线下载").strip()
-    identity = re.sub(r"[^A-Za-z0-9_-]+", "-", str(task_key or "").strip()).strip("-")
+    label = (title or "离线下载").strip()
+    identity = re.sub(r"[^A-Za-z0-9_-]+", "-", (task_key or "").strip()).strip("-")
     prefix = f"MF-{identity}" if identity else "MF-download"
     try:
         safe_title = sanitize_name(label)
@@ -516,9 +518,9 @@ def _remove_empty_staging(
             return "retained", "隔离目标已不再是目录，未自动删除"
         actual_parent = str(getattr(info, "parent_id", "") or "0")
         actual_name = str(getattr(info, "name", "") or "")
-        if expected_parent_id and actual_parent != str(expected_parent_id):
+        if expected_parent_id and actual_parent != expected_parent_id:
             return "retained", "隔离目录父级已变化，未自动删除"
-        if expected_name and actual_name != str(expected_name):
+        if expected_name and actual_name != expected_name:
             return "retained", "隔离目录名称已变化，未自动删除"
         if client.list_dir(directory_id):
             return "retained", "临时目录仍包含文件，未自动删除"
@@ -556,15 +558,15 @@ def _remove_empty_staging(
             trigger="offline_staging_rollback",
             reason="离线任务明确未受理，清理已复核为空的隔离暂存目录",
             candidate=DeleteCandidate(
-                file_id=str(directory_id),
-                name=actual_name or str(expected_name or "下载隔离目录"),
+                file_id=directory_id,
+                name=actual_name or (expected_name or "下载隔离目录"),
                 parent_id=actual_parent,
                 size=max(0, int(getattr(info, "size", 0) or 0)),
                 gcid=expected_etag,
             ),
             safe_failure_message="离线隔离暂存目录清理失败，目录已保留",
             delete_operation=lambda: delete_empty(
-                str(directory_id),
+                directory_id,
                 expected_etag=expected_etag,
                 expected_updated_at=expected_updated_at,
             ),
@@ -595,8 +597,8 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
     )
     if target_dir_id and decision.allowed:
         decision = OfflineDecision(
-            True, decision.protocol, str(target_dir_id),
-            str(target_dir_name or "指定目标目录"), "使用指定目录",
+            True, decision.protocol, target_dir_id,
+            (target_dir_name or "指定目标目录"), "使用指定目录",
             decision.matched_keyword,
         )
     if not decision.allowed:
@@ -664,7 +666,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
         if isolate_task:
             staging_name = _offline_staging_name(title, task_key)
             try:
-                staging_id = str(client.create_dir(staging_name, decision.target_dir_id) or "")
+                staging_id = (client.create_dir(staging_name, decision.target_dir_id) or "")
             except Exception as exc:
                 return {
                     "ok": False, "decision": decision.as_dict(),
@@ -683,8 +685,8 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
             if on_staging_created is not None:
                 staging_snapshot = {
                     "id": staging_id,
-                    "parent_id": str(decision.target_dir_id or "0"),
-                    "parent_name": str(decision.target_dir_name or ""),
+                    "parent_id": (decision.target_dir_id or "0"),
+                    "parent_name": (decision.target_dir_name or ""),
                     "name": staging_name,
                     "isolated": True,
                 }
@@ -694,12 +696,12 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
                     cleanup_status, cleanup_error = _remove_empty_staging(
                         client,
                         staging_id,
-                        expected_parent_id=str(decision.target_dir_id or "0"),
+                        expected_parent_id=(decision.target_dir_id or "0"),
                         expected_name=staging_name,
                     )
                     logger.warning(
                         "持久化光鸭隔离目录失败 task=%s type=%s",
-                        str(task_key or ""),
+                        (task_key or ""),
                         type(exc).__name__,
                     )
                     return {
@@ -715,7 +717,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
 
         try:
             if choices:
-                created = client.add_offline_selection(url, effective.target_dir_id, selected)
+                created: dict[str, Any] = client.add_offline_selection(url, effective.target_dir_id, selected)
                 ok = bool(created.get("ok"))
                 task_ids = [str(item) for item in (created.get("task_ids") or []) if str(item)]
                 completed_batches = int(created.get("completed_batches") or 0)
@@ -731,7 +733,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
                     staging_cleanup_status, staging_cleanup_error = _remove_empty_staging(
                         client,
                         staging_id,
-                        expected_parent_id=str(decision.target_dir_id or "0"),
+                        expected_parent_id=(decision.target_dir_id or "0"),
                         expected_name=staging_name,
                     )
                 elif not ok and staging_id:
@@ -752,7 +754,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
                     "tracking_incomplete": tracking_incomplete,
                     "staging": {
                         "id": staging_id,
-                        "parent_id": str(decision.target_dir_id or "0"),
+                        "parent_id": (decision.target_dir_id or "0"),
                         "name": staging_name if isolate_task else "",
                         "isolated": bool(staging_id),
                         "cleanup_status": staging_cleanup_status,
@@ -789,7 +791,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
                 staging_cleanup_status, staging_cleanup_error = _remove_empty_staging(
                     client,
                     staging_id,
-                    expected_parent_id=str(decision.target_dir_id or "0"),
+                    expected_parent_id=(decision.target_dir_id or "0"),
                     expected_name=staging_name,
                 )
             elif not ok and staging_id:
@@ -807,7 +809,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
                 "task_ids": task_ids, "batch_count": batch_count,
                 "outcome_unknown": outcome_unknown,
                 "tracking_incomplete": tracking_incomplete,
-                "staging": {"id": staging_id, "parent_id": str(decision.target_dir_id or "0"),
+                "staging": {"id": staging_id, "parent_id": (decision.target_dir_id or "0"),
                             "name": staging_name, "isolated": bool(staging_id),
                             "cleanup_status": staging_cleanup_status,
                             "cleanup_error": staging_cleanup_error},
@@ -822,7 +824,7 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
                 "ok": False, "decision": effective.as_dict(),
                 "staging": {
                     "id": staging_id,
-                    "parent_id": str(decision.target_dir_id or "0"),
+                    "parent_id": (decision.target_dir_id or "0"),
                     "name": staging_name,
                     "isolated": bool(staging_id),
                     "cleanup_status": cleanup_status,
@@ -896,8 +898,8 @@ def submit_offline_selection(url: str, selected_indexes: list[int] | None,
     if not decision.allowed:
         return {**base, "error": decision.reason}
     if expected_target_dir_id and (
-        decision.target_dir_id != str(expected_target_dir_id)
-        or decision.target_dir_name != str(expected_target_dir_name)
+        decision.target_dir_id != expected_target_dir_id
+        or decision.target_dir_name != expected_target_dir_name
     ):
         return {**base, "error": "预览目标已变化，请重新解析"}
     owned_client = client is None
@@ -990,7 +992,7 @@ def submit_offline_selection(url: str, selected_indexes: list[int] | None,
                 }
             return {**base, "error": error}
         try:
-            created = client.add_offline_selection(url, decision.target_dir_id, requested)
+            created: dict[str, Any] = client.add_offline_selection(url, decision.target_dir_id, requested)
         except Exception as exc:
             return {**base, "error": f"光鸭任务创建失败: {exc}"}
         if not created.get("ok", True):
@@ -1009,6 +1011,7 @@ def submit_offline_selection(url: str, selected_indexes: list[int] | None,
                 "batch_count": int(created.get("batch_count", 0)),
                 "error": str(created.get("error") or "光鸭任务创建失败"),
             }
+        completed_batches: Any = created.get("completed_batches", created.get("batch_count", 0))
         return {
             **base,
             "ok": True,
@@ -1020,7 +1023,7 @@ def submit_offline_selection(url: str, selected_indexes: list[int] | None,
             "selected_count": int(created.get("selected_count", len(requested))),
             "task_ids": list(created.get("task_ids") or []),
             "batch_count": int(created.get("batch_count", 0)),
-            "completed_batches": int(created.get("completed_batches", created.get("batch_count", 0))),
+            "completed_batches": int(completed_batches),
             "completed_indexes": list(created.get("completed_indexes") or requested),
             "remaining_indexes": [],
             "failed_batch": None,
@@ -1157,7 +1160,7 @@ def normalize_video_extensions(raw: str) -> tuple[str, ...]:
     return tuple(item for item in values if item in _DEFAULT_VIDEO_EXT_SET)
 
 
-def _normalize_selected_indexes(values: list[int]) -> list[int]:
+def _normalize_selected_indexes(values: Iterable[int | str | float]) -> list[int]:
     result: list[int] = []
     seen: set[int] = set()
     for value in values:

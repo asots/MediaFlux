@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import hashlib
 import tempfile
 import unittest
@@ -64,7 +67,7 @@ class StrmMetadataScanIndexTests(unittest.TestCase):
                 "source",
                 "http://media.invalid",
                 str(self.root),
-                client=_TreeClient({"source": files}),
+                client=cast(GuangYaClient, _TreeClient({"source": files})),
                 metadata_exts={"nfo"},
                 clean_invalid=False,
                 clean_empty_dirs=False,
@@ -117,7 +120,7 @@ class StrmMetadataScanIndexTests(unittest.TestCase):
                 "source",
                 "http://media.invalid",
                 str(self.root),
-                client=_TreeClient({"source": [remote]}),
+                client=cast(GuangYaClient, _TreeClient({"source": [remote]})),
                 metadata_exts={"nfo"},
                 clean_invalid=False,
                 clean_empty_dirs=False,
@@ -134,7 +137,7 @@ class StrmMetadataScanIndexTests(unittest.TestCase):
         stamp = target.stat().st_mtime_ns
         remote = GuangYaFile("legacy", target.name, False, 8, "cloud", "source")
         client = _TreeClient({"source": [remote]})
-        stats = strm.sync_strm("source", "http://media.invalid", str(self.root), client=client,
+        stats = strm.sync_strm("source", "http://media.invalid", str(self.root), client=cast(GuangYaClient, client),
                                metadata_exts={"ass"}, clean_invalid=False)
         self.assertEqual(stats["metadata_queued"], 1)
         self.assertEqual(stats["metadata_failed"], 0)
@@ -151,7 +154,7 @@ class StrmMetadataScanIndexTests(unittest.TestCase):
         self.assertFalse(temp.exists())
         row = db.list_strm_index("guangya-meta:source")[0]
         self.assertTrue(strm._metadata_state_matches(row, remote, target))
-        again = strm.sync_strm("source", "http://media.invalid", str(self.root), client=client,
+        again = strm.sync_strm("source", "http://media.invalid", str(self.root), client=cast(GuangYaClient, client),
                                metadata_exts={"ass"}, clean_invalid=False)
         self.assertEqual(again["metadata_queued"], 0)
         self.assertEqual(again["metadata_skipped"], 1)
@@ -202,7 +205,7 @@ class StrmMetadataScanIndexTests(unittest.TestCase):
                 self.wfile.flush()
                 self.close_connection = True
 
-            def log_message(self, *_):
+            def log_message(self, format, *args):
                 pass
 
         with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:

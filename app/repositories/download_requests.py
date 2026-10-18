@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
-
+from typing import Any
 
 _PLACEHOLDER_TITLES = ("", "磁力任务", "链接任务", "ED2K 任务", "未命名任务", "未命名下载请求", "离线下载", "torrent", "resource")
 
@@ -69,6 +69,7 @@ def add_download_log(source: str, title: str = "", path: str = "",
             (source, title, path, status, rss_item_id, request_id, backend_task_id,
              max(0.0, min(float(progress or 0), 1.0)), error, db.now(), db.now()),
         )
+        assert cur.lastrowid is not None
         return cur.lastrowid
 
 
@@ -109,7 +110,7 @@ def list_download_logs(source: str | None = None, status: str | None = None,
                        offset: int = 0) -> list[sqlite3.Row]:
     filters, params = _download_log_filters(source, status, keyword)
     sql = "SELECT * FROM download_log" + filters + " ORDER BY id DESC LIMIT ? OFFSET ?"
-    params.extend([max(1, int(limit)), max(0, int(offset))])
+    params.extend([max(1, limit), max(0, offset)])
     with db.get_conn() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -126,7 +127,7 @@ def count_download_logs(source: str | None = None, status: str | None = None,
 def delete_download_logs(log_ids: list[int]) -> list[int]:
     """删除指定下载日志并返回实际删除的 ID；不操作下载请求、后端任务或文件。"""
     normalized = list(dict.fromkeys(
-        int(value) for value in log_ids if int(value) > 0
+        value for value in log_ids if value > 0
     ))
     if not normalized:
         return []
@@ -166,8 +167,8 @@ _DOWNLOAD_ATTENTION_WHERE = (
 def _normalized_request_keys(
     request_key: str, alternate_request_keys: Iterable[str] | None,
 ) -> tuple[str, ...]:
-    values = [str(request_key or "").strip()]
-    values.extend(str(value or "").strip() for value in (alternate_request_keys or ()))
+    values = [(request_key or "").strip()]
+    values.extend((value or "").strip() for value in (alternate_request_keys or ()))
     normalized = tuple(dict.fromkeys(value for value in values if value))
     if not normalized:
         raise ValueError("下载请求 key 不能为空")
@@ -205,7 +206,7 @@ def _content_request_keys(conn, request_id: int, source_alias_key: str) -> set[s
     return {
         str(row[0]) for row in conn.execute(
             "SELECT request_key FROM download_request_keys WHERE request_id=?",
-            (int(request_id),),
+            (request_id,),
         ) if str(row[0]) != source_alias_key
     }
 
@@ -235,7 +236,7 @@ def check_download_request_torrent_identity(
     with db.get_conn() as conn:
         conn.execute("BEGIN")
         if not conn.execute(
-            "SELECT 1 FROM download_request_keys WHERE request_id=? LIMIT 1", (int(request_id),),
+            "SELECT 1 FROM download_request_keys WHERE request_id=? LIMIT 1", (request_id,),
         ).fetchone():
             raise ValueError("原下载请求已被接管，未重新提交")
         _check_torrent_identity_conn(conn, request_id, keys, source_alias_key)
@@ -253,7 +254,7 @@ def _register_request_keys(
     conn.executemany(
         f"{verb} INTO download_request_keys(request_key,request_id,created_at) "
         "VALUES(?,?,?)",
-        ((key, int(request_id), timestamp) for key in keys),
+        ((key, request_id, timestamp) for key in keys),
     )
 
 
@@ -269,17 +270,17 @@ def _bind_media_download_admission_conn(
     cur = conn.execute(
         "UPDATE media_download_admissions SET request_id=?,updated_at=? "
         "WHERE id=? AND status='dispatching' AND request_id IS NULL",
-        (int(request_id), timestamp, int(admission_id)),
+        (request_id, timestamp, admission_id),
     )
     if cur.rowcount == 1:
         return
     current = conn.execute(
         "SELECT request_id,status FROM media_download_admissions WHERE id=?",
-        (int(admission_id),),
+        (admission_id,),
     ).fetchone()
     if (
         current is not None
-        and int(current["request_id"] or 0) == int(request_id)
+        and int(current["request_id"] or 0) == request_id
         and str(current["status"] or "") in {
             "dispatching", "submitted", "downloading", "processing"
         }
@@ -299,14 +300,14 @@ def bind_verified_torrent_identity(
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT kind,source_value,status,gy_status,torrent_data FROM download_requests WHERE id=?",
-            (int(request_id),),
+            (request_id,),
         ).fetchone()
         if row is None or row["kind"] != "http" or row["source_value"] != source_value:
             raise ValueError("下载请求状态已变化，未提交种子")
         if pending_only:
             # 准备结果只能补入尚未被认领的历史请求；竞争者已认领时由调用方重读状态。
             if row["status"] != "pending":
-                return int(request_id)
+                return request_id
         elif (row["status"] not in {"submitting", "submitted", "downloading", "partial", "completed"}
                 or row["gy_status"] != "submitting"):
             raise ValueError("下载请求状态已变化，未提交种子")
@@ -315,14 +316,14 @@ def bind_verified_torrent_identity(
         _check_torrent_identity_conn(conn, request_id, keys, source_alias_key)
         keys = _compatible_request_keys(conn, keys, source_alias_key)
         owners = _request_rows_for_keys(conn, keys, columns="id,status,request_key")
-        blockers = [r for r in owners if int(r["id"]) != int(request_id)
+        blockers = [r for r in owners if int(r["id"]) != request_id
                     and r["status"] not in {"failed", "cancelled", "resubmitted"}]
         if blockers:
             return int(_preferred_request_row(blockers, keys[0])["id"])
-        _register_request_keys(conn, int(request_id), keys, timestamp, replace=True)
+        _register_request_keys(conn, request_id, keys, timestamp, replace=True)
         conn.execute("UPDATE download_requests SET torrent_data=?,content_type='application/x-bittorrent',updated_at=? WHERE id=?",
-                     (torrent_data, timestamp, int(request_id)))
-        return int(request_id)
+                     (torrent_data, timestamp, request_id))
+        return request_id
 
 
 def bind_media_download_admission_request(admission_id: int, request_id: int) -> bool:
@@ -353,7 +354,7 @@ def create_download_request(request_key: str, kind: str, title: str = "",
     保留旧请求作为历史尝试，并创建新的 canonical 请求。``manual_review`` 仅允许
     待处理页显式传入 ``supersede_request_id`` 时创建 successor。
     """
-    display_title = str(display_title).strip() if usable_download_title(display_title) else ""
+    display_title = display_title.strip() if usable_download_title(display_title) else ""
     if initial_targets not in {"", "qb", "guangya", "both"}:
         raise ValueError("未知下载认领目标")
     retryable_kinds = {"magnet", "torrent", "ed2k", "http"}
@@ -372,10 +373,10 @@ def create_download_request(request_key: str, kind: str, title: str = "",
                     "UPDATE download_requests SET (gy_requested_target_dir,gy_requested_nsfw) = "
                     "(SELECT COALESCE(NULLIF(gy_requested_target_dir,''),gy_staging_parent_dir,''), "
                     "gy_requested_nsfw FROM download_requests WHERE id=?) WHERE id=?",
-                    (int(retry_source_request_id), int(request_id)),
+                    (retry_source_request_id, request_id),
                 )
             if created and initial_targets and not _claim_download_request_conn(
-                conn, int(request_id), initial_targets, timestamp
+                conn, request_id, initial_targets, timestamp
             ):
                 raise RuntimeError("新下载请求未能认领")
             if created and admission_source_ids:
@@ -386,28 +387,28 @@ def create_download_request(request_key: str, kind: str, title: str = "",
                 _transfer_failed_media_download_admissions_conn(
                     conn,
                     source_request_ids=admission_source_ids,
-                    successor_request_id=int(request_id),
+                    successor_request_id=request_id,
                     timestamp=timestamp,
                 )
             _bind_media_download_admission_conn(
-                conn, admission_id, int(request_id), timestamp
+                conn, admission_id, request_id, timestamp
             )
             if not created and display_title:
-                _enrich_display_title_conn(conn, int(request_id), display_title)
-            return int(request_id), created
+                _enrich_display_title_conn(conn, request_id, display_title)
+            return request_id, created
 
         # 串行化“检查所有等价 key → 归档历史 → 新建 canonical 请求”。
         conn.execute("BEGIN IMMEDIATE")
         if retry_source_request_id is not None:
             source = conn.execute(
                 "SELECT status,qb_status,gy_status,organize_status FROM download_requests WHERE id=?",
-                (int(retry_source_request_id),),
+                (retry_source_request_id,),
             ).fetchone()
-            if source is None or str(source["status"] or "") != str(retry_source_status):
+            if source is None or str(source["status"] or "") != retry_source_status:
                 raise DownloadRequestRetryFenceError(
                     "原下载请求状态已变化，未重新提交"
                 )
-            if str(origin or "").startswith("rss:"):
+            if (origin or "").startswith("rss:"):
                 from app.repositories.rss import rss_retry_source_is_safe
 
                 if not rss_retry_source_is_safe(source, initial_targets):
@@ -436,27 +437,27 @@ def create_download_request(request_key: str, kind: str, title: str = "",
                 "INSERT INTO download_requests(request_key,origin,chat_id,user_id,message_id,kind,title,display_title,"
                 "source_value,torrent_data,content_type,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (primary_key, origin, chat_id, user_id, message_id, kind, title, display_title, source_value,
-                 torrent_data, str(content_type or ""), "pending", timestamp, timestamp),
+                 torrent_data, (content_type or ""), "pending", timestamp, timestamp),
             )
-            request_id = int(created.lastrowid)
+            assert created.lastrowid is not None
+            request_id = created.lastrowid
             _register_request_keys(conn, request_id, keys, timestamp)
             return finish(request_id, True)
 
         explicit_row = None
         if supersede_request_id is not None:
-            explicit_id = int(supersede_request_id)
+            explicit_id = supersede_request_id
             explicit_row = next((row for row in rows if int(row["id"]) == explicit_id), None)
 
         active_rows = [
             row for row in rows if str(row["status"] or "") not in terminal_statuses
         ]
-        explicit_manual_successor = bool(
-            explicit_row is not None
-            and str(explicit_row["status"] or "") == "manual_review"
-        )
+        explicit_manual_successor = (explicit_row is not None
+            and str(explicit_row["status"] or "") == "manual_review")
         active_blockers = [
             row for row in active_rows
-            if not (explicit_manual_successor and int(row["id"]) == int(explicit_row["id"]))
+            if not (explicit_manual_successor and explicit_row is not None
+                    and int(row["id"]) == int(explicit_row["id"]))
         ]
         if active_blockers:
             existing = _preferred_request_row(active_blockers, primary_key)
@@ -474,7 +475,8 @@ def create_download_request(request_key: str, kind: str, title: str = "",
         rows_to_archive = [
             row for row in rows
             if str(row["status"] or "") in terminal_statuses
-            or (explicit_manual_successor and int(row["id"]) == int(explicit_row["id"]))
+            or (explicit_manual_successor and explicit_row is not None
+                and int(row["id"]) == int(explicit_row["id"]))
         ]
         if not rows_to_archive or any(
             str(row["kind"] or kind) not in retryable_kinds for row in rows_to_archive
@@ -516,14 +518,15 @@ def create_download_request(request_key: str, kind: str, title: str = "",
             "INSERT INTO download_requests(request_key,origin,chat_id,user_id,message_id,kind,title,display_title,"
             "source_value,torrent_data,content_type,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (primary_key, origin, chat_id, user_id, message_id, kind, title, display_title, source_value,
-             torrent_data, str(content_type or ""), "pending", timestamp, timestamp),
+             torrent_data, (content_type or ""), "pending", timestamp, timestamp),
         )
-        request_id = int(created.lastrowid)
+        assert created.lastrowid is not None
+        request_id = created.lastrowid
         _register_request_keys(conn, request_id, keys, timestamp)
         admission_source_ids = ()
         if retry_source_request_id is not None:
             admission_source_ids = tuple(dict.fromkeys((
-                int(retry_source_request_id),
+                retry_source_request_id,
                 *(int(row["id"]) for row in rows_to_archive
                   if str(row["status"] or "") in {"failed", "manual_review"}),
             )))
@@ -537,15 +540,15 @@ def bind_pending_download_request_owner(
     user_id: str,
 ) -> sqlite3.Row | None:
     """验证 Telegram pending 请求的规范会话所有者。"""
-    safe_chat = str(chat_id or "").strip()
-    safe_user = str(user_id or "").strip()
+    safe_chat = (chat_id or "").strip()
+    safe_user = (user_id or "").strip()
     if not safe_chat or not safe_user:
         return None
     with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM download_requests "
             "WHERE id=? AND status='pending' AND chat_id=? AND user_id=?",
-            (int(request_id), safe_chat, safe_user),
+            (request_id, safe_chat, safe_user),
         ).fetchone()
 
 
@@ -578,7 +581,7 @@ def claim_failed_share_transfer_request(request_id: int) -> bool:
             "completed_at=NULL,updated_at=? WHERE id=? AND kind='guangya_share' "
             "AND status='failed' AND (SELECT COUNT(*) FROM download_log "
             "WHERE request_id=download_requests.id AND source='guangya_share')=1",
-            (db.now(), int(request_id)),
+            (db.now(), request_id),
         )
         return cur.rowcount == 1
 
@@ -606,24 +609,24 @@ def finish_share_transfer_request(
     )
     gy_status = "completed" if success else normalized_failure
     log_status = "success" if success else "failed"
-    safe_error = str(error or "")
+    safe_error = (error or "")
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if not conn.execute(
             "SELECT 1 FROM download_requests WHERE id=? AND kind='guangya_share'",
-            (int(request_id),),
+            (request_id,),
         ).fetchone():
             return False
         status = _finalize_download_request_submission_conn(
             conn, request_id, ("guangya",),
             targets="guangya", gy_status=gy_status,
-            gy_target_dir=str(target_dir_id or "0"),
-            gy_target_name=str(target_dir_name or "根目录"),
+            gy_target_dir=(target_dir_id or "0"),
+            gy_target_name=(target_dir_name or "根目录"),
             gy_isolated=1 if isolated else 0,
-            gy_staging_parent_dir=str(staging_parent_dir or ""),
-            gy_staging_name=str(staging_name or ""),
-            gy_staging_cleanup_status=str(staging_cleanup_status or ""),
-            gy_staging_cleanup_error=str(staging_cleanup_error or ""),
+            gy_staging_parent_dir=(staging_parent_dir or ""),
+            gy_staging_name=(staging_name or ""),
+            gy_staging_cleanup_status=(staging_cleanup_status or ""),
+            gy_staging_cleanup_error=(staging_cleanup_error or ""),
             error=safe_error,
         )
         if status is None:
@@ -632,8 +635,8 @@ def finish_share_transfer_request(
             "INSERT INTO download_log(source,title,path,status,request_id,progress,error,"
             "created_at,updated_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
-                "guangya_share", str(title or f"分享转存 {max(0, int(count))} 项"),
-                str(target_dir_name or "根目录"), log_status, request_id,
+                "guangya_share", (title or f"分享转存 {max(0, count)} 项"),
+                (target_dir_name or "根目录"), log_status, request_id,
                 1.0 if success else 0.0, safe_error, timestamp, timestamp, timestamp,
             ),
         )
@@ -651,7 +654,7 @@ def get_download_request(request_id: int) -> sqlite3.Row | None:
 def count_download_requests_requiring_attention(request_id: int | None = None) -> int:
     """看板与重提回执共用待处理口径，可精确核对单条请求。"""
     scope = " AND id=?" if request_id is not None else ""
-    params = (int(request_id),) if request_id is not None else ()
+    params = (request_id,) if request_id is not None else ()
     with db.get_conn() as conn:
         return int(conn.execute(
             f"SELECT COUNT(*) FROM download_requests WHERE {_DOWNLOAD_ATTENTION_WHERE}{scope}", params,
@@ -662,8 +665,8 @@ def list_download_requests_requiring_attention(
     *, limit: int = 50, offset: int = 0,
 ) -> list[sqlite3.Row]:
     """列出与看板计数口径完全一致的待处理请求。"""
-    safe_limit = max(1, min(int(limit or 50), 100))
-    safe_offset = max(0, int(offset or 0))
+    safe_limit = max(1, min((limit or 50), 100))
+    safe_offset = max(0, (offset or 0))
     with db.get_conn() as conn:
         return conn.execute(
             f"SELECT * FROM download_requests WHERE {_DOWNLOAD_ATTENTION_WHERE} "
@@ -677,7 +680,7 @@ def clear_download_request_attentions(
 ) -> dict[str, list[int]]:
     """统一确认告警；batch 只区分审计文案，不改变事务、状态与文件边界。"""
     normalized = list(dict.fromkeys(
-        int(value) for value in request_ids if int(value) > 0
+        value for value in request_ids if value > 0
     ))
     result = {"cleared": [], "already_cleared": [], "not_attention": [], "not_found": []}
     if not normalized:
@@ -727,7 +730,7 @@ def mark_download_request_resubmitted(
     if targets not in {"qb", "guangya", "both"}:
         raise ValueError("未知下载重提目标")
     timestamp = db.now()
-    note = f"已重新提交为请求 #{int(successor_request_id)}（目标：{targets}）"
+    note = f"已重新提交为请求 #{successor_request_id}（目标：{targets}）"
     fields = ["status"]
     if targets in {"qb", "both"}:
         fields.extend(("qb_status", "local_import_status"))
@@ -750,7 +753,7 @@ def mark_download_request_resubmitted(
     with db.get_conn() as conn:
         cur = conn.execute(
             f"UPDATE download_requests SET {','.join(assignments)} WHERE id=?",
-            (note, note, timestamp, int(request_id)),
+            (note, note, timestamp, request_id),
         )
         return cur.rowcount == 1
 
@@ -765,10 +768,10 @@ def purge_expired_download_request_torrent_data(
     仅处理明确终态的请求。``manual_review`` 以及仍有活动后端的
     ``resubmitted`` 请求会继续保留原始种子，避免自动清理妨碍人工恢复。
     """
-    days = int(retention_days or 0)
+    days = (retention_days or 0)
     if days <= 0:
         return 0
-    batch_limit = max(1, min(int(limit or 500), 5000))
+    batch_limit = max(1, min((limit or 500), 5000))
     terminal_timestamp = (
         "COALESCE(NULLIF(completed_at,''),NULLIF(updated_at,''),created_at)"
     )
@@ -787,7 +790,7 @@ def purge_expired_download_request_torrent_data(
             ")",
             (f"-{days} days", batch_limit),
         )
-        return int(cur.rowcount or 0)
+        return (cur.rowcount or 0)
 
 
 def get_download_request_status_snapshot(
@@ -800,20 +803,20 @@ def get_download_request_status_snapshot(
             "SELECT targets,status,qb_status,gy_status,organize_started,"
             "local_import_status,created_at,updated_at,completed_at "
             "FROM download_requests WHERE id=?",
-            (int(request_id),),
+            (request_id,),
         ).fetchone()
         logs = conn.execute(
             "SELECT source,status,progress,created_at,updated_at,completed_at "
             "FROM download_log WHERE request_id=? AND source IN ('qb','guangya') "
             "ORDER BY id DESC LIMIT 8",
-            (int(request_id),),
+            (request_id,),
         ).fetchall()
         return row, logs
 
 
 def get_download_request_by_request_key(request_key: str):
     """按 canonical key 读取当前活动/最新下载请求。"""
-    key = str(request_key or "").strip()
+    key = (request_key or "").strip()
     if not key:
         return None
     with db.get_conn() as conn:
@@ -847,7 +850,7 @@ def claim_download_request_targets(request_id: int, targets: str) -> tuple[str, 
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT id,status,targets,qb_status,gy_status FROM download_requests WHERE id=?",
-            (int(request_id),),
+            (request_id,),
         ).fetchone()
         # 在同一事务内阻止已取消/已交接的请求被迟到认领重新激活。
         if not row or str(row["status"] or "") in {
@@ -903,7 +906,7 @@ def claim_download_request_targets(request_id: int, targets: str) -> tuple[str, 
             ])
         conn.execute(
             f"UPDATE download_requests SET {','.join(sets)} WHERE id=?",
-            (*values, int(request_id)),
+            (*values, request_id),
         )
         return tuple(missing)
 
@@ -917,9 +920,9 @@ def bind_download_request_guangya_staging(
     target_name: str,
 ) -> bool:
     """在离线 Provider 接收任务前原子绑定隔离目录身份。"""
-    safe_staging_id = str(staging_id or "").strip()
-    safe_parent_id = str(parent_id or "0").strip() or "0"
-    safe_staging_name = str(staging_name or "").strip()
+    safe_staging_id = (staging_id or "").strip()
+    safe_parent_id = (parent_id or "0").strip() or "0"
+    safe_staging_name = (staging_name or "").strip()
     if not safe_staging_id or not safe_staging_name:
         return False
     with db.get_conn() as conn:
@@ -932,11 +935,11 @@ def bind_download_request_guangya_staging(
             "AND status NOT IN ('completed','failed','cancelled','resubmitted')",
             (
                 safe_staging_id,
-                str(target_name or safe_staging_name),
+                (target_name or safe_staging_name),
                 safe_parent_id,
                 safe_staging_name,
                 db.now(),
-                int(request_id),
+                request_id,
             ),
         )
         return cur.rowcount == 1
@@ -950,7 +953,7 @@ def cancel_pending_download_request(request_id: int, *, error: str = "") -> bool
         cur = conn.execute(
             "UPDATE download_requests SET status='cancelled',targets='cancelled',"
             "error=?,completed_at=?,updated_at=? WHERE id=? AND status='pending'",
-            (str(error or ""), timestamp, timestamp, int(request_id)),
+            ((error or ""), timestamp, timestamp, request_id),
         )
         if cur.rowcount != 1:
             return False
@@ -958,7 +961,7 @@ def cancel_pending_download_request(request_id: int, *, error: str = "") -> bool
             _sync_media_download_admissions_conn,
         )
 
-        _sync_media_download_admissions_conn(conn, int(request_id), timestamp)
+        _sync_media_download_admissions_conn(conn, request_id, timestamp)
         return True
 
 
@@ -1008,7 +1011,7 @@ def claim_download_request_organize(request_id: int) -> bool:
             "UPDATE download_requests SET organize_started=1,organize_status='starting',"
             "organize_error='',updated_at=? WHERE id=? "
             f"AND {_GUANGYA_FOLLOWUP_READY_SQL}",
-            (db.now(), int(request_id)),
+            (db.now(), request_id),
         )
         return cur.rowcount == 1
 
@@ -1027,12 +1030,12 @@ def claim_download_request_staging_finalize(
     使用 ``organize_next_retry_at`` 作为短租约，既阻止并发 Worker 重复提交，
     又允许进程在启动 Writer 后异常退出时自动恢复。
     """
-    safe_staging_id = str(staging_id or "").strip()
-    safe_parent_id = str(parent_id or "0").strip() or "0"
-    safe_staging_name = str(staging_name or "").strip()
+    safe_staging_id = (staging_id or "").strip()
+    safe_parent_id = (parent_id or "0").strip() or "0"
+    safe_staging_name = (staging_name or "").strip()
     if not safe_staging_id or not safe_staging_name:
         return False
-    ttl = max(5, min(int(lease_seconds or 30), 300))
+    ttl = max(5, min((lease_seconds or 30), 300))
     timestamp = db.now()
     retry_at = (
         datetime.now() + timedelta(seconds=ttl)
@@ -1050,7 +1053,7 @@ def claim_download_request_staging_finalize(
             (
                 retry_at,
                 timestamp,
-                int(request_id),
+                request_id,
                 safe_staging_id,
                 safe_parent_id,
                 safe_staging_name,
@@ -1140,20 +1143,20 @@ def _update_download_request_conn(
     if accepting and not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
     previous = conn.execute(
-        "SELECT qb_status,gy_status FROM download_requests WHERE id=?", (int(request_id),),
+        "SELECT qb_status,gy_status FROM download_requests WHERE id=?", (request_id,),
     ).fetchone() if accepting else None
     rss_accepted = previous is not None and any(previous[key] not in accepted for key in accepting)
     sets.append("updated_at=?")
-    values.extend([timestamp, int(request_id)])
+    values.extend([timestamp, request_id])
     conn.execute(f"UPDATE download_requests SET {', '.join(sets)} WHERE id=?", values)
     if rss_accepted:
         from app.repositories.rss import _sync_rss_download_entries_conn
-        _sync_rss_download_entries_conn(conn, int(request_id), timestamp)
+        _sync_rss_download_entries_conn(conn, request_id, timestamp)
     if {"strm_status", "strm_error", "strm_finished_at", "strm_run_id"}.intersection(fields):
         # 非当前队列工作写入的新状态会撤销旧失败的重试授权，即使错误文本相同。
         conn.execute(
             "UPDATE strm_request_work SET failed_lease_generation=-1 "
-            "WHERE request_id=? AND failed_lease_generation>=0", (int(request_id),),
+            "WHERE request_id=? AND failed_lease_generation>=0", (request_id,),
         )
     return True
 
@@ -1162,11 +1165,11 @@ def claim_download_request_notification(
     request_id: int,
     *,
     lease_seconds: int = 300,
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """原子领取一条到期通知，避免并发 tracker 重复发送。"""
     timestamp = db.now()
     lease_until = (
-        datetime.now() + timedelta(seconds=max(30, int(lease_seconds or 300)))
+        datetime.now() + timedelta(seconds=max(30, (lease_seconds or 300)))
     ).strftime("%Y-%m-%d %H:%M:%S")
     token = uuid.uuid4().hex
     with db.get_conn() as conn:
@@ -1179,7 +1182,7 @@ def claim_download_request_notification(
             "(notification_delivery_status='sending' AND "
             "(notification_lease_expires_at IS NULL OR notification_lease_expires_at='' "
             "OR notification_lease_expires_at<=datetime('now','localtime'))))",
-            (int(request_id),),
+            (request_id,),
         ).fetchone()
         if row is None:
             return None
@@ -1193,7 +1196,7 @@ def claim_download_request_notification(
             "(notification_delivery_status='sending' AND "
             "(notification_lease_expires_at IS NULL OR notification_lease_expires_at='' "
             "OR notification_lease_expires_at<=datetime('now','localtime'))))",
-            (token, lease_until, timestamp, int(request_id)),
+            (token, lease_until, timestamp, request_id),
         )
         if cur.rowcount != 1:
             return None
@@ -1211,7 +1214,7 @@ def finalize_download_request_notification(
     retry_at: str | None = None,
 ) -> bool:
     """仅由当前 lease 持有者提交通知结果。"""
-    normalized_token = str(token or "").strip()
+    normalized_token = (token or "").strip()
     if not normalized_token:
         return False
     timestamp = db.now()
@@ -1223,7 +1226,7 @@ def finalize_download_request_notification(
                 "notification_lease_token='',notification_lease_expires_at=NULL,updated_at=? "
                 "WHERE id=? AND notification_delivery_status='sending' "
                 "AND notification_lease_token=?",
-                (timestamp, timestamp, int(request_id), normalized_token),
+                (timestamp, timestamp, request_id, normalized_token),
             )
         else:
             cur = conn.execute(
@@ -1232,7 +1235,7 @@ def finalize_download_request_notification(
                 "notification_lease_token='',notification_lease_expires_at=NULL,updated_at=? "
                 "WHERE id=? AND notification_delivery_status='sending' "
                 "AND notification_lease_token=?",
-                (retry_at or timestamp, timestamp, int(request_id), normalized_token),
+                (retry_at or timestamp, timestamp, request_id, normalized_token),
             )
         return cur.rowcount == 1
 
@@ -1254,7 +1257,7 @@ def update_download_request_and_sync_media_admission(request_id: int, **fields) 
         )
 
         return _sync_media_download_admissions_conn(
-            conn, int(request_id), timestamp
+            conn, request_id, timestamp
         )
 
 
@@ -1273,13 +1276,13 @@ def request_download_notification_refresh(request_id: int) -> bool:
     timestamp = db.now()
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT * FROM download_requests WHERE id=?", (int(request_id),)).fetchone()
+        row = conn.execute("SELECT * FROM download_requests WHERE id=?", (request_id,)).fetchone()
         if row is None or row["status"] in {"cancelled", "resubmitted"}:
             return False
         if row["notification_delivery_status"] in {"pending", "retry_wait", "sending"}:
             return False
         return _update_download_request_conn(
-            conn, int(request_id), _download_notification_refresh_fields(str(row["status"]), timestamp), timestamp,
+            conn, request_id, _download_notification_refresh_fields(str(row["status"]), timestamp), timestamp,
         )
 
 
@@ -1290,7 +1293,7 @@ def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
     cancelled 表示用户已停止跟踪，不是远端删除成功的凭据；即使随后超时
     或进程退出也不能重新启动入库/缺失告警。已完成入库及另一下载后端保留。
     """
-    normalized = list(dict.fromkeys(str(value or "").strip().lower() for value in hashes))
+    normalized = list(dict.fromkeys((value or "").strip().lower() for value in hashes))
     if not normalized:
         return []
     if any(not 40 <= len(value) <= 64 or set(value) - set("0123456789abcdef") for value in normalized):
@@ -1310,7 +1313,9 @@ def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
             f"AND lower(trim(qb_task_id)) IN ({placeholders})",
             tuple(normalized),
         ).fetchall()
-        from app.repositories.telegram_notifications import invalidate_pending_download_notifications_conn
+        from app.repositories.telegram_notifications import (
+            invalidate_pending_download_notifications_conn,
+        )
 
         notification_requests = invalidate_pending_download_notifications_conn(
             conn, [int(row["id"]) for row in rows], timestamp=timestamp,
@@ -1348,7 +1353,9 @@ def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
                 "AND status NOT IN ('success','completed','failed','cancelled','resubmitted')",
                 (timestamp, timestamp, note, note, request_id),
             )
-            from app.repositories.media_subscriptions import _sync_media_download_admissions_conn
+            from app.repositories.media_subscriptions import (
+                _sync_media_download_admissions_conn,
+            )
 
             _sync_media_download_admissions_conn(conn, request_id, timestamp)
             changed.append(request_id)
@@ -1356,7 +1363,7 @@ def cancel_qb_download_tracking(hashes: Iterable[str]) -> list[int]:
 
 
 def apply_download_tracker_update(
-    snapshot: sqlite3.Row | Mapping[str, object],
+    snapshot: sqlite3.Row | Mapping[str, Any],
     **fields,
 ) -> sqlite3.Row | None:
     """在写事务内校验完整快照，返回已落盘状态；冲突/取消时拒绝本轮观察。
@@ -1407,15 +1414,15 @@ def _finalize_download_request_submission_conn(
     否则迟到结果只能进入审计日志，不能复活旧请求。
     """
     normalized = tuple(dict.fromkeys(
-        str(target or "").strip() for target in claimed_targets
-        if str(target or "").strip() in {"qb", "guangya"}
+        (target or "").strip() for target in claimed_targets
+        if (target or "").strip() in {"qb", "guangya"}
     ))
     if not normalized:
         return None
 
     timestamp = db.now()
     conditions = ["id=?", "status NOT IN ('resubmitted','cancelled')"]
-    values: list[object] = [int(request_id)]
+    values: list[object] = [request_id]
     if "qb" in normalized:
         conditions.append("qb_status='submitting'")
     if "guangya" in normalized:
@@ -1452,7 +1459,7 @@ def _finalize_download_request_submission_conn(
     updates["completed_at"] = (
         timestamp if root_status in {"completed", "failed", "manual_review"} else None
     )
-    if not _update_download_request_conn(conn, int(request_id), updates, timestamp):
+    if not _update_download_request_conn(conn, request_id, updates, timestamp):
         return None
 
     from app.repositories.media_subscriptions import (  # 局部导入避免仓储循环加载
@@ -1460,7 +1467,7 @@ def _finalize_download_request_submission_conn(
     )
 
     _sync_media_download_admissions_conn(
-        conn, int(request_id), timestamp
+        conn, request_id, timestamp
     )
     return root_status
 
@@ -1491,12 +1498,12 @@ def link_download_request_to_local_media_task(
             "local_import_completed_at=NULL,updated_at=? "
             "WHERE id=? AND COALESCE(local_import_status,'') IN ('','pending')",
             (
-                f"local-media-task:{int(task_id)}", str(content_path or ""),
-                timestamp, timestamp, int(request_id),
+                f"local-media-task:{task_id}", (content_path or ""),
+                timestamp, timestamp, request_id,
             ),
         )
         if cur.rowcount == 1:
-            db.reconcile_local_media_downloads(conn, task_id=int(task_id))
+            db.reconcile_local_media_downloads(conn, task_id=task_id)
         return cur.rowcount == 1
 
 
@@ -1506,27 +1513,25 @@ def mark_download_request_local_media_skipped(request_id: int, content_path: str
             "UPDATE download_requests SET local_import_status='skipped',qb_content_path=?,"
             "local_import_error=?,local_import_completed_at=?,updated_at=? "
             "WHERE id=? AND COALESCE(local_import_status,'') IN ('','pending')",
-            (str(content_path or ""), str(error or "")[:1000], db.now(), db.now(), int(request_id)),
+            ((content_path or ""), (error or "")[:1000], db.now(), db.now(), request_id),
         )
         return cur.rowcount == 1
 
 
 def can_retry_download_local_import(row) -> bool:
     """仅重开尚未建本地任务的确定失败；已绑定任务沿原 task 重试。"""
-    return bool(
-        row is not None
+    return (row is not None
         and str(row["status"] or "") not in {"cancelled", "resubmitted"}
         and str(row["qb_status"] or "") == "completed"
         and str(row["local_import_status"] or "") == "failed"
-        and not str(row["local_import_target"] or "").strip()
-    )
+        and not str(row["local_import_target"] or "").strip())
 
 
 def retry_download_local_import(request_id: int) -> bool:
     """在同一写事务校验并恢复原请求；不重投下载、不修改另一后端。"""
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT * FROM download_requests WHERE id=?", (int(request_id),)).fetchone()
+        row = conn.execute("SELECT * FROM download_requests WHERE id=?", (request_id,)).fetchone()
         if not can_retry_download_local_import(row):
             return False
         conn.execute(
@@ -1534,11 +1539,11 @@ def retry_download_local_import(request_id: int) -> bool:
             "local_import_attempts=0,local_import_error='',local_import_started_at=NULL,"
             "local_import_completed_at=NULL,attention_cleared_at=NULL,attention_clear_note='',updated_at=? "
             "WHERE id=?",
-            (db.now(), int(request_id)),
+            (db.now(), request_id),
         )
         timestamp = db.now()
         _update_download_request_conn(
-            conn, int(request_id),
+            conn, request_id,
             _download_notification_refresh_fields(str(row["status"]), timestamp), timestamp,
         )
         return True
@@ -1557,8 +1562,8 @@ def mark_download_request_local_media_failed(
             "local_import_completed_at=?,updated_at=? "
             "WHERE id=? AND COALESCE(local_import_status,'') IN ('','pending')",
             (
-                str(content_path or ""), str(error or "")[:1000], timestamp,
-                timestamp, timestamp, int(request_id),
+                (content_path or ""), (error or "")[:1000], timestamp,
+                timestamp, timestamp, request_id,
             ),
         )
         return cur.rowcount == 1
@@ -1580,7 +1585,7 @@ def _recover_legacy_pending_cancellations_conn(
         "AND COALESCE(gy_task_ids,'[]') IN ('','[]')",
         (timestamp, timestamp),
     )
-    return int(cur.rowcount or 0)
+    return (cur.rowcount or 0)
 
 
 def _recover_interrupted_download_submissions_conn(
@@ -1599,7 +1604,7 @@ def _recover_interrupted_download_submissions_conn(
             " AND datetime(COALESCE(NULLIF(updated_at,''),created_at)) "
             "< datetime('now','localtime', ?)"
         )
-        age_params = (f"-{max(1, int(stale_minutes or 15))} minutes",)
+        age_params = (f"-{max(1, (stale_minutes or 15))} minutes",)
     recovered = 0
     for predicate, message in (
         (
@@ -1626,7 +1631,7 @@ def _recover_interrupted_download_submissions_conn(
             + predicate + age_clause,
             (message, message, message, timestamp, timestamp, *age_params),
         )
-        recovered += int(cur.rowcount or 0)
+        recovered += (cur.rowcount or 0)
     return recovered
 
 
@@ -1635,7 +1640,7 @@ def recover_stale_submitting_download_requests(stale_minutes: int = 15) -> int:
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         return _recover_interrupted_download_submissions_conn(
-            conn, db.now(), stale_minutes=max(1, int(stale_minutes or 15)),
+            conn, db.now(), stale_minutes=max(1, (stale_minutes or 15)),
         )
 
 
@@ -1663,8 +1668,8 @@ def list_active_download_requests(
         clauses.append(
             "(qb_status='completed' AND COALESCE(local_import_status,'') IN ('','pending'))"
         )
-    normalized_limit = max(1, int(limit))
-    normalized_after = max(0, int(after_id or 0))
+    normalized_limit = max(1, limit)
+    normalized_after = max(0, (after_id or 0))
     predicate = f"(status!='cancelled' AND ({' OR '.join(clauses)}))"
     with db.get_conn() as conn:
         rows = conn.execute(

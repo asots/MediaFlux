@@ -20,7 +20,7 @@ def page(start=0, count=50):
 
 
 class GuangYaPagingCompletenessTests(unittest.TestCase):
-    def _client(self, pages):
+    def _client(self: unittest.TestCase, pages):
         raw = Mock()
         raw.cloud_task_list.side_effect = pages
         client = object.__new__(GuangYaClient)
@@ -121,6 +121,7 @@ class GuangYaPagingTrackerBoundaryTests(unittest.TestCase):
                     available, raw, row = self._read_and_update(request_id, pages)
                     self.assertFalse(available)
                     self.assertEqual(raw.cloud_task_list.call_count, 200 if reason == "budget" else 2)
+                    assert row is not None
                     self.assertEqual(row["gy_status"], "submitted")
                     self.assertEqual(row["status"], "submitted")
                     self.assertEqual(row["gy_task_missing_since"], missing)
@@ -131,11 +132,13 @@ class GuangYaPagingTrackerBoundaryTests(unittest.TestCase):
         request_id = self._request()
         available, _, row = self._read_and_update(request_id, [[]])
         self.assertTrue(available)
+        assert row is not None
         self.assertTrue(row["gy_task_missing_since"])
         self.assertEqual(row["gy_status"], "submitted")
         db.update_download_request(request_id, gy_task_missing_since="2000-01-01 00:00:00")
         available, _, row = self._read_and_update(request_id, [[]])
         self.assertTrue(available)
+        assert row is not None
         self.assertEqual(row["gy_status"], "manual_review")
         self.assertEqual(row["status"], "manual_review")
         self.organize.assert_not_called()
@@ -146,6 +149,7 @@ class GuangYaPagingTrackerBoundaryTests(unittest.TestCase):
             {"taskId": "gy-10000", "name": "finished", "status": 2, "progress": 100},
         ]])
         self.assertTrue(available)
+        assert row is not None
         self.assertEqual(row["gy_status"], "completed")
         self.assertIsNone(row["gy_task_missing_since"])
         self.organize.assert_called_once()

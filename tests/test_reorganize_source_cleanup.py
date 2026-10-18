@@ -1,6 +1,10 @@
 """重新整理成功后复用来源/下载隔离目录收尾；数据库与云盘完全隔离。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -95,6 +99,7 @@ class _Cloud:
             if not file_id.startswith("created-"):
                 raise AssertionError("unguarded source delete")
             info = self.file_info(file_id)
+            assert info is not None
             self.delete_empty_directory(
                 file_id, expected_etag=info.etag, expected_updated_at=info.updated_at,
             )
@@ -142,7 +147,7 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         rules_patch = patch.object(OrganizeRules, "from_config", return_value=self.rules)
         rules_patch.start()
         self.addCleanup(rules_patch.stop)
-        self.service = OrganizeCorrectionService(client=self.cloud, scraper=_Scraper())
+        self.service = OrganizeCorrectionService(client=cast(GuangYaClient, self.cloud), scraper=cast(TMDBScraper, _Scraper()))
         self.addCleanup(self.service.close)
         video = self.cloud.nodes["video"]
         self.log_id = db.add_organize_log(
@@ -169,7 +174,9 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         }])
 
     def _reorganize(self):
-        version = int(db.get_organize_log(self.log_id)["version"])
+        get_organize_log_result = db.get_organize_log(self.log_id)
+        assert get_organize_log_result is not None
+        version = int(get_organize_log_result["version"])
         return self.service.reorganize(
             self.log_id, f"bug1-operation-{version}", version, "4242", "tv",
         )
@@ -211,6 +218,7 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertIn("incoming", self.cloud.nodes)
         self.assertIn("target", self.cloud.nodes)
         log = db.get_organize_log(self.log_id)
+        assert log is not None
         self.assertEqual((log["status"], log["operation_type"]), ("success", "reorganize"))
         self.assertEqual(self.cloud.nodes["video"].parent_id, result["target_dir_id"])
         with db.get_conn() as conn:
@@ -229,11 +237,16 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(result['success'])
         parent = self.cloud.file_info(self.cloud.nodes['video'].parent_id)
-        self.assertEqual((parent.name, self.cloud.file_info(parent.parent_id).name),
+        assert parent is not None
+        file_info_result = self.cloud.file_info(parent.parent_id)
+        assert file_info_result is not None
+        self.assertEqual((parent.name, file_info_result.name),
                          ('Season 1', 'Synthetic source'))
         self.assertEqual(self.cloud.nodes['subtitle'].parent_id, parent.file_id)
         self.assertEqual(self.cloud.nodes['video'].name, 'Original.S01E01.mkv')
-        self.assertEqual(db.get_organize_log(self.log_id)['current_parent_id'], parent.file_id)
+        get_organize_log_result_2 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_2 is not None
+        self.assertEqual(get_organize_log_result_2['current_parent_id'], parent.file_id)
         self.assertNotIn('leaf', self.cloud.nodes)
 
     def test_confirmation_cleanup_receipts_preserve_return_with_companions(self):
@@ -256,7 +269,10 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(result["success"])
         parent = self.cloud.file_info(self.cloud.nodes["video"].parent_id)
-        self.assertEqual((parent.name, self.cloud.file_info(parent.parent_id).name),
+        assert parent is not None
+        file_info_result_2 = self.cloud.file_info(parent.parent_id)
+        assert file_info_result_2 is not None
+        self.assertEqual((parent.name, file_info_result_2.name),
                          ("Season 1", "Synthetic source"))
         self.assertEqual(self.cloud.nodes["subtitle"].parent_id, parent.file_id)
 
@@ -266,6 +282,7 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
             self.log_id, "undo-cleaned", self.service.detail(self.log_id)['version'],
         )['success'])
         parent = self.cloud.file_info(self.cloud.nodes['video'].parent_id)
+        assert parent is not None
         self.assertEqual(parent.name, 'Season 1')
         self.assertEqual(self.cloud.nodes['video'].name, 'Original.S01E01.mkv')
         self.assertNotIn('leaf', self.cloud.nodes)
@@ -282,8 +299,11 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
             self.log_id, 'return-second', self.service.detail(self.log_id)['version'],
         )['success'])
         leaf = self.cloud.file_info(self.cloud.nodes['video'].parent_id)
+        assert leaf is not None
         self.assertEqual(leaf.name, 'Season 1')
-        self.assertEqual(self.cloud.file_info(leaf.parent_id).name, 'Synthetic source')
+        file_info_result_3 = self.cloud.file_info(leaf.parent_id)
+        assert file_info_result_3 is not None
+        self.assertEqual(file_info_result_3.name, 'Synthetic source')
 
     def test_failed_request_does_not_recover_when_remote_member_changed_after_move(self):
         request_id, _ = self._staging()
@@ -295,7 +315,9 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
             return result
         with patch.object(self.cloud, 'move', side_effect=changed_after_move):
             self.assertTrue(self._reorganize()['success'])
-        self.assertEqual(db.get_download_request(request_id)['organize_started'], -1)
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result['organize_started'], -1)
         self.assertIn('source', self.cloud.nodes)
 
     def test_return_restores_audited_deleted_directories_when_provider_rejects_old_ids(self):
@@ -432,8 +454,11 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         result = self._reorganize()
         self.assertTrue(result['success'])
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual((row['organize_status'], row['organize_started'], row['organize_error']), ('completed', 1, ''))
-        self.assertEqual(db.get_organize_confirmation(token)['status'], 'completed')
+        get_organize_confirmation_result = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result is not None
+        self.assertEqual(get_organize_confirmation_result['status'], 'completed')
         self.assertEqual(row['gy_staging_cleanup_status'], 'completed')
         self.assertEqual(self.cloud.deleted, ['leaf', 'source'])
 
@@ -444,6 +469,7 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         db.update_download_request(request_id, organize_started=-1, organize_status='failed')
         self.assertTrue(self._reorganize()['success'])
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual((row['organize_status'], row['organize_started'], row['gy_staging_cleanup_status']),
                          ('completed', 1, 'completed'))
 
@@ -452,7 +478,9 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         db.update_download_request(request_id, organize_started=-1, organize_status='failed')
         self.cloud.add('unlogged', 'leaf', 'unlogged.mkv')
         self.assertTrue(self._reorganize()['success'])
-        self.assertEqual(db.get_download_request(request_id)['organize_status'], 'failed')
+        get_download_request_result_2 = db.get_download_request(request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2['organize_status'], 'failed')
         self.assertIn('source', self.cloud.nodes)
         self.assertIn('unlogged', self.cloud.nodes)
 
@@ -467,6 +495,7 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         with patch.object(self.cloud, 'move', side_effect=cancel_after_move):
             self.assertTrue(self._reorganize()['success'])
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual((row['status'], row['organize_status'], row['organize_started']), ('cancelled', 'failed', -1))
         self.assertIn('source', self.cloud.nodes)
 
@@ -502,7 +531,9 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertIn("source", self.cloud.nodes)
         self.assertIn("leaf", self.cloud.nodes)
         self.assertEqual(self.cloud.nodes["video"].parent_id, "leaf")
-        self.assertEqual(db.get_organize_confirmation("bug1-confirmation")["status"], "expired")
+        get_organize_confirmation_result_2 = db.get_organize_confirmation("bug1-confirmation")
+        assert get_organize_confirmation_result_2 is not None
+        self.assertEqual(get_organize_confirmation_result_2["status"], "expired")
 
     def test_scan_failure_retains_source_without_rolling_back_success(self):
         self.cloud.fail_empty_scan = "leaf"
@@ -510,7 +541,9 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["success"])
         self.assertTrue(result["warnings"])
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_organize_log(self.log_id)["status"], "success")
+        get_organize_log_result_3 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_3 is not None
+        self.assertEqual(get_organize_log_result_3["status"], "success")
 
     def test_delete_failure_is_audited_and_does_not_roll_back_reorganize(self):
         self.cloud.fail_delete = "leaf"
@@ -528,9 +561,11 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(self.cloud.deleted, ["leaf", "source"])
         confirmation = db.get_organize_confirmation(token)
+        assert confirmation is not None
         self.assertEqual(confirmation["status"], "completed")
         self.assertEqual(json.loads(confirmation["result_json"])["previous_confirmation"]["status"], "expired")
         request = db.get_download_request(request_id)
+        assert request is not None
         self.assertEqual((request["organize_status"], request["gy_staging_cleanup_status"]),
                          ("completed", "completed"))
         with db.get_conn() as conn:
@@ -544,16 +579,23 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         result = self._reorganize()
         self.assertTrue(result["success"])
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_organize_confirmation(token)["status"], "pending")
-        self.assertEqual(db.get_download_request(request_id)["organize_status"], "requires_manual")
+        get_organize_confirmation_result_3 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_3 is not None
+        self.assertEqual(get_organize_confirmation_result_3["status"], "pending")
+        get_download_request_result_3 = db.get_download_request(request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["organize_status"], "requires_manual")
 
     def test_disabled_staging_cleanup_still_closes_confirmation_and_request(self):
         self.rules.clean_empty = False
         request_id, token = self._staging()
         self.assertTrue(self._reorganize()["success"])
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_organize_confirmation(token)["status"], "completed")
+        get_organize_confirmation_result_4 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_4 is not None
+        self.assertEqual(get_organize_confirmation_result_4["status"], "completed")
         request = db.get_download_request(request_id)
+        assert request is not None
         self.assertEqual(request["organize_status"], "completed")
         self.assertEqual(request["gy_staging_cleanup_status"], "skipped")
 
@@ -564,7 +606,9 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         db.update_download_request(request_id, organize_status="completed")
         self.assertTrue(self._reorganize()["success"])
         self.assertEqual(self.cloud.deleted, ["leaf", "source"])
-        self.assertEqual(db.get_download_request(request_id)["gy_staging_cleanup_status"], "completed")
+        get_download_request_result_4 = db.get_download_request(request_id)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["gy_staging_cleanup_status"], "completed")
 
     def test_completed_staging_with_already_completed_confirmation_is_cleaned(self):
         request_id, token = self._staging(status="completed")
@@ -572,8 +616,12 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         db.update_download_request(request_id, organize_status="completed")
         self.assertTrue(self._reorganize()["success"])
         self.assertEqual(self.cloud.deleted, ["leaf", "source"])
-        self.assertEqual(db.get_organize_confirmation(token)["status"], "completed")
-        self.assertEqual(db.get_download_request(request_id)["gy_staging_cleanup_status"], "completed")
+        get_organize_confirmation_result_5 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_5 is not None
+        self.assertEqual(get_organize_confirmation_result_5["status"], "completed")
+        get_download_request_result_5 = db.get_download_request(request_id)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5["gy_staging_cleanup_status"], "completed")
 
     def test_manual_staging_without_confirmation_evidence_is_not_force_completed(self):
         request_id, token = self._staging()
@@ -582,6 +630,7 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertTrue(self._reorganize()["success"])
         self.assertEqual(self.cloud.deleted, [])
         request = db.get_download_request(request_id)
+        assert request is not None
         self.assertEqual((request["organize_status"], request["gy_staging_cleanup_status"]),
                          ("requires_manual", "retained"))
 
@@ -591,8 +640,12 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
             conn.execute("UPDATE organize_log SET source_dir_id='leaf' WHERE id=?", (self.log_id,))
         self.assertTrue(self._reorganize()["success"])
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_organize_confirmation(token)["status"], "expired")
-        self.assertEqual(db.get_download_request(request_id)["organize_status"], "requires_manual")
+        get_organize_confirmation_result_6 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_6 is not None
+        self.assertEqual(get_organize_confirmation_result_6["status"], "expired")
+        get_download_request_result_6 = db.get_download_request(request_id)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6["organize_status"], "requires_manual")
 
     def test_unsupported_safe_delete_preserves_directories_and_success(self):
         self.cloud.supports_guarded_empty_directory_delete = False
@@ -600,7 +653,9 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["success"])
         self.assertTrue(result["warnings"])
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_organize_log(self.log_id)["status"], "success")
+        get_organize_log_result_4 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_4 is not None
+        self.assertEqual(get_organize_log_result_4["status"], "success")
 
     def test_failed_business_commit_does_not_run_cleanup_or_confirmation_hook(self):
         self._staging()
@@ -619,7 +674,9 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertNotIn("source", self.cloud.deleted)
         self.assertNotIn("leaf", self.cloud.deleted)
         self.assertEqual(self.cloud.nodes["video"].parent_id, "leaf")
-        self.assertEqual(db.get_organize_confirmation("bug1-confirmation")["status"], "expired")
+        get_organize_confirmation_result_7 = db.get_organize_confirmation("bug1-confirmation")
+        assert get_organize_confirmation_result_7 is not None
+        self.assertEqual(get_organize_confirmation_result_7["status"], "expired")
 
     def test_confirmation_hook_failure_preserves_source_and_reports_warning(self):
         with patch(
@@ -630,4 +687,6 @@ class ReorganizeSourceCleanupTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["success"])
         self.assertTrue(result["warnings"])
         self.assertEqual(self.cloud.deleted, [])
-        self.assertEqual(db.get_organize_log(self.log_id)["status"], "success")
+        get_organize_log_result_5 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_5 is not None
+        self.assertEqual(get_organize_log_result_5["status"], "success")

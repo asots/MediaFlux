@@ -27,7 +27,7 @@ _PROJECTION_KEYS = {
 }
 
 
-def _safe_count(value: object) -> int:
+def _safe_count(value: Any) -> int:
     if isinstance(value, bool):
         return 0
     try:
@@ -88,7 +88,7 @@ def serialize_patrol_projection(result: ToolResult) -> tuple[str, dict[str, Any]
 def _load_projection(raw: object) -> dict[str, Any] | None:
     try:
         value = json.loads(str(raw or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return None
     return validate_persisted_patrol_projection(value)
 
@@ -159,7 +159,7 @@ def get_library_patrol_status(_arguments: dict[str, Any]) -> ToolResult:
             ],
         )
 
-    projection = _load_projection(row["projection_json"])
+    projection: dict[str, Any] | None = _load_projection(row["projection_json"])
     projection_valid = projection is not None
     if projection is None:
         projection = {

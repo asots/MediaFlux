@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import Any
 from urllib.parse import quote
 
 from app.clients.base import (
@@ -149,7 +150,7 @@ class JellyfinClient(MediaServerClient):
         params: dict | None = None,
         *,
         timeout: float | None = None,
-    ) -> object:
+    ) -> Any:
         return super()._request(path, params, timeout=timeout)
 
     def _server_name(self) -> str:
@@ -414,7 +415,7 @@ class JellyfinClient(MediaServerClient):
     def recently_played(self, user_id: str, *, limit: int = 12) -> list[MediaItem]:
         """读取显式用户的真实播放历史；不可用时兼容 DatePlayed 查询。"""
         selected = normalize_explicit_media_user_id(user_id)
-        normalized_limit = max(1, min(int(limit or 12), 50))
+        normalized_limit = max(1, min((limit or 12), 50))
         try:
             return self._recent_played_from_activity(selected, normalized_limit)
         except Exception as exc:
@@ -494,10 +495,10 @@ class JellyfinClient(MediaServerClient):
         """只读取 Jellyfin 统计接口，避免为一个总数加载整张看板。"""
         counts = self._media_counts()
         return {
-            "total_items": max(0, int(self._total_items() or 0)),
-            "movie_count": max(0, int(counts.get("movie_count", 0) or 0)),
-            "series_count": max(0, int(counts.get("series_count", 0) or 0)),
-            "episode_count": max(0, int(counts.get("episode_count", 0) or 0)),
+            "total_items": max(0, (self._total_items() or 0)),
+            "movie_count": max(0, (counts.get("movie_count", 0) or 0)),
+            "series_count": max(0, (counts.get("series_count", 0) or 0)),
+            "episode_count": max(0, (counts.get("episode_count", 0) or 0)),
         }
 
     def _media_counts(self) -> dict[str, int]:
@@ -540,7 +541,7 @@ class JellyfinClient(MediaServerClient):
 
     @staticmethod
     def _normalize_path(path: str) -> str:
-        return str(path or "").replace("\\", "/").rstrip("/").lower()
+        return (path or "").replace("\\", "/").rstrip("/").lower()
 
     def refresh_for_path(self, media_path: str) -> bool:
         """兼容单路径调用；沿用安全的批量精准刷新策略。"""

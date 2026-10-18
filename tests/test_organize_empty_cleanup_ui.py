@@ -175,7 +175,7 @@ class OrganizeEmptyCleanupUiTests(unittest.TestCase):
         self.assertNotIn("42 项", mixed["message"])
 
     def test_failure_diagnostics_already_explain_uncleaned_candidates(self):
-        responses = [
+        responses: list[dict] = [
             {"ok": True, "cleaned": 0, "candidates": 2, key: 1}
             for key in ("scan_failures", "delete_failures", "unsupported", "unavailable")
         ]
@@ -206,7 +206,7 @@ class OrganizeEmptyCleanupUiTests(unittest.TestCase):
                     self.assertIn("格式异常", feedback["message"])
 
     def test_missing_or_nonobject_response_never_fabricates_success(self):
-        responses = [None, [], "ok", True, 1, {}, {"ok": True}, {"ok": True, "scanned": 2}]
+        responses: list[object] = [None, [], "ok", True, 1, {}, {"ok": True}, {"ok": True, "scanned": 2}]
         for response, feedback in zip(responses, self._feedback(*responses)):
             with self.subTest(response=response):
                 self.assertNotEqual(feedback["type"], "success")
@@ -223,7 +223,7 @@ class OrganizeEmptyCleanupUiTests(unittest.TestCase):
         keys = ("cleaned", "scanned", "candidates", "protected", "not_empty",
                 "scan_failures", "delete_failures", "unsupported", "unavailable")
         for key in keys:
-            responses = [{"ok": True, "cleaned": 1, key: value} for value in invalid_values]
+            responses: list[dict] = [{"ok": True, "cleaned": 1, key: value} for value in invalid_values]
             for value, feedback in zip(invalid_values, self._feedback(*responses)):
                 with self.subTest(key=key, value=value):
                     self.assertNotEqual(feedback["type"], "success")
@@ -307,7 +307,7 @@ class OrganizeEmptyCleanupUiTests(unittest.TestCase):
                 self.assertEqual(final["disabled"], result["states"][0]["disabled"])
                 self.assertFalse(result["states"][-2]["busy"])
                 message = result["alerts"][0]["message"]
-                self.assertIsInstance(message, str)
+                assert isinstance(message, str)
                 self.assertNotIn("do-not-dump", message)
                 if config.get("httpOk") is False or config.get("networkError") or config.get("throwNull"):
                     self.assertEqual(result["alerts"][0]["type"], "error")

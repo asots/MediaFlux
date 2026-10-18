@@ -38,7 +38,7 @@ class MikanAdapter(DirectResultAdapter):
     site_id = "mikan"
     site_name = "Mikan"
     base_url = MIKAN_URL
-    mirror_base_urls = (MIKAN_MIRROR_URL,)
+    mirror_base_urls: tuple[str, ...] = (MIKAN_MIRROR_URL,)
     default_enabled = True
     capabilities = IndexerCapabilities(pagination_supported=False, download_kinds=("magnet", "torrent"))
 

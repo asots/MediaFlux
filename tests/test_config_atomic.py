@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from os import stat_result
+
 import errno
 import os
 import stat
@@ -744,17 +747,17 @@ class ConfigAtomicWriteTests(unittest.TestCase):
             with self.assertRaisesRegex(config.UnsafeConfigFileError, "reparse"):
                 config._validate_config_stat(
                     self.env_file,
-                    SimpleNamespace(**base, st_nlink=1, st_file_attributes=0x400),
+                    cast(stat_result, SimpleNamespace(**base, st_nlink=1, st_file_attributes=0x400)),
                 )
             with self.assertRaisesRegex(config.UnsafeConfigFileError, "硬链接"):
                 config._validate_config_stat(
                     self.env_file,
-                    SimpleNamespace(**base, st_nlink=2, st_file_attributes=0),
+                    cast(stat_result, SimpleNamespace(**base, st_nlink=2, st_file_attributes=0)),
                 )
             with self.assertRaisesRegex(config.UnsafeConfigFileError, "可靠验证"):
                 config._validate_config_stat(
                     self.env_file,
-                    SimpleNamespace(**base, st_nlink=1),
+                    cast(stat_result, SimpleNamespace(**base, st_nlink=1)),
                 )
 
     def test_keyboard_interrupt_after_capture_restores_original_configuration(self):

@@ -44,7 +44,7 @@ def _date(value):
 
 
 def _body(*, day=None, module_id=None):
-    params = {"page_type": "channel", "page_id": "100119", "scene": "channel", "new_mark_label_enabled": "1"}
+    params: dict = {"page_type": "channel", "page_id": "100119", "scene": "channel", "new_mark_label_enabled": "1"}
     if day is not None:
         params.update(week=day.strftime("%Y%m%d"), un_mod_id=module_id, un_module_key="")
     return {
@@ -88,7 +88,7 @@ def _navigation(module, week):
         if child.get("type") != "navigation" or not isinstance(params, dict):
             continue
         day = _date(params.get("week"))
-        if day not in week:
+        if day is None or day not in week:
             continue
         key = _text(params.get("data_key"), 500)
         try:

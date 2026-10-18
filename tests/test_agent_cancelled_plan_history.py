@@ -45,6 +45,7 @@ def runtime(monkeypatch):
         original = runtime.catalog.get("cloud.change")
 
         def prepare(arguments, context):
+            assert original.prepare is not None
             prepared = original.prepare(arguments, context)
             return replace(prepared, preview={**prepared.preview, "status": "confirmation_required"})
 

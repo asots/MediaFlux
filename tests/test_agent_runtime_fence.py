@@ -1,4 +1,9 @@
 """Durable authorization publication through real product entries."""
+from starlette.responses import JSONResponse
+from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter
+from starlette.requests import Request
+from app.agent.kernel.model import ModelAdapter
+from typing import cast
 import json
 import os
 from unittest.mock import patch
@@ -44,7 +49,9 @@ def test_publication_commits_changing_before_file_and_stable_after(runtime_env):
     with patch.object(config, 'update_env_file', side_effect=observe):
         config.set_and_save({'AGENT_LLM_MODEL': 'new'})
     assert seen and seen[0] and seen[0]['phase'] == 'changing'
-    assert read_record()['phase'] == 'stable'
+    read_record_result = read_record()
+    assert read_record_result is not None
+    assert read_record_result['phase'] == 'stable'
 
 
 def test_real_worker_publication_invalidates_cached_runtime(runtime_env):
@@ -61,12 +68,15 @@ def test_real_worker_publication_invalidates_cached_runtime(runtime_env):
     assert os.waitstatus_to_exitcode(status) == 0
     new = bootstrap.get_agent_kernel_runtime()
     assert new is not old
+    assert isinstance(new.session.model, OpenAICompatibleModelAdapter)
     assert new.session.model.settings.model == 'new'
     # The retained object keeps its original authority and provider identity.
+    assert isinstance(old.session.model, OpenAICompatibleModelAdapter)
     assert old.session.model.settings.model == 'old'
     assert old.creation_binding != new.creation_binding
     with db.get_conn() as conn:
         with pytest.raises(gate.RuntimeFenceError):
+            assert old.creation_binding is not None
             gate.require_runtime_fence(conn, old.creation_binding.fence)
 
 
@@ -76,7 +86,9 @@ def test_failed_publication_stays_changing_and_restart_cannot_revive(runtime_env
     with pytest.raises(config.ConcurrentConfigUpdateError):
         config.update_runtime_env_file(config.ENV_FILE, {'AGENT_LLM_MODEL': 'new'}, expected=b'stale=1\n')
     assert config.ENV_FILE.read_bytes() == before
-    assert read_record()['phase'] == 'changing'
+    read_record_result_2 = read_record()
+    assert read_record_result_2 is not None
+    assert read_record_result_2['phase'] == 'changing'
     changing = read_record()
     with pytest.raises(gate.RuntimeFenceError, match='runtime_fence_changing'):
         gate.initialize_runtime_fence()
@@ -88,6 +100,7 @@ def test_failed_publication_stays_changing_and_restart_cannot_revive(runtime_env
         config.set_and_save({'AGENT_LLM_MODEL': 'old'})
     with db.get_conn() as conn:
         with pytest.raises(gate.RuntimeFenceError):
+            assert old.creation_binding is not None
             gate.require_runtime_fence(conn, old.creation_binding.fence)
 
 
@@ -99,6 +112,8 @@ def test_aba_display_exception_and_normal_cold_rebuild(runtime_env):
     config.set_and_save({'AGENT_LLM_MODEL': 'new'})
     config.set_and_save({'AGENT_LLM_MODEL': 'old'})
     current = bootstrap.get_agent_kernel_runtime()
+    assert current.creation_binding is not None
+    assert original is not None
     assert current.creation_binding.fence.epoch > original.fence.epoch
     assert current.creation_binding.fence.config_digest == original.fence.config_digest
     assert current.creation_binding != original
@@ -115,7 +130,7 @@ def test_falsey_explicit_model_never_uses_provider(runtime_env):
             return False
     model = Falsey()
     with patch.object(bootstrap, 'OpenAICompatibleModelAdapter', side_effect=AssertionError('fallback forbidden')):
-        runtime = bootstrap.build_agent_kernel_runtime(model=model)
+        runtime = bootstrap.build_agent_kernel_runtime(model=cast(ModelAdapter | None, model))
     assert runtime.session.model is model
     assert runtime.creation_binding is None
 
@@ -125,7 +140,8 @@ def test_snapshot_is_fresh_immutable_scoped_and_binds_startup(runtime_env):
     os.environ['AGENT_LLM_MODEL'] = 'stale-app-value'
     snapshot = config.capture_runtime_config_snapshot()
     with pytest.raises(TypeError):
-        snapshot.file_values['AGENT_LLM_MODEL'] = 'tampered'
+        import operator
+        operator.setitem(cast(dict[str, str], snapshot.file_values), 'AGENT_LLM_MODEL', 'tampered')
     from app.agent.kernel.provider_model import ProviderSettings
     with config.use_runtime_config_snapshot(snapshot):
         assert ProviderSettings.from_config().model == 'old'
@@ -144,7 +160,9 @@ def test_require_uses_caller_session_connection_and_blocks_competing_writer(runt
     from app.agent.kernel.persistence import SQLiteKernelStore
     store = SQLiteKernelStore()
     asyncio.run(store.begin_turn(owner='fence-owner', session_id='fence-session', request_id='fence'))
-    token = bootstrap.get_agent_kernel_runtime().creation_binding.fence
+    get_agent_kernel_runtime_result = bootstrap.get_agent_kernel_runtime().creation_binding
+    assert get_agent_kernel_runtime_result is not None
+    token = get_agent_kernel_runtime_result.fence
     with db.get_conn() as conn:
         conn.execute('BEGIN IMMEDIATE')
         with patch.object(db, 'get_conn', side_effect=AssertionError('must use caller connection')):
@@ -170,11 +188,13 @@ def test_real_strm_api_enters_fence_before_sqlite_writer(runtime_env):
         with original(*args, **kwargs) as ids:
             yield ids
     with patch.object(api, 'require_api_login'), patch('app.services.clear_dashboard_cache'), patch('app.modules.scheduler.get_scheduler', return_value=MagicMock()), patch.object(db, 'reconcile_strm_retired_sources_transaction', side_effect=observe):
-        result = api.save_config(request, {'GY_STRM_SOURCE_DIRS': '[{"id":"33","name":"synthetic"}]'})
+        result = api.save_config(cast(Request, request), {'GY_STRM_SOURCE_DIRS': '[{"id":"33","name":"synthetic"}]'})
     assert result == {'success': True}
     assert before_writer[0] and before_writer[0]['phase'] == 'changing'
     assert json.loads(config.read_env_snapshot(config.ENV_FILE)[1]['GY_STRM_SOURCE_DIRS'])[0]['id'] == '33'
-    assert read_record()['phase'] == 'stable'
+    read_record_result_3 = read_record()
+    assert read_record_result_3 is not None
+    assert read_record_result_3['phase'] == 'stable'
 
 
 def test_strm_database_failure_compensates_but_never_stabilizes(runtime_env):
@@ -190,10 +210,13 @@ def test_strm_database_failure_compensates_but_never_stabilizes(runtime_env):
             raise sqlite3.OperationalError('synthetic DB commit failure')
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(background_services_enabled=False)))
     with patch.object(api, 'require_api_login'), patch.object(db, 'reconcile_strm_retired_sources_transaction', side_effect=fail_commit):
-        result = api.save_config(request, {'GY_STRM_SOURCE_DIRS': '[{"id":"33","name":"synthetic"}]'})
+        result = api.save_config(cast(Request, request), {'GY_STRM_SOURCE_DIRS': '[{"id":"33","name":"synthetic"}]'})
+    assert isinstance(result, JSONResponse)
     assert result.status_code == 500
     assert config.read_env_snapshot(config.ENV_FILE)[1].get('GY_STRM_SOURCE_DIRS', '') == ''
-    assert read_record()['phase'] == 'changing'
+    read_record_result_4 = read_record()
+    assert read_record_result_4 is not None
+    assert read_record_result_4['phase'] == 'changing'
     with pytest.raises(gate.RuntimeFenceError):
         bootstrap.get_agent_kernel_runtime()
 
@@ -207,7 +230,9 @@ def test_worker_dies_after_changing_before_file(runtime_env):
         os._exit(2)
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 27
-    assert read_record()['phase'] == 'changing'
+    read_record_result_5 = read_record()
+    assert read_record_result_5 is not None
+    assert read_record_result_5['phase'] == 'changing'
     assert config.ENV_FILE.read_bytes() == before
     changing = read_record()
     with pytest.raises(gate.RuntimeFenceError, match='runtime_fence_changing'):
@@ -315,12 +340,14 @@ def test_restore_rebinds_verified_payload_and_revokes_old_runtime(runtime_env, t
 
     restored, restored_values = observed[0]
     assert restored['phase'] == 'stable'
+    assert old is not None
     assert restored['incarnation'] != old['incarnation']
     assert restored['config_digest'] == config._runtime_digest(restored_values)
     assert read_record() == restored
     new_runtime = bootstrap.get_agent_kernel_runtime()
     assert new_runtime is not old_runtime
     with db.get_conn() as conn, pytest.raises(gate.RuntimeFenceError):
+        assert old_runtime.creation_binding is not None
         gate.require_runtime_fence(conn, old_runtime.creation_binding.fence)
 
 
@@ -339,7 +366,9 @@ def test_restore_rejects_changing_backup_without_touching_existing_db_or_env(run
         config.update_runtime_env_file(
             config.ENV_FILE, {'AGENT_LLM_MODEL': 'unpublished'}, expected=b'stale=1\n'
         )
-    assert read_record()['phase'] == 'changing'
+    read_record_result_6 = read_record()
+    assert read_record_result_6 is not None
+    assert read_record_result_6['phase'] == 'changing'
 
     archive = tmp_path / 'changing-fence.zip'
     backup.create_backup(runtime_env, output=archive)

@@ -1,6 +1,8 @@
 """下载管理待处理与日志批量操作契约。"""
 from __future__ import annotations
 
+from tests.support import assert_present
+
 import re
 import sqlite3
 import threading
@@ -93,12 +95,12 @@ class DownloadManagementBatchApiTests(IsolatedDatabaseTestCase):
             "already_cleared": 0,
             "skipped": 2,
         })
-        self.assertIsNotNone(db.get_download_request(first))
-        self.assertIsNotNone(db.get_download_request(second))
+        assert (db.get_download_request(first)) is not None
+        assert (db.get_download_request(second)) is not None
         self.assertEqual(db.count_download_requests_requiring_attention(), 0)
         self.assertEqual(db.count_download_logs(), 1)
         self.assertEqual(db.list_download_logs()[0]["id"], log_id)
-        self.assertIn("批量", db.get_download_request(first)["attention_clear_note"])
+        self.assertIn("批量", assert_present(db.get_download_request(first))["attention_clear_note"])
 
     def test_batch_clear_uses_bounded_sql_and_preserves_all_other_fields(self):
         request_ids = [self._attention(f"query-budget:{index}") for index in range(80)]
@@ -108,7 +110,7 @@ class DownloadManagementBatchApiTests(IsolatedDatabaseTestCase):
         )
         for request_id in request_ids[50:]:
             db.update_download_request(request_id, status="pending", qb_status="")
-        before = {request_id: dict(db.get_download_request(request_id)) for request_id in request_ids}
+        before = {request_id: dict(assert_present(db.get_download_request(request_id))) for request_id in request_ids}
         log_id = db.add_download_log("qb", title="审计记录", request_id=request_ids[0])
         headers = self._headers()
         statements = []
@@ -130,7 +132,9 @@ class DownloadManagementBatchApiTests(IsolatedDatabaseTestCase):
             "already_cleared": 20, "skipped": 50,
         })
         for request_id, original in before.items():
-            current = dict(db.get_download_request(request_id))
+            get_download_request_result_3 = db.get_download_request(request_id)
+            assert get_download_request_result_3 is not None
+            current = dict(get_download_request_result_3)
             if request_id in request_ids[:30]:
                 self.assertTrue(current["attention_cleared_at"])
                 self.assertEqual(current["attention_clear_note"], "用户已批量将本记录移出待处理；原状态、错误与下载日志均保留")
@@ -152,14 +156,20 @@ class DownloadManagementBatchApiTests(IsolatedDatabaseTestCase):
             "ok": True, "request_id": request_id,
             "already_cleared": False, "message": "已移出待处理",
         })
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
         self.assertEqual(
-            db.get_download_request(request_id)["attention_clear_note"],
+            get_download_request_result["attention_clear_note"],
             "用户已将本记录移出待处理；原状态、错误与下载日志均保留",
         )
-        snapshot = dict(db.get_download_request(request_id))
+        get_download_request_result_4 = db.get_download_request(request_id)
+        assert get_download_request_result_4 is not None
+        snapshot = dict(get_download_request_result_4)
         repeated = self.client.post(path, headers=headers)
         self.assertEqual(repeated.json(), {**first.json(), "already_cleared": True})
-        self.assertEqual(dict(db.get_download_request(request_id)), snapshot)
+        get_download_request_result_5 = db.get_download_request(request_id)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(dict(get_download_request_result_5), snapshot)
         for missing in (0, -1, 999999):
             with self.subTest(missing=missing):
                 response = self.client.post(f"/api/downloads/issues/{missing}/clear", headers=headers)
@@ -167,7 +177,7 @@ class DownloadManagementBatchApiTests(IsolatedDatabaseTestCase):
 
     def test_batch_clear_sql_failure_rolls_back_every_record(self):
         ids = [self._attention(f"clear-rollback:{index}") for index in range(3)]
-        before = [dict(db.get_download_request(request_id)) for request_id in ids]
+        before = [dict(assert_present(db.get_download_request(request_id))) for request_id in ids]
         with db.get_conn() as conn:
             conn.execute(
                 "CREATE TRIGGER reject_attention_clear BEFORE UPDATE OF attention_cleared_at "
@@ -177,7 +187,7 @@ class DownloadManagementBatchApiTests(IsolatedDatabaseTestCase):
         try:
             with self.assertRaisesRegex(sqlite3.IntegrityError, "synthetic write failure"):
                 db.clear_download_request_attentions(ids)
-            self.assertEqual([dict(db.get_download_request(request_id)) for request_id in ids], before)
+            self.assertEqual([dict(assert_present(db.get_download_request(request_id))) for request_id in ids], before)
         finally:
             with db.get_conn() as conn:
                 conn.execute("DROP TRIGGER reject_attention_clear")
@@ -208,8 +218,10 @@ class DownloadManagementBatchApiTests(IsolatedDatabaseTestCase):
         self.assertEqual(sum(len(result["already_cleared"]) for _, result in results), 1)
         for batch, result in results:
             for request_id in result["cleared"]:
+                get_download_request_result_2 = db.get_download_request(request_id)
+                assert get_download_request_result_2 is not None
                 self.assertEqual(
-                    db.get_download_request(request_id)["attention_clear_note"],
+                    get_download_request_result_2["attention_clear_note"],
                     f"用户已{'批量' if batch else ''}将本记录移出待处理；原状态、错误与下载日志均保留",
                 )
 
@@ -233,7 +245,7 @@ class DownloadManagementBatchApiTests(IsolatedDatabaseTestCase):
             "missing": 1,
         })
         self.assertEqual([int(row["id"]) for row in db.list_download_logs()], [third])
-        self.assertIsNotNone(db.get_download_request(request_id))
+        assert (db.get_download_request(request_id)) is not None
         self.assertEqual(db.count_download_requests_requiring_attention(), 1)
 
     def test_log_page_is_clamped_after_last_page_batch_cleanup(self):

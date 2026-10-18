@@ -1,12 +1,21 @@
 """下载、整理、STRM 与媒体库复核的一条 Telegram 事务时间线。"""
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import replace
-import json
+from typing import Any
 
-from app import config, database as db
-from app.modules.local_media_outcomes import local_media_refresh_status, local_media_task_outcome
+from app import config
+from app import database as db
+from app.modules.local_media_outcomes import (
+    local_media_refresh_status,
+    local_media_task_outcome,
+)
+from app.modules.telegram_media_projection import (
+    attach_bounded_media_details,
+    build_media_detail_blocks,
+)
 from app.modules.telegram_notification_center import (
     NotificationPublishResult,
     get_notification_thread_event,
@@ -16,12 +25,11 @@ from app.modules.telegram_notification_policy import (
     NotificationImportance,
     NotificationTopic,
 )
-from app.modules.telegram_media_projection import (
-    attach_bounded_media_details,
-    build_media_detail_blocks,
-)
 from app.notifier import NotificationEvent, safe_int
-from app.repositories.download_requests import download_display_title, usable_download_title
+from app.repositories.download_requests import (
+    download_display_title,
+    usable_download_title,
+)
 
 _STATUS_LABELS = {
     "": "—",
@@ -51,7 +59,7 @@ _ERROR_STATES = {"failed", "partial", "stopped", "outcome_unknown"}
 _PROCESSING_STATES = {"pending", "submitting", "submitted", "downloading", "running", "queued", "settling", "planned"}
 
 
-def _value(row, key: str, default: object = "") -> object:
+def _value(row, key: str, default: Any = "") -> Any:
     try:
         return row[key]
     except (KeyError, IndexError, TypeError):
@@ -62,13 +70,13 @@ def _status(value: object) -> str:
     return str(value or "").strip().lower()
 
 
-def _notification_payload(row) -> dict[str, object]:
+def _notification_payload(row) -> dict[str, Any]:
     raw = str(_value(row, "notification_payload_json", "") or "").strip()
     if not raw:
         return {}
     try:
         payload = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return {}
     return dict(payload) if isinstance(payload, Mapping) else {}
 
@@ -169,7 +177,7 @@ def _load_probe_progress(row) -> dict[str, int]:
     from app.repositories.organize_probe import get_organize_probe_notification_progress
 
     request_id = int(_value(row, "id", 0) or 0)
-    chat_id = _chat_id(row) or str(config.get("TG_CHAT_ID", "") or "").strip()
+    chat_id = _chat_id(row) or (config.get("TG_CHAT_ID", "") or "").strip()
     if request_id <= 0 or not chat_id:
         return {}
     return get_organize_probe_notification_progress(
@@ -181,7 +189,7 @@ def _load_probe_progress(row) -> dict[str, int]:
 
 
 def _probe_needs_attention(progress: Mapping[str, int]) -> bool:
-    return any(int(progress.get(key, 0) or 0) > 0 for key in ("failed", "cancelled", "strm_failed"))
+    return any((progress.get(key, 0) or 0) > 0 for key in ("failed", "cancelled", "strm_failed"))
 
 
 def _merge_probe_progress(
@@ -199,7 +207,7 @@ def _merge_probe_progress(
         # 让已成功下载/整理被调度器重新执行。异常细节不跨通知范围外泄。
         title = event.title if base_state in {"attention", "error"} else "⚠️ 下载入库链路部分完成"
         note = "后台规格补全或后续 STRM 同步尚有异常，请在 Web 运行记录中复核。"
-        footer = "\n".join(value for value in (event.footer, note) if value)
+        footer = "\n".join(str(value) for value in (event.footer, note) if value)
         return replace(event, title=title, fields=fields, footer=footer,
                        state="attention" if base_state == "attention" else "partial")
     if pending and base_state not in {"attention", "error"}:
@@ -213,7 +221,7 @@ def _merge_probe_progress(
 def build_download_lifecycle_event(
     row,
     *,
-    stats: Mapping[str, object] | None = None,
+    stats: Mapping[str, Any] | None = None,
     media_refresh: str = "",
     verification_status: str = "",
     verification_result: str = "",
@@ -254,7 +262,7 @@ def build_download_lifecycle_event(
     strm_status = _status(_value(row, "strm_status"))
     if strm_status:
         fields.append(("STRM", _label(strm_status)))
-    refresh_value = str(media_refresh or "").strip() or {
+    refresh_value = (media_refresh or "").strip() or {
         "failed": "刷新失败（需处理） ❌",
         "queued": "已排队（合并刷新） ⏳",
         "completed": "刷新完成 🎯",
@@ -268,7 +276,7 @@ def build_download_lifecycle_event(
     if verification_status:
         fields.append((
             "入库复核",
-            str(verification_result or _label(verification_status)).strip(),
+            (verification_result or _label(verification_status)).strip(),
         ))
 
     media_blocks = build_media_detail_blocks(
@@ -338,9 +346,9 @@ def build_download_lifecycle_event(
 def download_notification_obsolescence(thread_key: str, event: NotificationEvent) -> str:
     """投递前仅核对撤销后的下载字段；重建仍回到唯一生命周期生产者。"""
     prefix = "download:"
-    if not str(thread_key).startswith(prefix):
+    if not thread_key.startswith(prefix):
         return ""
-    raw_id = str(thread_key)[len(prefix):]
+    raw_id = thread_key[len(prefix):]
     if not raw_id.isascii() or not raw_id.isdigit() or len(raw_id) > 19:
         return ""
     if not 0 < int(raw_id) < 2**63:
@@ -362,13 +370,13 @@ def download_notification_obsolescence(thread_key: str, event: NotificationEvent
 def publish_download_lifecycle(
     request_id: int,
     *,
-    stats: Mapping[str, object] | None = None,
+    stats: Mapping[str, Any] | None = None,
     media_refresh: str = "",
     verification_status: str = "",
     verification_result: str = "",
     deliver_now: bool = True,
 ) -> NotificationPublishResult:
-    row = db.get_download_request(int(request_id))
+    row = db.get_download_request(request_id)
     if row is None:
         return NotificationPublishResult(False, status="missing_request")
     probe_progress = _load_probe_progress(row)
@@ -390,7 +398,7 @@ def publish_download_lifecycle(
     if importance in {NotificationImportance.ACTION, NotificationImportance.ERROR}:
         topic_enabled = True
     return publish_notification_thread(
-        f"download:{int(request_id)}",
+        f"download:{request_id}",
         event,
         topic=NotificationTopic.DOWNLOAD,
         importance=importance,

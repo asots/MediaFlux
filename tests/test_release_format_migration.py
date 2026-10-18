@@ -270,12 +270,10 @@ class ReleaseFormatMigrationTests(unittest.TestCase):
         self.assertEqual(visited, [30])
         with db.get_conn() as conn:
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
-            self.assertIsNotNone(
-                conn.execute(
+            assert (conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                     (_RULE_TABLE,),
-                ).fetchone()
-            )
+                ).fetchone()) is not None
             self.assertEqual(
                 conn.execute(
                     "SELECT value FROM settings_kv "
@@ -317,19 +315,17 @@ class ReleaseFormatMigrationTests(unittest.TestCase):
         db.init_db()
         with db.get_conn() as conn:
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
-            self.assertIsNotNone(
-                conn.execute(
+            assert (conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                     (_RULE_TABLE,),
-                ).fetchone()
-            )
+                ).fetchone()) is not None
 
     def test_backup_restore_includes_release_format_rules_and_invalidates_loaded_cache(self) -> None:
         from app.modules.recognition import formats
 
         compiled = formats.compile_template(_RULE_TEMPLATE)
         match = compiled.regex.fullmatch(_RULE_EXAMPLES[0]["filename"])
-        self.assertIsNotNone(match)
+        assert (match) is not None
         self.assertEqual(
             match.groupdict(),
             {
@@ -364,7 +360,7 @@ class ReleaseFormatMigrationTests(unittest.TestCase):
             )
             invalidate_cache = Mock()
             formats_module = types.ModuleType("app.modules.recognition.formats")
-            formats_module.invalidate_cache = invalidate_cache
+            setattr(formats_module, "invalidate_cache", invalidate_cache)
             with patch.dict(
                 sys.modules,
                 {"app.modules.recognition.formats": formats_module},

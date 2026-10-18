@@ -49,7 +49,12 @@ def test_identifiable_malformed_call_is_repairable_not_provider_fault(protocol,m
 def test_native_valid_control(protocol,mode):
  events,error=asyncio.run(observe(protocol,reply(protocol,mode,False)))
  assert error is None
- assert [dict(e.tool_call.arguments) for e in events if e.tool_call]==[{'query':'example'}]
+ actual_calls = []
+ for e in events:
+     if e.tool_call:
+         assert e.tool_call.arguments is not None
+         actual_calls.append(dict(e.tool_call.arguments))
+ assert actual_calls==[{'query':'example'}]
  assert events[-1].type is ModelEventType.FINISH
 
 @pytest.mark.parametrize('mode',['json','sse'])

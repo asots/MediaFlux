@@ -220,7 +220,7 @@ class EmpireAdapter(DirectResultAdapter):
                 continue
             try:
                 detail_url = self._join_known_host(
-                    anchor.get("href", ""), relative_base_url=result_url,
+                    str(anchor.get("href") or ""), relative_base_url=result_url,
                 )
             except HttpSecurityError:
                 continue

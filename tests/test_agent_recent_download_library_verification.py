@@ -1,6 +1,7 @@
 """最近缺集下载完成后的媒体库核验续接测试。"""
 
 from __future__ import annotations
+from typing import Any
 
 import unittest
 
@@ -22,7 +23,7 @@ _VERIFICATION_CONTEXT = {
 
 
 def _submission_result(request_id: int | None) -> ToolResult:
-    data = {
+    data: dict[str, Any] = {
         "result_id": "safe-result-00000001",
         "created": True,
         "target": "qb",

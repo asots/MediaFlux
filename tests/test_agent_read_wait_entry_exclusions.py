@@ -61,10 +61,12 @@ def test_wait_bearing_effect_entry_excludes_auto_execution(mode):
             request_id='source', turn_id=lease.turn_id, report_progress=progress,
             cancellation=CancellationToken(), user_source=GOAL)
         result = await runtime.session.pipeline.execute(tool.name, {}, context=context)
+        assert result.effect_plan is not None
         plan_id = result.effect_plan.plan_id
         assert preparations == [{}] and writes == []
         state = await runtime.store.load(owner=OWNER, session_id='wait-control')
         assert state.pending_effect_plan_id == plan_id
+        receipt = None
         if mode != 'pending':
             script = WaitScript(True)
             runtime.session.model = script.adapter
@@ -86,6 +88,7 @@ def test_wait_bearing_effect_entry_excludes_auto_execution(mode):
         assert preparations == [{}]
         assert len(writes) == (1 if mode in {'confirmed', 'unknown'} else 0)
         if mode == 'unknown':
+            assert receipt is not None
             saved = await fresh.store.load(owner=OWNER, session_id='wait-control')
             assert receipt in saved.conversation
     asyncio.run(run())

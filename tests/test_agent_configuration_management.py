@@ -68,7 +68,9 @@ class ConfigurationManagementTests(IsolatedDatabaseTestCase):
         knowledge.update_entry(row["id"], {"aliases": ["another"]})
         with self.assertRaises(AgentToolError):
             execute_knowledge(args, token, "update")
-        self.assertFalse(knowledge.get_entry(row["id"])["disabled"])
+        get_entry_result = knowledge.get_entry(row["id"])
+        assert get_entry_result is not None
+        self.assertFalse(get_entry_result["disabled"])
 
     def test_reject_protected_knowledge_fields_and_builtin_deletion(self):
         for field in ("source", "evidence", "knowledge_key", "confidence"):
@@ -103,8 +105,10 @@ class ConfigurationManagementTests(IsolatedDatabaseTestCase):
         update = {"source_number": 1, "name": "Renamed", "mode": "move"}
         _, token = prepare_source(update, "update")
         self.assertTrue(execute_source(update, token, "update").ok)
+        get_local_media_source_result = db.get_local_media_source(source.id, owner="admin")
+        assert get_local_media_source_result is not None
         self.assertEqual(
-            db.get_local_media_source(source.id, owner="admin").name, "Renamed"
+            get_local_media_source_result.name, "Renamed"
         )
         _, token = prepare_source({"source_number": 1}, "delete")
         self.assertTrue(execute_source({"source_number": 1}, token, "delete").ok)
@@ -164,8 +168,8 @@ class ConfigurationManagementTests(IsolatedDatabaseTestCase):
         for spec in registry.specs:
             if spec.risk.value != "read":
                 self.assertTrue(spec.requires_confirmation)
-                self.assertIsNotNone(spec.context_confirmation_preparer)
-                self.assertIsNotNone(spec.context_confirmed_handler)
+                assert (spec.context_confirmation_preparer) is not None
+                assert (spec.context_confirmed_handler) is not None
 
 
 class MediaPathMappingTests(IsolatedDatabaseTestCase):

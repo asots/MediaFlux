@@ -81,7 +81,7 @@ class MediaFluxAuthorizationPolicy:
         del tool, arguments
         if not is_agent_enabled():
             raise ToolPipelineError("Media Agent 当前未启用", code="agent_disabled")
-        owner = str(context.owner or "")
+        owner = (context.owner or "")
         if _WEB_OWNER_RE.fullmatch(owner):
             return
         if owner.startswith("tg:v1:"):
@@ -100,7 +100,7 @@ class MediaFluxToolRateLimiter:
         self, *, owner: str, tool_name: str, cost: float, arguments: Mapping[str, Any]
     ) -> None:
         del cost
-        canonical = str(tool_name or "").removeprefix("confirm:")
+        canonical = (tool_name or "").removeprefix("confirm:")
         # 预览不写入，不能耗尽用户点击确认时的执行额度；两阶段仍按同一身份跨 Worker 限流。
         scope_suffix = "confirmed" if tool_name.startswith("confirm:") else ""
         if canonical == "provider.query":

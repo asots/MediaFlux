@@ -1,6 +1,8 @@
 """缺季搜索共享候选、预算和可提交快照的纵向回归。"""
 
 from __future__ import annotations
+from typing import cast
+from app.indexers.providers.base import IndexerAdapter
 
 from contextlib import ExitStack
 from unittest import TestCase
@@ -94,6 +96,7 @@ class SeasonResourceSearchTests(TestCase):
         self.assertIsNone(search.call_args.args[0].get("episode"))
         self.assertEqual(search.call_args.args[0]["limit"], 50)
         self.assertEqual((result.status, result.data["processed"], result.data["remaining"]), ("success", 11, 0))
+        assert result.model_data is not None
         self.assertEqual([row["episode"] for row in result.model_data["episodes"]], list(range(1, 12)))
         self.assertTrue(all(row["search"]["recommendation"]["selected"] for row in result.data["episodes"]))
         self.assertFalse(any("继续" in suggestion for suggestion in result.suggestions))
@@ -163,6 +166,7 @@ class SeasonResourceSearchTests(TestCase):
         self.assertEqual([call.args[0].get("episode") for call in search.call_args_list], [None, 1, 2, 3, 4, 5])
         self.assertEqual(result.status, "partial")
         self.assertEqual(result.data["remaining_episodes"], targets(range(6, 12)))
+        assert result.model_data is not None
         self.assertEqual(result.model_data["remaining_episodes"], targets(range(6, 12)))
         self.assertTrue(all(row["search"]["exact_search_attempted"] for row in result.data["episodes"]))
         self.assertEqual(result.data["stop_reason"], "request_budget")
@@ -173,6 +177,7 @@ class SeasonResourceSearchTests(TestCase):
         search.assert_called_once()
         self.assertTrue(result.ok)
         self.assertEqual((result.status, result.data["processed"], result.data["failed"]), ("partial", 11, 0))
+        assert result.model_data is not None
         self.assertTrue(all(row["search"]["errors"] for row in result.model_data["episodes"]))
         self.assertEqual(result.data["remaining_episodes"], [])
 
@@ -247,6 +252,7 @@ class SeasonResourceSearchTests(TestCase):
         with patch.object(actions, "search_resources", return_value=searched):
             result = actions.search_missing_season_resources(self.arguments())
         self.assertTrue(all(row["search"]["recommendation"]["selected"] is None for row in result.data["episodes"]))
+        assert result.model_data is not None
         self.assertTrue(all(not row["search"]["items"] for row in result.model_data["episodes"]))
         self.assertEqual(result.data["remaining_episodes"], targets(range(6, 12)))
         self.assertTrue(all(candidate["match"] == "unknown" for candidate in result.references[0].value["candidates"]))
@@ -272,6 +278,7 @@ class SeasonResourceSearchTests(TestCase):
         self.assertEqual(self.audit.call_count, 2)
         self.assertEqual(result.data["recommended_positions"], [1, 2])
         self.assertEqual([group["positions"] for group in result.data["groups"]], [[1], [2]])
+        assert result.model_data is not None
         self.assertTrue(all(group["remaining"] == 0 for group in result.model_data["groups"]))
         self.assertEqual(len(result.references), 1)
         reference = result.references[0].value
@@ -352,7 +359,7 @@ class SeasonResourceSearchTests(TestCase):
             detail_url=f"https://fixture.invalid/{episode}",
             magnet=f"magnet:?xt=urn:btih:{episode:040x}", download_state="ready", download_kinds=("magnet",),
         ) for episode in range(1, 12)])
-        service = IndexerService(registry=IndexerRegistry({"nyaa": provider}), result_store=IndexerResultStore())
+        service = IndexerService(registry=IndexerRegistry({"nyaa": cast(IndexerAdapter, provider)}), result_store=IndexerResultStore())
         with (
             patch("socket.socket.connect", side_effect=AssertionError("network forbidden")),
             patch("app.services._configured_media_sources", return_value=[("jellyfin", "Jellyfin", "https://fixture.invalid", media)]),
@@ -416,6 +423,7 @@ class SeasonResourceSearchTests(TestCase):
             result = actions.search_missing_season_resources(arguments)
         self.assertEqual(result.status, "partial")
         self.assertEqual(result.data["groups"][0]["remaining"], 0)
+        assert result.model_data is not None
         self.assertTrue(result.model_data["groups"][0]["errors"])
 
     def test_wrong_episode_and_different_work_never_become_batch_review_positions(self):

@@ -12,6 +12,7 @@ import threading
 import time
 import unicodedata
 from datetime import datetime, timedelta
+from typing import Any
 
 from app import database as db
 from app.sensitive_data import contains_sensitive_credential, redact_sensitive_text
@@ -39,23 +40,23 @@ def _thread(value: object) -> str:
 
 
 def topic_mode_enabled(owner: str) -> bool:
-    return db.kv_get(f"telegram_topic_mode:v1:{_digest(str(owner))}") == "1"
+    return db.kv_get(f"telegram_topic_mode:v1:{_digest(owner)}") == "1"
 
 
 def set_topic_mode(owner: str, enabled: bool) -> None:
-    db.kv_set(f"telegram_topic_mode:v1:{_digest(str(owner))}", "1" if enabled else "0")
+    db.kv_set(f"telegram_topic_mode:v1:{_digest(owner)}", "1" if enabled else "0")
 
 
 def telegram_session_scope(owner: str, thread_id: object) -> str:
     """Append the private topic only while this owner's app isolation is on."""
     thread = _thread(thread_id)
-    owner_scope = str(owner)
+    owner_scope = owner
     if thread and topic_mode_enabled(owner_scope):
         return f"{owner_scope}\x1fthread:{thread}"
     return owner_scope
 
 
-def _expiry_is_live(value: object) -> bool:
+def _expiry_is_live(value: Any) -> bool:
     try:
         expires_at = float(value or 0)
     except (TypeError, ValueError, OverflowError):
@@ -115,12 +116,12 @@ def create_session_callback_route(
     token = secrets.token_urlsafe(6)
     if not _ROUTE_TOKEN_RE.fullmatch(token):
         raise RuntimeError("Telegram callback route token is invalid")
-    key = f"telegram_callback_route:v1:{_digest(str(owner))}:{token}"
+    key = f"telegram_callback_route:v1:{_digest(owner)}:{token}"
     db.kv_set(
         key,
         json.dumps(
             {
-                "session_id": str(session_id),
+                "session_id": session_id,
                 "thread_id": thread,
                 "expires_at": time.time() + _CALLBACK_ROUTE_TTL,
             },
@@ -133,10 +134,10 @@ def create_session_callback_route(
 def resolve_session_callback_route(
     owner: str, token: str, thread_id: object
 ) -> str:
-    normalized_token = str(token or "")
+    normalized_token = (token or "")
     if not _ROUTE_TOKEN_RE.fullmatch(normalized_token):
         return ""
-    key = f"telegram_callback_route:v1:{_digest(str(owner))}:{normalized_token}"
+    key = f"telegram_callback_route:v1:{_digest(owner)}:{normalized_token}"
     try:
         route = json.loads(db.kv_get(key, "") or "{}")
     except (TypeError, ValueError):
@@ -152,7 +153,7 @@ def resolve_session_callback_route(
 
 
 def bind_download_request_thread(
-    request_id: object, thread_id: object, *, only_if_unbound: bool = False
+    request_id: Any, thread_id: object, *, only_if_unbound: bool = False
 ) -> None:
     _maybe_prune_expired_routes()
     thread = _thread(thread_id)
@@ -177,7 +178,7 @@ def bind_download_request_thread(
         )
 
 
-def download_request_thread(request_id: object) -> int | None:
+def download_request_thread(request_id: Any) -> int | None:
     try:
         request = int(request_id)
     except (TypeError, ValueError):
@@ -221,7 +222,7 @@ _TITLE_PROMISE_RE = re.compile(
 )
 
 
-def _topic_naming_key(owner: object, chat_id: object, thread_id: object) -> str:
+def _topic_naming_key(owner: object, chat_id: Any, thread_id: object) -> str:
     owner_value = str(owner or "").strip()
     thread = _thread(thread_id)
     try:
@@ -412,7 +413,7 @@ async def auto_name_private_topic(
     *,
     owner: str,
     session_id: str,
-    chat_id: object,
+    chat_id: Any,
     chat_type: str,
     thread_id: object,
     topic_open: bool,
@@ -427,7 +428,7 @@ async def auto_name_private_topic(
 
     thread = _thread(thread_id)
     if (
-        str(chat_type or "").casefold() != "private"
+        (chat_type or "").casefold() != "private"
         or not thread
         or topic_open is not True
         or not topic_mode_enabled(owner)

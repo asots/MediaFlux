@@ -1,4 +1,7 @@
 """Small same-generation CAS, lifecycle and strict evidence controls."""
+from typing import Any
+from app.agent.kernel.task_state import TaskPatch
+from typing import cast
 
 import asyncio
 import json
@@ -72,7 +75,9 @@ def legacy_observations(task, *, owner=OWNER):
     # 模拟旧 reducer 已持久化的合法满容量快照，不放宽现行配额。
     task = deepcopy(task)
     for _ in range(32):
-        task["verified_facts"].append(observe(task, owner=owner).payload["observations"]["tmdb"])
+        observe_result = observe(task, owner=owner)
+        assert observe_result is not None
+        task["verified_facts"].append(observe_result.payload["observations"]["tmdb"])
         task["revision"] += 1
     return task
 
@@ -372,12 +377,16 @@ def test_unassociated_observations_keep_latest_component_snapshots():
     first = None
     for _ in range(32):
         patch = observe(task)
+        assert patch is not None
         first = first or patch.payload["observations"]["tmdb"]["evidence_id"]
         task = apply(task, patch)
+        assert patch is not None
         assert task["verified_facts"] == [other, patch.payload["observations"]["tmdb"]]
         assert task["status"] == "partial"
         assert all(o["state"] == "pending" and o["evidence_ids"] == [] for o in task["obligations"])
-    assert task_projection(task)["remaining_obligation_ids"] == ["tmdb", "qbittorrent"]
+    task_projection_result = task_projection(task)
+    assert task_projection_result is not None
+    assert task_projection_result["remaining_obligation_ids"] == ["tmdb", "qbittorrent"]
     before = deepcopy(task)
     with pytest.raises(ValueError, match="invalid evidence scope"):
         apply(task, command(task, "checkpoint", evidence_ids=[first], blockers=[]))
@@ -392,6 +401,7 @@ def test_explicit_checkpoints_replace_evidence_and_preserve_reported_blockers():
     previous = None
     for _ in range(32):
         patch = observe(task)
+        assert patch is not None
         latest = patch.payload["observations"]["tmdb"]["evidence_id"]
         task = apply(task, patch)
         assert task["obligations"][0]["evidence_ids"] == ([previous] if previous else [])
@@ -437,6 +447,7 @@ def test_checkpoint_replacement_rejects_invalid_selected_and_existing_scope(key)
             apply(corrupt, command(corrupt, "checkpoint", evidence_ids=[latest], blockers=[]))
         assert corrupt == before
     patch = observe(task)
+    assert patch is not None
     patch.payload["observations"]["tmdb"]["scope"][key] = 999 if key == "epoch" else "another"
     before = deepcopy(task)
     with pytest.raises(ValueError, match="invalid observation evidence"):
@@ -463,6 +474,7 @@ def test_snapshot_reclamation_keeps_cas_and_epoch_fences():
     with pytest.raises(ValueError, match="invalid evidence scope"):
         apply(task, command(task, "checkpoint", evidence_ids=[evidence], blockers=[]))
     old_epoch = observe(task)
+    assert old_epoch is not None
     old_epoch.payload["observations"]["tmdb"]["epoch"] -= 1
     with pytest.raises(ValueError, match="invalid observation evidence"):
         apply(task, old_epoch)
@@ -512,6 +524,7 @@ def test_sqlite_legacy_snapshot_recovers_after_cold_read(task_store, linked_hist
         cold = await other.load(owner=owner, session_id="cas")
         assert cold.metadata["task"] == task and len(task["verified_facts"]) == 32
         bad = observe(task, "qbittorrent", owner=owner)
+        assert bad is not None
         bad.payload["observations"]["qbittorrent"]["scope"]["owner"] = "another"
         with pytest.raises(ValueError, match="invalid observation evidence"):
             await other.commit(lease, task_patch=bad)
@@ -520,16 +533,20 @@ def test_sqlite_legacy_snapshot_recovers_after_cold_read(task_store, linked_hist
         state = await other.commit(lease, task_patch=recovery)
         recovered = state.metadata["task"]
         expected = [accepted] if linked_history else [accepted, latest]
+        assert recovery is not None
         assert recovered["verified_facts"] == [*expected, recovery.payload["observations"]["qbittorrent"]]
         assert recovered["obligations"][0]["evidence_ids"] == [accepted["evidence_id"]]
         assert recovered["blockers"] == [{"origin": "reported", "text": "query:qbittorrent"}]
         assert recovered["obligations"][1]["state"] == "pending"
-        assert task_projection(recovered)["remaining_obligation_ids"] == ["qbittorrent"]
+        task_projection_result_2 = task_projection(recovered)
+        assert task_projection_result_2 is not None
+        assert task_projection_result_2["remaining_obligation_ids"] == ["qbittorrent"]
         with pytest.raises(TaskConflict):
             await other.commit(lease, task_patch=command(task, "checkpoint", evidence_ids=[], blockers=[]))
         with pytest.raises(ValueError, match="invalid evidence scope"):
             await other.commit(lease, task_patch=command(recovered, "checkpoint", evidence_ids=[retired], blockers=[]))
         assert (await other.load(owner=owner, session_id="cas")).to_payload() == state.to_payload()
+        assert recovery is not None
         evidence = recovery.payload["observations"]["qbittorrent"]["evidence_id"]
         state = await other.commit(lease, task_patch=command(recovered, "checkpoint", evidence_ids=[evidence], blockers=["query:qbittorrent"]))
         assert state.metadata["task"]["status"] == "blocked"
@@ -554,7 +571,7 @@ def test_legacy_link_normalization_validates_every_old_reference():
         corrupt["verified_facts"][index]["scope"]["owner"] = "another"
         before = deepcopy(corrupt)
         with pytest.raises(ValueError, match="invalid linked evidence"):
-            reduce_task(corrupt, observe(corrupt, "qbittorrent", owner=owner), owner=owner, session_id="cas")
+            reduce_task(corrupt, cast(TaskPatch, observe(corrupt, "qbittorrent", owner=owner)), owner=owner, session_id="cas")
         assert corrupt == before
 
 
@@ -563,9 +580,11 @@ def test_batch_observation_is_one_revision_and_requires_explicit_checkpoint():
     task = reduce_task(None, control(declaration()), owner=OWNER, session_id="cas")
     before = deepcopy(task)
     patch = observe_batch(task)
+    assert patch is not None
     observed = reduce_task(task, patch, owner=OWNER, session_id="cas")
     assert task == before
     assert observed["revision"] == task["revision"] + 1
+    assert patch is not None
     assert observed["verified_facts"] == list(patch.payload["observations"].values())
     assert len({f["evidence_id"] for f in observed["verified_facts"]}) == 2
     assert {f["call_id"] for f in observed["verified_facts"]} == {"batch-call"}
@@ -594,20 +613,27 @@ def test_batch_partial_failure_keeps_valid_facts_pending_and_reported_blocker(fa
     reported = {"origin": "reported", "text": text}
     assert query in task["blockers"] and reported in task["blockers"]
     task = apply(task, command(task, "checkpoint", evidence_ids=[task["verified_facts"][0]["evidence_id"]], blockers=[text]))
-    assert task["status"] == "blocked" and task_projection(task)["remaining_obligation_ids"] == [failed]
+    projection = task_projection(task)
+    assert projection is not None
+    assert task["status"] == "blocked" and projection["remaining_obligation_ids"] == [failed]
     accepted = [o["evidence_ids"][:] for o in task["obligations"]]
     task = apply(task, observe_batch(task))
     assert task["blockers"] == [reported]
     assert [o["evidence_ids"] for o in task["obligations"]] == accepted
-    assert task_projection(task)["remaining_obligation_ids"] == [failed]
+    task_projection_result_3 = task_projection(task)
+    assert task_projection_result_3 is not None
+    assert task_projection_result_3["remaining_obligation_ids"] == [failed]
     task = apply(task, command(task, "checkpoint", evidence_ids=[f["evidence_id"] for f in task["verified_facts"]], blockers=[text]))
-    assert task["status"] == "blocked" and not task_projection(task)["remaining_obligation_ids"]
+    projection = task_projection(task)
+    assert projection is not None
+    assert task["status"] == "blocked" and not projection["remaining_obligation_ids"]
 
 
 @pytest.mark.parametrize("invalid", ["owner", "session_id", "task_id", "epoch", "fact_epoch", "component", "unknown"])
 def test_batch_invalid_second_fact_rejects_the_entire_patch(invalid):
     task = reduce_task(None, control(declaration()), owner=OWNER, session_id="cas")
     patch = observe_batch(task)
+    assert patch is not None
     facts = patch.payload["observations"]
     fact = facts["qbittorrent"]
     if invalid == "unknown":
@@ -626,14 +652,17 @@ def test_batch_invalid_second_fact_rejects_the_entire_patch(invalid):
 
 def test_batch_factory_ignores_unknown_components_without_trusting_their_facts():
     task = reduce_task(None, control(declaration()), owner=OWNER, session_id="cas")
-    observations = {"unsupported": {
+    observations: dict[str, dict[str, Any] | None] = {"unsupported": {
         "component": "unsupported", "status": "ready", "enabled": True,
         "probe_mode": "configuration_only", "network_accessed": False,
     }}
     kwargs = dict(owner=OWNER, session_id="cas", tool="config.diagnose", call_id="batch-call")
     assert observation_patch(task, observations=observations, **kwargs) is None
-    observations["tmdb"] = {**observations["unsupported"], "component": "tmdb"}
+    unsupported = observations["unsupported"]
+    assert unsupported is not None
+    observations["tmdb"] = {**unsupported, "component": "tmdb"}
     patch = observation_patch(task, observations=observations, **kwargs)
+    assert patch is not None
     assert set(patch.payload["observations"]) == {"tmdb"}
     saved = reduce_task(task, patch, owner=OWNER, session_id="cas")
     assert [f["component"] for f in saved["verified_facts"]] == ["tmdb"]
@@ -655,9 +684,11 @@ def test_diagnosis_observer_does_not_trust_invalid_or_unknown_component_rows(bad
     })
     observations = observe_configuration(result, {})
     assert set(observations) == {"tmdb", "qbittorrent"}
+    assert observations["tmdb"] is not None
     assert observations["tmdb"]["status"] == "ready" and observations["qbittorrent"] is None
     task = reduce_task(None, control(declaration()), owner=OWNER, session_id="cas")
     patch = observation_patch(task, owner=OWNER, session_id="cas", tool="config.diagnose", call_id="batch-call", observations=observations)
+    assert patch is not None
     saved = reduce_task(task, patch, owner=OWNER, session_id="cas")
     assert saved["status"] == "blocked" and len(saved["verified_facts"]) == 1
     assert all(o["state"] == "pending" and not o["evidence_ids"] for o in saved["obligations"])
@@ -669,6 +700,7 @@ def test_batch_sqlite_atomicity_cold_read_and_reference_is_not_task_evidence(tas
         initial = await task_store.commit(lease, task_patch=control(declaration()))
         task = initial.metadata["task"]
         bad = observe_batch(task)
+        assert bad is not None
         bad.payload["observations"]["qbittorrent"]["scope"]["owner"] = "another"
         with pytest.raises(ValueError, match="invalid observation evidence"):
             await task_store.commit(lease, task_patch=bad)
@@ -740,6 +772,6 @@ def test_terminal_task_can_be_replaced_without_model_supplied_versions(terminal)
 def test_new_task_cannot_replace_unfinished_work(blocked):
     task = reduce_task(None, control(declaration()), owner=OWNER, session_id="cas")
     if blocked:
-        task = reduce_task(task, observe(task, success=False), owner=OWNER, session_id="cas")
+        task = reduce_task(task, cast(TaskPatch, observe(task, success=False)), owner=OWNER, session_id="cas")
     with pytest.raises(TaskConflict, match="finish or cancel"):
         reduce_task(task, control(declaration(), task), owner=OWNER, session_id="cas")

@@ -59,7 +59,7 @@ def anime_calendar_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         query = _safe(query, 80)
         if not query:
             raise AgentToolError("query 只能提供片名关键词，不能包含路径、地址或凭据")
-    normalized = {"day": day, "source": source, "query": query}
+    normalized: dict[str, Any] = {"day": day, "source": source, "query": query}
     if not {"page", "limit"} & arguments.keys():
         return normalized
     for name, default, maximum in (("page", 1, 100), ("limit", 20, 20)):
@@ -118,9 +118,12 @@ def _events(card: dict, day: date) -> list[CalendarEvent]:
     for value in raw[:50]:
         if not isinstance(value, dict) or not isinstance(value.get("update_time", ""), str):
             continue
+        event_date, schedule = value.get("date"), value.get("schedule")
+        if not isinstance(event_date, str) or not isinstance(schedule, str):
+            continue
         try:
-            event = CalendarEvent(value.get("date"), value.get("update_time", ""),
-                                  value.get("schedule"), value.get("audience", "unknown"))
+            event = CalendarEvent(event_date, value.get("update_time", ""),
+                                  schedule, value.get("audience", "unknown"))
         except (TypeError, ValueError):
             continue
         if event.date == day.isoformat():

@@ -11,11 +11,15 @@ from typing import Any, Mapping
 import requests
 
 from app import config as app_config
-from app.clients.tmdb import TMDBClient
 from app.clients.douban_authenticated import normalize_dbcl2
+from app.clients.tmdb import TMDBClient
 from app.discovery.models import MediaCard, ProviderError, ProviderInvalidResponse
-from app.discovery.providers.base import DEFAULT_TIMEOUT, map_request_error, response_json
 from app.discovery.providers.bangumi import BangumiProvider
+from app.discovery.providers.base import (
+    DEFAULT_TIMEOUT,
+    map_request_error,
+    response_json,
+)
 from app.discovery.providers.douban import DoubanProvider
 from app.discovery.providers.tmdb import TMDBProvider
 from app.logger import get_logger
@@ -156,9 +160,7 @@ class BangumiSearchProvider:
         timeout=DEFAULT_TIMEOUT,
     ):
         self.session = session or requests.Session()
-        self.user_agent = str(
-            user_agent or app_config.get("BANGUMI_USER_AGENT", "MediaFlux/1.0") or "MediaFlux/1.0"
-        ).strip()
+        self.user_agent = (user_agent or app_config.get("BANGUMI_USER_AGENT", "MediaFlux/1.0") or "MediaFlux/1.0").strip()
         self.timeout = timeout
         if hasattr(self.session, "trust_env"):
             self.session.trust_env = False
@@ -275,19 +277,16 @@ class DiscoverySearchService:
         return names
 
     def _normalize(self, query: str, page: int, provider_names: list[str] | tuple[str, ...] | None):
-        normalized_query = unicodedata.normalize("NFKC", str(query or "")).strip()
+        normalized_query = unicodedata.normalize("NFKC", (query or "")).strip()
         has_control = any(unicodedata.category(char).startswith("C") for char in normalized_query)
         if not normalized_query or len(normalized_query) > 120 or has_control or _CONTROL_RE.search(normalized_query):
             raise ValueError("搜索关键词必须为 1 到 120 个可见字符")
-        try:
-            normalized_page = int(page)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("页码无效") from exc
-        if normalized_page < 1 or normalized_page > 100:
+
+        if page < 1 or page > 100:
             raise ValueError("页码必须在 1 到 100 之间")
         enabled = self._enabled_names()
         selected = list(provider_names or enabled)
-        selected = list(dict.fromkeys(str(name or "").strip().lower() for name in selected if str(name or "").strip()))
+        selected = list(dict.fromkeys((name or "").strip().lower() for name in selected if (name or "").strip()))
         if not selected:
             raise ValueError("至少选择一个搜索来源")
         unknown = [name for name in selected if name not in _PROVIDER_ORDER]
@@ -296,7 +295,7 @@ class DiscoverySearchService:
         disabled = [name for name in selected if name not in enabled]
         if disabled:
             raise ValueError("搜索来源已关闭")
-        return normalized_query, normalized_page, selected
+        return normalized_query, page, selected
 
     def search(
         self,

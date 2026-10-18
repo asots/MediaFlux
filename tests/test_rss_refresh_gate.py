@@ -202,7 +202,9 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(result["error_code"], "all_sources_failed")
         self.assertEqual(result["failed_sources"], 2)
-        self.assertIsNone(db.get_rss_subscription(sid)["last_refreshed_at"])
+        get_rss_subscription_result = db.get_rss_subscription(sid)
+        assert get_rss_subscription_result is not None
+        self.assertIsNone(get_rss_subscription_result["last_refreshed_at"])
 
     def test_valid_empty_feed_advances_last_refresh_time(self):
         sid = self._subscription("valid-empty")
@@ -214,7 +216,9 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
 
         engine.parser.parse = Mock(side_effect=empty_parse)
         self.assertEqual(engine.refresh(sid), {"total": 0, "new": 0, "skipped": 0})
-        self.assertTrue(db.get_rss_subscription(sid)["last_refreshed_at"])
+        get_rss_subscription_result_2 = db.get_rss_subscription(sid)
+        assert get_rss_subscription_result_2 is not None
+        self.assertTrue(get_rss_subscription_result_2["last_refreshed_at"])
 
     def test_scheduler_bounds_concurrent_refresh_threads(self):
         rows = [
@@ -347,7 +351,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             self.assertNotIn(secret, serialized)
 
     def test_parser_uses_bounded_http_timeouts(self):
-        observed = {}
+        observed: dict[str, object] = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             observed["url"] = str(request.url)
@@ -483,6 +487,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
         download_many.assert_called_once_with([accepted_id], auto_guard=ANY)
         self.assertTrue(download_many.call_args.kwargs["auto_guard"]())
         excluded = db.get_rss_entry(int(excluded_id))
+        assert excluded is not None
         self.assertEqual(excluded["status"], "skipped")
         self.assertTrue(excluded["processed"])
         with db.get_conn() as conn:
@@ -529,7 +534,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
     def test_scheduler_retries_unresolved_alert_and_persists_delivery_signature(self):
         sid = self._subscription("scheduler-durable-alert")
         entry_id = db.add_rss_entry_with_media(sid, "待核对资源", "durable-alert-guid")["id"]
-        self.assertIsNotNone(entry_id)
+        assert (entry_id) is not None
         db.record_rss_entry_failure(int(entry_id), "qb_outcome_unknown", False)
         issue = {
             "refresh": {"total": 1, "new": 1, "skipped": 0},

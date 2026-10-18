@@ -54,7 +54,9 @@ def test_setup_error_css_reserves_scrollable_space_without_changing_login():
     css = (root / "app/static/css/core-layout.css").read_text(encoding="utf-8")
 
     def rule(selector):
-        return re.search(re.escape(selector) + r"\s*\{([^}]+)\}", css).group(1)
+        search_result = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", css)
+        assert search_result is not None
+        return search_result.group(1)
 
     setup = rule(".form-error.setup-form-error")
     assert "display: flex !important" in setup

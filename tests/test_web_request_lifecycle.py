@@ -108,7 +108,7 @@ class WebRequestLifecycleTests(IsolatedDatabaseTestCase):
                     result = request()
                 self.assertEqual(call.call_count, 1)
                 self.assertTrue(
-                    result.cached if module is hints else result.data["cached"]
+                    result.cached if isinstance(result, hints.RecognitionWebHintResult) else result.data["cached"]
                 )
                 self.assertEqual(flight.active_count, 0)
 
@@ -126,7 +126,7 @@ class WebRequestLifecycleTests(IsolatedDatabaseTestCase):
                     result = request()
                 self.assertEqual(call.call_count, 2)
                 self.assertFalse(
-                    result.cached if module is hints else result.data["cached"]
+                    result.cached if isinstance(result, hints.RecognitionWebHintResult) else result.data["cached"]
                 )
                 self.assertEqual(flight.active_count, 0)
 

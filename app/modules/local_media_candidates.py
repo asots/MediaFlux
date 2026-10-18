@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.modules.local_media_cleanup import is_probable_sample_video
 from app.modules.local_path_mapping import (
     LEGACY_SOURCE_PATH_ERROR,
     PathMappingError,
     assert_within,
     require_container_absolute_path,
 )
-from app.modules.local_media_cleanup import is_probable_sample_video
 from app.modules.local_storage import (
     LocalFilesystemAdapter,
     LocalStorageError,
@@ -157,7 +157,7 @@ def _expand_media_candidate(
     if not stat_module.S_ISDIR(info.st_mode):
         return []
 
-    identity = (int(info.st_dev), int(info.st_ino))
+    identity = (info.st_dev, info.st_ino)
     if identity in visited:
         return []
     visited.add(identity)
@@ -263,17 +263,17 @@ def candidate_payload(
         "relative_path": selected.relative_to(root).as_posix(),
         "kind": kind,
         "deletable": selected.parent == root,
-        "size": int(info.st_size) if kind == "video" else None,
+        "size": info.st_size if kind == "video" else None,
         "modified_at": datetime.fromtimestamp(info.st_mtime, tz=timezone.utc).isoformat(),
-        "organize_ready": bool(organize_ready),
+        "organize_ready": organize_ready,
         "identity": {
             # 文件身份是前端回传的透明快照。mtime_ns 与部分 NAS 文件系统的
             # inode/device 会超过 JavaScript Number 的安全整数范围，必须使用
             # 十进制字符串传输，避免浏览器 JSON 往返后被舍入并误报条目变化。
-            "size": str(int(info.st_size)),
-            "mtime_ns": str(int(info.st_mtime_ns)),
-            "device": str(int(info.st_dev)),
-            "inode": str(int(info.st_ino)),
+            "size": str(info.st_size),
+            "mtime_ns": str(info.st_mtime_ns),
+            "device": str(info.st_dev),
+            "inode": str(info.st_ino),
         },
     }
 
@@ -299,14 +299,14 @@ def move_candidate_to_trash(source, path: Path | str, expected_identity: dict[st
         raise PathMappingError("条目不是可删除的媒体内容")
 
     current_identity = {
-        "size": int(info.st_size),
-        "mtime_ns": int(info.st_mtime_ns),
-        "device": int(info.st_dev),
-        "inode": int(info.st_ino),
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "device": info.st_dev,
+        "inode": info.st_ino,
     }
     normalized_expected: dict[str, int] = {}
     for key in current_identity:
-        value = expected_identity.get(key) if isinstance(expected_identity, dict) else None
+        value: Any = expected_identity.get(key) if isinstance(expected_identity, dict) else None
         if isinstance(value, bool):
             raise PathMappingError("条目快照无效，请刷新后重试")
         try:
@@ -331,10 +331,10 @@ def move_candidate_to_trash(source, path: Path | str, expected_identity: dict[st
         if stat_module.S_ISLNK(fresh.st_mode):
             raise PathMappingError("禁止删除符号链接")
         fresh_identity = {
-            "size": int(fresh.st_size),
-            "mtime_ns": int(fresh.st_mtime_ns),
-            "device": int(fresh.st_dev),
-            "inode": int(fresh.st_ino),
+            "size": fresh.st_size,
+            "mtime_ns": fresh.st_mtime_ns,
+            "device": fresh.st_dev,
+            "inode": fresh.st_ino,
         }
         if fresh_identity != normalized_expected:
             raise PathMappingError("条目在删除前发生变化，请刷新后重试")
@@ -352,10 +352,10 @@ def move_candidate_to_trash(source, path: Path | str, expected_identity: dict[st
         moved = True
         published = os.stat(destination_name, dir_fd=trash_fd, follow_symlinks=False)
         published_identity = {
-            "size": int(published.st_size),
-            "mtime_ns": int(published.st_mtime_ns),
-            "device": int(published.st_dev),
-            "inode": int(published.st_ino),
+            "size": published.st_size,
+            "mtime_ns": published.st_mtime_ns,
+            "device": published.st_dev,
+            "inode": published.st_ino,
         }
         if published_identity != normalized_expected:
             move_entry_no_replace_at(

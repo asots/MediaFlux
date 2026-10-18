@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 from contextlib import contextmanager
 
@@ -939,7 +940,7 @@ def test_recent_added_granularity_through_domain_provider_and_shared_clients(
         {"ItemId": "tv-library", "Name": "电视剧", "CollectionType": "tvshows"},
         {"ItemId": "anime-library", "Name": "动漫", "CollectionType": "tvshows"},
     ]
-    rows = [
+    rows: list[dict[str, Any]] = [
         {"Id": f"episode-{number}", "Name": f"第{number}集", "Type": "Episode",
          "SeriesId": "series-a", "SeriesName": "黑镜", "ParentIndexNumber": 7,
          "IndexNumber": number, "DateCreated": f"2026-10-16T12:00:0{number}Z",
@@ -992,6 +993,7 @@ def test_recent_added_granularity_through_domain_provider_and_shared_clients(
         arguments["media_type"] = media_type
     spec = next(spec for spec in build_tool_specs() if spec.name == "media.recently_added")
     with isolated_test_database():
+        assert spec.context_handler is not None
         result = spec.context_handler(spec.validator(arguments), context)
     assert result.ok, result.summary
     assert [item["name"] for item in result.data["items"]] == expected_names

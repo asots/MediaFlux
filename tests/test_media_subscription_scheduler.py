@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import threading
+from threading import Thread
+from typing import cast
 from unittest import TestCase
 from unittest.mock import AsyncMock, patch
 
@@ -119,8 +121,8 @@ class MediaSubscriptionSchedulerTests(TestCase):
         scheduler_thread.alive = True
         worker = _StubbornThread()
         worker.alive = True
-        scheduler._thread = scheduler_thread
-        scheduler._workers = {9: worker}
+        scheduler._thread = cast(Thread, scheduler_thread)
+        scheduler._workers = {9: cast(Thread, worker)}
 
         self.assertFalse(scheduler.stop(timeout=0))
         self.assertIs(scheduler._thread, scheduler_thread)
@@ -132,8 +134,8 @@ class MediaSubscriptionSchedulerTests(TestCase):
         scheduler_thread.alive = True
         worker = _FakeThread()
         worker.alive = True
-        scheduler._thread = scheduler_thread
-        scheduler._workers = {11: worker}
+        scheduler._thread = cast(Thread, scheduler_thread)
+        scheduler._workers = {11: cast(Thread, worker)}
 
         self.assertTrue(scheduler.stop(timeout=1))
         self.assertIsNone(scheduler._thread)

@@ -69,7 +69,10 @@ def test_history_valid_fingerprint_cache_survives_newer_corrupt_rows(reader, exa
         assert result == good, "损坏的新记录不得遮蔽同内容的有效历史缓存"
         from app.modules.media_probe import media_profile_from_cache
 
-        assert media_profile_from_cache(result).resolution == "1080p"
+        assert result is not None
+        media_profile_from_cache_result = media_profile_from_cache(result)
+        assert media_profile_from_cache_result is not None
+        assert media_profile_from_cache_result.resolution == "1080p"
 
 
 @contextmanager

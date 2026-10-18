@@ -6,9 +6,11 @@ import gzip
 import threading
 import unittest
 import zlib
+from typing import cast
 from unittest.mock import PropertyMock, patch
 
 import httpx
+from httpx import AsyncClient
 
 import tests  # noqa: F401 -- 应用导入前隔离生产配置和 DB。
 from app.clients.http import (
@@ -54,6 +56,7 @@ class FakeCurlResponse:
 
 
 class FakeCurlSession:
+    curl_options: dict
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
@@ -93,14 +96,14 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
             async def aclose(self):
                 closed_loop.call_soon(lambda: None)
 
-        client._client = ClosedLoopClient()
+        client._client = cast(AsyncClient, ClosedLoopClient())
         await client.aclose()
 
         class SameTextClient:
             async def aclose(self):
                 raise RuntimeError("Event loop is closed")
 
-        client._client = SameTextClient()
+        client._client = cast(AsyncClient, SameTextClient())
         with self.assertRaisesRegex(RuntimeError, "Event loop is closed"):
             await client.aclose()
 
@@ -108,7 +111,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
             async def aclose(self):
                 raise RuntimeError("transport shutdown failed")
 
-        client._client = OtherTextClient()
+        client._client = cast(AsyncClient, OtherTextClient())
         with self.assertRaisesRegex(RuntimeError, "transport shutdown failed"):
             await client.aclose()
 
@@ -122,7 +125,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
                 except RuntimeError as exc:
                     raise ClosedLoopSubclass(*exc.args) from exc
 
-        client._client = SubclassClient()
+        client._client = cast(AsyncClient, SubclassClient())
         with self.assertRaises(ClosedLoopSubclass):
             await client.aclose()
         self.client = None
@@ -177,6 +180,11 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
             pin_resolved_address=True,
         )
         try:
+            assert isinstance(single._client._transport, httpx.AsyncHTTPTransport)
+            assert isinstance(multi._client._transport, httpx.AsyncHTTPTransport)
+            from httpcore import AsyncConnectionPool
+            assert isinstance(single._client._transport._pool, AsyncConnectionPool)
+            assert isinstance(multi._client._transport._pool, AsyncConnectionPool)
             self.assertGreater(
                 single._client._transport._pool._max_keepalive_connections, 0
             )
@@ -496,7 +504,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.calls, [])
 
     async def test_query_params_are_encoded_by_httpx(self):
-        observed = {}
+        observed: dict = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             observed["query"] = request.url.params.get("q")
@@ -508,7 +516,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_pinned_request_uses_validated_ip_with_original_host_and_sni(self):
-        observed = {}
+        observed: dict = {}
         resolution_calls = []
 
         def resolver(host, port):
@@ -541,7 +549,7 @@ if __name__ == "__main__":
 
 class FixedHostPostJsonTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_json_preserves_method_body_and_headers(self):
-        seen = {}
+        seen: dict = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["method"] = request.method
@@ -569,7 +577,7 @@ class FixedHostPostJsonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["authorization"], "Bearer secret")
 
     async def test_stream_post_json_preserves_security_context_and_bounds_chunks(self):
-        seen = {}
+        seen: dict = {}
         stream = ChunkStream([b"data: one\n\n", b"data: two\n\n"])
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -686,7 +694,7 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
             calls.append(request)
             return response
 
-        options = {} if strict is None else {"require_identity_encoding": strict}
+        options: dict = {} if strict is None else {"require_identity_encoding": strict}
         client = FixedHostHttpClient(
             allowed_hosts={"nyaa.si"}, resolver=PUBLIC_DNS,
             transport=httpx.MockTransport(handle), max_response_bytes=maximum, **options,
@@ -866,7 +874,7 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
                         calls.append(request)
                         raise httpx.ReadTimeout("offline fixture", request=request)
 
-                    options = {} if strict is None else {"require_identity_encoding": strict}
+                    options: dict = {} if strict is None else {"require_identity_encoding": strict}
                     client = FixedHostHttpClient(allowed_hosts={"nyaa.si"}, resolver=PUBLIC_DNS,
                         transport=httpx.MockTransport(timeout), **options)
                     self.addAsyncCleanup(client.aclose)
@@ -880,7 +888,8 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
             for kind in ("content", "json", "text"):
                 with self.subTest(method=method, kind=kind):
                     value = {"content": self.PNG, "json": {"ok": True}, "text": "离线响应"}[kind]
-                    response = httpx.Response(200, **{kind: value})
+                    body_options: dict = {kind: value}
+                    response = httpx.Response(200, **body_options)
                     expected = response.content
                     self.assertTrue(response.is_stream_consumed)
                     client, _, _ = self.make_client(response=response, maximum=len(expected))

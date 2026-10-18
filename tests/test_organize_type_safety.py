@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 from unittest.mock import Mock, patch
 
 from app.clients.guangya import GuangYaFile
@@ -102,7 +103,7 @@ class ExplicitTmdbTypeSafetyTests(unittest.TestCase):
                 "first_air_date": "2023-01-19",
             },
         }
-        return rows.get((str(tmdb_id), media_type), {})
+        return rows.get((tmdb_id, media_type), {})
 
     def test_inherited_anime_movies_switch_from_wrong_tv_namespace(self):
         cases = (

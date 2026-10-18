@@ -20,6 +20,7 @@ class FakeRegistry:
 class IndexerRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def _initialize_lifespan_fixture(self):
         from contextlib import ExitStack
+
         from tests.support import initialized_web_runtime
 
         stack = ExitStack()
@@ -298,6 +299,7 @@ class IndexerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(runtime._standalone_loop, owner_loop)
         self.assertIs(runtime._standalone_thread, thread)
         self.assertTrue(runtime._runtime_stopping)
+        assert thread is not None
         self.assertTrue(thread.is_alive())
 
         second = await asyncio.to_thread(runtime._stop_standalone_runtime, 1.0)
@@ -503,7 +505,7 @@ class IndexerRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         def bind_with_failure(loop):
             handler = loop.get_exception_handler()
-            self.assertIsNotNone(handler)
+            assert (handler) is not None
             handler(loop, {"message": "unsilenced runtime failure"})
             raise RuntimeError("bind failed")
 

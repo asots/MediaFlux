@@ -31,7 +31,7 @@ class MediaAliasPersistenceTests(IsolatedDatabaseTestCase):
         )
 
         self.assertEqual(written, 2)
-        self.assertIsNotNone(match)
+        assert (match) is not None
         self.assertEqual(match["tmdb_id"], "1360829")
         self.assertEqual(match["source"], "manual")
 
@@ -55,7 +55,7 @@ class MediaAliasPersistenceTests(IsolatedDatabaseTestCase):
                 ("shared title", "100"),
             ).fetchone()
 
-        self.assertIsNotNone(match)
+        assert (match) is not None
         self.assertEqual(match["tmdb_id"], "200")
         self.assertEqual(int(old["blocked"]), 1)
         self.assertEqual(old["source"], "manual_rejected")
@@ -74,7 +74,9 @@ class MediaAliasPersistenceTests(IsolatedDatabaseTestCase):
         new = lookup_manual_alias(["Example"], media_type="movie", year="2025")
         ambiguous = lookup_manual_alias(["Example"], media_type="movie")
 
+        assert old is not None
         self.assertEqual(old["tmdb_id"], "101")
+        assert new is not None
         self.assertEqual(new["tmdb_id"], "202")
         self.assertIsNone(ambiguous)
 
@@ -87,8 +89,10 @@ class MediaAliasPersistenceTests(IsolatedDatabaseTestCase):
         self.assertIsNone(
             lookup_manual_alias(["Example"], media_type="movie", year="2024")
         )
+        lookup_manual_alias_result = lookup_manual_alias(["Example"], media_type="movie", year="2025")
+        assert lookup_manual_alias_result is not None
         self.assertEqual(
-            lookup_manual_alias(["Example"], media_type="movie", year="2025")["tmdb_id"],
+            lookup_manual_alias_result["tmdb_id"],
             "101",
         )
 
@@ -110,7 +114,7 @@ class MediaAliasPersistenceTests(IsolatedDatabaseTestCase):
 
         match = lookup_manual_alias(["Example"], media_type="movie", year="")
 
-        self.assertIsNotNone(match)
+        assert (match) is not None
         self.assertEqual(match["tmdb_id"], "101")
 
 

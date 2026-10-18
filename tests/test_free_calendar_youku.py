@@ -142,7 +142,7 @@ class YoukuCalendarTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_two_host_allowlist_and_unrecognized_ssr_has_no_fixture_fallback(self):
         provider = YoukuCalendarProvider(clock=lambda: _NOW)
         self.assertEqual(provider.allowed_hosts, frozenset({"www.youku.com", "acs.youku.com"}))
-        self.assertIsInstance(provider.allowed_hosts, frozenset)
+        assert isinstance(provider.allowed_hosts, frozenset)
         http = FakeHttp('<script>window.__INITIAL_DATA__ ={"moduleList":[]};</script>')
         result = await provider.fetch(http)
         self.assertEqual(result.entries, ())
@@ -576,6 +576,7 @@ class YoukuCalendarTests(unittest.IsolatedAsyncioTestCase):
         payload = json.dumps(data).replace('"moduleList":', '"unused":undefined,"moduleList":', 1)
         html = '<script data-note="a > b">window.__INITIAL_DATA__ =' + payload + ';</script>'
         parsed = _initial_data(html)
+        assert parsed is not None
         self.assertEqual(parsed["literal"], literal)
         self.assertIsNone(parsed["unused"])
         result = await YoukuCalendarProvider(clock=lambda: _NOW).fetch(FakeHttp(html))

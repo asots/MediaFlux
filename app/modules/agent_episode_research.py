@@ -350,6 +350,7 @@ class _ResearchRun:
         return await self.web(name, arguments)
 
     async def web(self, name, arguments):
+        url = ""
         if name == "web_search":
             self.searches += 1
             if self.searches > _MAX_WEB_SEARCHES:
@@ -605,7 +606,7 @@ async def research_episode_case_async(payload: dict[str, Any], *, model=None, re
                 result.update(status="abstained", reason_code="insufficient_evidence")
                 return
             index, group_id = run.proposed
-            proposal = await worker.call(reader.validate, index, group_id,
+            proposal = await worker.call(worker.reader.validate, index, group_id,
                                          web_evidence=tuple(run.web_evidence))
             if run.failure:
                 raise _error(run.failure)
@@ -633,7 +634,8 @@ async def research_episode_case_async(payload: dict[str, Any], *, model=None, re
     except asyncio.TimeoutError:
         result.update(status="failed", proposal=None, reason_code="research_timeout")
     except Exception as exc:  # noqa: BLE001 - 研究会话故障统一返回，无敏感异常正文
-        is_evidence_error = contract is not None and isinstance(exc, contract.EpisodeResearchError)
+        error_type = getattr(contract, "EpisodeResearchError", None)
+        is_evidence_error = isinstance(error_type, type) and isinstance(exc, error_type)
         result.update(status="abstained" if is_evidence_error else "failed", proposal=None,
                       reason_code=_code(getattr(exc, "code", None), "research_failed"))
     finally:

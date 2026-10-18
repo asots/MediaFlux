@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Iterator
+from typing import Any, Generator
 
 from app import database as db
 from app.modules.process_lock import CrossProcessLock
@@ -38,7 +38,7 @@ def _task() -> object | None:
 
 
 def _scope_key(owner: str, session_id: str) -> str:
-    owner, session_id = str(owner or "").strip(), str(session_id or "").strip()
+    owner, session_id = (owner or "").strip(), (session_id or "").strip()
     if not owner or not session_id:
         raise ValueError("Agent 会话 scope 无效")
     return hashlib.sha256(json.dumps(
@@ -48,7 +48,7 @@ def _scope_key(owner: str, session_id: str) -> str:
 
 
 @contextmanager
-def continuation_execution_guard(owner: str, session_id: str) -> Iterator[bool]:
+def continuation_execution_guard(owner: str, session_id: str) -> Generator[bool, None, None]:
     """续行执行持有独立 OS 锁；进程退出自动释放，不用 TTL 推断死亡。
 
     与会话状态事务锁分开，存活续行期间仍允许冷取消和前台新请求。
@@ -67,7 +67,7 @@ def continuation_execution_guard(owner: str, session_id: str) -> Iterator[bool]:
 
 
 @contextmanager
-def session_scope_guard(owner: str, session_id: str, *, kind: str = "mutation") -> Iterator[None]:
+def session_scope_guard(owner: str, session_id: str, *, kind: str = "mutation") -> Generator[None, None, None]:
     """非阻塞互斥；不创建内存锁注册表，也不依赖 TTL 判定活跃执行者。
 
     同一操作通过 to_thread 进入状态事务时允许复用持锁权。其它 asyncio

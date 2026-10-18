@@ -1,6 +1,11 @@
 """自动整理、下载恢复和 STRM URL 的增量韧性回归。"""
 from __future__ import annotations
 
+from starlette.routing import Route
+
+from typing import cast
+from app.modules.scraper import TMDBScraper
+
 import tempfile
 import threading
 import unittest
@@ -45,7 +50,7 @@ class _LocalScraper:
 
     def match_from_tmdb(self, tmdb_id: str, media_type: str):
         return MatchResult(
-            tmdb_id=str(tmdb_id), title="Movie", year="2026", media_type=media_type,
+            tmdb_id=tmdb_id, title="Movie", year="2026", media_type=media_type,
             confidence=1.0, status="matched",
         )
 
@@ -83,6 +88,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             self.assertEqual(tracker.run_once(), 0)
 
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["status"], "manual_review")
         self.assertEqual(row["qb_status"], "submitted")
         self.assertEqual(row["gy_status"], "manual_review")
@@ -99,6 +105,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(db.recover_stale_submitting_download_requests(), 0)
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["status"], "submitting")
         self.assertEqual(row["qb_status"], "submitting")
 
@@ -151,6 +158,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         if failures:
             raise failures[0]
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["status"], "resubmitted")
         self.assertEqual(row["qb_status"], "resubmitted")
         self.assertFalse(outcome["ok"])
@@ -214,6 +222,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         if failures:
             raise failures[0]
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["status"], "resubmitted")
         self.assertEqual(row["gy_status"], "resubmitted")
         self.assertTrue(outcome["handled"])
@@ -234,6 +243,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(db.claim_failed_share_transfer_request(request_id))
         claimed = db.get_download_request(request_id)
+        assert claimed is not None
         self.assertEqual(claimed["status"], "submitting")
         self.assertEqual(claimed["gy_status"], "submitting")
         with db.get_conn() as conn:
@@ -256,6 +266,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
         gy_tasks.assert_not_called()
         recovered = db.get_download_request(request_id)
+        assert recovered is not None
         self.assertEqual(recovered["status"], "manual_review")
         self.assertEqual(recovered["gy_status"], "manual_review")
         self.assertIn("云端写入结果未知", recovered["error"])
@@ -277,6 +288,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(db.recover_stale_submitting_download_requests(), 0)
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["status"], "submitting")
         self.assertEqual(row["gy_status"], "submitting")
 
@@ -311,6 +323,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             request_id, token, delivered=True,
         ))
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["notification_delivery_status"], "sent")
         self.assertEqual(row["notification_lease_token"], "")
 
@@ -323,7 +336,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             notification_delivery_status="pending",
         )
         first = db.claim_download_request_notification(request_id, lease_seconds=30)
-        self.assertIsNotNone(first)
+        assert (first) is not None
         self.assertIsNone(db.claim_download_request_notification(request_id))
         with db.get_conn() as conn:
             conn.execute(
@@ -331,7 +344,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
                 ("2000-01-01 00:00:00", request_id),
             )
         second = db.claim_download_request_notification(request_id)
-        self.assertIsNotNone(second)
+        assert (second) is not None
         self.assertNotEqual(first["token"], second["token"])
         self.assertFalse(db.finalize_download_request_notification(
             request_id, first["token"], delivered=True,
@@ -340,6 +353,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             request_id, second["token"], delivered=True,
         ))
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["notification_delivery_status"], "sent")
         self.assertEqual(row["notification_lease_token"], "")
 
@@ -358,6 +372,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
         self.assertTrue(db.claim_download_request_organize(request_id))
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(int(row["organize_started"]), 1)
         self.assertEqual(str(row["status"]), "manual_review")
 
@@ -373,7 +388,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             local_root=str(source_root), stable_seconds=0, owner="admin",
         )
         db.upsert_local_library_target(source_id, "movie", str(target_root), owner="admin")
-        service = LocalMediaService(scraper=_LocalScraper(confidence))
+        service = LocalMediaService(scraper=cast(TMDBScraper, _LocalScraper(confidence)))
         inspection = service.inspect_source("admin", source_id, source_root)
         return root, service, inspection
 
@@ -395,7 +410,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
     def test_high_confidence_legacy_match_without_status_remains_automatic(self):
         root, service, inspection = self._local_inspection(confidence=1.0)
-        service.scraper.status = ""
+        setattr(service.scraper, "status", "")
         try:
             preview = service.preview("admin", inspection["inspection_id"], automatic=True)
         finally:
@@ -517,6 +532,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             tracker._update_request(row, [], [], qb_available=True)
 
         pending = db.get_download_request(request_id)
+        assert pending is not None
         self.assertEqual(pending["status"], "manual_review")
         self.assertEqual(pending["notification_delivery_status"], "retry_wait")
         self.assertEqual(int(pending["notification_attempts"]), 1)
@@ -531,6 +547,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
             tracker._update_request(retry_row, [], [], qb_available=True)
 
         delivered = db.get_download_request(request_id)
+        assert delivered is not None
         self.assertEqual(delivered["notification_delivery_status"], "sent")
         self.assertTrue(delivered["notification_sent_at"])
         send.assert_called_once_with(request_id)
@@ -555,6 +572,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         row = db.get_download_request(request_id)
 
         self.assertEqual(claimed, ())
+        assert row is not None
         self.assertEqual(row["status"], "manual_review")
         self.assertEqual(row["qb_status"], "manual_review")
         self.assertEqual(row["gy_status"], "manual_review")
@@ -584,6 +602,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         db.update_download_request(request_id, status="submitting", gy_status="submitting")
         db.init_db()
         row = db.get_download_request(request_id)
+        assert row is not None
         self.assertEqual(row["status"], "manual_review")
         self.assertEqual(row["gy_status"], "manual_review")
         self.assertIn("勿直接重试", row["error"])
@@ -599,6 +618,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         db.init_db()
         row = db.get_download_request(request_id)
 
+        assert row is not None
         self.assertEqual(row["status"], "manual_review")
         self.assertEqual(row["qb_status"], "submitted")
         self.assertEqual(row["gy_status"], "manual_review")
@@ -614,7 +634,9 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
         first_error = row["error"]
         db.init_db()
-        self.assertEqual(db.get_download_request(request_id)["error"], first_error)
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["error"], first_error)
 
     def test_strm_url_encodes_reserved_filename_without_changing_signature_payload(self):
         url = build_play_url(
@@ -642,7 +664,9 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(operations["get"]["operationId"], "proxy_play_gy_get")
         self.assertEqual(operations["head"]["operationId"], "proxy_play_gy_head")
-        routes = {route.name: route for route in playgy_router.routes}
+        routes = {route.name: route for route in playgy_router.routes if isinstance(route, Route)}
+        assert isinstance(routes['proxy.play_gy_get'], Route)
+        assert isinstance(routes['proxy.play_gy_head'], Route)
         self.assertIs(routes["proxy.play_gy_get"].endpoint, routes["proxy.play_gy_head"].endpoint)
         self.assertEqual(routes["proxy.play_gy_get"].methods, {"GET"})
         self.assertEqual(routes["proxy.play_gy_head"].methods, {"HEAD"})

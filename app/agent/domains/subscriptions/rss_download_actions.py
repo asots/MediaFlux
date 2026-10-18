@@ -68,14 +68,14 @@ def _capture(arguments: dict[str, Any]) -> dict[str, Any]:
         "entries": entries,
         "has_more": has_more,
         "runtime_config": runtime_config,
-        "config_error": str(config_error or ""),
+        "config_error": (config_error or ""),
     }
     return {
         "limit": limit,
         "entries": entries,
         "has_more": has_more,
         "runtime_config": runtime_config,
-        "config_error": str(config_error or ""),
+        "config_error": (config_error or ""),
         "fingerprint": confirmation_context_fingerprint(
             payload, domain="rss-submit-pending-to-qb"
         ),
@@ -178,7 +178,7 @@ def submit_pending_rss_to_qb_confirmed(
 ) -> ToolResult:
     state = _capture(arguments)
     if not secrets.compare_digest(
-        str(state["fingerprint"]), str(expected_context or "")
+        str(state["fingerprint"]), (expected_context or "")
     ):
         raise AgentToolError(
             "待处理 RSS 条目或 qBittorrent 配置已变化，请重新预检",

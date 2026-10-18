@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import Any
 
 from app.agent.models import ToolResult
 from app.agent.public_view import public_result_state
@@ -15,7 +16,7 @@ def batch_result(arguments: dict, results: list[dict], *, waiting: bool = False)
         items.append({"tool": step["tool"], "result": {"ok": False, "status": "not_started",
                       "summary": "等待已确认前项完成" if waiting else "未执行"}})
     done = sum(public_result_state(item["result"]) == "success" for item in items)
-    data = {"steps": items, "completed": done, "total": len(items)}
+    data: dict[str, Any] = {"steps": items, "completed": done, "total": len(items)}
     if waiting:
         data["background_job"] = {"kind": "approved_batch", "status": "continuation_pending", "followup_pending": True}
     return ToolResult(waiting or done == len(items), "running" if waiting else "completed" if done == len(items) else "partial",

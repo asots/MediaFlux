@@ -24,13 +24,16 @@ class TelegramNotificationSchemaOwnershipTests(IsolatedDatabaseTestCase):
             row = repository.upsert_notification(
                 "schema-owner", topic="system", importance="result", chat_id="test", event_json="{}",
             )
-            self.assertIsNotNone(repository.get_notification("schema-owner"))
+            assert (repository.get_notification("schema-owner")) is not None
             claimed = repository.claim_due_notifications(event_key="schema-owner")
             self.assertEqual(len(claimed), 1)
+            assert row is not None
             self.assertTrue(repository.complete_notification(
                 row["id"], lease_generation=claimed[0]["lease_generation"],
                 claimed_revision=claimed[0]["revision"], message_id=7,
             ))
-            self.assertEqual(repository.get_notification("schema-owner")["status"], "sent")
+            get_notification_result = repository.get_notification("schema-owner")
+            assert get_notification_result is not None
+            self.assertEqual(get_notification_result["status"], "sent")
         ddl = [sql for sql in statements if sql.lstrip().upper().startswith(("CREATE ", "ALTER ", "DROP "))]
         self.assertEqual(ddl, [], "热路径必须由数据库初始化统一提供 schema")

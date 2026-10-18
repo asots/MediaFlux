@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Body, Query, Request
 from fastapi.responses import StreamingResponse
@@ -67,9 +68,9 @@ async def runtime_log_stream(
     generation: int | None = Query(default=None, ge=0),
 ):
     require_api_login(request)
-    start_offset = max(0, int(offset or 0))
-    start_stream_id = str(stream_id or "").strip()
-    start_checkpoint = str(checkpoint or "").strip()
+    start_offset = max(0, (offset or 0))
+    start_stream_id = (stream_id or "").strip()
+    start_checkpoint = (checkpoint or "").strip()
     start_generation = generation
 
     async def events():
@@ -78,6 +79,7 @@ async def runtime_log_stream(
         current_checkpoint = start_checkpoint
         current_generation = start_generation
         last_heartbeat = time.monotonic()
+        consecutive_errors = 0
         while not await request.is_disconnected():
             try:
                 generation_before_read = current_generation
@@ -416,7 +418,8 @@ def _operation_payload(data: dict) -> tuple[str, int]:
     if not token:
         raise ValueError("缺少操作令牌")
     try:
-        version = int(data.get("expected_version"))
+        raw_version: Any = data.get("expected_version")
+        version = int(raw_version)
     except (TypeError, ValueError):
         raise ValueError("缺少有效的日志版本")
     return token, version
@@ -435,7 +438,8 @@ def _batch_operation_payload(data: dict) -> tuple[str, list[dict]]:
             raise ValueError("批量日志参数格式错误")
         token, version = _operation_payload(raw)
         try:
-            log_id = int(raw.get("log_id"))
+            raw_id: Any = raw.get("log_id")
+            log_id = int(raw_id)
         except (TypeError, ValueError):
             raise ValueError("批量日志 ID 无效")
         entries.append({

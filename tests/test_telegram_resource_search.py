@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import time
 import unittest
-from types import SimpleNamespace
+from types import CoroutineType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 from app.bot.handlers import (
@@ -13,7 +14,11 @@ from app.bot.handlers import (
     _resource_target_view,
 )
 from app.indexers.errors import IndexerChallengeRequired, IndexerQueryRejected
-from app.indexers.models import AggregatedIndexerResult, IndexerItem, IndexerProviderError
+from app.indexers.models import (
+    AggregatedIndexerResult,
+    IndexerItem,
+    IndexerProviderError,
+)
 from app.indexers.providers.empire import EmpireAdapter
 from app.modules.telegram_resource_search import (
     TelegramIndexerWorker,
@@ -66,7 +71,7 @@ def _items():
     ]
 
 
-def _sites():
+def _sites() -> list[dict[str, Any]]:
     return [
         {
             "site_id": "nyaa",
@@ -134,6 +139,7 @@ class TelegramIndexerWorkerTests(unittest.TestCase):
             worker._call(factory, timeout=0.1)
 
         self.assertEqual(len(captured), 1)
+        assert isinstance(captured[0], CoroutineType)
         self.assertIsNone(captured[0].cr_frame)
 
     def test_close_failure_keeps_worker_service_and_loop_for_retry(self):
@@ -156,8 +162,8 @@ class TelegramIndexerWorkerTests(unittest.TestCase):
             worker._ensure_started()
             thread = worker._thread
             loop = worker._loop
-            self.assertIsNotNone(thread)
-            self.assertIsNotNone(loop)
+            assert (thread) is not None
+            assert (loop) is not None
 
             self.assertFalse(worker.stop(timeout=0.05))
             deadline = time.monotonic() + 1.0

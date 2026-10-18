@@ -1,4 +1,7 @@
 from __future__ import annotations
+from typing import cast
+from app.agent.kernel.model import ModelAdapter
+from app.agent.kernel.session import TurnAdmissionPolicy
 
 import asyncio
 import json
@@ -156,13 +159,13 @@ class TelegramCancellationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.025)
             async for event in original(value):
                 yield event
-        session.run = delayed_start
+        self.enterContext(patch.object(session, "run", delayed_start))
         class SlowModel:
             async def stream(self, request, *, cancellation):
                 await cancellation.wait()
                 cancellation.raise_if_cancelled()
                 yield
-        session.model = SlowModel()
+        session.model = cast(ModelAdapter, SlowModel())
         token = CancellationToken()
         observed = []
         async def observe(event):
@@ -212,6 +215,7 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
         await stream.aclose()
         for _ in range(3):
             activity = await web.activity(owner="owner", session_id="session")
+            assert activity is not None
             self.assertEqual(activity["request_id"], "request")
             self.assertEqual(activity["status"], "running")
             self.assertFalse(activity["protected"])
@@ -270,7 +274,7 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Event().wait()
 
         session = make_session()
-        session.turn_admission = PendingAdmission()
+        session.turn_admission = cast(TurnAdmissionPolicy, PendingAdmission())
         stream = session.run(AgentInput(
             owner="owner", session_id="session", request_id="admission-request",
             message="尚未准入", channel="api",
@@ -297,7 +301,7 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
                 raise StalePublicationError("revoked")
 
         session = make_session()
-        session.turn_admission = RevokedAdmission()
+        session.turn_admission = cast(TurnAdmissionPolicy, RevokedAdmission())
         events = [event async for event in session.run(AgentInput(
             owner="owner", session_id="session", request_id="revoked-request",
             message="已被撤销", channel="api",

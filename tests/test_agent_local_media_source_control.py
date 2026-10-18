@@ -135,7 +135,9 @@ class LocalMediaSourceAgentControlTests(IsolatedDatabaseTestCase):
             owner="owner",
         )
         after_prepare = db.get_local_media_source(self.source_one)
+        assert before is not None
         self.assertTrue(before.enabled)
+        assert after_prepare is not None
         self.assertTrue(after_prepare.enabled)
         self.assertEqual(prepared["mode"], "confirmation_required")
         self.assertEqual(
@@ -154,8 +156,10 @@ class LocalMediaSourceAgentControlTests(IsolatedDatabaseTestCase):
         self.assertFalse(confirmed["result"]["data"]["enabled"])
         scheduler.reload.assert_called_once_with()
         changed = db.get_local_media_source(self.source_one)
+        assert changed is not None
         self.assertFalse(changed.enabled)
         self.assertFalse(changed.scan_enabled)
+        assert before is not None
         self.assertEqual(changed.local_root, before.local_root)
         self.assertEqual(changed.qb_profile, before.qb_profile)
         history = db.list_agent_action_history(
@@ -217,4 +221,5 @@ class LocalMediaSourceAgentControlTests(IsolatedDatabaseTestCase):
         self.assertFalse(ordinal["result"]["ok"])
         self.assertEqual(ordinal["result"]["status"], "conflict")
         remaining = db.get_local_media_source(self.source_two)
+        assert remaining is not None
         self.assertFalse(remaining.enabled)

@@ -9,6 +9,7 @@ import hashlib
 import json
 import secrets
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -191,12 +192,12 @@ def tracks_read(task: dict | None, tool: str) -> bool:
                     for o in task["obligations"]))
 
 
-def read_observations(task: dict | None, tool: str, arguments: dict, result: dict | None) -> dict:
+def read_observations(task: dict | None, tool: str, arguments: dict, result: Mapping[str, Any] | None) -> dict:
     """记录实际成功READ回执，不要求模型提前编写调用，也不将探索失败变成整项任务的永久阻塞。"""
     if not tracks_read(task, tool) or not result or result.get("ok") is not True:
         return {}
-    from app.agent.public_view import public_result_state
     from app.agent.public_safety import sanitize_public_text
+    from app.agent.public_view import public_result_state
     if (str(result.get("status", "success")).strip().casefold() not in {
             "ok", "success", "completed", "healthy", "ready", "found", "not_found", "empty"}
             or public_result_state(result) != "success"):
@@ -293,7 +294,7 @@ def reduce_task(
     if operation == "create":
         if current is not None and current["status"] not in {"complete", "cancelled"}:
             raise TaskConflict("finish or cancel existing task before create")
-        task = {"v": 1, "task_id": patch.new_id, "epoch": 1, "revision": 0}
+        task: dict = {"v": 1, "task_id": patch.new_id, "epoch": 1, "revision": 0}
     else:
         if current is None or current["status"] == "cancelled":
             raise TaskConflict("task is not active")
@@ -416,10 +417,10 @@ def reduce_task(
     return task
 
 
-def task_projection(task: dict | None) -> dict | None:
+def task_projection(task: Mapping | None) -> dict | None:
     if task is None:
         return None
-    result = deepcopy(task)
+    result = deepcopy(dict(task))
     for fact in result["verified_facts"]:
         fact.pop("scope", None)
         fact.pop("call_id", None)

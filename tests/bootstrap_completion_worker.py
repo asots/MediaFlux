@@ -54,7 +54,9 @@ def main():
         from app.agent.feature_gate import read_runtime_fence
         with TestClient(create_app()) as client:
             page = client.get('/login')
-            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            search_result = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+            assert search_result is not None
+            token = search_result.group(1)
             response = client.post('/login', data={'username': 'operator', 'password': 'test-bootstrap-password', 'csrf_token': token}, follow_redirects=False)
             assert response.status_code == 302 and response.headers['location'] == '/'
             assert client.get('/readyz').status_code == 200
@@ -69,14 +71,14 @@ def main():
         if mode in ('before', 'after'):
             from app import config
             original = config._publish_noreplace
-            def publish(stage, target):
+            def publish(temporary, target):
                 if target == root / 'mediaflux.db':
                     if mode == 'after':
-                        original(stage, target)
+                        original(temporary, target)
                     (root / 'boundary').write_text(mode)
                     while True:
                         time.sleep(.05)
-                return original(stage, target)
+                return original(temporary, target)
             config._publish_noreplace = publish
         if mode == 'race':
             (root / ('ready-' + str(os.getpid()))).write_text('ready')
@@ -90,7 +92,7 @@ def main():
             code = 2
         else:
             code = 0
-    origins = {n: str(m.__file__) for n, m in sys.modules.items() if (n == 'app' or n.startswith('app.')) and getattr(m, '__file__', None)}
+    origins = {n: m.__file__ for n, m in sys.modules.items() if (n == 'app' or n.startswith('app.')) and getattr(m, '__file__', None)}
     assert origins and all(Path(p).resolve().is_relative_to(source) for p in origins.values())
     print('WORKER_RESULT=' + json.dumps({'code': code, 'pid': os.getpid(), 'origins_sha256': hashlib.sha256(json.dumps(origins, sort_keys=True).encode()).hexdigest(), 'guard': 'all-inet-and-dns-denied', 'mode': mode}))
     return code

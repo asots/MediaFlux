@@ -1,4 +1,7 @@
 """本地媒体终态不得因重复执行被覆写或再次消费同路径的新文件。"""
+
+from typing import cast
+from app.modules.scraper import TMDBScraper
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,7 +24,7 @@ def test_completed_task_replay_preserves_result_and_new_source(tmp_path, recreat
         incoming.write_bytes(b"first-media")
         source_id = db.create_local_media_source(name="S", qb_profile="", qb_path_prefix="", local_root=str(source_root), owner="admin")
         db.upsert_local_library_target(source_id, "movie", str(target_root), owner="admin")
-        service = LocalMediaService(scraper=FakeScraper(MatchResult(tmdb_id="1", title="Movie", year="2026", media_type="movie", confidence=1.0)))
+        service = LocalMediaService(scraper=cast(TMDBScraper, FakeScraper(MatchResult(tmdb_id="1", title="Movie", year="2026", media_type="movie", confidence=1.0))))
         rules = OrganizeRules(region_split=False, year_split=False, naming_scope="both", conflict_strategy=3, emby_refresh=False, media_probe_enabled=False)
         with patch("app.modules.local_media_service.OrganizeRules.from_config", return_value=rules):
             inspection = service.inspect_source("admin", source_id, incoming)
@@ -42,7 +45,9 @@ def test_completed_task_replay_preserves_result_and_new_source(tmp_path, recreat
             except LocalMediaServiceError:
                 pass  # 显式拒绝与幂等返回均可，但必须保持已完成结果。
             after = db.get_local_media_task(task_id, owner="admin")
+            assert after is not None
             assert after.status == "completed", after
+            assert before is not None
             assert after.version == before.version
             assert target.read_bytes() == b"first-media"
             if recreate:

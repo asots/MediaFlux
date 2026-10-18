@@ -3,6 +3,7 @@
 不访问真实模型或 RSS 网络服务；业务写入落到隔离数据库的 rss_items。
 """
 from __future__ import annotations
+from app.agent.kernel.effects import ConfirmationEffectPlanStore
 
 import unittest
 from unittest.mock import patch
@@ -16,7 +17,7 @@ from app.agent.kernel.capabilities import (
     ToolCatalog,
     ToolEffect,
 )
-from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.events import AgentEventType as E
 from app.agent.kernel.model import ModelEvent, ModelToolCall
 from app.agent.kernel.model import ModelEventType as M
@@ -117,9 +118,11 @@ class PendingDialogueTests(unittest.IsolatedAsyncioTestCase):
     async def run_turn(self, *calls, session=None, owner=OWNER, sid=SID,
                        message="讨论 RSS 订阅和当前待确认计划，按工具回执答复"):
         session = session or self.session
+        assert isinstance(session.model, ScriptedModel)
         session.model.calls = list(calls)
         events = [event async for event in session.run(AgentInput(
             owner=owner, session_id=sid, message=message))]
+        assert isinstance(session.model, ScriptedModel)
         self.assertFalse(session.model.calls, "脚本工具调用未被消费")
         return events
 
@@ -130,7 +133,7 @@ class PendingDialogueTests(unittest.IsolatedAsyncioTestCase):
         events = await self.run_turn((WRITE, {"name": name}), **scope)
         self.assertTrue(any(e.type == E.EFFECT_APPROVAL_REQUIRED for e in events), self.summary(events))
         plan = await self.pending(**scope)
-        self.assertIsNotNone(plan)
+        assert (plan) is not None
         return plan
 
     async def confirm(self, plan, *, session=None, owner=OWNER, sid=SID):
@@ -172,6 +175,8 @@ class PendingDialogueTests(unittest.IsolatedAsyncioTestCase):
         session = self.runtime() if cold else self.session
         if cold:
             self.assertIsNot(session.state_store, self.session.state_store)
+            assert isinstance(self.session.pipeline.effect_store, ConfirmationEffectPlanStore)
+            assert isinstance(session.pipeline.effect_store, ConfirmationEffectPlanStore)
             self.assertIsNot(session.pipeline.effect_store.store, self.session.pipeline.effect_store.store)
         self.now[0] += 5
         await self.run_turn(session=session)

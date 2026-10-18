@@ -1,6 +1,15 @@
 """光鸭目录级手动刮削与自动匹配回归测试。"""
 from __future__ import annotations
 
+from app.modules.directory_media import DirectoryInspection
+from app.modules.directory_scrape import PreviewRecord
+
+from app.modules.process_lock import CrossProcessLock
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
+
 import json
 import re
 import time
@@ -199,7 +208,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         infos = {"source": _dir("source", "Iron Man (2008)"),
                  "archive": _dir("archive", "媒体库"), "proof": proof_dir,
                  "sample": sample}
-        inspector = DirectoryMediaInspector(client=_TreeClient(tree, infos), scraper=_ParsingScraper())
+        inspector = DirectoryMediaInspector(client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=cast(TMDBScraper, _ParsingScraper()))
         rules = OrganizeRules(target_dir_id="archive", small_file_mb=0)
         inspection = inspector.inspect("source", rules)
         self.assertEqual([item.file_id for item in inspection.videos], ["main"])
@@ -229,7 +238,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "incoming",
@@ -257,8 +266,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
-            scraper=_ParsingScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
+            scraper=cast(TMDBScraper, _ParsingScraper()),
         ).inspect(
             "movie-dir",
             OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -300,7 +309,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -342,7 +351,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=TMDBScraper()
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper()
         ).inspect(
             "show-dir", OrganizeRules(target_dir_id="archive", small_file_mb=0)
         )
@@ -371,7 +380,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=TMDBScraper()
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper()
         ).inspect(
             "show-dir", OrganizeRules(target_dir_id="archive", small_file_mb=0)
         )
@@ -397,7 +406,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=TMDBScraper()
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper()
         ).inspect(
             "show-dir", OrganizeRules(target_dir_id="archive", small_file_mb=0)
         )
@@ -423,7 +432,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "目录季号与文件季号冲突"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos), scraper=TMDBScraper()
+                client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper()
             ).inspect(
                 "show-dir", OrganizeRules(target_dir_id="archive", small_file_mb=0)
             )
@@ -448,7 +457,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=TMDBScraper()
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper()
         ).inspect(
             "show-dir", OrganizeRules(target_dir_id="archive", small_file_mb=0)
         )
@@ -474,8 +483,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
-            scraper=_ParsingScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
+            scraper=cast(TMDBScraper, _ParsingScraper()),
         ).inspect(
             "show-dir",
             OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -507,7 +516,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=TMDBScraper()
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper()
         ).inspect(
             "show-dir", OrganizeRules(target_dir_id="archive", small_file_mb=0)
         )
@@ -539,7 +548,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "多个低信息媒体子目录"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos), scraper=TMDBScraper()
+                client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper()
             ).inspect(
                 "root", OrganizeRules(target_dir_id="archive", small_file_mb=0)
             )
@@ -568,7 +577,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -605,8 +614,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
-            scraper=_ParsingScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
+            scraper=cast(TMDBScraper, _ParsingScraper()),
         ).inspect(
             "show-dir",
             OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -644,7 +653,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -684,8 +693,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
-            scraper=_ParsingScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
+            scraper=cast(TMDBScraper, _ParsingScraper()),
         ).inspect(
             "show-dir",
             OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -720,8 +729,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "多个不同媒体"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos),
-                scraper=_ParsingScraper(),
+                client=cast(GuangYaClient, _TreeClient(tree, infos)),
+                scraper=cast(TMDBScraper, _ParsingScraper()),
             ).inspect(
                 "show-dir",
                 OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -744,8 +753,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
-            scraper=_ParsingScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
+            scraper=cast(TMDBScraper, _ParsingScraper()),
         ).inspect(
             "show-dir",
             OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -773,8 +782,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "多个不同媒体"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos),
-                scraper=_ParsingScraper(),
+                client=cast(GuangYaClient, _TreeClient(tree, infos)),
+                scraper=cast(TMDBScraper, _ParsingScraper()),
             ).inspect(
                 "show-dir",
                 OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -804,7 +813,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -838,7 +847,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -862,7 +871,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
             "archive": _dir("archive", "媒体库"),
         }
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=TMDBScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper(),
         ).inspect("root", OrganizeRules(target_dir_id="archive", small_file_mb=0))
 
         self.assertTrue(inspection.requires_manual_match)
@@ -881,7 +890,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
             "archive": _dir("archive", "媒体库"),
         }
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos), scraper=TMDBScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=TMDBScraper(),
         ).inspect("show", OrganizeRules(target_dir_id="archive", small_file_mb=0))
 
         self.assertFalse(inspection.requires_manual_match)
@@ -902,7 +911,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -934,7 +943,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -979,7 +988,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -1033,7 +1042,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -1068,7 +1077,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
 
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
             scraper=TMDBScraper(),
         ).inspect(
             "show-dir",
@@ -1104,8 +1113,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "多个不同媒体"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos),
-                scraper=_ParsingScraper(),
+                client=cast(GuangYaClient, _TreeClient(tree, infos)),
+                scraper=cast(TMDBScraper, _ParsingScraper()),
             ).inspect(
                 "mixed",
                 OrganizeRules(target_dir_id="archive", small_file_mb=0),
@@ -1128,8 +1137,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "归档目标位于所选目录内"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos),
-                scraper=_ParsingScraper(),
+                client=cast(GuangYaClient, _TreeClient(tree, infos)),
+                scraper=cast(TMDBScraper, _ParsingScraper()),
             ).inspect(
                 "source",
                 OrganizeRules(target_dir_id="archive-child", small_file_mb=0),
@@ -1151,8 +1160,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "多个不同媒体"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos),
-                scraper=_ParsingScraper(),
+                client=cast(GuangYaClient, _TreeClient(tree, infos)),
+                scraper=cast(TMDBScraper, _ParsingScraper()),
             ).inspect("mixed", OrganizeRules(target_dir_id="archive", small_file_mb=0))
 
     def test_movie_and_episode_mix_is_rejected(self):
@@ -1171,8 +1180,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "多个不同媒体"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos),
-                scraper=_ParsingScraper(),
+                client=cast(GuangYaClient, _TreeClient(tree, infos)),
+                scraper=cast(TMDBScraper, _ParsingScraper()),
             ).inspect("mixed", OrganizeRules(target_dir_id="archive", small_file_mb=0))
 
     def test_same_movie_in_resolution_subdirectories_is_not_mixed(self):
@@ -1191,8 +1200,8 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
             "archive": _dir("archive", "媒体库"),
         }
         inspection = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
-            scraper=_ParsingScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
+            scraper=cast(TMDBScraper, _ParsingScraper()),
         ).inspect("movie", OrganizeRules(target_dir_id="archive", small_file_mb=0))
         self.assertEqual(inspection.media_type, "movie")
         self.assertEqual(inspection.counts["video"], 2)
@@ -1209,7 +1218,7 @@ class DirectoryMediaInspectorTests(unittest.TestCase):
         infos = {"mixed": _dir("mixed", "混合"), "archive": _dir("archive", "媒体库")}
         with self.assertRaisesRegex(ValueError, "多个不同媒体"):
             DirectoryMediaInspector(
-                client=_TreeClient(tree, infos), scraper=_ParsingScraper()
+                client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=cast(TMDBScraper, _ParsingScraper())
             ).inspect("mixed", OrganizeRules(target_dir_id="archive", small_file_mb=0))
 
 
@@ -1228,7 +1237,7 @@ class DirectoryMediaValidationErrorTests(unittest.TestCase):
             {"source": _dir("source", "空目录"), "archive": _dir("archive", "媒体库")},
         )
         with self.assertRaisesRegex(DirectoryScrapeRequestError, "没有支持的视频"):
-            self.inspector_type(client=client, scraper=_ParsingScraper()).inspect(
+            self.inspector_type(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _ParsingScraper())).inspect(
                 "source", self.rules
             )
 
@@ -1240,7 +1249,7 @@ class DirectoryMediaValidationErrorTests(unittest.TestCase):
             {"source": _dir("source", "循环目录"), "archive": _dir("archive", "媒体库")},
         )
         with self.assertRaisesRegex(DirectoryScrapeRequestError, "循环引用"):
-            self.inspector_type(client=client, scraper=_ParsingScraper()).inspect(
+            self.inspector_type(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _ParsingScraper())).inspect(
                 "source", self.rules
             )
 
@@ -1257,7 +1266,7 @@ class DirectoryMediaValidationErrorTests(unittest.TestCase):
             infos[child] = _dir(child, child, current)
         with self.assertRaisesRegex(DirectoryScrapeRequestError, "64 层"):
             self.inspector_type(
-                client=_TreeClient(tree, infos), scraper=_ParsingScraper()
+                client=cast(GuangYaClient, _TreeClient(tree, infos)), scraper=cast(TMDBScraper, _ParsingScraper())
             ).inspect("source", self.rules)
 
 
@@ -1276,7 +1285,7 @@ class DirectoryEpisodeTitleIdentityTests(IsolatedDatabaseTestCase):
         )
         scraper = TMDBScraper()
         try:
-            return DirectoryMediaInspector(client, scraper).inspect(
+            return DirectoryMediaInspector(cast(GuangYaClient, client), scraper).inspect(
                 "source",
                 OrganizeRules(target_dir_id="archive", small_file_mb=0),
             )
@@ -1449,8 +1458,8 @@ class SingleFileInspectionTests(IsolatedDatabaseTestCase):
         }
         self.rules = OrganizeRules(target_dir_id="archive", small_file_mb=0)
         self.inspector = DirectoryMediaInspector(
-            client=_TreeClient(tree, infos),
-            scraper=_ParsingScraper(),
+            client=cast(GuangYaClient, _TreeClient(tree, infos)),
+            scraper=cast(TMDBScraper, _ParsingScraper()),
         )
 
     def test_selected_video_does_not_include_other_videos_or_junk(self):
@@ -1490,7 +1499,7 @@ class SingleFileInspectionTests(IsolatedDatabaseTestCase):
             nsfw_metatube_endpoint="http://127.0.0.1:8080",
         )
         inspector = DirectoryMediaInspector(
-            client=client, scraper=TMDBScraper(),
+            client=cast(GuangYaClient, client), scraper=TMDBScraper(),
         )
 
         directory = inspector.inspect("adult-dir", rules)
@@ -1521,7 +1530,7 @@ class SingleFileInspectionTests(IsolatedDatabaseTestCase):
             },
         )
         inspection = DirectoryMediaInspector(
-            client=client,
+            client=cast(GuangYaClient, client),
             scraper=TMDBScraper(),
         ).inspect_file("episode-3", self.rules)
 
@@ -1538,9 +1547,9 @@ class SingleFileInspectionTests(IsolatedDatabaseTestCase):
 
     def test_single_file_rejects_descendant_archive_target(self):
         nested = _dir("nested-target", "归档", "source")
-        self.inspector.client.tree["source"].append(nested)
-        self.inspector.client.tree["nested-target"] = []
-        self.inspector.client.infos["nested-target"] = nested
+        cast(_TreeClient, self.inspector.client).tree["source"].append(nested)
+        cast(_TreeClient, self.inspector.client).tree["nested-target"] = []
+        cast(_TreeClient, self.inspector.client).infos["nested-target"] = nested
         rules = OrganizeRules(target_dir_id="nested-target", small_file_mb=0)
 
         with self.assertRaisesRegex(ValueError, "归档目标位于所选目录内"):
@@ -1557,8 +1566,8 @@ class SingleFileInspectionTests(IsolatedDatabaseTestCase):
             "source",
             size=5 * 1024 * 1024,
         )
-        self.inspector.client.tree["source"].append(small_video)
-        self.inspector.client.infos["small-video"] = small_video
+        cast(_TreeClient, self.inspector.client).tree["source"].append(small_video)
+        cast(_TreeClient, self.inspector.client).infos["small-video"] = small_video
         rules = OrganizeRules(target_dir_id="archive", small_file_mb=10)
 
         with self.assertRaisesRegex(ValueError, "小文件"):
@@ -1603,8 +1612,8 @@ class SingleFileInspectionTests(IsolatedDatabaseTestCase):
             notify_enabled=False,
         )
         service = DirectoryScrapeService(
-            client=client,
-            scraper=_DirectoryScrapeTMDB(),
+            client=cast(GuangYaClient, client),
+            scraper=cast(TMDBScraper, _DirectoryScrapeTMDB()),
             store=DirectoryScrapeStore(),
             rules_loader=lambda: rules,
         )
@@ -1637,6 +1646,7 @@ class SingleFileInspectionTests(IsolatedDatabaseTestCase):
 
 
 class _DirectoryScrapeTMDB:
+    confirm: Mock
     api_key = "tmdb-test-key"
 
     def __init__(self):
@@ -1726,7 +1736,7 @@ class _DirectoryScrapeTMDB:
         title = detail.get("name") or detail.get("title") or ""
         date = detail.get("first_air_date") or detail.get("release_date") or ""
         return MatchResult(
-            tmdb_id=str(tmdb_id),
+            tmdb_id=tmdb_id,
             title=title,
             year=str(date)[:4],
             media_type=media_type,
@@ -1767,7 +1777,7 @@ class TMDBCreditsDetailTests(unittest.TestCase):
     def test_detail_with_credits_uses_append_to_response(self):
         client = _RecordingTMDBClient()
 
-        detail = TMDBScraper(client=client).get_detail_with_credits("1726", "movie")
+        detail = TMDBScraper(client=cast(TMDBClient, client)).get_detail_with_credits("1726", "movie")
 
         self.assertEqual(detail["id"], 1726)
         self.assertEqual(
@@ -1778,7 +1788,7 @@ class TMDBCreditsDetailTests(unittest.TestCase):
 
     def test_successful_credits_detail_is_reused_by_plain_detail_and_repeat_calls(self):
         client = _RecordingTMDBClient()
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
 
         first = scraper.get_detail_with_credits("1726", "movie")
         second = scraper.get_detail_with_credits("1726", "movie")
@@ -1825,8 +1835,8 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
             notify_enabled=False,
         )
         self.inspection = DirectoryMediaInspector(
-            client=self.client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, self.client),
+            scraper=cast(TMDBScraper, self.scraper),
         ).inspect("movie-dir", self.rules)
         self.store = DirectoryScrapeStore(clock=lambda: 100.0)
         self.inspection_id = self.store.put_inspection(
@@ -1835,8 +1845,8 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
             self.rules,
         )
         self.service = DirectoryScrapeService(
-            client=self.client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, self.client),
+            scraper=cast(TMDBScraper, self.scraper),
             store=self.store,
             rules_loader=lambda: self.rules,
         )
@@ -1881,7 +1891,7 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
                 scoped_rules = SimpleNamespace(
                     for_source=lambda _source_id, *, client, rules=rules: rules
                 )
-                self.service.rules_loader = lambda scoped_rules=scoped_rules: scoped_rules
+                self.service.rules_loader = lambda scoped_rules=scoped_rules: cast(OrganizeRules, scoped_rules)
                 with self.subTest(
                     tmdb=tmdb, metatube=metatube, nsfw_only=nsfw_only
                 ):
@@ -2039,14 +2049,14 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
         }
         client = _TreeClient(tree, infos)
         inspection = DirectoryMediaInspector(
-            client=client, scraper=self.scraper
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, self.scraper)
         ).inspect("single", self.rules)
         inspection_id = self.store.put_inspection("owner", inspection, self.rules)
         from app.modules.directory_scrape import DirectoryScrapeService
 
         preview = DirectoryScrapeService(
-            client=client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, client),
+            scraper=cast(TMDBScraper, self.scraper),
             store=self.store,
             rules_loader=lambda: self.rules,
         ).preview("owner", inspection_id, "1726", "movie")
@@ -2129,7 +2139,7 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
             nsfw_metatube_endpoint="http://127.0.0.1:8080",
         )
         service = DirectoryScrapeService(
-            client=client,
+            client=cast(GuangYaClient, client),
             scraper=TMDBScraper(),
             store=DirectoryScrapeStore(clock=lambda: 100.0),
             rules_loader=lambda: rules,
@@ -2204,13 +2214,13 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         )
         self.store = DirectoryScrapeStore()
         inspection = DirectoryMediaInspector(
-            client=self.client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, self.client),
+            scraper=cast(TMDBScraper, self.scraper),
         ).inspect("movie-dir", self.rules)
         inspection_id = self.store.put_inspection("owner", inspection, self.rules)
         self.service = DirectoryScrapeService(
-            client=self.client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, self.client),
+            scraper=cast(TMDBScraper, self.scraper),
             store=self.store,
             rules_loader=lambda: self.rules,
         )
@@ -2246,12 +2256,17 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         self.assertEqual(set(result), {"preview_id", "directory", "stats", "log_ids"})
         self.assertEqual(result["stats"]["moved"], 1)
         self.assertEqual(result["stats"]["skipped"], 1)
+        def require_log(log_id):
+            row = db.get_organize_log(log_id)
+            assert row is not None
+            return row
+
         self.assertEqual(
-            {db.get_organize_log(log_id)["tmdb_id"] for log_id in result["log_ids"]},
+            {require_log(log_id)["tmdb_id"] for log_id in result["log_ids"]},
             {"1726"},
         )
         operation_tokens = {
-            str(db.get_organize_log(log_id)["operation_token"] or "")
+            str(require_log(log_id)["operation_token"] or "")
             for log_id in result["log_ids"]
         }
         self.assertEqual(len(operation_tokens), 1)
@@ -2315,9 +2330,9 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
             dedupe_key="receipt-read-failure",
         )
         claimed = claim_organize_operation_job(str(created["job_id"]))
-        self.assertIsNotNone(claimed)
+        assert (claimed) is not None
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
         manager._task = {
             "id": str(created["job_id"]),
@@ -2344,6 +2359,7 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
 
         operation_ref = organize_operation_public_ref(str(created["job_id"]))
         terminal = manager.task_result(operation_ref, owner=owner)
+        assert terminal is not None
         self.assertEqual(terminal["status"], "partial")
         self.assertEqual(set(execution_results[0]), {"preview_id", "directory", "stats", "log_ids"})
         self.assertEqual(execution_results[0]["log_ids"], [])
@@ -2367,6 +2383,7 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         self.assertEqual(agent_result.status, "attention")
         self.assertEqual(agent_result.data["task"]["stats"]["moved"], 1)
         self.assertEqual(agent_result.data["task"]["stats"]["audit_failures"], 1)
+        assert agent_result.error is not None
         self.assertIn("核对实际状态", agent_result.error)
         with self.assertRaisesRegex(KeyError, "不存在或已过期"):
             self.service.execute_preview(owner, self.preview_id)
@@ -2416,7 +2433,7 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         from app.modules.directory_media import DirectoryMediaInspector
 
         inspection = DirectoryMediaInspector(
-            client=self.client, scraper=self.scraper,
+            client=cast(GuangYaClient, self.client), scraper=cast(TMDBScraper, self.scraper),
         ).inspect("movie-dir", self.rules)
         inspection_id = self.store.put_inspection("owner", inspection, self.rules)
         with patch.object(Organizer, "organize", autospec=True, side_effect=tracked):
@@ -2489,8 +2506,8 @@ class PartialDirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         )
         self.store = DirectoryScrapeStore()
         self.service = DirectoryScrapeService(
-            client=self.client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, self.client),
+            scraper=cast(TMDBScraper, self.scraper),
             store=self.store,
             rules_loader=lambda: self.rules,
         )
@@ -2630,8 +2647,8 @@ class PartialDirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         }
         client = _MutableTreeClient(tree, infos)
         service = DirectoryScrapeService(
-            client=client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, client),
+            scraper=cast(TMDBScraper, self.scraper),
             store=DirectoryScrapeStore(),
             rules_loader=lambda: self.rules,
         )
@@ -2678,8 +2695,8 @@ class PartialDirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         }
         client = _MutableTreeClient(tree, infos)
         service = DirectoryScrapeService(
-            client=client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, client),
+            scraper=cast(TMDBScraper, self.scraper),
             store=DirectoryScrapeStore(),
             rules_loader=lambda: self.rules,
         )
@@ -2743,8 +2760,8 @@ class SingleFileScrapeScopeTests(IsolatedDatabaseTestCase):
         )
         self.store = DirectoryScrapeStore()
         self.service = DirectoryScrapeService(
-            client=self.client,
-            scraper=self.scraper,
+            client=cast(GuangYaClient, self.client),
+            scraper=cast(TMDBScraper, self.scraper),
             store=self.store,
             rules_loader=lambda: self.rules,
         )
@@ -2902,8 +2919,8 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
         )
         store = DirectoryScrapeStore()
         service = DirectoryScrapeService(
-            client=client,
-            scraper=self.SeasonScraper(),
+            client=cast(GuangYaClient, client),
+            scraper=cast(TMDBScraper, self.SeasonScraper()),
             store=store,
             rules_loader=lambda: rules,
         )
@@ -3059,8 +3076,8 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
             link_strm=False, notify_enabled=False,
         )
         service = DirectoryScrapeService(
-            client=client,
-            scraper=self.SeasonScraper(),
+            client=cast(GuangYaClient, client),
+            scraper=cast(TMDBScraper, self.SeasonScraper()),
             store=DirectoryScrapeStore(),
             rules_loader=lambda: rules,
         )
@@ -3127,6 +3144,7 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
         service.execute_preview("owner", preview["preview_id"])
 
         self.assertEqual(len(target_paths), 1)
+        assert isinstance(client, _EventuallyConsistentTreeClient)
         self.assertEqual(
             [name for _parent_id, name in client.create_calls],
             list(next(iter(target_paths)).split("/")),
@@ -3173,6 +3191,7 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
             client.infos[episode_dir].parent_id,
             client.infos[specials_dir].parent_id,
         )
+        assert isinstance(client, _EventuallyConsistentTreeClient)
         self.assertEqual(
             sum(name.endswith("{tmdb-86034}") for _parent_id, name in client.create_calls),
             1,
@@ -3227,7 +3246,7 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
         current = SimpleNamespace(directory_id="source", directory_name="下载目录")
         stats = {}
 
-        service._cleanup_selected_source(record, current, stats)
+        service._cleanup_selected_source(cast(PreviewRecord, record), cast(DirectoryInspection, current), stats)
 
         client.file_info.assert_called_once_with("source")
         client.delete_empty_directory.assert_called_once_with(
@@ -3247,8 +3266,8 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
         checks = iter((False, True))
 
         service._cleanup_selected_source(
-            record,
-            current,
+            cast(PreviewRecord, record),
+            cast(DirectoryInspection, current),
             stats,
             cancel_check=lambda: next(checks),
         )
@@ -3275,7 +3294,7 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
         current = SimpleNamespace(directory_id="source", directory_name="下载目录")
         stats = {"failed": 1}
 
-        service._cleanup_selected_source(record, current, stats)
+        service._cleanup_selected_source(cast(PreviewRecord, record), cast(DirectoryInspection, current), stats)
 
         self.assertEqual(stats["source_dir_cleaned"], 0)
         self.assertEqual(stats["source_dir_cleanup_skipped"], 1)
@@ -3349,8 +3368,8 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
             notify_enabled=False,
         )
         service = DirectoryScrapeService(
-            client=client,
-            scraper=self.SeasonScraper(),
+            client=cast(GuangYaClient, client),
+            scraper=cast(TMDBScraper, self.SeasonScraper()),
             store=DirectoryScrapeStore(),
             rules_loader=lambda: rules,
         )
@@ -3459,8 +3478,8 @@ class SingleEpisodeOverrideTests(IsolatedDatabaseTestCase):
         )
         store = DirectoryScrapeStore()
         service = DirectoryScrapeService(
-            client=client,
-            scraper=self.EpisodeScraper(),
+            client=cast(GuangYaClient, client),
+            scraper=cast(TMDBScraper, self.EpisodeScraper()),
             store=store,
             rules_loader=lambda: rules,
         )
@@ -3937,7 +3956,7 @@ class DirectoryScrapeSecretBoundaryTests(IsolatedDatabaseTestCase):
         )
         store = DirectoryScrapeStore()
         service = DirectoryScrapeService(
-            client=client, scraper=_DirectoryScrapeTMDB(),
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _DirectoryScrapeTMDB()),
             store=store, rules_loader=lambda: rules,
         )
         inspection = service.inspect("placeholder", "source")
@@ -3996,11 +4015,11 @@ class DirectoryScrapeSecretBoundaryTests(IsolatedDatabaseTestCase):
         )
 
         service = DirectoryScrapeService(
-            client=_TreeClient(
+            client=cast(GuangYaClient, _TreeClient(
                 {"source": [_file("note", "README.txt", "source")], "archive": []},
                 {"source": _dir("source", "空目录"), "archive": _dir("archive", "媒体库")},
-            ),
-            scraper=_DirectoryScrapeTMDB(),
+            )),
+            scraper=cast(TMDBScraper, _DirectoryScrapeTMDB()),
             store=DirectoryScrapeStore(),
             rules_loader=lambda: OrganizeRules(target_dir_id="archive", small_file_mb=0),
         )
@@ -4033,11 +4052,11 @@ class DirectoryScrapeSecretBoundaryTests(IsolatedDatabaseTestCase):
         import app.routes.guangya_scrape_api as scrape_api
 
         conflict_type = getattr(directory_scrape, "DirectoryScrapeConflictError", None)
-        self.assertIsNotNone(conflict_type)
+        assert (conflict_type) is not None
         response = scrape_api._error(conflict_type("目录内容已变化，请重新检查"))
         self.assertEqual(response.status_code, 409)
         self.assertEqual(
-            json.loads(response.body)["error"],
+            json.loads(bytes(response.body))["error"],
             "目录内容已变化，请重新检查",
         )
 
@@ -4206,7 +4225,7 @@ class OrganizeScanSampleTests(unittest.TestCase):
 
         result = scanner.scan(
             context,
-            SimpleNamespace(small_file_mb=300),
+            cast(OrganizeRules, SimpleNamespace(small_file_mb=300)),
             stats,
             video_exts={"mkv"},
             metadata_exts=set(),
@@ -4244,7 +4263,7 @@ class OrganizeScanSampleTests(unittest.TestCase):
 
         result = scanner.scan(
             OrganizeContext(source_dir_id="source", source_name="Downloads"),
-            SimpleNamespace(small_file_mb=300),
+            cast(OrganizeRules, SimpleNamespace(small_file_mb=300)),
             stats,
             video_exts={"mkv"},
             metadata_exts=set(),
@@ -4276,7 +4295,7 @@ class StagingRecognitionOrganizeTests(IsolatedDatabaseTestCase):
                 (34158, "魔法骑士", "1994"), (303272, "魔法骑士雷阿斯", "2026"),
             )
         ]
-        scraper = TMDBScraper(client=_DeterministicClient(candidates))
+        scraper = TMDBScraper(client=cast(TMDBClient, _DeterministicClient(candidates)))
         self.addCleanup(scraper.close)
         video = _file("episode-2", filename, "source")
         cloud = _MutableTreeClient(
@@ -4284,7 +4303,7 @@ class StagingRecognitionOrganizeTests(IsolatedDatabaseTestCase):
             {"source": _dir("source", source_name),
              "archive": _dir("archive", "媒体库"), video.file_id: video},
         )
-        organizer = Organizer(client=cloud, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, cloud), scraper=scraper)
         self.addCleanup(organizer.close)
         with (
             patch.object(cloud, "create_dir", wraps=cloud.create_dir) as create,

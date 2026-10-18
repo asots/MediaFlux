@@ -9,11 +9,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, TypedDict
 
 from app import config
 from app.logger import get_logger
-from app.modules.local_path_mapping import normalize_qb_path, normalized_path_parts, path_uses_casefold
+from app.modules.local_path_mapping import (
+    normalize_qb_path,
+    normalized_path_parts,
+    path_uses_casefold,
+)
 
 logger = get_logger(__name__)
 
@@ -236,9 +240,14 @@ def reverse_media_server_path_mapping(
     return path, mapping
 
 
-def configured_media_server_refresh_options(server_type: str) -> dict[str, object]:
+class MediaServerRefreshOptions(TypedDict):
+    path_mappings: tuple[MediaServerPathMapping, ...]
+    allow_global_refresh_fallback: bool
+
+
+def configured_media_server_refresh_options(server_type: str) -> MediaServerRefreshOptions:
     """读取指定媒体服务器的路径映射和全局刷新降级策略。"""
-    normalized = str(server_type or "").strip().lower()
+    normalized = (server_type or "").strip().lower()
     try:
         mapping_key, fallback_key = _CONFIG_KEYS[normalized]
     except KeyError as exc:

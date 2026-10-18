@@ -82,7 +82,8 @@ class BatchScript(NativeScript):
 class AsyncBatchRig:
     def __init__(self, client, stack):
         self.client, self.stack = client, stack
-        self.store, self.worker = SQLiteKernelStore(), None
+        self.store = SQLiteKernelStore()
+        self.worker: organize_tasks.OrganizeTaskManager | None = None
         self.value, self.attempts, self.verified = "before", [], []
         self.rate_limiter, self.denied = None, set()
         self.tail_effect = ToolEffect.WRITE
@@ -107,6 +108,7 @@ class AsyncBatchRig:
             state = await SQLiteKernelStore().load(owner=OWNER, session_id=SID)
             progress = state.metadata["effect_waits"][self.plan.plan_id]["batch_progress"]
             assert progress["executing"] == 1 and len(progress["results"]) == 1
+            assert self.plan is not None
             assert state.metadata["confirmed_publication"]["plan_id"] == self.plan.plan_id
             assert context.completion_scope is None
             assert self.client.file_info("rename").name == "admitted.mp4"
@@ -155,8 +157,11 @@ class AsyncBatchRig:
         if invalid:
             assert not self.script.steps
             return view, events
+        assert view.approval is not None
         assert view.status == "approval_required" and view.approval.tool_name == "agent.batch"
         self.plan = await self.source.pipeline.get_pending_plan(owner=OWNER, session_id=SID)
+        assert self.plan is not None
+        assert view.approval is not None
         assert self.plan.plan_id == view.approval.plan_id
         assert self.prepare.call_count == 1 and not self.submit.called and not self.attempts
         assert not self.job_rows()
@@ -170,7 +175,9 @@ class AsyncBatchRig:
         row, = self.job_rows()
         assert row["status"] == "pending"
         self.worker = _run_real_worker(jobs.claim_organize_operation_job(row["job_id"]))
-        assert jobs.get_organize_operation_job(row["job_id"])["status"] == "completed"
+        get_organize_operation_job_result = jobs.get_organize_operation_job(row["job_id"])
+        assert get_organize_operation_job_result is not None
+        assert get_organize_operation_job_result["status"] == "completed"
 
     async def confirm(self, *, foreground=False):
         async def finish_before_wait(result, **options):
@@ -179,6 +186,7 @@ class AsyncBatchRig:
                 return await effects.wait_for_effect_completion(result, timeout_seconds=0, **options)
         wait = finish_before_wait if foreground else partial(effects.wait_for_effect_completion, timeout_seconds=0)
         with patch.object(existing_actions, "wait_for_effect_completion", wait):
+            assert self.plan is not None
             return await capture(self.source.confirm(owner=OWNER, session_id=SID, plan_id=self.plan.plan_id, channel="web"))
 
     async def row(self, store=None):
@@ -188,6 +196,7 @@ class AsyncBatchRig:
     async def poll(self, store=None):
         store = self.store if store is None else store
         def due(state):
+            assert self.plan is not None
             row = (state.metadata.get("effect_waits") or {}).get(self.plan.plan_id)
             if row is not None:
                 row["next_poll_at"] = 0
@@ -210,7 +219,9 @@ class AsyncBatchRig:
     async def assert_once(self, *, tail=True):
         assert self.prepare.call_count == self.submit.call_count == self.client.rename.call_count == 1
         assert len(self.job_rows()) == 1
-        assert self.attempts == ([self.plan.plan_id + "_2"] if tail else [])
+        if tail:
+            assert self.plan is not None
+        assert self.attempts == ([self.plan.plan_id + "_2"] if tail and self.plan is not None else [])
         assert self.verified == (["4K"] if tail else [])
         events = await SQLiteKernelStore().list_events(owner=OWNER, session_id=SID)
         assert sum(e["type"] == Event.EFFECT_APPROVAL_REQUIRED.value for e in events) == 1
@@ -367,6 +378,7 @@ def test_foreground_fast_completion_executes_each_step_once_without_background_r
 @pytest.mark.parametrize("phase", ["pending", "ready"])
 def test_stop_or_new_user_never_executes_old_remaining_write(rig, interruption, phase):
     async def run():
+        candidate = None
         if phase == "ready":
             candidate = await rig.ready()
         else:
@@ -385,6 +397,7 @@ def test_stop_or_new_user_never_executes_old_remaining_write(rig, interruption, 
             assert await rig.poll() == 1
             candidate, = await rig.store.due_continuations()
         cold, script = SQLiteKernelStore(), BatchScript()
+        assert candidate is not None
         assert not await rig.session(script, cold).resume_wait(candidate=candidate)
         assert not script.requests
         assert await cold.due_continuations() == []
@@ -534,6 +547,7 @@ def test_retired_batch_continuation_poll_has_no_running_or_followup_promise(rig,
         if reason == "cancelled":
             assert await cold.request_stop_generation(owner=OWNER, session_id=SID, generation=state.generation)
         script = BatchScript()
+        assert candidate is not None
         assert not await rig.session(script, cold).resume_wait(candidate=candidate)
         _, retired = await rig.row(cold)
         assert retired["continuation"]["state"] == ("terminal" if reason == "expired" else "cancelled")

@@ -124,6 +124,7 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
     ready: dict[str, tuple[ToolCallContext, PipelineResult | BaseException]] = {}
 
     for call_index, call in enumerate(calls):
+        lease = turn.tool_context.lease
         if call.name not in turn.available_names:
             error = ToolPipelineError(
                 "该工具不在本轮候选能力中；先调用 agent.capabilities 指定 tool_names 加载工具，下一轮按返回的 Schema 调用。",
@@ -147,6 +148,8 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
             record_result(turn, tool.name, {}, {"ok": False, "status": error.code, "summary": str(error)}, error=error, rejected_call=call.call_id)
             await turn.close_failed_call(call, error, tool_name=tool.name, input_schema=tool.input_schema)
             continue
+        arguments = call.arguments
+        assert arguments is not None
         canonical_call = ModelToolCall(
             call_id=call.call_id,
             name=tool.name,
@@ -181,9 +184,9 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
             # 接力未携带持久化 scope，不能借旧任务额度停泊成无 scope 的恢复回合。
             if (isinstance(exc, _ReadPermitRejected) and not turn.agent_input.initial_read_tool
                     and turn.session.continuation_binding is not None
-                    and (turn.state.metadata.get("read_wait") or turn.lease.continuation_kind == "effect") and not turn.confirming and not turn.explaining
+                    and (turn.state.metadata.get("read_wait") or lease.continuation_kind == "effect") and not turn.confirming and not turn.explaining
                     and (not turn.attempted_write or (
-                        turn.lease.continuation_kind == "effect" and turn.lease.continuation_id
+                        lease.continuation_kind == "effect" and lease.continuation_id
                         and turn.confirmed_result is not None and public_result_state(turn.confirmed_result) == "failed"
                     )) and not turn.state.pending_effect_plan_id
                     and all(c.call_id in turn.completed_call_ids for c in calls if c is not call)):
@@ -204,7 +207,7 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
                     await turn.publish_tool(AgentEventType.TOOL_FAILED, call, code=exc.code, message=str(exc))
                     await turn.publish(AgentEventType.TURN_COMPLETED, {
                         "status": "waiting", "answer": "查询受到本地额度限制，已保存等待；尚未完成。",
-                        "retry_at_epoch": (turn.state.metadata["effect_waits"][turn.lease.continuation_id]["continuation"] if turn.lease.continuation_kind == "effect" else turn.state.metadata["read_wait"])["due_at"],
+                        "retry_at_epoch": (turn.state.metadata["effect_waits"][lease.continuation_id]["continuation"] if lease.continuation_kind == "effect" else turn.state.metadata["read_wait"])["due_at"],
                         "model_calls": turn.model_calls, "tool_calls": turn.total_tool_calls,
                     })
                     return True
@@ -217,10 +220,10 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
                 await persist_conversation(turn, close_pending=True, task_patch=exc.task_patch,
                                            staged_messages=staged, staged_completed=done)
                 turn.messages, turn.completed_call_ids = staged, done
-                record_result(turn, tool.name, call.arguments, {"ok": False, "summary": str(exc)}, error=exc)
+                record_result(turn, tool.name, arguments, {"ok": False, "summary": str(exc)}, error=exc)
                 await turn.publish_tool(AgentEventType.TOOL_FAILED, call, code=exc.code, message=str(exc))
             else:
-                record_result(turn, tool.name, call.arguments, {"ok": False, "status": exc.code, "summary": str(exc)}, error=exc)
+                record_result(turn, tool.name, arguments, {"ok": False, "status": exc.code, "summary": str(exc)}, error=exc)
                 await turn.close_failed_call(
                     call, exc,
                     tool_name=tool.name,
@@ -244,7 +247,7 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
         try:
             if result.task_patch is not None:
                 preview = reduce_task(turn.state.metadata.get("task"), result.task_patch,
-                                      owner=turn.lease.owner, session_id=turn.lease.session_id)
+                                      owner=lease.owner, session_id=lease.session_id)
                 task = task_projection(preview)
                 content = {**json.loads(result.outcome.model_content), "task": task}
                 result = replace(result, outcome=replace(result.outcome,
@@ -265,7 +268,7 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
             done = turn.completed_call_ids | {call.call_id}
             await persist_conversation(turn, close_pending=True, staged_messages=staged, staged_completed=done)
             turn.messages, turn.completed_call_ids = staged, done
-            record_result(turn, tool.name, call.arguments, {"ok": False, "summary": str(error)}, error=error)
+            record_result(turn, tool.name, arguments, {"ok": False, "summary": str(error)}, error=error)
             await turn.publish_tool(AgentEventType.TOOL_FAILED, call, code=error.code, message=str(error))
             if resuming_read:
                 raise error
@@ -276,9 +279,9 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
         if result.effect_plan is not None:
             plan = result.effect_plan
             if await turn.session.pipeline.scoped_trust.allows(plan, context=turn.tool_context):
-                turn.scope.enter_context(session_scope_guard(turn.lease.owner, turn.lease.session_id, kind="effect"))
+                turn.scope.enter_context(session_scope_guard(lease.owner, lease.session_id, kind="effect"))
                 if await turn.session.pipeline.scoped_trust.allows(plan, context=turn.tool_context):
-                    await turn.session.coordinator.protect(turn.lease, turn.token)
+                    await turn.session.coordinator.protect(lease, turn.tool_context.cancellation)
                     turn.plan_id, turn.confirming = plan.plan_id, True
                     turn.last_user = turn.state.metadata.get("pending_effect_goal") or {"role": "user", "content": turn.agent_input.message}
                     if not await turn.confirm_effect(scoped_trust=True):
@@ -310,7 +313,7 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
                 },
             )
             return True
-        record_result(turn, tool.name, call.arguments, result.outcome.audit_result(), recovered_failures=result.recovered_failures)
+        record_result(turn, tool.name, arguments, result.outcome.audit_result(), recovered_failures=result.recovered_failures)
         await turn.publish_tool_result(canonical_call, result)
         if (result.tool.effect is ToolEffect.READ and not result.tool.metadata.get("kernel_utility")
                 and public_result_state(result.outcome.public_content) == "success"):
@@ -323,7 +326,7 @@ async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping
     next_tools = turn.discovery.window(turn.selected_tools, additions)
     if next_tools != turn.selected_tools:
         # 只在完整工具批次之后更新Schema；同一模型批次不能猜新工具名绕过初选。
-        turn.token.raise_if_cancelled()
+        turn.tool_context.cancellation.raise_if_cancelled()
         turn.selected_tools = next_tools
         turn.available_names = {name for tool in turn.selected_tools for name in (tool.name, tool.model_name)}
         turn.tool_definitions = tuple(tool.model_definition() for tool in turn.selected_tools)
@@ -344,7 +347,7 @@ async def execute_group(turn: AgentTurn, calls: tuple[ModelToolCall, ...], start
     jobs: list[tuple[str, ToolCallContext, asyncio.Task[PipelineResult]]] = []
     try:
         for offset, item in enumerate(group):
-            turn.token.raise_if_cancelled()
+            turn.tool_context.cancellation.raise_if_cancelled()
             spec = turn.session.catalog.get(item.name)
             canonical = ModelToolCall(item.call_id, spec.name, item.arguments)
             turn.started_call_ids[item.call_id] = None
@@ -354,20 +357,19 @@ async def execute_group(turn: AgentTurn, calls: tuple[ModelToolCall, ...], start
                 await turn.publish_tool(AgentEventType.EFFECT_PREVIEW_STARTED, canonical)
             await turn.publish_tool(AgentEventType.TOOL_STARTED, canonical, effect=spec.effect.value)
             await persist_conversation(turn, close_pending=True)
-            options = {}
+            receipt = None
             if spec.effect is ToolEffect.READ:
-                receipt = _CancelledReadInline.capture(turn.lease, turn.state.conversation, start + offset, tool=spec)
+                receipt = _CancelledReadInline.capture(turn.tool_context.lease, turn.state.conversation, start + offset, tool=spec)
                 turn.returned_reads[item.call_id] = receipt
-                options["_returned_read"] = receipt
             context = replace(turn.tool_context,
-                current_task=round_task if spec.metadata.get("kernel_utility") else turn.state.metadata.get("task"),
+                current_task=(dict(round_task) if round_task is not None else None)
+                    if spec.metadata.get("kernel_utility") else turn.state.metadata.get("task"),
                 call_id=item.call_id,
                 schema_replacements={} if concurrent else turn.tool_context.schema_replacements)
             admitted = asyncio.Event()
-            if concurrent:
-                options["_read_admitted"] = admitted
-                options["_read_publication_lock"] = turn.publication_lock
-            invocation = turn.session.pipeline.execute(spec.name, item.arguments, context=context, **options)
+            invocation = turn.session.pipeline.execute(spec.name, item.arguments, context=context,
+                _returned_read=receipt, _read_admitted=admitted if concurrent else None,
+                _read_publication_lock=turn.publication_lock if concurrent else None)
             if not concurrent:
                 # 顺序路径不创建子任务，保持既有调用上下文与持锁身份。
                 try:

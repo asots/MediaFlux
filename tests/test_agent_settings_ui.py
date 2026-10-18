@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.responses import JSONResponse
 from starlette.datastructures import URL
+from starlette.requests import Request
 
 from app import config
 from app.agent.feature_gate import is_agent_enabled
@@ -36,20 +37,21 @@ class AgentSettingsUiTests(unittest.TestCase):
 
     @staticmethod
     def _request():
-        return SimpleNamespace(
-            session={"logged_in": True},
-            app=SimpleNamespace(
+        return Request({
+            "type": "http",
+            "session": {"logged_in": True},
+            "app": SimpleNamespace(
                 state=SimpleNamespace(
                     background_services_enabled=False,
                     media_proxy_manager=None,
                 )
             ),
-        )
+        })
 
     @staticmethod
     def _payload(response):
         if isinstance(response, JSONResponse):
-            return json.loads(response.body)
+            return json.loads(bytes(response.body))
         return response
 
     def test_shared_config_save_surfaces_runtime_warnings_without_false_success(self):
@@ -252,8 +254,8 @@ class AgentSettingsUiTests(unittest.TestCase):
             r'<button[^>]+id="testAgentModelBtn"[^>]*>.*?</button>',
             agent_panel,
         )
-        self.assertIsNotNone(fetch_model_button)
-        self.assertIsNotNone(test_model_button)
+        assert (fetch_model_button) is not None
+        assert (test_model_button) is not None
         for button, label in (
             (fetch_model_button.group(0), "获取模型列表"),
             (test_model_button.group(0), "测试模型连接"),
@@ -701,6 +703,7 @@ class AgentSettingsUiTests(unittest.TestCase):
                 rejected = save_config(
                     request, {"DOWNLOAD_TORRENT_RETENTION_DAYS": invalid}
                 )
+            assert isinstance(rejected, JSONResponse)
             self.assertEqual(rejected.status_code, 400)
             rejected_persist.assert_not_called()
 
@@ -1008,7 +1011,7 @@ class AgentSettingsUiTests(unittest.TestCase):
             ))
 
         client = FakeClient.instance
-        self.assertIsNotNone(client)
+        assert (client) is not None
         self.assertEqual(result["protocol"], "chat_completions")
         self.assertEqual(result["status_code"], 200)
         self.assertTrue(result["ok"])
@@ -1111,6 +1114,7 @@ class AgentSettingsUiTests(unittest.TestCase):
             ), patch("app.routes.api.config.set_and_save") as persist:
                 response = save_config(self._request(), {key: value})
 
+            assert isinstance(response, JSONResponse)
             self.assertEqual(response.status_code, 409)
             self.assertIn(key, self._payload(response)["error"])
             persist.assert_not_called()
@@ -1128,6 +1132,7 @@ class AgentSettingsUiTests(unittest.TestCase):
             ), patch("app.routes.api.config.set_and_save") as persist:
                 response = save_config(self._request(), {key: value})
 
+            assert isinstance(response, JSONResponse)
             self.assertEqual(response.status_code, 409)
             self.assertIn(key, self._payload(response)["error"])
             persist.assert_not_called()
@@ -1149,6 +1154,7 @@ class AgentSettingsUiTests(unittest.TestCase):
                 {"WEB_PORT": "22366", "AGENT_LLM_MODEL": "other-model"},
             )
 
+        assert isinstance(response, JSONResponse)
         self.assertEqual(response.status_code, 400)
         self.assertIn("WEB_PORT", self._payload(response)["error"])
         persist.assert_not_called()
@@ -1159,6 +1165,7 @@ class AgentSettingsUiTests(unittest.TestCase):
                 self._request(), {"WEB_HOST": "0.0.0.0", "WEB_PORT": "22366"}
             )
 
+        assert isinstance(response, JSONResponse)
         self.assertEqual(response.status_code, 400)
         error = self._payload(response)["error"]
         self.assertIn("WEB_HOST", error)

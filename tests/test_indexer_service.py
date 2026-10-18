@@ -4,6 +4,7 @@ import asyncio
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 from app.clients.http import HttpSecurityError
@@ -22,6 +23,7 @@ from app.indexers.models import (
     IndexerProviderError,
     ResolvedDownload,
 )
+from app.indexers.providers.base import IndexerAdapter
 from app.indexers.ranking import candidate_sort_key
 from app.indexers.registry import IndexerRegistry
 from app.indexers.result_store import IndexerResultStore
@@ -135,7 +137,7 @@ class ShutdownAwareAdapter(FakeAdapter):
         self.calls += 1
         self.search_started.set()
         try:
-            await asyncio.Event().wait()
+            return await asyncio.Future[IndexerPage]()
         finally:
             self.search_finished.set()
 
@@ -143,14 +145,14 @@ class ShutdownAwareAdapter(FakeAdapter):
         self.resolve_calls.append(stored_result)
         self.resolve_started.set()
         try:
-            await asyncio.Event().wait()
+            return await asyncio.Future[ResolvedDownload]()
         finally:
             self.resolve_finished.set()
 
 
 class ShutdownAwareRegistry(IndexerRegistry):
     def __init__(self, adapter: ShutdownAwareAdapter, *, finished: asyncio.Event):
-        super().__init__({adapter.site_id: adapter})
+        super().__init__(cast(dict[str, IndexerAdapter], {adapter.site_id: adapter}))
         self.finished = finished
         self.closed = False
         self.closed_after_operation = False
@@ -478,6 +480,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("internal upstream", result.errors[0].message)
         self.assertEqual([entry.title for entry in result.items], ["one", "two"])
         self.assertTrue(all(entry.result_id for entry in result.items))
+        assert result.items[0].result_id is not None
         self.assertEqual(self.store.get(result.items[0].result_id).title, "one")
 
     async def test_media_search_uses_site_queries_and_stops_after_quality_hit(self):
@@ -1245,6 +1248,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         service = self.service([adapter])
         search = await service.search("Frieren", 1, ("btbtla",))
 
+        assert search.items[0].result_id is not None
         resolved = await service.resolve(search.items[0].result_id)
 
         self.assertEqual(resolved.kind, "magnet")
@@ -1456,9 +1460,9 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_failure_is_shared_with_waiters_and_can_be_retried(self):
         service = self.service([FakeAdapter("nyaa")])
-        service._inflight[(asyncio.get_running_loop(), ("test-close",))] = (
-            asyncio.current_task()
-        )
+        task = asyncio.current_task()
+        assert task is not None
+        service._inflight[(asyncio.get_running_loop(), ("test-close",))] = task
         first_wait_started = threading.Event()
         release_first_wait = threading.Event()
         wait_calls = 0
@@ -1581,7 +1585,7 @@ class CallerDeadlineTests(unittest.IsolatedAsyncioTestCase):
     async def test_short_waiter_keeps_ready_results_without_stopping_long_waiter(self):
         fast = FakeAdapter("fast", [IndexerItem("fast", "Fast", "Example 1080p", magnet="magnet:?xt=urn:btih:" + HASH, download_state="ready", download_kinds=("magnet",))])
         slow = FakeAdapter("slow", [IndexerItem("slow", "Slow", "Example 2160p", magnet="magnet:?xt=urn:btih:" + "b" * 40, download_state="ready", download_kinds=("magnet",))], delay=0.15)
-        service = IndexerService(registry=IndexerRegistry({"fast": fast, "slow": slow}), result_store=IndexerResultStore())
+        service = IndexerService(registry=IndexerRegistry(cast(dict[str, IndexerAdapter], {"fast": fast, "slow": slow})), result_store=IndexerResultStore())
         request = IndexerMediaSearchRequest.create(title="Example")
         try:
             short, full = await asyncio.gather(
@@ -1607,7 +1611,7 @@ class CallerDeadlineTests(unittest.IsolatedAsyncioTestCase):
     async def test_deadline_without_results_cancels_last_waiter_and_does_not_cache_empty(self):
         tracker = {"active": 0, "maximum": 0}
         slow = FakeAdapter("slow", delay=1, tracker=tracker)
-        service = IndexerService(registry=IndexerRegistry({"slow": slow}), result_store=IndexerResultStore())
+        service = IndexerService(registry=IndexerRegistry(cast(dict[str, IndexerAdapter], {"slow": slow})), result_store=IndexerResultStore())
         request = IndexerMediaSearchRequest.create(title="Example")
         try:
             with self.assertRaises(TimeoutError):

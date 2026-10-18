@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import tests  # noqa: F401
 from unittest.mock import patch
 
@@ -32,7 +35,7 @@ class ReleaseChainConflictTests(IsolatedDatabaseTestCase):
         for count in (80, 160):
             with self.subTest(count=count):
                 scraper = TMDBScraper()
-                organizer = Organizer(client=object(), scraper=scraper)
+                organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
                 plans = [self._plan(f"new-{i}", i) for i in range(1, count + 1)]
                 try:
                     with patch.object(
@@ -50,7 +53,7 @@ class ReleaseChainConflictTests(IsolatedDatabaseTestCase):
 
     def test_existing_names_are_parsed_once_per_inventory(self):
         scraper = TMDBScraper()
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         files = [
             GuangYaFile(
                 f"old-{i}", f"Show.2025.S01E{i:03}.mkv", False, 100, "etag", "target"
@@ -74,7 +77,7 @@ class ReleaseChainConflictTests(IsolatedDatabaseTestCase):
 
     def test_batch_winner_inherits_real_replacement_target(self):
         scraper = TMDBScraper()
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         old = GuangYaFile("old", "Show.2025.S01E003.mkv", False, 50, "etag", "target")
         first = self._plan("first", 3, size=100)
         winner = self._plan("winner", 3, size=200)

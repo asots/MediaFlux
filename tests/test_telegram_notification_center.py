@@ -1,12 +1,16 @@
 """统一 Telegram 通知中心的幂等、线程更新与按钮保留契约。"""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from app import database as db
 from app.modules import telegram_notification_center as notification_center
@@ -199,15 +203,19 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
                 self.assertTrue(outcome.accepted)
                 self.assertTrue(outcome.queued)
                 saved = get_notification(outcome.event_key)
+                assert saved is not None
                 restored = deserialize_notification_event(saved["event_json"])
                 self.assertEqual(saved["topic"], NotificationTopic.AGENT.value)
                 self.assertTrue(outcome.event_key.startswith(
                     "tg:event:agent:agent-effect:"
                 ))
                 self.assertEqual(restored.state, "agent_effect_reply")
+                lines = []
+                for line in restored.lines:
+                    assert isinstance(line, str)
+                    lines.append(line)
                 self.assertTrue(any(
-                    line.startswith("任务标识：agent-effect-")
-                    for line in restored.lines
+                    line.startswith("任务标识：agent-effect-") for line in lines
                 ))
 
                 # 从持久 outbox 重新 claim/deserialize/dispatch，不依赖发布进程内状态。
@@ -217,6 +225,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
                     )
                 )
                 delivered = get_notification(outcome.event_key)
+                assert delivered is not None
                 self.assertEqual(delivered["status"], "sent")
                 self.assertFalse(outcome.delivered)
 
@@ -245,6 +254,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
 
         is_current.assert_called_once_with(queued.event_key)
         row = get_notification(queued.event_key)
+        assert row is not None
         self.assertEqual(row["status"], "suppressed")
         self.assertEqual(row["last_error"], "AgentInteractionSessionRemoved")
         sender.assert_not_called()
@@ -271,6 +281,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             ))
 
         row = get_notification(queued.event_key)
+        assert row is not None
         self.assertEqual(row["status"], "retry_wait")
         self.assertEqual(
             row["last_error"],
@@ -304,6 +315,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
                     event_key=queued.event_key,
                 )
             row = get_notification(queued.event_key)
+            assert row is not None
             self.assertEqual(row["status"], "suppressed")
             self.assertFalse(queued.delivered)
 
@@ -320,7 +332,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
                 key, NotificationEvent("第一次回执"),
                 chat_id="100", deliver_now=True,
             )
-            first_payload = get_notification(first.event_key)["event_json"]
+            get_notification_result = get_notification(first.event_key)
+            assert get_notification_result is not None
+            first_payload = get_notification_result["event_json"]
             duplicate = publish_agent_interaction_reply(
                 key, NotificationEvent("不能覆盖第一次"),
                 chat_id="100", deliver_now=True,
@@ -331,7 +345,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertTrue(duplicate.accepted)
         self.assertFalse(duplicate.delivered)
         self.assertEqual(duplicate.status, "sent")
-        self.assertEqual(get_notification(first.event_key)["event_json"], first_payload)
+        get_notification_result_2 = get_notification(first.event_key)
+        assert get_notification_result_2 is not None
+        self.assertEqual(get_notification_result_2["event_json"], first_payload)
         self.assertEqual(sender.call_count, 1)
 
     @patch("app.modules.telegram_notification_center.send_event_result")
@@ -377,8 +393,10 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertEqual(sender.call_count, 1)
         self.assertEqual(sum(result.delivered for result in outcomes.values()), 1)
         self.assertTrue(all(result.accepted for result in outcomes.values()))
+        get_notification_result_3 = get_notification(next(iter(outcomes.values())).event_key)
+        assert get_notification_result_3 is not None
         saved = deserialize_notification_event(
-            get_notification(next(iter(outcomes.values())).event_key)["event_json"]
+            get_notification_result_3["event_json"]
         )
         self.assertIn(saved.title, {"回执 A", "回执 B"})
 
@@ -407,6 +425,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertEqual(first.status, "outcome_unknown")
         self.assertTrue(again.accepted)
         self.assertFalse(again.delivered)
+        assert row is not None
         self.assertEqual(row["status"], "outcome_unknown")
         self.assertEqual(int(row["message_id"] or 0), 0)
         sender.assert_called_once()
@@ -446,7 +465,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
                 notification_center.drain_telegram_notifications(
                     event_key=event_key,
                 )
-                self.assertEqual(get_notification(event_key)["status"], "suppressed")
+                get_notification_result_4 = get_notification(event_key)
+                assert get_notification_result_4 is not None
+                self.assertEqual(get_notification_result_4["status"], "suppressed")
         sender.assert_not_called()
 
     def test_ordinary_agent_topic_notification_still_obeys_notification_policy(self) -> None:
@@ -462,7 +483,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
     def test_serialization_converges_dynamic_objects_to_safe_strings(self) -> None:
         restored = deserialize_notification_event(serialize_notification_event(
             NotificationEvent(
-                Path("/tmp/poster"),
+                title=Path("/tmp/poster"),
                 fields=(("路径", Path("/tmp/media")),),
                 lines=(Path("/tmp/line"),),
             )
@@ -495,6 +516,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             topic=NotificationTopic.SYSTEM, chat_id="100", deliver_now=False,
         )
         thread_row = get_notification(thread.event_key)
+        assert thread_row is not None
         self.assertTrue(str(thread_row["thread_key"]).startswith("sha256:"))
         self.assertNotIn("敏感示例", str(thread_row["thread_key"]))
 
@@ -559,6 +581,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertTrue(result["outcome"].delivered)
         sender.assert_called_once()
         row = get_notification(key)
+        assert row is not None
         self.assertEqual(row["lease_generation"], 1)
         self.assertEqual(row["message_id"], 81)
 
@@ -665,10 +688,12 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             chat_id="100",
         )
         pending = get_notification(key)
+        assert pending is not None
         self.assertEqual(pending["status"], "pending")
         self.assertEqual(pending["revision"], 3)
         self.assertTrue(drain_telegram_notifications(event_key=key))
         final = get_notification(key)
+        assert final is not None
         self.assertEqual(final["status"], "sent")
         self.assertEqual(final["delivered_revision"], 3)
         self.assertEqual(editor.call_count, 2)
@@ -702,6 +727,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             error="TelegramRequestRejected",
         ))
         row = get_notification(event_key)
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["revision"], 2)
         self.assertEqual(row["attempts"], 0)
@@ -734,6 +760,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             claimed_revision=claimed["revision"],
         ))
         row = get_notification(event_key)
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["revision"], 2)
         self.assertEqual(row["delivered_revision"], 0)
@@ -773,6 +800,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         )
         self.assertEqual(status, "pending")
         row = get_notification(event_key)
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["revision"], 2)
         self.assertEqual(row["attempts"], 0)
@@ -809,6 +837,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertTrue(second.accepted)
         self.assertFalse(second.delivered)
         row = get_notification(second.event_key)
+        assert row is not None
         self.assertEqual(row["status"], "outcome_unknown")
         self.assertEqual(int(row["message_id"] or 0), 0)
 
@@ -819,6 +848,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             chat_id="100",
         )
         row = get_notification(second.event_key)
+        assert row is not None
         self.assertEqual(row["status"], "outcome_unknown")
         self.assertEqual(row["revision"], 3)
         self.assertEqual(int(row["message_id"] or 0), 0)
@@ -873,6 +903,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
 
         self.assertTrue(result.accepted)
         row = get_notification(result.event_key)
+        assert row is not None
         restored = deserialize_notification_event(row["event_json"])
         self.assertEqual(restored.actions[0].callback_data, "orgc:token:0")
         self.assertEqual(telegram_text_length(restored.actions[0].label), 64)
@@ -907,6 +938,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         )
         row = get_notification(result.event_key)
         self.assertEqual(result.status, "failed")
+        assert row is not None
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["attempts"], 1)
 
@@ -928,6 +960,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
 
         self.assertFalse(drain_telegram_notifications(event_key=result.event_key))
         row = get_notification(result.event_key)
+        assert row is not None
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["attempts"], 1)
         self.assertIn("InvalidEventPayload", row["last_error"])
@@ -951,6 +984,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
 
         self.assertFalse(drain_telegram_notifications(event_key=result.event_key))
         row = get_notification(result.event_key)
+        assert row is not None
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["attempts"], 1)
         self.assertIn("InvalidEventPayload", row["last_error"])
@@ -981,7 +1015,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertTrue(result.delivered)
         editor.assert_called_once()
         sender.assert_called_once()
-        self.assertEqual(get_notification(result.event_key)["message_id"], 42)
+        get_notification_result_5 = get_notification(result.event_key)
+        assert get_notification_result_5 is not None
+        self.assertEqual(get_notification_result_5["message_id"], 42)
 
     def test_recovery_retries_known_edits_but_quarantines_unknown_first_send(self) -> None:
         first_send = publish_notification_event(
@@ -1009,8 +1045,10 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertEqual(notification_center.recover_notifications(), 2)
         unknown_row = get_notification(first_send.event_key)
         retry_row = get_notification(edit.event_key)
+        assert unknown_row is not None
         self.assertEqual(unknown_row["status"], "outcome_unknown")
         self.assertEqual(unknown_row["last_error"], "DeliveryOutcomeUnknown")
+        assert retry_row is not None
         self.assertEqual(retry_row["status"], "retry_wait")
         self.assertEqual(retry_row["last_error"], "ProcessInterrupted")
 
@@ -1041,6 +1079,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
 
         self.assertEqual([row["event_key"] for row in claimed], [edit.event_key])
         unknown_row = get_notification(first_send.event_key)
+        assert unknown_row is not None
         self.assertEqual(unknown_row["status"], "outcome_unknown")
         self.assertEqual(unknown_row["last_error"], "DeliveryOutcomeUnknown")
         self.assertEqual(unknown_row["lease_generation"], 1)
@@ -1074,7 +1113,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
 
         self.assertLess(renderer.call_count, 20)
         self.assertTrue(event.lines)
-        self.assertIn("未展开", event.lines[-1])
+        last_line = event.lines[-1]
+        assert isinstance(last_line, str)
+        self.assertIn("未展开", last_line)
 
     @patch("app.modules.telegram_notification_center.edit_event_result")
     @patch("app.modules.telegram_notification_center.send_event_result")
@@ -1109,6 +1150,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             "confirmation:abc", topic=NotificationTopic.CONFIRMATION, chat_id="100",
         )
         row = get_notification(key)
+        assert row is not None
         self.assertEqual(row["message_id"], 42)
         self.assertEqual(row["revision"], 2)
         self.assertEqual(row["delivered_revision"], 2)
@@ -1134,7 +1176,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             thread_key, topic=NotificationTopic.ORGANIZE, chat_id="100",
         )
         self.assertTrue(first.queued)
-        self.assertIsNotNone(queued)
+        assert (queued) is not None
         self.assertFalse(queued.current_revision_delivered)
         self.assertEqual(queued.revision, 1)
         self.assertEqual(queued.delivered_revision, 0)
@@ -1143,6 +1185,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         delivered = get_notification_thread_snapshot(
             thread_key, topic=NotificationTopic.ORGANIZE, chat_id="100",
         )
+        assert delivered is not None
         self.assertTrue(delivered.current_revision_delivered)
 
         second = publish_notification_thread(
@@ -1156,6 +1199,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             thread_key, topic=NotificationTopic.ORGANIZE, chat_id="100",
         )
         self.assertTrue(second.queued)
+        assert updating is not None
         self.assertFalse(updating.current_revision_delivered)
         self.assertEqual(updating.revision, 2)
         self.assertEqual(updating.delivered_revision, 1)
@@ -1164,6 +1208,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         final = get_notification_thread_snapshot(
             thread_key, topic=NotificationTopic.ORGANIZE, chat_id="100",
         )
+        assert final is not None
         self.assertTrue(final.current_revision_delivered)
         self.assertEqual(final.revision, 2)
         self.assertEqual(final.delivered_revision, 2)
@@ -1214,7 +1259,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         ):
             self.assertTrue(drain_telegram_notifications(event_key=outcome.event_key))
         sender.assert_not_called()
-        self.assertEqual(get_notification(outcome.event_key)["status"], "suppressed")
+        get_notification_result_6 = get_notification(outcome.event_key)
+        assert get_notification_result_6 is not None
+        self.assertEqual(get_notification_result_6["status"], "suppressed")
 
     @patch("app.modules.telegram_notification_center.send_event_result")
     def test_retry_keeps_single_outbox_row(self, sender) -> None:
@@ -1237,6 +1284,7 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
             )
         self.assertTrue(drain_telegram_notifications(event_key=key))
         row = get_notification(key)
+        assert row is not None
         self.assertEqual(row["status"], "sent")
         self.assertEqual(row["message_id"], 7)
 
@@ -1295,7 +1343,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertEqual(final_event.actions, ())
 
     def test_qb_path_mapping_failure_reports_partial_ingest(self) -> None:
-        from app.modules.telegram_download_lifecycle import build_download_lifecycle_event
+        from app.modules.telegram_download_lifecycle import (
+            build_download_lifecycle_event,
+        )
 
         request_id, _ = db.create_download_request(
             "tg-qb-path-mapping-failure", "magnet", title="测试剧", chat_id="100",
@@ -1317,7 +1367,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertEqual(event.footer, reason)
 
     def test_download_without_archive_evidence_never_claims_ingest_completed(self) -> None:
-        from app.modules.telegram_download_lifecycle import build_download_lifecycle_event
+        from app.modules.telegram_download_lifecycle import (
+            build_download_lifecycle_event,
+        )
 
         cases = (
             ({"status": "completed", "qb_status": "completed"}, "✅ 下载完成", "downloaded"),
@@ -1333,7 +1385,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
                 self.assertEqual(event.state, state)
 
     def test_local_archive_reference_uses_exact_integer_identity(self) -> None:
-        from app.modules.telegram_download_lifecycle import build_download_lifecycle_event
+        from app.modules.telegram_download_lifecycle import (
+            build_download_lifecycle_event,
+        )
 
         task_id = 2**53 + 1
         with patch.object(db, "get_local_media_task", return_value=None) as lookup:
@@ -1357,7 +1411,9 @@ class TelegramNotificationCenterTests(IsolatedDatabaseTestCase):
         self.assertEqual(publish.call_args.args[1].state, "attention")
 
     def test_skipped_local_import_does_not_claim_ingest_completed(self) -> None:
-        from app.modules.telegram_download_lifecycle import build_download_lifecycle_event
+        from app.modules.telegram_download_lifecycle import (
+            build_download_lifecycle_event,
+        )
 
         request_id, _ = db.create_download_request(
             "tg-skipped-local-import", "magnet", title="测试剧", chat_id="100",
@@ -1443,7 +1499,7 @@ class TelegramNotificationSettingsTests(unittest.TestCase):
         ), patch("app.routes.api.config.set_and_save") as persist, patch(
             "app.services.clear_dashboard_cache"
         ):
-            response = save_config(self._request(), {
+            response = save_config(cast(Request, self._request()), {
                 "TG_NOTIFICATION_ENABLED": "true",
                 "TG_NOTIFICATION_LEVEL": "DETAILED",
             })
@@ -1455,8 +1511,9 @@ class TelegramNotificationSettingsTests(unittest.TestCase):
 
         with patch("app.routes.api.config.set_and_save") as rejected:
             response = save_config(
-                self._request(), {"TG_NOTIFICATION_LEVEL": "verbose"}
+                cast(Request, self._request()), {"TG_NOTIFICATION_LEVEL": "verbose"}
             )
+        assert isinstance(response, JSONResponse)
         self.assertEqual(response.status_code, 400)
         rejected.assert_not_called()
 

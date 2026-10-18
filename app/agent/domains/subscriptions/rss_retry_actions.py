@@ -67,7 +67,7 @@ def _capture(arguments: dict[str, Any]) -> dict[str, Any]:
         "entries": entries,
         "has_more": has_more,
         "runtime_config": runtime_config,
-        "config_error": str(config_error or ""),
+        "config_error": (config_error or ""),
         "cloud_rules": cloud_rules,
         "target": target,
     }
@@ -178,7 +178,7 @@ def retry_failed_rss_confirmed(
 ) -> ToolResult:
     state = _capture(arguments)
     if not secrets.compare_digest(
-        str(state["fingerprint"]), str(expected_context or "")
+        str(state["fingerprint"]), (expected_context or "")
     ):
         raise AgentToolError(
             "RSS 失败条目或下载目标/配置已变化，请重新预检",

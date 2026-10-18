@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import threading
 import unittest
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from unittest.mock import Mock
 
 from app.discovery.models import (
@@ -48,21 +49,23 @@ class Dbcl2RedirectSemanticsTests(unittest.TestCase):
             with self.subTest(location=location):
                 error = self._status_error(302, location)
 
-                self.assertIsInstance(error, ProviderAuthenticationError)
+                assert isinstance(error, ProviderAuthenticationError)
                 self.assertIn("dbcl2", str(error))
 
     def test_other_redirects_stay_unavailable(self):
         error = self._status_error(302, "https://movie.douban.com/other")
 
-        self.assertIsInstance(error, ProviderUnavailable)
+        assert isinstance(error, ProviderUnavailable)
 
     def test_direct_auth_status_is_unchanged(self):
         error = self._status_error(403)
 
-        self.assertIsInstance(error, ProviderAuthenticationError)
+        assert isinstance(error, ProviderAuthenticationError)
 
 
 class _FailingClient:
+    _credential_identity: str
+    credential_source: str
     def __init__(self, error: Exception):
         self.error = error
         self.calls = 0
@@ -78,6 +81,7 @@ class _FailingClient:
 
 
 class _BlockingFailingClient(_FailingClient):
+    credential_source: str
     def __init__(self, error: Exception):
         super().__init__(error)
         self.started = threading.Event()
@@ -338,7 +342,7 @@ class DoubanFallbackBreakerTests(unittest.TestCase):
         frodo.configured = True
         frodo.get_detail.side_effect = [ProviderUnavailable("超时"), {"ok": True}]
         provider = self._provider(frodo, Mock(configured=False), clock=lambda: now[0])
-        provider._required_card = lambda _raw, _media_type: card
+        provider._required_card = lambda raw, fallback_type: card
 
         with self.assertRaises(Exception):
             provider.get_detail("38581618", "movie")

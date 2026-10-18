@@ -47,6 +47,7 @@ def test_normal_submitted_read_answer_preserves_trusted_scope_once():
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
                                pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
         preview = await consume_events(session.run(AgentInput(message="提交并检查后续任务", owner="o", session_id="s")))
+        assert preview.approval is not None
         final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
         assert writes == [1]
         assert len(model.requests) == 3

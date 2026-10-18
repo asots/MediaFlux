@@ -1,7 +1,10 @@
 """Media Agent 配置组件说明的安全投影、路由与 API 契约。"""
 
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
+from collections.abc import Mapping
 import json
 import unittest
 from unittest.mock import patch
@@ -14,11 +17,11 @@ from app.agent.errors import AgentToolError
 from app.agent.models import ToolResult
 
 
-def _config_get(values: dict[str, object]):
+def _config_get(values: Mapping[str, object]):
     return lambda key, default="": values.get(key, default)
 
 
-def _explain_with_values(component: str, values: dict[str, object]) -> ToolResult:
+def _explain_with_values(component: str, values: Mapping[str, object]) -> ToolResult:
     with (
         patch(
             "app.agent.domains.configuration.explanations.config.all_items",
@@ -54,7 +57,7 @@ class ConfigComponentExplainUnitTests(unittest.TestCase):
         )
         for arguments in invalid:
             with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
-                config_component_arguments(arguments)
+                config_component_arguments(cast(dict[str, Any], arguments))
 
     def test_incomplete_component_returns_labels_without_configuration_values(self):
         values = {

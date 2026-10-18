@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
+from typing import Any
 
 from app import database as db
 from app.clients.guangya import (
@@ -30,7 +31,9 @@ from app.modules.naming import sanitize_name
 from app.modules.organize import OrganizeRules
 from app.modules.organize_tasks import get_organize_manager
 from app.repositories.download_requests import (
-    apply_download_tracker_update, download_display_title, usable_download_title,
+    apply_download_tracker_update,
+    download_display_title,
+    usable_download_title,
 )
 
 logger = get_logger(__name__)
@@ -45,9 +48,12 @@ _TORRENT_DATA_CLEANUP_BATCH_SIZE = 500
 _STALE_SUBMISSION_MINUTES = 15
 
 
-def resume_relocated_staging(client, stats: dict, *, source_ids: set[str], nsfw_source_ids: set[str]) -> list[int]:
+def resume_relocated_staging(client, stats: dict, *, source_ids: set[str], nsfw_source_ids: set[str] | frozenset[str]) -> list[int]:
     """手动整源扫描的续接点；只入既有下载跟踪队列，不绕过落稳或执行整理。"""
-    from app.repositories.download_staging import list_staging_cleanup_requests, requeue_relocated_staging
+    from app.repositories.download_staging import (
+        list_staging_cleanup_requests,
+        requeue_relocated_staging,
+    )
 
     resumed = []
     parent_entries: dict[str, list] = {}
@@ -263,7 +269,7 @@ class DownloadTracker:
             str(DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS),
         )
         try:
-            days = int(str(raw or "").strip() or DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS)
+            days = int((raw or "").strip() or DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS)
         except (TypeError, ValueError):
             return DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS
         if days < 0 or days > MAX_DOWNLOAD_TORRENT_RETENTION_DAYS:
@@ -334,7 +340,7 @@ class DownloadTracker:
         qb_tasks = qb_tasks if isinstance(qb_tasks, _QBTaskIndex) else _QBTaskIndex(qb_tasks)
         gy_tasks = gy_tasks if isinstance(gy_tasks, _GYTaskIndex) else _GYTaskIndex(gy_tasks)
         request_id = int(row["id"])
-        updates = {}
+        updates: dict[str, Any] = {}
         backend_logs: list[tuple[str, str, float, str]] = []
         qb_status = str(row["qb_status"] or "")
         gy_status = str(row["gy_status"] or "")
@@ -355,7 +361,7 @@ class DownloadTracker:
             matched_qb_task = task
             if task:
                 progress = max(0.0, min(float(task.progress or 0), 1.0))
-                state = str(task.state or "").strip().lower()
+                state = (task.state or "").strip().lower()
                 updates["qb_task_id"] = task.hash
                 updates["qb_task_missing_since"] = None
                 if not tracking_completed_qb:
@@ -685,7 +691,7 @@ class DownloadTracker:
     @staticmethod
     def _settle_delay(attempt: int) -> int:
         delays = (30, 30, 30, 60, 120, 300, 600, 900)
-        return delays[min(max(1, int(attempt)) - 1, len(delays) - 1)]
+        return delays[min(max(1, attempt) - 1, len(delays) - 1)]
 
     def _staging_ready_for_organize(self, row) -> bool:
         """等待隔离目录中的异步云端写入落稳，避免只整理首批可见文件。"""
@@ -705,9 +711,9 @@ class DownloadTracker:
             expected_parent = str(self._row_value(row, "gy_staging_parent_dir", "") or "")
             expected_name = str(self._row_value(row, "gy_staging_name", "") or "")
             if (
-                info is None or not bool(info.is_dir)
-                or (expected_parent and str(info.parent_id or "") != expected_parent)
-                or (expected_name and str(info.name or "") != expected_name)
+                info is None or not info.is_dir
+                or (expected_parent and (info.parent_id or "") != expected_parent)
+                or (expected_name and (info.name or "") != expected_name)
             ):
                 self._fail_settle(row, "下载隔离目录身份已变化，已停止自动整理")
                 return False
@@ -747,7 +753,7 @@ class DownloadTracker:
     @staticmethod
     def _scan_staging_snapshot(client: GuangYaClient, root_id: str) -> tuple[int, str]:
         max_entries = max(100, int(get("DOWNLOAD_GY_SETTLE_MAX_ENTRIES", "20000") or 20000))
-        stack = [str(root_id)]
+        stack = [root_id]
         leaves: list[str] = []
         visited: set[str] = set()
         while stack:
@@ -760,7 +766,7 @@ class DownloadTracker:
                     raise RuntimeError("隔离目录项目超过落稳检查上限")
                 if item.is_dir:
                     if item.file_id:
-                        stack.append(str(item.file_id))
+                        stack.append(item.file_id)
                     continue
                 leaves.append(
                     f"{item.file_id}|{item.size}|{item.etag}|{item.updated_at}|{item.name}"
@@ -782,8 +788,8 @@ class DownloadTracker:
         db.update_download_request(
             request_id, organize_started=0, organize_status="settling", organize_error=error,
             organize_next_retry_at=next_retry, gy_settle_attempts=attempts,
-            gy_settle_observed_file_count=max(0, int(observed)),
-            gy_settle_snapshot=str(snapshot or ""), gy_settle_stable_count=max(0, int(stable_count)),
+            gy_settle_observed_file_count=max(0, observed),
+            gy_settle_snapshot=(snapshot or ""), gy_settle_stable_count=max(0, stable_count),
             # STRM 尚未入队，不能标为 pending；否则服务重启恢复会把它误判为
             # “上次 STRM 排队期间中断”，产生虚假的待处理记录。
             strm_status="", strm_error="", strm_finished_at=None, error="",
@@ -808,7 +814,7 @@ class DownloadTracker:
 
     def _retain_staging_without_organize(self, row, reason: str) -> None:
         """保留无法安全收口的隔离目录，并让待处理页给出明确原因。"""
-        message = str(reason or "下载目录需要人工核验")[:500]
+        message = (reason or "下载目录需要人工核验")[:500]
         db.update_download_request(
             int(row["id"]),
             organize_started=-1, organize_status="skipped", organize_error="",
@@ -872,7 +878,7 @@ class DownloadTracker:
                     expected_name=expected_name,
                 )
                 return {
-                    "ok": bool(handled),
+                    "ok": handled,
                     "request_id": request_id,
                     "stats": {"finalized": 1 if handled else 0},
                 }
@@ -916,8 +922,8 @@ class DownloadTracker:
             info = client.file_info(staging_id)
             if (
                 info is None or not info.is_dir
-                or str(info.parent_id or "0") != parent_id
-                or str(info.name or "") != expected_name
+                or (info.parent_id or "0") != parent_id
+                or (info.name or "") != expected_name
             ):
                 self._retain_staging_without_organize(row, "暂存目录身份已变化，未自动移动")
                 return True
@@ -933,10 +939,10 @@ class DownloadTracker:
             return True
 
         def has_conflict(name: str, *, ignore_id: str = "") -> bool:
-            key = str(name or "").strip().casefold()
+            key = (name or "").strip().casefold()
             return any(
-                str(item.file_id or "") != ignore_id
-                and str(item.name or "").strip().casefold() == key
+                (item.file_id or "") != ignore_id
+                and (item.name or "").strip().casefold() == key
                 for item in parent_entries
             )
 
@@ -950,13 +956,13 @@ class DownloadTracker:
             try:
                 client.move([child.file_id], parent_id)
                 moved = client.file_info(child.file_id)
-                if moved is None or str(moved.parent_id or "0") != parent_id:
+                if moved is None or (moved.parent_id or "0") != parent_id:
                     raise RuntimeError("移动后未能确认目标位置")
                 latest = client.file_info(staging_id)
                 if (
                     latest is None or not latest.is_dir
-                    or str(latest.parent_id or "0") != parent_id
-                    or str(latest.name or "") != expected_name
+                    or (latest.parent_id or "0") != parent_id
+                    or (latest.name or "") != expected_name
                 ):
                     raise RuntimeError("移动后暂存目录身份已变化")
                 if not client.supports_guarded_empty_directory_delete:
@@ -975,16 +981,16 @@ class DownloadTracker:
                     reason="下载内容已安全提升，清理已复核为空的隔离暂存目录",
                     candidate=DeleteCandidate(
                         file_id=staging_id,
-                        name=str(latest.name or expected_name),
-                        parent_id=str(latest.parent_id or parent_id),
-                        size=max(0, int(latest.size or 0)),
-                        gcid=str(latest.etag or ""),
+                        name=(latest.name or expected_name),
+                        parent_id=(latest.parent_id or parent_id),
+                        size=max(0, (latest.size or 0)),
+                        gcid=(latest.etag or ""),
                     ),
                     safe_failure_message="隔离暂存目录清理失败，目录已保留",
                     delete_operation=lambda: client.delete_empty_directory(
                         staging_id,
-                        expected_etag=str(latest.etag or ""),
-                        expected_updated_at=int(latest.updated_at or 0),
+                        expected_etag=(latest.etag or ""),
+                        expected_updated_at=(latest.updated_at or 0),
                     ),
                 )
             except Exception as exc:
@@ -1026,8 +1032,8 @@ class DownloadTracker:
             renamed = client.file_info(staging_id)
             if (
                 renamed is None or not renamed.is_dir
-                or str(renamed.parent_id or "0") != parent_id
-                or str(renamed.name or "") != final_name
+                or (renamed.parent_id or "0") != parent_id
+                or (renamed.name or "") != final_name
             ):
                 raise RuntimeError("重命名后未能确认目录身份")
         except Exception as exc:
@@ -1142,7 +1148,7 @@ class DownloadTracker:
                 publish_download_lifecycle,
             )
 
-            return bool(publish_download_lifecycle(int(request_id)))
+            return bool(publish_download_lifecycle(request_id))
         except Exception as exc:
             logger.warning(
                 "下载入库事务通知更新异常 request#%s type=%s",
@@ -1270,7 +1276,7 @@ class DownloadTracker:
         raw = cls._row_value(row, "gy_task_ids", "[]")
         try:
             values = json.loads(str(raw or "[]"))
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             values = []
         if not isinstance(values, list):
             return []

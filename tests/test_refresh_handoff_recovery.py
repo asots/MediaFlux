@@ -1,4 +1,8 @@
 """刷新交接故障注入：不接触真实网盘或媒体服务器。"""
+
+from typing import cast
+from typing import Any
+from app.modules.local_media_service import LocalMovePlan
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,7 +40,7 @@ class RefreshHandoffRecoveryTests(IsolatedDatabaseTestCase):
         with patch("app.modules.media_server_profiles.list_configured_profiles", return_value=[profile]), \
              patch("app.clients.jellyfin.JellyfinClient", return_value=client), \
              patch("app.modules.media_refresh_coordinator.get_media_refresh_coordinator"):
-            warnings = LocalMediaService._refresh_plans([plan])
+            warnings = LocalMediaService._refresh_plans(cast(list[LocalMovePlan], [plan]))
         self.assertEqual(warnings, [])
         client.list_virtual_folders.assert_not_called()
         self.assertEqual(media_refresh_queue_status()["paths"], 1)
@@ -154,6 +158,6 @@ class RefreshHandoffRecoveryTests(IsolatedDatabaseTestCase):
         for invalid in (["/fixture/0"], [{"path": "/fixture/0", "allow_emby": True}],
                         [entries[0], {"path": "bad", "event_token": ""}]):
             with self.assertRaises(ValueError):
-                db.acknowledge_strm_refresh_paths(invalid)
+                db.acknowledge_strm_refresh_paths(cast(list[dict[str, Any]], invalid))
         self.assertEqual(db.count_strm_refresh_paths(), 1201)
         self.assertEqual(db.acknowledge_strm_refresh_paths(entries), 1201)

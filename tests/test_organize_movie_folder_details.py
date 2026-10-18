@@ -1,6 +1,10 @@
 """电影目录、人工整理通知与 STRM 明细回归测试。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import hashlib
 import unittest
 from unittest.mock import patch
@@ -113,7 +117,7 @@ class MovieFolderNamingTests(unittest.TestCase):
             "etag",
             "parent",
         )
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         self.assertEqual(
             organizer.build_media_dir(match, rules),
             "封神第二部：战火西岐 (2025) {tmdb-1155281}",
@@ -127,7 +131,7 @@ class MovieFolderNamingTests(unittest.TestCase):
         rules = OrganizeRules(
             naming_scope="guangya", region_split=False, year_split=False,
         )
-        organizer = Organizer(client=object(), scraper=_AnimeEpisodeScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, _AnimeEpisodeScraper()))
         file = GuangYaFile(
             "f1",
             "[ANi] 約會大作戰 DATE A LIVE S05E12 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4",
@@ -142,6 +146,7 @@ class MovieFolderNamingTests(unittest.TestCase):
         )
         self.assertEqual(plan.new_name, "约会大作战.2013.S05E12-WEB-DL.1080p.H.264.AAC.mp4")
         match = plan.match
+        assert match is not None
         self.assertEqual(organizer.build_season_dir(match, {"season": 0}), "Specials")
         self.assertEqual(
             organizer.build_season_dir(match, {"season": None, "episode": 3}),
@@ -162,7 +167,7 @@ class MovieFolderNamingTests(unittest.TestCase):
             region_split=False,
             year_split=False,
         )
-        organizer = Organizer(client=object(), scraper=_MovieScraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, _MovieScraper()))
         file = GuangYaFile(
             "f1", "Creation.2025.1080p.SDR.H265.AAC.2.0.mkv",
             False, 100, "etag", "parent",
@@ -206,8 +211,10 @@ class MediaProbeTests(unittest.TestCase):
         )
         unlabeled = media_profile_from_cache(payload, source_hint="Movie.2026.2160p.mkv")
 
+        assert renamed is not None
         self.assertEqual(renamed.source, "Remux")
         self.assertEqual(renamed.render(), "Remux.2160p")
+        assert unlabeled is not None
         self.assertEqual(unlabeled.source, "")
         self.assertEqual(unlabeled.render(), "2160p")
 
@@ -356,11 +363,12 @@ class MediaSourceConsensusTests(unittest.TestCase):
     def _prepare(self, files):
         from app.modules.media_probe import MediaProfile
 
-        organizer = Organizer(client=object(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         rules = OrganizeRules(media_info_enabled=True)
         plans = [self._plan(file, "incoming", index + 1) for index, file in enumerate(files)]
         by_id = {file.file_id: file for file in files}
         for plan in plans:
+            assert plan.match is not None
             organizer._apply_media_profile_to_move_plan(
                 plan, by_id[plan.file_id], rules, plan.match,
                 {"season": plan.season, "episode": plan.episode},
@@ -379,6 +387,7 @@ class MediaSourceConsensusTests(unittest.TestCase):
 
         organizer._apply_media_source_consensus(plans, by_id, rules=rules, stats=stats)
 
+        assert plans[2].media_profile is not None
         self.assertEqual(plans[2].media_profile.source, "WEB-DL")
         self.assertIn("WEB-DL.1080p.H.264", plans[2].new_name)
         self.assertEqual(stats["media_source_consensus_groups"], 1)
@@ -395,6 +404,7 @@ class MediaSourceConsensusTests(unittest.TestCase):
 
         organizer._apply_media_source_consensus(plans, by_id, rules=rules, stats=stats)
 
+        assert plans[2].media_profile is not None
         self.assertEqual(plans[2].media_profile.source, "")
         self.assertEqual(stats["media_source_consensus_groups"], 0)
         self.assertEqual(stats["media_source_consensus_items"], 0)
@@ -422,7 +432,7 @@ class MediaSourceConsensusTests(unittest.TestCase):
 class ManualCorrectionNotificationTests(unittest.TestCase):
     def test_manual_result_sends_media_event_with_target_directory(self):
         from app.modules.organize_correction import CorrectionItem, OrganizeCorrectionService
-        service = OrganizeCorrectionService(client=object(), scraper=object())
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, object()))
         preview = {
             "match":{"tmdb_id":"1155281","title":"封神第二部：战火西岐","year":"2025","media_type":"movie"},
             "target_path":"电影/封神第二部：战火西岐 (2025) {tmdb-1155281}",

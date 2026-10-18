@@ -7,11 +7,11 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from app import config
-from app.discovery.models import MediaCard, ProviderError
-from app.discovery.service import get_discovery_service
-from app.discovery.search import get_discovery_search_service
 from app.discovery.calendar.models import SourceUnavailable
 from app.discovery.calendar.service import get_calendar_service
+from app.discovery.models import MediaCard, ProviderError
+from app.discovery.search import get_discovery_search_service
+from app.discovery.service import get_discovery_service
 from app.routes.discovery_image import decode_poster_token, encode_poster_token
 from app.web import api_error, api_response, require_api_login
 
@@ -55,9 +55,9 @@ def _scalar(data: dict[str, Any], key: str, *, required: bool = False, max_lengt
 
 
 def _identity(provider: str, media_type: str, external_id: str) -> tuple[str, str, str]:
-    provider = str(provider or "").strip().lower()
-    media_type = str(media_type or "").strip().lower()
-    external_id = str(external_id or "").strip()
+    provider = (provider or "").strip().lower()
+    media_type = (media_type or "").strip().lower()
+    external_id = (external_id or "").strip()
     if provider not in _PROVIDERS:
         raise ValueError("不支持的数据源")
     if media_type not in _MEDIA_TYPES:
@@ -266,7 +266,7 @@ def add_watchlist(request: Request, data: Any = Body(default=None)):
     except (TypeError, ValueError) as exc:
         return api_error(str(exc), 400)
     except HTTPException as exc:
-        return api_error(str(exc.detail or "poster token invalid"), exc.status_code)
+        return api_error((exc.detail or "poster token invalid"), exc.status_code)
 
 
 @router.delete("/watchlist/{provider}/{media_type}/{external_id}")
@@ -275,7 +275,7 @@ def remove_watchlist(request: Request, provider: str, media_type: str, external_
     try:
         provider, media_type, external_id = _identity(provider, media_type, external_id)
         removed = get_discovery_service().remove_watchlist(provider, media_type, external_id)
-        return api_response({"success": True, "removed": bool(removed)})
+        return api_response({"success": True, "removed": removed})
     except (TypeError, ValueError) as exc:
         return api_error(str(exc), 400)
 

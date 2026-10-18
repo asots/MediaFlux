@@ -1,15 +1,18 @@
 """持久化、校验并匹配有界的 TMDB 正则识别规则。"""
 from __future__ import annotations
 
+import importlib
 import re
 import sqlite3
 from dataclasses import dataclass
-from re import _constants as re_constants
-from re import _parser as re_parser
-from typing import Any
+from typing import Any, Literal
 
 from app.database import get_conn, now
 from app.logger import get_logger
+
+# Python 正则内部模块没有公开类型声明，按模块名加载实际解析器。
+re_constants = importlib.import_module("re._constants")
+re_parser = importlib.import_module("re._parser")
 
 logger = get_logger(__name__)
 
@@ -29,7 +32,17 @@ _ZERO_WIDTH_OPS = {
 }
 
 
-def _simple_repeat_domain(tokens) -> tuple[str, object] | None:
+_RepeatDomain = (
+    tuple[Literal["any"], None]
+    | tuple[Literal["unknown_chars"], None]
+    | tuple[Literal["chars"], frozenset[int]]
+    | tuple[Literal["not_chars"], frozenset[int]]
+    | tuple[Literal["category"], str]
+    | tuple[Literal["not_category"], str]
+)
+
+
+def _simple_repeat_domain(tokens) -> _RepeatDomain | None:
     items = list(tokens)
     while (
         len(items) == 1
@@ -72,14 +85,8 @@ def _simple_repeat_domain(tokens) -> tuple[str, object] | None:
         else:
             return ("unknown_chars", None)
     if category:
-        return (
-            "category" if negated == category_negated else "not_category",
-            category,
-        )
-    return (
-        "not_chars" if negated else "chars",
-        frozenset(chars),
-    )
+        return ("category", category) if negated == category_negated else ("not_category", category)
+    return ("not_chars", frozenset(chars)) if negated else ("chars", frozenset(chars))
 
 
 def _category_contains(category: str, value: int) -> bool:
@@ -96,8 +103,8 @@ def _category_contains(category: str, value: int) -> bool:
 
 
 def _repeat_domains_overlap(
-    first: tuple[str, object] | None,
-    second: tuple[str, object] | None,
+    first: _RepeatDomain | None,
+    second: _RepeatDomain | None,
 ) -> bool:
     if (
         (first is not None and first[0] == "unknown_chars")
@@ -117,25 +124,25 @@ def _repeat_domains_overlap(
     if first[0] == second[0] == "not_category":
         return True
     if first[0] == "not_category" and second[0] == "category":
-        return str(first[1]) != str(second[1])
+        return first[1] != second[1]
     if first[0] == "category" and second[0] == "not_category":
-        return str(first[1]) != str(second[1])
+        return first[1] != second[1]
     if first[0] == "not_category" and second[0] == "chars":
         return any(
-            not _category_contains(str(first[1]), value)
+            not _category_contains(first[1], value)
             for value in second[1]
         )
     if first[0] == "chars" and second[0] == "not_category":
         return any(
-            not _category_contains(str(second[1]), value)
+            not _category_contains(second[1], value)
             for value in first[1]
         )
     if first[0].startswith("not_") or second[0].startswith("not_"):
         return True
-    if first[0] == second[0] == "chars":
+    if first[0] == "chars" and second[0] == "chars":
         return bool(first[1] & second[1])
     if first[0] == second[0] == "category":
-        left, right = str(first[1]), str(second[1])
+        left, right = first[1], str(second[1])
         if left == right:
             return True
         return (
@@ -144,16 +151,16 @@ def _repeat_domains_overlap(
             or ("LINEBREAK" in left and "SPACE" in right)
             or ("SPACE" in left and "LINEBREAK" in right)
         )
-    chars, category = (
-        (first[1], str(second[1]))
-        if first[0] == "chars"
-        else (second[1], str(first[1]))
-    )
+    if first[0] == "chars":
+        chars, category = first[1], str(second[1])
+    else:
+        assert second[0] == "chars"
+        chars, category = second[1], str(first[1])
     return any(_category_contains(category, value) for value in chars)
 
 
 def _validate_parsed_pattern(tokens) -> None:
-    previous_repeat: tuple[str, tuple[str, object] | None] | None = None
+    previous_repeat: tuple[str, _RepeatDomain | None] | None = None
     for operation, argument in tokens:
         if str(operation).startswith("GROUPREF"):
             raise ValueError("正则安全限制：不允许 backreference 回溯引用")
@@ -485,8 +492,8 @@ def delete_rule(rule_id: int) -> bool:
 
 
 def _subject(match_target: str, filename: str, parent_path: str) -> str:
-    filename = str(filename or "")[:_MAX_SUBJECT_LENGTH]
-    parent_path = str(parent_path or "")[:_MAX_SUBJECT_LENGTH]
+    filename = (filename or "")[:_MAX_SUBJECT_LENGTH]
+    parent_path = (parent_path or "")[:_MAX_SUBJECT_LENGTH]
     if match_target == "parent":
         return parent_path
     if match_target == "both":
@@ -495,7 +502,7 @@ def _subject(match_target: str, filename: str, parent_path: str) -> str:
 
 
 def _matches(rule: dict, filename: str, parent_path: str, media_type: str) -> bool:
-    requested_type = "tv" if str(media_type).lower() == "tv" else "movie"
+    requested_type = "tv" if media_type.lower() == "tv" else "movie"
     if rule["media_type"] not in {"any", requested_type}:
         return False
     try:
@@ -528,7 +535,7 @@ def find_tmdb_regex_match(
             resolved_type = (
                 "tv" if rule["media_type"] == "tv" else
                 "movie" if rule["media_type"] == "movie" else
-                ("tv" if str(media_type).lower() == "tv" else "movie")
+                ("tv" if media_type.lower() == "tv" else "movie")
             )
             return RuleMatch(
                 rule_id=rule["id"],

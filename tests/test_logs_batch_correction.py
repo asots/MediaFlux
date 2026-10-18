@@ -1,6 +1,16 @@
 """真实批量纠偏服务/API 回归测试；云端与 SQLite 均隔离在临时资源中。"""
 from __future__ import annotations
 
+from tests.support import assert_present
+
+from collections.abc import Iterator
+
+from app.modules.process_lock import CrossProcessLock
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import copy
 import re
 import shutil
@@ -161,11 +171,10 @@ class _MemoryCloud:
         )
 
     def file_info(self, file_id: str) -> GuangYaFile | None:
-        record = self.files.get(str(file_id))
-        return self._as_file(str(file_id), record) if record else None
+        record = self.files.get(file_id)
+        return self._as_file(file_id, record) if record else None
 
     def list_dir(self, directory_id: str) -> list[GuangYaFile]:
-        directory_id = str(directory_id)
         self.list_calls.append(directory_id)
         directories = [
             GuangYaFile(
@@ -239,7 +248,7 @@ class _Harness:
         self.services: list[OrganizeCorrectionService] = []
 
     def service(self) -> OrganizeCorrectionService:
-        service = OrganizeCorrectionService(client=self.cloud, scraper=self.scraper)
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, self.cloud), scraper=cast(TMDBScraper, self.scraper))
         self.services.append(service)
         return service
 
@@ -274,7 +283,7 @@ def archive_rules(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 
-def harness(tmp_path: Path, archive_rules) -> _Harness:
+def harness(tmp_path: Path, archive_rules) -> Iterator[_Harness]:
     del archive_rules
     value = _Harness(tmp_path)
     try:
@@ -336,7 +345,7 @@ def _entries(log_ids: list[int]) -> list[dict[str, Any]]:
     return [
         {
             "log_id": log_id,
-            "expected_version": int(db.get_organize_log(log_id)["version"]),
+            "expected_version": int(assert_present(db.get_organize_log(log_id))["version"]),
             "operation_token": f"batch-token-{log_id}",
         }
         for log_id in log_ids
@@ -583,6 +592,7 @@ def test_batch_execute_corrects_identity_returns_receipt_and_replay_is_idempoten
     assert receipt["failed"] == []
     for log_id in ids:
         row = db.get_organize_log(log_id)
+        assert row is not None
         assert row["status"] == "success"
         assert row["tmdb_id"] == CANDIDATE["tmdb_id"]
         assert row["title"] == CANDIDATE["title"]
@@ -612,17 +622,21 @@ def test_batch_receipt_reports_partial_failure_without_replaying_completed_item(
 
     from app.modules.organize_tasks import OrganizeTaskManager
     manager = OrganizeTaskManager()
-    manager._lock = threading.Lock()
+    manager._lock = cast(CrossProcessLock, threading.Lock())
     manager._lock.acquire()
     manager._task = {"id": "batch-files", "operation": "批量纠正", "status": "running"}
     manager._run_operation("batch-files", "批量纠正", "2条日志", lambda: service.run_batch(
         "reorganize", entries, candidate=CANDIDATE, preview_digest=preview["preview_digest"],
     ))
     assert manager.task_status()["status"] == "partial"
-    receipt = manager.task_result("batch-files")["result"]
+    task_result_result = manager.task_result("batch-files")
+    assert task_result_result is not None
+    receipt = task_result_result["result"]
     # 新任务接管当前槽位后，原批次逐条回执仍可按 ID 取得。
     manager._task = {"id": "later-task", "status": "running"}
-    assert manager.task_result("batch-files")["result"] == receipt
+    task_result_result_2 = manager.task_result("batch-files")
+    assert task_result_result_2 is not None
+    assert task_result_result_2["result"] == receipt
     assert harness.cloud.files["file-1"]["path"].is_file()
     assert harness.cloud.files["file-2"]["parent_id"] == "source"
     assert harness.cloud.files["file-2"]["path"].is_file()
@@ -630,7 +644,9 @@ def test_batch_receipt_reports_partial_failure_without_replaying_completed_item(
     assert receipt["success"] is False
     assert [item["log_id"] for item in receipt["completed"]] == [ids[0]]
     assert [item["log_id"] for item in receipt["failed"]] == [ids[1]]
-    assert db.get_organize_log(ids[0])["tmdb_id"] == CANDIDATE["tmdb_id"]
+    get_organize_log_result = db.get_organize_log(ids[0])
+    assert get_organize_log_result is not None
+    assert get_organize_log_result["tmdb_id"] == CANDIDATE["tmdb_id"]
     writes_after_partial = list(harness.cloud.write_calls)
     with pytest.raises(ValueError, match="预览已失效|重新预览并确认"):
         service.run_batch(
@@ -664,7 +680,7 @@ def test_batch_api_requires_auth_accepts_preview_and_rejects_legacy_implicit_req
     created: list[OrganizeCorrectionService] = []
 
     def service_factory():
-        service = OrganizeCorrectionService(client=harness.cloud, scraper=harness.scraper)
+        service = OrganizeCorrectionService(client=cast(GuangYaClient, harness.cloud), scraper=cast(TMDBScraper, harness.scraper))
         created.append(service)
         return service
 

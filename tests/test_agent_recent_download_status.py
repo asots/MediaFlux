@@ -1,6 +1,7 @@
 """最近资源提交后的安全任务状态续接测试。"""
 
 from __future__ import annotations
+from typing import Any
 
 import unittest
 from unittest.mock import patch
@@ -36,7 +37,7 @@ def _submission_result(
     succeeded: tuple[str, ...] = ("qb",),
     failed: tuple[str, ...] = (),
 ) -> ToolResult:
-    data = {
+    data: dict[str, Any] = {
         "result_id": "safe-result-00000001",
         "created": created,
         "target": target,

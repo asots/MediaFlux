@@ -99,6 +99,7 @@ class RegistrationCase:
             continuation_policy={"model_policy": "", "model_limit": 8, "tool_limit": 8})
         args = arguments or {}
         preview = await self.pipeline.execute(self.tool.name, args, context=self.context)
+        assert preview.effect_plan is not None
         self.plan_id = preview.effect_plan.plan_id
         state = await self.store.load(owner=OWNER, session_id=SID)
         self.scope = completion_receipts.EffectCompletionScope(store=self.store, lease=lease, plan_id=self.plan_id, channel="web",

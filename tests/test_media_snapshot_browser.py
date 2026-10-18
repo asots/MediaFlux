@@ -59,6 +59,7 @@ FETCH_FIXTURE = r"""
 class MediaSnapshotBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         executable = _chromium_executable(cls.playwright)
         if not executable:
@@ -206,7 +207,9 @@ class MediaSnapshotBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator('[data-metric="total_items"]').inner_text(), "1,135")
         self.assertEqual(page.locator(".dashboard-status-value").inner_text(), "更新失败")
         self.assertEqual(page.locator("[data-dashboard-updated-at]").inner_text(), "02:00:00")
-        self.assertIn("2026-10-15 02:00:00+00:00", page.locator("[data-dashboard-updated-at]").get_attribute("title"))
+        text_content = page.locator("[data-dashboard-updated-at]").get_attribute("title")
+        assert text_content is not None
+        self.assertIn("2026-10-15 02:00:00+00:00", text_content)
         self.assertTrue(page.locator(".dashboard-primary-grid").is_visible())
         self.assertTrue(page.locator("[data-dashboard-refresh]").is_visible())
         page.locator("[data-dashboard-refresh]").click()
@@ -225,7 +228,9 @@ class MediaSnapshotBrowserTests(unittest.TestCase):
         page.locator("[data-dashboard-refresh]").click()
         page.evaluate("window.__snapshotTimeouts.at(-1).callback()")
         self.wait_dashboard(page)
-        self.assertIn("读取超时", page.locator("[data-dashboard-snapshot-message]").get_attribute("title"))
+        text_content = page.locator("[data-dashboard-snapshot-message]").get_attribute("title")
+        assert text_content is not None
+        self.assertIn("读取超时", text_content)
         self.assertTrue(page.evaluate("window.__snapshotRequests[1].aborted"))
         self.assertFalse(page.locator("[data-dashboard-refresh]").is_disabled())
         self.assert_retained(page, ".dashboard-poster-card")
@@ -353,7 +358,9 @@ class MediaSnapshotBrowserTests(unittest.TestCase):
         self.wait_recent(page)
         self.assert_retained(page, ".media-recent-card")
         self.assertEqual(page.locator(".media-recent-card").first.bounding_box(), rect)
-        self.assertIn("读取失败", page.locator("[data-recent-retry]").get_attribute("title"))
+        text_content = page.locator("[data-recent-retry]").get_attribute("title")
+        assert text_content is not None
+        self.assertIn("读取失败", text_content)
         self.assertEqual(page.evaluate("window.__snapshotRequests.length"), 1)
         self.assertEqual(len(self.navigations), 1)
         page.locator("[data-recent-retry]").click()

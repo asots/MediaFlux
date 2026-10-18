@@ -1,6 +1,10 @@
 """日志 8885 回归：已入库作品重整只清理旧归档，凭成功审计恢复目录。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import json
 from unittest.mock import patch
 
@@ -64,7 +68,7 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
             json.dumps([{"id": "incoming", "name": "Incoming"}])
             if key == "GY_ORGANIZE_SOURCE_DIRS" else default))
         self.enterContext(patch.object(OrganizeRules, "from_config", return_value=self.rules))
-        self.service = OrganizeCorrectionService(client=self.cloud, scraper=_Scraper())
+        self.service = OrganizeCorrectionService(client=cast(GuangYaClient, self.cloud), scraper=cast(TMDBScraper, _Scraper()))
         self.addCleanup(self.service.close)
         video = self.cloud.nodes["video"]
         self.old_path = f"TV/US/1994/{self.cloud.nodes['old-root'].name}/Season1/{video.name}"
@@ -84,11 +88,15 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
         }])
 
     def _reorganize(self):
-        version = db.get_organize_log(self.log_id)["version"]
+        get_organize_log_result = db.get_organize_log(self.log_id)
+        assert get_organize_log_result is not None
+        version = get_organize_log_result["version"]
         return self.service.reorganize(self.log_id, f"archive-{version}", version, "4242", "tv")
 
     def _revert(self):
-        version = db.get_organize_log(self.log_id)["version"]
+        get_organize_log_result_2 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_2 is not None
+        version = get_organize_log_result_2["version"]
         return self.service.revert_latest(self.log_id, f"undo-archive-{version}", version)
 
     def _audits(self):
@@ -103,7 +111,9 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["empty_dirs_cleaned"], 0)
         self.assertEqual(self.cloud.deleted, [])
         self.assertTrue({"old-season", "old-root"}.issubset(self.cloud.nodes))
-        self.assertEqual(db.get_organize_log(self.log_id)["status"], "success")
+        get_organize_log_result_3 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_3 is not None
+        self.assertEqual(get_organize_log_result_3["status"], "success")
         self.assertEqual(self.cloud.nodes["video"].parent_id, result["target_dir_id"])
         self.assertFalse({"source", "leaf"}.intersection(self.cloud.info_reads))
 
@@ -111,7 +121,9 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
         delete = self.cloud.delete_empty_directory
 
         def committed_delete(file_id, **guards):
-            self.assertEqual(db.get_organize_log(self.log_id)["status"], "success")
+            get_organize_log_result_4 = db.get_organize_log(self.log_id)
+            assert get_organize_log_result_4 is not None
+            self.assertEqual(get_organize_log_result_4["status"], "success")
             audit = self._audits()[-1]
             self.assertEqual((audit["file_id"], audit["status"]), (file_id, "pending"))
             return delete(file_id, **guards)
@@ -126,6 +138,7 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
         self.assertFalse({"source", "leaf"}.intersection(self.cloud.info_reads))
         self.assertEqual(self.cloud.nodes["video"].parent_id, result["target_dir_id"])
         log = db.get_organize_log(self.log_id)
+        assert log is not None
         self.assertEqual((log["status"], log["operation_type"], log["tmdb_id"], log["year"]),
                          ("success", "reorganize", "4242", "2026"))
         self.assertEqual([(a["file_id"], a["file_name"], a["parent_id"], a["status"], a["trigger"])
@@ -202,7 +215,9 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
         self.assertFalse({"old-season", "old-root"}.intersection(self.cloud.deleted))
         self.assertEqual(self.cloud.nodes["video"].parent_id, "old-season")
         self.assertFalse(any(a["trigger"] == "reorganize_empty_dir_cleanup" for a in self._audits()))
-        self.assertEqual(db.get_organize_log(self.log_id)["status"], "failed")
+        get_organize_log_result_5 = db.get_organize_log(self.log_id)
+        assert get_organize_log_result_5 is not None
+        self.assertEqual(get_organize_log_result_5["status"], "failed")
 
     def test_revert_restores_deleted_archive_using_complete_audits_despite_read_149(self):
         self.assertTrue(self._reorganize()["success"])
@@ -221,6 +236,7 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
         self.assertNotEqual(root.file_id, "old-root")
         self.assertEqual(video.name, "Wrong series - S01E01.mkv")
         log = db.get_organize_log(self.log_id)
+        assert log is not None
         self.assertEqual((log["status"], log["tmdb_id"], log["year"], log["new_path"]),
                          ("reverted", "1994", "1994", self.old_path))
         self.assertEqual((log["current_parent_id"], log["target_parent_id"]),
@@ -274,14 +290,22 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
             }, expires_at="2099-01-01 00:00:00",
         )
         db.update_organize_confirmation(token, status="completed", result_json=json.dumps({"moved": 1}))
-        request = dict(db.get_download_request(request_id))
-        confirmation = dict(db.get_organize_confirmation(token))
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        request = dict(get_download_request_result)
+        get_organize_confirmation_result = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result is not None
+        confirmation = dict(get_organize_confirmation_result)
         result = self._reorganize()
         self.assertTrue(result["success"])
         self.assertEqual(result["warnings"], [])
         self.assertFalse({"source", "leaf"}.intersection(self.cloud.info_reads))
-        self.assertEqual(dict(db.get_download_request(request_id)), request)
-        self.assertEqual(dict(db.get_organize_confirmation(token)), confirmation)
+        get_download_request_result_2 = db.get_download_request(request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(dict(get_download_request_result_2), request)
+        get_organize_confirmation_result_2 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_2 is not None
+        self.assertEqual(dict(get_organize_confirmation_result_2), confirmation)
 
     def test_same_parent_reorganize_does_not_clean_or_audit_active_archive(self):
         first = self._reorganize()
@@ -305,6 +329,7 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
         self.assertNotEqual(season.file_id, "old-season")
         self.assertNotEqual(root.file_id, "old-root")
         log = db.get_organize_log(self.log_id)
+        assert log is not None
         self.assertEqual((log["status"], log["new_path"]), ("reverted", self.old_path))
         self.assertEqual((log["current_parent_id"], log["target_parent_id"]),
                          (season.file_id, season.file_id))
@@ -321,6 +346,7 @@ class ReorganizeArchiveCleanupTests(IsolatedDatabaseTestCase):
         self.assertTrue({"category", "region", "year", "target"}.issubset(self.cloud.nodes))
         self.assertEqual(self.cloud.nodes["video"].parent_id, second["target_dir_id"])
         log = db.get_organize_log(self.log_id)
+        assert log is not None
         self.assertEqual((log["status"], log["tmdb_id"], log["year"]), ("success", "4242", "2026"))
         self.assertEqual([(a["file_id"], a["status"], a["trigger"]) for a in self._audits()], [
             (file_id, "success", "reorganize_empty_dir_cleanup")

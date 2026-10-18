@@ -1,6 +1,9 @@
 """本地整理识别摘要聚合与历史回退契约。"""
 from __future__ import annotations
 
+from typing import cast
+from app.modules.scraper import TMDBScraper
+
 import unittest
 
 from app.modules.local_media_recognition_summary import (
@@ -51,7 +54,7 @@ class LocalMediaRecognitionSummaryTests(unittest.TestCase):
             "target_path": "/media/动漫/骸骨骑士大人异世界冒险中 (2022) {tmdb-1235283}/Season 2/"
                            "骸骨骑士大人异世界冒险中.2022.S02E08-WEB-DL.1080p.mp4",
         }]
-        summary = infer_recognition_summary(rows, scraper=_HistoryScraper())
+        summary = infer_recognition_summary(rows, scraper=cast(TMDBScraper, _HistoryScraper()))
         self.assertEqual(summary["source"], "history_inferred")
         self.assertEqual(summary["media"][0]["tmdb_id"], "1235283")
         self.assertEqual(summary["media"][0]["seasons"][0]["episodes"], [8])
@@ -61,7 +64,7 @@ class LocalMediaRecognitionSummaryTests(unittest.TestCase):
             "target_path": "/media/电影/错误 {tmdb-1}/影片.{tmdb-2}.mkv",
         }]
         self.assertEqual(
-            infer_recognition_summary(conflicted, scraper=_HistoryScraper()), {},
+            infer_recognition_summary(conflicted, scraper=cast(TMDBScraper, _HistoryScraper())), {},
         )
 
 

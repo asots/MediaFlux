@@ -22,6 +22,7 @@ def extract(source, start, end):
 class RSSFailureRecoveryBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         bundled = Path(cls.playwright.chromium.executable_path)
         executable = str(bundled) if bundled.is_file() else next((p for name in ("google-chrome", "chromium", "chromium-browser") if (p := shutil.which(name))), None)
@@ -82,7 +83,9 @@ class RSSFailureRecoveryBrowserTests(unittest.TestCase):
                 errors = []
                 page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
                 cards = page.locator(".rss-entry-card")
-                self.assertIn("下载失败 · 请求 #7", cards.nth(0).locator(".rss-status-badge").get_attribute("title"))
+                text_content = cards.nth(0).locator(".rss-status-badge").get_attribute("title")
+                assert text_content is not None
+                self.assertIn("下载失败 · 请求 #7", text_content)
                 self.assertEqual(cards.nth(0).locator("button").inner_text(), "重试")
                 self.assertEqual(cards.nth(1).locator("button").count(), 0)
                 self.assertEqual(cards.nth(1).locator("a").get_attribute("href"), "/downloads")

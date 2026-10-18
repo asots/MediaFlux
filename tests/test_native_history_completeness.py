@@ -1,4 +1,8 @@
 """Native group identity and exact scoped storage-reprojection contracts."""
+
+from typing import cast
+from collections.abc import Callable
+from app.clients.http import FixedHostHttpClient
 import asyncio
 import json
 
@@ -35,7 +39,7 @@ def test_native_same_id_distinct_facts_real_wire_and_cold_store():
             store = sqlite_store()
             return AgentSession(model=OpenAICompatibleModelAdapter(
                 ProviderSettings(api_url="https://api.example.com/v1", model="model-one", protocol="anthropic_messages"),
-                client_factory=lambda **kwargs: wire), catalog=catalog, retriever=CapabilityRetriever(),
+                client_factory=cast(Callable[..., FixedHostHttpClient], lambda **kwargs: wire)), catalog=catalog, retriever=CapabilityRetriever(),
                 pipeline=ToolPipeline(catalog=catalog, state_store=store, reference_store=store), state_store=store,
                 system_prompt="inspect")
         for request in ("old", "current"):

@@ -197,7 +197,7 @@ def timeline_snapshot(target: dict) -> ToolResult:
         for backend, field in (("qb", "qb_status"), ("guangya", "gy_status")):
             if backend not in targets:
                 continue
-            log = latest.get(backend, {})
+            log = latest.get(backend) or {}
             progress = log.get("progress")
             stages.append(
                 _stage(

@@ -77,7 +77,7 @@ class DownloadLibraryVerificationScheduler:
         self._terminal_notifier_uses_request_id = terminal_notifier is None
         self._notification_enabled_override = terminal_notifier is not None
         self.interval = max(0.1, float(interval))
-        self.max_attempts = max(1, min(int(max_attempts), len(_RETRY_DELAYS)))
+        self.max_attempts = max(1, min(max_attempts, len(_RETRY_DELAYS)))
         self._clock = clock or datetime.now
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
@@ -127,7 +127,7 @@ class DownloadLibraryVerificationScheduler:
         }
 
     def _runtime_allows(self, generation: int) -> bool:
-        return bool(
+        return (
             not self._stop_event.is_set()
             and agent_runtime_generation_is_current(generation)
         )
@@ -147,7 +147,7 @@ class DownloadLibraryVerificationScheduler:
             result=str(job["result"] or ""),
             attempts=int(job["attempts"] or 0)
             if attempts is None
-            else max(0, int(attempts)),
+            else max(0, attempts),
             next_check_at=current,
             last_checked_at=(
                 job["last_checked_at"] if last_checked_at is None else last_checked_at
@@ -161,7 +161,7 @@ class DownloadLibraryVerificationScheduler:
             return 0
         self._maybe_purge_expired_history()
         processed = 0
-        for _ in range(max(1, min(int(limit), 100))):
+        for _ in range(max(1, min(limit, 100))):
             if not self._runtime_allows(runtime_generation):
                 break
             current = self._now()
@@ -193,7 +193,7 @@ class DownloadLibraryVerificationScheduler:
                 else:
                     self._release_verification_job(job, current=current)
             processed += 1
-        for _ in range(max(1, min(int(limit), 10))):
+        for _ in range(max(1, min(limit, 10))):
             if (
                 not self._runtime_allows(runtime_generation)
                 or self.dispatch_notification_once(
@@ -580,7 +580,7 @@ class DownloadLibraryVerificationScheduler:
         generation_guard = (
             current_agent_runtime_generation()
             if runtime_generation is None
-            else int(runtime_generation)
+            else runtime_generation
         )
         with self._notification_gate:
             if not self._runtime_allows(generation_guard):
@@ -758,7 +758,7 @@ class DownloadLibraryVerificationScheduler:
             )
             return
         delay = (
-            max(0, int(delay_override or 0))
+            max(0, (delay_override or 0))
             or _NOTIFICATION_RETRY_DELAYS[
                 min(attempts, len(_NOTIFICATION_RETRY_DELAYS) - 1)
             ]

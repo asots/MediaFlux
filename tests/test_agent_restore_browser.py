@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 from tests import test_agent_kernel_browser as browser_support
@@ -36,7 +37,7 @@ def restored_candidate_view(ref: str, selection_ref: str) -> dict:
 
 
 class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
-    def restore_page(self, *, viewport=None, stored=True, hint=None, history=True, delay=250, hold_script=False, fail=False, missing=False, ignore_abort=False, color_scheme="light", block_storage=False, session_details=None, session_list=None):
+    def restore_page(self: shell_support.AgentShellBrowserCase, *, viewport=None, stored=True, hint=None, history=True, delay=250, hold_script=False, fail=False, missing=False, ignore_abort=False, color_scheme: Literal["dark", "light", "no-preference", "null"] = "light", block_storage=False, session_details=None, session_list=None):
         context = self.browser.new_context(viewport=viewport or {'width': 1280, 'height': 800}, color_scheme=color_scheme)
         self.addCleanup(context.close)
         pending = []
@@ -128,9 +129,11 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
         self.assertFalse(page.locator('.agent-start-panel').is_visible())
         self.assertTrue(page.locator('#agentSend').is_disabled())
         before = page.locator('#agentComposer').bounding_box()
+        assert before is not None
         self.release_script(pending)
         page.wait_for_function("document.querySelector('#agentTranscript').textContent.includes('历史回复')")
         after = page.locator('#agentComposer').bounding_box()
+        assert after is not None
         self.assertLessEqual(abs(before['y'] - after['y']), 0.5)
         self.assertEqual(before['height'], after['height'])
         self.assertFalse(any(frame['empty'] for frame in page.evaluate('window.__restoreFrames')))
@@ -207,7 +210,9 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
 
     def assert_centered(self, page):
         composer = page.locator('#agentComposer').bounding_box()
+        assert composer is not None
         workspace = page.locator('.agent-workbench').bounding_box()
+        assert workspace is not None
         self.assertLessEqual(abs(composer['y'] + composer['height'] / 2 - workspace['y'] - workspace['height'] / 2), 0.5)
 
     def screenshot(self, page, name):
@@ -229,10 +234,12 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
                     self.assertFalse(page.locator('#agentEmptyIntro').is_visible())
                     self.assertFalse(page.locator('.agent-start-panel').is_visible())
                     before = page.locator('#agentComposer').bounding_box()
+                    assert before is not None
                     self.screenshot(page, f'{color}-{iteration}-before-main-js')
                     self.release_script(pending)
                     page.wait_for_function("document.querySelector('#agentTranscript').textContent.includes('历史回复')")
                     after = page.locator('#agentComposer').bounding_box()
+                    assert after is not None
                     self.assertLessEqual(abs(before['y'] - after['y']), 0.5)
                     self.assertEqual(before['height'], after['height'])
                     self.assertFalse(any(frame['empty'] for frame in page.evaluate('window.__restoreFrames')))
@@ -252,11 +259,14 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
                 self.assertTrue(page.locator('#agentSend').is_disabled())
                 page.locator('#agentPrompt').fill('等待恢复时写下的草稿')
                 before = page.locator('#agentComposer').bounding_box()
+                assert before is not None
                 self.release_script(pending)
                 page.wait_for_function("document.querySelector('#agentSessionList').getAttribute('aria-busy') === 'false'")
                 page.wait_for_timeout(350)
                 self.assert_centered(page)
-                self.assertEqual(before['y'], page.locator('#agentComposer').bounding_box()['y'])
+                bounds = page.locator('#agentComposer').bounding_box()
+                assert bounds is not None
+                self.assertEqual(before['y'], bounds['y'])
                 self.assertEqual(page.locator('#agentPrompt').input_value(), '等待恢复时写下的草稿')
                 self.assertTrue(all(frame['empty'] for frame in page.evaluate('window.__restoreFrames')))
                 self.assertEqual(errors, [])
@@ -271,12 +281,15 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
         page.locator('#agentPrompt').press('Enter')
         self.assertFalse(any(c['url'] == '/api/agent/query' for c in page.evaluate('window.__kernelCalls')))
         before = page.locator('#agentComposer').bounding_box()
+        assert before is not None
         self.screenshot(page, 'restore-failed')
         page.evaluate('window.__kernelConfig.failHistory = false')
         page.locator('#agentRestoreRetry').click()
         page.wait_for_function("document.querySelector('#agentTranscript').textContent.includes('历史回复')")
         self.assertEqual(page.locator('#agentPrompt').input_value(), '恢复失败期间继续编辑')
-        self.assertEqual(before['y'], page.locator('#agentComposer').bounding_box()['y'])
+        bounds = page.locator('#agentComposer').bounding_box()
+        assert bounds is not None
+        self.assertEqual(before['y'], bounds['y'])
         self.assertFalse(page.locator('#agentSend').is_disabled())
         self.assertFalse(page.locator('#agentRestoreNotice').is_visible())
         self.assertFalse(any(c['method'] != 'GET' for c in page.evaluate('window.__kernelCalls')))
@@ -401,6 +414,7 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
         page.wait_for_function('window.__restoreFrames.length >= 3')
         self.assert_centered(page)
         before = page.locator('#agentComposer').bounding_box()
+        assert before is not None
         page.evaluate("({scope,id}) => {window.__kernelConfig.sessions={draft_scope:scope,sessions:[]};window.__kernelConfig.sessionDetails={[id]:{messages:[]}};}", {'scope': other_scope, 'id': new_id})
         self.release_script(pending)
         page.wait_for_function("document.querySelector('#agentSessionList').getAttribute('aria-busy') === 'false'")
@@ -414,10 +428,13 @@ class AgentRestoreBrowserTests(shell_support.AgentShellBrowserCase):
         page, _, errors, unexpected = self.restore_page(viewport={'width': 390, 'height': 300}, fail=True)
         page.locator('#agentRestoreNew').wait_for(state='visible')
         notice = page.locator('#agentRestoreNotice').bounding_box()
+        assert notice is not None
         composer = page.locator('#agentComposer').bounding_box()
+        assert composer is not None
         self.assertLessEqual(notice['y'] + notice['height'] + 4, composer['y'])
         page.locator('#agentRestoreNew').focus()
         button = page.locator('#agentRestoreNew').bounding_box()
+        assert button is not None
         self.assertLessEqual(button['y'] + button['height'], notice['y'] + notice['height'] + 0.5)
         page.locator('#agentPrompt').click(position={'x': 20, 'y': 8})
         self.assertEqual(page.evaluate('document.activeElement.id'), 'agentPrompt')

@@ -85,14 +85,14 @@ class AIRecognitionInput:
 
     def safe_payload(self) -> dict[str, Any]:
         payload = {
-            "normalized_title": str(self.normalized_title or "")[:240],
-            "filename_title": str(self.filename_title or "")[:240],
-            "folder_title": str(self.folder_title or "")[:240],
-            "folder_year": str(self.folder_year or "")[:4],
+            "normalized_title": (self.normalized_title or "")[:240],
+            "filename_title": (self.filename_title or "")[:240],
+            "folder_title": (self.folder_title or "")[:240],
+            "folder_year": (self.folder_year or "")[:4],
             "media_type": "tv" if self.media_type == "tv" else "movie",
             "season": self.season,
             "episode": self.episode,
-            "aliases": [str(item)[:200] for item in self.aliases[:10]],
+            "aliases": [item[:200] for item in self.aliases[:10]],
         }
         _assert_external_payload_safe(payload)
         return payload
@@ -218,8 +218,8 @@ class AIReleaseGroupInput:
 
     def safe_payload(self) -> dict[str, str]:
         payload = {
-            "group_token": str(self.group_token or "")[:120],
-            "remainder_title": str(self.remainder_title or "")[:240],
+            "group_token": (self.group_token or "")[:120],
+            "remainder_title": (self.remainder_title or "")[:240],
         }
         _assert_external_payload_safe(payload)
         return payload
@@ -305,14 +305,14 @@ class AIRecognitionClient:
         proxy_url: str = "",
         session: requests.Session | Any | None = None,
     ) -> None:
-        raw_url = str(api_url or "").strip()
+        raw_url = (api_url or "").strip()
         try:
             location = normalize_provider_location(
                 raw_url, https_only=True, public_only=True
             )
         except ValueError as exc:
             raise AIRecognitionError(str(exc)) from exc
-        raw_protocol = str(protocol or "").strip().lower().replace("-", "_")
+        raw_protocol = (protocol or "").strip().lower().replace("-", "_")
         if raw_protocol and raw_protocol not in PROTOCOLS:
             raise AIRecognitionError(
                 f"AI 接口协议仅支持 {SUPPORTED_PROTOCOLS_TEXT}"
@@ -324,15 +324,15 @@ class AIRecognitionClient:
         self.api_url = location.endpoint(
             "responses" if self.protocol == "auto" else self.protocol
         )
-        self.model = str(model or "").strip()
+        self.model = (model or "").strip()
         if not self.model or len(self.model) > 200:
             raise AIRecognitionError("未配置有效的 AI 模型")
-        self.api_key = str(api_key or "").strip()
-        self.timeout_seconds = max(2, min(int(timeout_seconds or 15), 60))
+        self.api_key = (api_key or "").strip()
+        self.timeout_seconds = max(2, min((timeout_seconds or 15), 60))
         # 注入 Session 仅作为单元测试/兼容适配缝；生产请求统一走固定公网 HTTPS 客户端。
         self.session = session
         if session is not None:
-            proxy = str(proxy_url or "").strip()
+            proxy = (proxy_url or "").strip()
             if proxy and hasattr(session, "proxies"):
                 normalized = (
                     proxy
@@ -489,7 +489,7 @@ class AIRecognitionClient:
                     self.provider_fingerprint, provider_failure=False
                 )
                 safe = redact_sensitive_text(exc.public_message)
-                raise AIRecognitionError(str(safe)[:240]) from None
+                raise AIRecognitionError(safe[:240]) from None
             finally:
                 if lease is not None:
                     lease.release()
@@ -529,7 +529,7 @@ class AIRecognitionClient:
                 envelope = self._response_json(response)
                 content = extract_output_text(envelope, protocol)
                 parsed = json.loads(content)
-            except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+            except (KeyError, IndexError, TypeError, ValueError):
                 # 部分 OpenAI 兼容网关会对 /responses 返回 HTTP 200，
                 # 但实际只完整支持 /chat/completions 的结构化输出。auto 模式下
                 # 将这种“成功状态 + 无法解析协议响应”视为兼容性探测失败，

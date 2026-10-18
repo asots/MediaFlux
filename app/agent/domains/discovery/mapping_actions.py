@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,7 @@ from app.agent.public_safety import sanitize_public_text
 from app.agent.session_context import (
     AgentContextWriteGuard,
     AgentSessionContextRepository,
+    PersistedAgentContext,
 )
 from app.discovery.service import get_discovery_service
 
@@ -87,7 +89,7 @@ def discovery_confirm_mapping_arguments(arguments: dict[str, Any]) -> dict[str, 
     value = arguments["candidate_number"]
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5:
         raise AgentToolError("candidate_number 必须是 1 到 5 的整数")
-    return {"candidate_number": int(value)}
+    return {"candidate_number": value}
 
 
 def _feature_disabled() -> ToolResult:
@@ -233,7 +235,7 @@ def _snapshot_from_payload(
                 }
             )
         return _MappingSnapshot(
-            owner=str(owner),
+            owner=owner,
             provider=provider,
             external_id=external_id,
             media_type=media_type,
@@ -241,8 +243,8 @@ def _snapshot_from_payload(
             year=_safe(payload.get("year"), 12),
             candidates=candidates,
             created_at=time.monotonic(),
-            generation=max(0, int(generation or 0)),
-            revision=max(0, int(revision or 0)),
+            generation=max(0, (generation or 0)),
+            revision=max(0, (revision or 0)),
         )
     except (TypeError, ValueError, OverflowError):
         return None
@@ -304,7 +306,7 @@ class DiscoveryMappingActions:
         owner: str,
         delete_persisted: bool = True,
     ) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return False
         with self._lock:
@@ -327,7 +329,7 @@ class DiscoveryMappingActions:
     def _begin_snapshot(self, owner: str) -> AgentContextWriteGuard:
         if self._repository is None:
             return AgentContextWriteGuard(generation=0, revision=0)
-        begin = getattr(self._repository, "begin_context", None)
+        begin: Callable[..., AgentContextWriteGuard] | None = getattr(self._repository, "begin_context", None)
         if not callable(begin):
             return AgentContextWriteGuard(generation=0, revision=0)
         return begin(owner=owner, context_type=_CONTEXT_TYPE)
@@ -336,7 +338,7 @@ class DiscoveryMappingActions:
         snapshot.created_at = time.monotonic()
         if self._repository is not None:
             try:
-                guarded = getattr(self._repository, "replace_latest_guarded", None)
+                guarded: Callable[..., PersistedAgentContext | None] | None = getattr(self._repository, "replace_latest_guarded", None)
                 if callable(guarded):
                     if snapshot.generation <= 0:
                         with self._lock:
@@ -415,7 +417,7 @@ class DiscoveryMappingActions:
         return True
 
     def _get_snapshot(self, owner: str) -> _MappingSnapshot | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return None
         if self._repository is not None:
@@ -639,7 +641,7 @@ class DiscoveryMappingActions:
         existing_state = _current_mapping_state(snapshot)
         if candidate is None or _mapping_context(
             snapshot, candidate, existing_state=existing_state, state_loaded=True
-        ) != str(expected_context or ""):
+        ) != (expected_context or ""):
             raise AgentToolError(
                 "来源、候选或现有映射已变化，请重新预检", code="confirmation_stale"
             )

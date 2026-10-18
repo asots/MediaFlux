@@ -252,7 +252,7 @@ class EmbyClient(MediaServerClient):
 
     def get_media_counts(self) -> dict[str, int]:
         """读取计数；仅旧服务未提供端点时降级为总项数。"""
-        total_items = max(0, int(self._total_items() or 0))
+        total_items = max(0, (self._total_items() or 0))
         try:
             counts = self._request(
                 "/Items/Counts", params={"userId": self._user_id()}
@@ -276,7 +276,7 @@ class EmbyClient(MediaServerClient):
     def recently_played(self, user_id: str, *, limit: int = 12) -> list[MediaItem]:
         """按显式用户读取 DatePlayed 历史，不能用 Resume 继续观看列表代替。"""
         selected = normalize_explicit_media_user_id(user_id)
-        normalized_limit = max(1, min(int(limit or 12), 50))
+        normalized_limit = max(1, min((limit or 12), 50))
         data = self._request(
             f"/Users/{selected}/Items",
             params={
@@ -400,7 +400,7 @@ class EmbyClient(MediaServerClient):
 
     @staticmethod
     def _normalize_path(path: str) -> str:
-        return str(path or "").replace("\\", "/").rstrip("/").lower()
+        return (path or "").replace("\\", "/").rstrip("/").lower()
 
     def refresh_for_path(self, media_path: str) -> bool:
         """兼容单路径调用；沿用安全的批量精准刷新策略。"""

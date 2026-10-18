@@ -112,7 +112,7 @@ def recover_pending_paths(
                         if active
                         else None
                     )
-                    if not replacement or not strm._fingerprint_matches(
+                    if active is None or not replacement or not strm._fingerprint_matches(
                         replacement, active["content_fingerprint"]
                     ):
                         _blocked(

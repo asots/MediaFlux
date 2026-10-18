@@ -6,23 +6,24 @@ import json
 import re
 import unicodedata
 from dataclasses import asdict, dataclass, replace
+from typing import Any
 
 from app.clients.guangya import GuangYaClient, GuangYaFile
-from app.modules.organize import OrganizeRules, Organizer, organize_rules_snapshot
-from app.modules.organize_postprocess import media_role, normalized_stem
 from app.modules.directory_scrape_errors import (
-    DirectoryScrapeRequestError,
     DirectoryScrapeConflictError,
+    DirectoryScrapeRequestError,
     DirectoryScrapeStateError,
 )
+from app.modules.organize import Organizer, OrganizeRules, organize_rules_snapshot
+from app.modules.organize_postprocess import media_role, normalized_stem
 from app.modules.scraper import TMDBScraper
-from app.modules.subtitle_identity import plan_subtitle_companions
 from app.modules.special_media import (
     is_sample_media_path,
     is_special_directory_name,
     is_special_media_name,
     is_special_path,
 )
+from app.modules.subtitle_identity import plan_subtitle_companions
 
 
 @dataclass(frozen=True)
@@ -111,13 +112,13 @@ class DirectoryMediaInspector:
         directory_id: str,
         rules: OrganizeRules,
     ) -> DirectoryInspection:
-        source_id = str(directory_id or "").strip()
+        source_id = (directory_id or "").strip()
         if not source_id or source_id == "0":
             raise DirectoryScrapeRequestError("请选择需要刮削的目录")
         source = self.client.file_info(source_id)
         if source is None or not source.is_dir:
             raise DirectoryScrapeRequestError("所选目录不存在或已被移动")
-        target_id = str(rules.target_dir_id or "").strip()
+        target_id = (rules.target_dir_id or "").strip()
         if not target_id or target_id == "0":
             raise DirectoryScrapeStateError("请先配置光鸭整理归档目标")
         self._validate_target_outside_source(source_id, target_id)
@@ -297,9 +298,9 @@ class DirectoryMediaInspector:
         ):
             media_type = "tv"
         video_seasons = {
-            int(item.season)
+            item.season
             for item in videos
-            if item.season is not None and int(item.season) != 0
+            if item.season is not None and item.season != 0
         }
         has_unseasoned_episodes = any(
             item.episode is not None and item.season is None
@@ -336,7 +337,7 @@ class DirectoryMediaInspector:
                 ), None)
                 if episode_sample is not None and callable(position_parser):
                     try:
-                        contextual_season, _ = position_parser(
+                        contextual_season, _ = self.scraper.parse_source_position(
                             episode_sample.name, source.name,
                         )
                         contextual_season = self._optional_season(contextual_season)
@@ -345,7 +346,7 @@ class DirectoryMediaInspector:
                 season = contextual_season if contextual_season is not None else 1
                 season_inferred = True
         clean_fn = getattr(self.scraper, "clean_title", None)
-        clean_dir_name = clean_fn(source.name) if callable(clean_fn) else ""
+        clean_dir_name = self.scraper.clean_title(source.name) if callable(clean_fn) else ""
         selected_ids = {item.file_id for item in videos}
         primary_titles = [
             item.title
@@ -393,7 +394,7 @@ class DirectoryMediaInspector:
         file_id: str,
         rules: OrganizeRules,
     ) -> DirectoryInspection:
-        source_id = str(file_id or "").strip()
+        source_id = (file_id or "").strip()
         if not source_id or source_id == "0":
             raise DirectoryScrapeRequestError("请选择需要刮削的视频文件")
         source = self.client.file_info(source_id)
@@ -408,7 +409,7 @@ class DirectoryMediaInspector:
         ):
             raise DirectoryScrapeRequestError("所选视频属于当前整理规则过滤的小文件")
 
-        target_id = str(rules.target_dir_id or "").strip()
+        target_id = (rules.target_dir_id or "").strip()
         if not target_id or target_id == "0":
             raise DirectoryScrapeStateError("请先配置光鸭整理归档目标")
         target = self.client.file_info(target_id)
@@ -417,7 +418,7 @@ class DirectoryMediaInspector:
         if not target.is_dir:
             raise DirectoryScrapeStateError("光鸭整理归档目标不是目录")
 
-        parent_id = str(source.parent_id or "0")
+        parent_id = (source.parent_id or "0")
         self._validate_target_outside_source(parent_id, target_id)
 
         resolved_source = self._enrich_identity(source)
@@ -457,7 +458,7 @@ class DirectoryMediaInspector:
         )
         season = parsed.get("season")
         episode = parsed.get("episode")
-        season_inferred = bool(
+        season_inferred = (
             media_type == "tv" and episode is not None and season is None
         )
         if season_inferred:
@@ -496,29 +497,29 @@ class DirectoryMediaInspector:
                 raise DirectoryScrapeStateError("光鸭整理归档目标不存在")
             if not current.is_dir:
                 raise DirectoryScrapeStateError("光鸭整理归档目标不是目录")
-            current_id = str(current.parent_id or "0")
+            current_id = (current.parent_id or "0")
         raise DirectoryScrapeStateError("归档目标目录层级异常")
 
     @staticmethod
     def _recognition_parent_path(source_name: str, relative_dir: str = "") -> str:
         """构造与目录刮削后续 match 相同的云端相对父目录上下文。"""
         return "/".join(
-            str(value or "").replace("\\", "/").strip("/")
+            (value or "").replace("\\", "/").strip("/")
             for value in (source_name, relative_dir)
-            if str(value or "").strip("/\\")
+            if (value or "").strip("/\\")
         )
 
     def _direct_parent_context(self, item: GuangYaFile) -> str:
         """单文件检查只能安全取得所选文件的直接云端父目录名。"""
-        parent_id = str(item.parent_id or "0").strip()
+        parent_id = (item.parent_id or "0").strip()
         if not parent_id or parent_id == "0":
             return ""
         parent = self.client.file_info(parent_id)
         if parent is None or not parent.is_dir:
             return ""
-        return str(parent.name or "").strip()
+        return (parent.name or "").strip()
 
-    def _parse(self, filename: str, parent_path: str = "") -> dict[str, object]:
+    def _parse(self, filename: str, parent_path: str = "") -> dict[str, Any]:
         try:
             parsed = self.scraper.parse_media(filename, parent_path, filename_only=True)
             if parsed.context.cleaned_components.get("release_format_conflicts"):
@@ -548,7 +549,7 @@ class DirectoryMediaInspector:
         filename: str,
         rules: OrganizeRules,
         parent_path: str = "",
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         if not rules.nsfw_exclusive:
             return self._parse(filename, parent_path)
 
@@ -560,7 +561,7 @@ class DirectoryMediaInspector:
         else:
             from app.modules.nsfw import clean_nsfw_release_text
 
-            source = str(filename or "").strip()
+            source = (filename or "").strip()
             stem, separator, extension = source.rpartition(".")
             if separator and extension.casefold() in self.organizer.video_exts(rules):
                 source = stem
@@ -615,9 +616,9 @@ class DirectoryMediaInspector:
                 while next_episode in used:
                     next_episode += 1
                 desired = next_episode
-            used.add(int(desired))
-            next_episode = max(next_episode, int(desired) + 1)
-            videos[index] = replace(item, season=0, episode=int(desired))
+            used.add(desired)
+            next_episode = max(next_episode, desired + 1)
+            videos[index] = replace(item, season=0, episode=desired)
         return videos
 
     @staticmethod
@@ -764,7 +765,7 @@ class DirectoryMediaInspector:
             # 主剧已有足够强的连续集证据时，允许把“唯一的小离群组”留在
             # 源目录待确认。即使它有明确标题/集号，也绝不绑定到当前候选；
             # 两个完整剧集组、多个离群组或比例接近时仍失败关闭。
-            isolated_outlier = bool(
+            isolated_outlier = (
                 positioned >= 4
                 and len(secondary) == 1
                 and len(primary_group) >= 4 * len(secondary)
@@ -864,7 +865,7 @@ class DirectoryMediaInspector:
     @classmethod
     def _ambiguous_special_source(cls, value: str) -> bool:
         """Specials-only 目录只有在作品目录名明确时才允许自动匹配。"""
-        text = unicodedata.normalize("NFKC", str(value or "")).strip()
+        text = unicodedata.normalize("NFKC", (value or "")).strip()
         if not text or cls._weak_identity_title(text) or is_special_directory_name(text):
             return True
         key = cls._identity_key(text)
@@ -878,7 +879,7 @@ class DirectoryMediaInspector:
     @classmethod
     def _weak_parent_identity(cls, relative_dir: str) -> str:
         meaningful: list[str] = []
-        for part in re.split(r"[/\\]+", str(relative_dir or "")):
+        for part in re.split(r"[/\\]+", (relative_dir or "")):
             text = part.strip()
             if not text or is_special_directory_name(text):
                 continue
@@ -925,11 +926,11 @@ class DirectoryMediaInspector:
 
     @staticmethod
     def _numeric_episode_filename(name: str) -> bool:
-        stem = str(name or "").rsplit(".", 1)[0].strip()
+        stem = (name or "").rsplit(".", 1)[0].strip()
         return bool(re.fullmatch(r"\d{1,3}", stem))
 
+    @staticmethod
     def _safe_companions_for_videos(
-        self,
         videos: list[MediaSnapshot],
         companions: list[MediaSnapshot],
     ) -> list[MediaSnapshot]:
@@ -967,7 +968,7 @@ class DirectoryMediaInspector:
             r"omnibus|picture[ ._-]*drama|pvs?[ ._-]*cms?|ova|oad|specials?|sps?|featurettes?)"
             r"(?=$|[ ._\-\]\)】])",
             " ",
-            str(value or ""),
+            (value or ""),
         )
         return re.sub(r"[\s._-]+", " ", cleaned).strip()
 
@@ -988,7 +989,7 @@ class DirectoryMediaInspector:
 
     @classmethod
     def _identity_pinyin_key(cls, value: str) -> str:
-        normalized = unicodedata.normalize("NFKC", str(value or ""))
+        normalized = unicodedata.normalize("NFKC", (value or ""))
         try:
             from pypinyin import Style, lazy_pinyin
             normalized = "".join(lazy_pinyin(normalized, style=Style.NORMAL))
@@ -1006,8 +1007,8 @@ class DirectoryMediaInspector:
         if cls._identity_pinyin_key(left) == cls._identity_pinyin_key(right):
             return True
 
-        left_normalized = unicodedata.normalize("NFKC", str(left or ""))
-        right_normalized = unicodedata.normalize("NFKC", str(right or ""))
+        left_normalized = unicodedata.normalize("NFKC", (left or ""))
+        right_normalized = unicodedata.normalize("NFKC", (right or ""))
         qualifier = re.compile(r"\([^()]{1,32}\)")
         left_has_qualifier = bool(qualifier.search(left_normalized))
         right_has_qualifier = bool(qualifier.search(right_normalized))
@@ -1025,11 +1026,11 @@ class DirectoryMediaInspector:
         parsed: dict,
     ) -> MediaSnapshot:
         return MediaSnapshot(
-            file_id=str(item.file_id),
-            parent_id=str(item.parent_id or "0"),
-            name=str(item.name),
-            size=int(item.size or 0),
-            etag=str(item.etag or ""),
+            file_id=item.file_id,
+            parent_id=(item.parent_id or "0"),
+            name=item.name,
+            size=(item.size or 0),
+            etag=(item.etag or ""),
             role=role,
             relative_dir=relative_dir,
             season=DirectoryMediaInspector._optional_season(parsed.get("season")),
@@ -1039,11 +1040,11 @@ class DirectoryMediaInspector:
     @staticmethod
     def _directory_snapshot(item: GuangYaFile, relative_dir: str) -> DirectorySnapshot:
         return DirectorySnapshot(
-            file_id=str(item.file_id),
-            parent_id=str(item.parent_id or "0"),
-            name=str(item.name),
-            etag=str(item.etag or ""),
-            relative_dir=str(relative_dir or ""),
+            file_id=item.file_id,
+            parent_id=(item.parent_id or "0"),
+            name=item.name,
+            etag=(item.etag or ""),
+            relative_dir=(relative_dir or ""),
         )
 
     @staticmethod

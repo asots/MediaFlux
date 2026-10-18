@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from app.modules.process_lock import CrossProcessLock
+from threading import Thread
+
+from typing import cast
+from collections.abc import Callable
+from app.clients.guangya import GuangYaClient
+
 import asyncio
 import json
 import sqlite3
@@ -206,9 +213,9 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
             with self.subTest(object_type="directory" if source_id == "trash" else "file"):
                 client = FakeGatewayClient()
                 with mock.patch.object(workspace, "_directory", return_value=Path(self.temp.name) / "observations"):
-                    observation = workspace.create_directory_observation(client, owner="queue-owner", path="/", recursive=True)
+                    observation = workspace.create_directory_observation(cast(GuangYaClient, client), owner="queue-owner", path="/", recursive=True)
                     refs = {row["file_id"]: row["handle"] for row in observation["entries"]}
-                    plan = guangya_fs_change.build_fs_change_plan(client, owner="queue-owner", observation=observation,
+                    plan = guangya_fs_change.build_fs_change_plan(cast(GuangYaClient, client), owner="queue-owner", observation=observation,
                         operations=[{"op": "copy", "object_ref": refs[source_id], "target_path": "/target"},
                                     {"op": "move", "object_ref": refs["source"], "target_path": "/target"}], trigger_strm=False)
                 guangya_fs_change.confirm_fs_change_plan(plan["plan_id"], owner="queue-owner", expected_fingerprint=plan["fingerprint"])
@@ -219,13 +226,13 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
 
                 def run(row):
                     manager = OrganizeTaskManager()
-                    manager._lock = threading.Lock()
+                    manager._lock = cast(CrossProcessLock, threading.Lock())
                     manager._lock.acquire()
-                    manager._worker = object()
+                    manager._worker = cast(Thread, object())
                     manager._task = {"id": job_id, "status": "running", "durable": True, "owner_digest": row["owner_digest"]}
                     with mock.patch.object(manager, "_wake_download_tracker"), \
                          mock.patch.object(manager, "_execute_durable_operation", side_effect=lambda _row:
-                             guangya_fs_change.execute_fs_change_plan(payload, client_factory=lambda: client, lease_generation=row["lease_generation"])):
+                             guangya_fs_change.execute_fs_change_plan(payload, client_factory=cast(Callable[[], GuangYaClient], lambda: client), lease_generation=row["lease_generation"])):
                         manager._run_durable_operation(dict(row))
                     self.assertIsNone(manager._worker)
                     self.assertTrue(manager._lock.acquire(blocking=False), "waiting must release the organizer write lock")
@@ -238,24 +245,30 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
                      mock.patch.object(guangya_fs_change, "_COPY_FOREGROUND_ATTEMPTS", 1):
                     first_manager = run(claim_organize_operation_job(job_id))
                     waiting = get_organize_operation_job(job_id)
+                    assert waiting is not None
                     self.assertEqual(waiting["status"], "pending")
                     self.assertEqual(waiting["error_code"], CLOUD_COPY_PENDING_CODE)
                     self.assertIsNone(waiting["finished_at"])
                     self.assertEqual(waiting["expires_at"], queued["expires_at"])
                     self.assertEqual(waiting["payload_json"], queued["payload_json"])
                     self.assertEqual(json.loads(waiting["result_json"])["stats"]["copied"], 0)
-                    self.assertEqual(client.file_info("source").parent_id, "0")
+                    file_info_result = client.file_info("source")
+                    assert file_info_result is not None
+                    self.assertEqual(file_info_result.parent_id, "0")
                     moved.assert_not_called()
                     checkpoint = guangya_fs_change._read_fs_checkpoints(guangya_fs_change._read(plan["plan_id"]))
                     task_id = checkpoint["copy_tasks"]["1"]
                     self.assertTrue(task_id)
                     task_status.assert_called_with(task_id)
                     self.assertIsNone(claim_organize_operation_job())
-                    self.assertEqual(first_manager.task_result(public_ref, owner="queue-owner")["status"], "queued")
+                    task_result_result = first_manager.task_result(public_ref, owner="queue-owner")
+                    assert task_result_result is not None
+                    self.assertEqual(task_result_result["status"], "queued")
                     # 复制在云端运行时，另一个普通任务可以领取，不被等待队首占锁。
                     other, _ = enqueue_organize_operation_job(job_kind="directory_scrape", owner="queue-owner",
                         operation="independent", reference="", payload={}, dedupe_key=f"independent:{source_id}")
                     claimed_other = claim_organize_operation_job()
+                    assert claimed_other is not None
                     self.assertEqual(claimed_other["job_id"], other["job_id"])
                     finish_organize_operation_job(other["job_id"], expected_lease_generation=claimed_other["lease_generation"], status="completed")
                     for generation in (2, 3):
@@ -263,10 +276,12 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
                             conn.execute("UPDATE organize_operation_jobs SET updated_at='2000-01-01 00:00:00' WHERE job_id=?", (job_id,))
                         if generation == 3: task_status.return_value = {"data": {"status": 2}}
                         claimed = claim_organize_operation_job(job_id)
+                        assert claimed is not None
                         self.assertEqual(claimed["lease_generation"], generation)
                         run(claimed)
                         if generation == 2:
                             still_waiting = get_organize_operation_job(job_id)
+                            assert still_waiting is not None
                             self.assertEqual(still_waiting["status"], "pending")
                             self.assertEqual(still_waiting["error_code"], CLOUD_COPY_PENDING_CODE)
                             self.assertIsNone(still_waiting["finished_at"])
@@ -277,11 +292,16 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
                     self.assertGreaterEqual(task_status.call_count, 3)
                     self.assertTrue(all(call.args == (task_id,) for call in task_status.call_args_list))
                 finished = get_organize_operation_job(job_id)
+                assert finished is not None
                 self.assertEqual(finished["status"], "completed")
-                self.assertEqual(client.file_info("source").parent_id, "target")
+                file_info_result_2 = client.file_info("source")
+                assert file_info_result_2 is not None
+                self.assertEqual(file_info_result_2.parent_id, "target")
                 self.assertEqual(json.loads(finished["result_json"])["stats"]["copied"], 1)
                 # 原manager的queued缓存不能遮住另一worker已落盘的终态。
-                self.assertEqual(first_manager.task_result(public_ref, owner="queue-owner")["status"], "completed")
+                task_result_result_2 = first_manager.task_result(public_ref, owner="queue-owner")
+                assert task_result_result_2 is not None
+                self.assertEqual(task_result_result_2["status"], "completed")
                 self.assertNotIn("copy-task-", finished["result_json"])
 
     def test_owner_purge_cannot_be_undone_by_running_or_finished_worker_cache(self):
@@ -290,12 +310,13 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
         claimed = claim_organize_operation_job(job_id)
         public_ref = organize_operation_public_ref(job_id)
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
         private_result = {"stats": {"total": 1}, "operation_items": [{
             "position": 1, "operation": "copy", "status": "unknown",
             "label": "复制：已清理的文件名", "completed_actions": [],
         }]}
+        assert claimed is not None
         manager._task = {"id": job_id, "status": "running", "durable": True,
                          "owner_digest": claimed["owner_digest"], "result": private_result}
         database.purge_agent_subject_data(owner="queue-owner")
@@ -313,14 +334,16 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
         queued, _ = self._enqueue(self._confirmed_plan())
         claimed = claim_organize_operation_job(queued["job_id"])
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
         manager._task = {"id": queued["job_id"], "status": "running", "durable": True}
         error = guangya_fs_change.GuangYaFSCheckpointError("checkpoint unavailable")
         error.operation_result = {"stats": {"audit_failures": 1}, "requires_manual": True}
         with mock.patch.object(manager, "_execute_durable_operation", side_effect=error), mock.patch.object(manager, "_wake_download_tracker"):
+            assert claimed is not None
             manager._run_durable_operation(dict(claimed))
         result = get_organize_operation_job(queued["job_id"])
+        assert result is not None
         self.assertEqual(result["status"], "manual_review")
         self.assertIn("勿重复提交", result["error"])
 
@@ -366,8 +389,9 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
         public_ref = organize_operation_public_ref(job_id)
         context = ToolContext(owner="queue-owner")
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
+        assert claimed is not None
         manager._task = {
             "id": job_id, "status": "running", "stats": {}, "durable": True,
             "owner_digest": claimed["owner_digest"],
@@ -406,6 +430,7 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
         ):
             manager._run_durable_operation(dict(claimed))
         persisted = get_organize_operation_job(job_id)
+        assert persisted is not None
         self.assertEqual(persisted["status"], terminal)
         expected_result = sanitize_organize_operation_result({"stats": stats,
             **({"operation_items": operation_items} if operation_items is not None else {})})
@@ -417,6 +442,7 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
             "private-stage-etag", "private-stage-updated-at", "private-copy-task-id",
         )
         for private in private_stage_values:
+            assert persisted is not None
             self.assertNotIn(private, persisted["result_json"])
 
         accepted = ToolResult(True, "accepted", "已提交", data={
@@ -445,6 +471,7 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
                 self.assertEqual(receipt.data["relocate_count"], stats["total"] - stats["created"])
                 self.assertEqual(receipt.data["operation_ref"], public_ref)
                 self.assertEqual(public.data["task"]["stats"], stats)
+                assert raw is not None
                 self.assertEqual(raw["result"], expected_result)
                 self.assertNotIn("copy_tasks", json.dumps(public.data))
                 self.assertNotIn("copy_tasks", json.dumps(receipt.data))
@@ -468,8 +495,9 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
         public_ref = organize_operation_public_ref(job_id)
         context = ToolContext(owner="queue-owner")
         manager = OrganizeTaskManager()
-        manager._lock = threading.Lock()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
         manager._lock.acquire()
+        assert claimed is not None
         manager._task = {
             "id": job_id, "status": "running", "durable": True,
             "owner_digest": claimed["owner_digest"],
@@ -480,7 +508,9 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
             mock.patch.object(manager, "_wake_download_tracker"),
         ):
             manager._run_durable_operation(dict(claimed))
-        self.assertEqual(get_organize_operation_job(job_id)["error_code"], "GuangYaFSChangeStale")
+        get_organize_operation_job_result = get_organize_operation_job(job_id)
+        assert get_organize_operation_job_result is not None
+        self.assertEqual(get_organize_operation_job_result["error_code"], "GuangYaFSChangeStale")
         accepted = ToolResult(True, "accepted", "已提交", data={"operation_ref": public_ref})
         for source in ("live", "history", "restart"):
             if source == "history":
@@ -496,6 +526,7 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
                 ))
                 self.assertFalse(receipt.ok)
                 self.assertEqual(receipt.status, "failed")
+                assert receipt.error is not None
                 self.assertIn("对象状态已变化", receipt.error)
                 self.assertIn("本次变更未执行", receipt.error)
                 for private in ("secret", "/private", "GuangYaFSChangeStale"):
@@ -633,7 +664,7 @@ class GuangYaFSChangeJobBindingTests(IsolatedDatabaseTestCase):
         running_plan = self._confirmed_plan("3" * 32)
         running_row, _ = self._enqueue(running_plan)
         claimed = claim_organize_operation_job(str(running_row["job_id"]))
-        self.assertIsNotNone(claimed)
+        assert (claimed) is not None
         guangya_fs_change.update_fs_change_plan_execution(
             running_plan["plan_id"],
             status="running",

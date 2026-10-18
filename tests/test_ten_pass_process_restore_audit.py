@@ -89,9 +89,12 @@ raise AssertionError("child did not reach retirement")
             self.child(script, path, expected_exit=23)
             manifest = json.loads((path.parent / "process-manifest.json").read_text())
             task_id = manifest["task"]
-            self.assertEqual(db.get_local_media_task(task_id).status, "moving")
+            get_local_media_task_result = db.get_local_media_task(task_id)
+            assert get_local_media_task_result is not None
+            self.assertEqual(get_local_media_task_result.status, "moving")
             db.init_db()
             recovered = db.get_local_media_task(task_id)
+            assert recovered is not None
             self.assertEqual(recovered.status, "requires_manual")
             self.assertTrue(db.is_interrupted_local_media_write_error(recovered.error))
             with self.assertRaisesRegex(ValueError, "核验"):
@@ -172,6 +175,8 @@ raise AssertionError("child did not reach retirement")
             self.assertEqual(db.kv_get("rss.scheduler.last_admitted_id"), str(sub_id))
             self.assertEqual(db.get_local_media_task(task_id), old_task)
             restored = notifications.get_notification("restore-receipt")
+            assert notification is not None
+            assert restored is not None
             self.assertEqual(
                 (restored["id"], restored["status"]),
                 (notification["id"], "outcome_unknown"),
@@ -185,10 +190,13 @@ raise AssertionError("child did not reach retirement")
                 preferred_message_id=77,
                 replace=True,
             )
+            assert updated is not None
             self.assertEqual(updated["status"], "pending")
             self.assertTrue(db.reset_local_media_task(task_id))
             retried = db.get_local_media_task(task_id)
             self.assertTrue(LocalMediaScheduler._is_silent_task(retried))
+            assert old_task is not None
+            assert retried is not None
             self.assertNotEqual(retried.operation_token, old_task.operation_token)
             self.assertFalse(db.reset_local_media_task(task_id))
 

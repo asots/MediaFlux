@@ -90,11 +90,8 @@ def triage_strm_failures(_arguments: dict[str, Any]) -> ToolResult:
     ):
         failures[key] = _count(raw.get(key))
     for action in ("generate", "metadata"):
-        action_raw = (
-            raw_by_action.get(action)
-            if isinstance(raw_by_action.get(action), dict)
-            else {}
-        )
+        candidate = raw_by_action.get(action)
+        action_raw = candidate if isinstance(candidate, dict) else {}
         for key in ("total", "open", "retrying", "resolved"):
             failures["by_action"][action][key] = _count(action_raw.get(key))
 

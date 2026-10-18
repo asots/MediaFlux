@@ -365,4 +365,6 @@ class AgentDiscoveryDetailRegressionTests(unittest.TestCase):
         ]}, "tv")
         result = self.detail(card)
         self.assertEqual(result.data["seasons"][0]["name"], _safe(name, 160))
+        assert card is not None
+        assert card.seasons is not None
         self.assertEqual(card.seasons[0]["name"], name)

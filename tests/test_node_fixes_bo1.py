@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import cast
+from app.modules.scraper import TMDBScraper
+
 import tempfile
 import time
 from pathlib import Path
@@ -32,7 +35,7 @@ class SiblingBatchTests(IsolatedDatabaseTestCase):
             owner="admin",
         )
         self.service = LocalMediaService(
-            scraper=FakeScraper(MatchResult(title="Show", media_type="tv"))
+            scraper=cast(TMDBScraper, FakeScraper(MatchResult(title="Show", media_type="tv")))
         )
         self.addCleanup(self.service.close)
 
@@ -67,7 +70,7 @@ class SiblingBatchTests(IsolatedDatabaseTestCase):
                 candidates, error = discover_local_media_candidates(source)
                 self.assertEqual(error, "")
                 self.assertEqual(len(candidates), count)
-                stats = {
+                stats: dict[str, int | float] = {
                     "count": count,
                     "directory_walks": 0,
                     "video_rows": 0,

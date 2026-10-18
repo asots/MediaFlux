@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from contextlib import ExitStack
 from dataclasses import replace
-from types import SimpleNamespace
 
 from app import database as db
 from app.clients.guangya import GuangYaClient, close_guangya_client
@@ -73,7 +72,7 @@ def reconcile_with_client(client=None, *, rules: OrganizeRules | None = None, li
                     clients.callback(close_guangya_client, client)
                 # 所有永久来源/目标保护、版本、空树、请求 CAS、删除审计继续复用原实现。
                 report = OrganizeTaskManager._cleanup_download_staging(
-                    SimpleNamespace(client=client), [int(row['id'])],
+                    client, [int(row['id'])],
                     [{'id': str(row['gy_target_dir']), 'name': str(row['gy_staging_name'])}],
                     rules=current_rules,
                     expected_identities={int(row['id']): {**row, '_confirmation_id': int(job['confirmation_id'])}},

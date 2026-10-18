@@ -1,6 +1,7 @@
 """媒体追更订阅的安全摘要、自然语言路由与确认写入回归。"""
 
 from __future__ import annotations
+from typing import Any
 
 import json
 from unittest.mock import AsyncMock, Mock, patch
@@ -72,7 +73,9 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
 
     def _seed_inflight_state(self) -> None:
         stamp = db.now()
-        revision = int(db.get_media_subscription(self.sid)["revision"])
+        get_media_subscription_result = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result is not None
+        revision = int(get_media_subscription_result["revision"])
         with db.get_conn() as conn:
             candidate = conn.execute(
                 "INSERT INTO media_subscription_candidates(subscription_id,media_key,season,episode,result_id,site_id,site_name,title,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -91,7 +94,8 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
                     stamp,
                 ),
             )
-            candidate_id = int(candidate.lastrowid)
+            assert candidate.lastrowid is not None
+            candidate_id = candidate.lastrowid
             conn.execute(
                 "INSERT INTO media_download_admissions(media_key,tmdb_id,media_type,season,episode,subscription_id,subscription_revision,candidate_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -136,14 +140,17 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
                 },
                 owner="owner",
             )
+            get_media_subscription_result_2 = db.get_media_subscription(self.sid)
+            assert get_media_subscription_result_2 is not None
             self.assertEqual(
-                db.get_media_subscription(self.sid)["download_target"], "guangya"
+                get_media_subscription_result_2["download_target"], "guangya"
             )
             confirmed = service.confirm(
                 prepared["action_plan"]["plan_id"], owner="owner"
             )
         self.assertEqual(confirmed["result"]["status"], "completed")
         after = db.get_media_subscription(self.sid)
+        assert after is not None
         self.assertEqual(after["download_target"], "both")
         self.assertEqual(after["action"], "notify")
         self.assertEqual(after["check_interval_minutes"], 120)
@@ -172,7 +179,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "conflict")
         row = db.get_media_subscription(self.sid)
-        self.assertIsNotNone(row)
+        assert (row) is not None
         if change == "revision":
             self.assertEqual(row["action"], "notify")
         else:
@@ -200,7 +207,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
         for index, (tool, restored) in enumerate(cases):
             with self.subTest(tool=tool, restored=restored):
                 tmdb_id = str(99000 + index)
-                data = {
+                data: dict[str, Any] = {
                     "provider": "tmdb", "external_id": tmdb_id, "tmdb_id": tmdb_id,
                     "media_type": "movie", "title": "Concurrent fixture", "enabled": False,
                     "action": "notify", "check_interval_minutes": 10080,
@@ -273,6 +280,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
 
         detail.assert_called_once_with(tmdb_id, "movie")
         mapping = db.get_media_external_id("douban", external_id, "movie")
+        assert mapping is not None
         self.assertEqual(mapping["tmdb_id"], changed_tmdb_id)
         self.assertEqual(bool(mapping["confirmed"]), not revoke_confirmed)
         self.assertEqual(result["result"]["status"], "conflict")
@@ -306,6 +314,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
                 owner="owner",
             )
         unchanged = db.get_media_subscription(self.sid)
+        assert unchanged is not None
         self.assertEqual(unchanged["monitor_mode"], "selected")
         self.assertEqual(json.loads(unchanged["seasons_json"]), [1])
         db.update_media_subscription_config(
@@ -325,6 +334,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
             )
         self.assertEqual(confirmed["result"]["status"], "completed")
         after = db.get_media_subscription(self.sid)
+        assert after is not None
         self.assertEqual(after["monitor_mode"], "selected")
         self.assertEqual(json.loads(after["seasons_json"]), [2])
 
@@ -342,7 +352,9 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
             enabled=True,
         )
         service = get_agent_service()
-        before = int(db.get_media_subscription(movie_id)["revision"])
+        get_media_subscription_result_3 = db.get_media_subscription(movie_id)
+        assert get_media_subscription_result_3 is not None
+        before = int(get_media_subscription_result_3["revision"])
         for delta in (
             {"monitor_mode": "selected"},
             {"seasons": [1]},
@@ -355,6 +367,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
                     owner="owner",
                 )
         after = db.get_media_subscription(movie_id)
+        assert after is not None
         self.assertEqual(int(after["revision"]), before)
         self.assertEqual(json.loads(after["seasons_json"]), [])
         self.assertFalse(bool(after["include_specials"]))
@@ -388,7 +401,9 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
                 prepared["action_plan"]["plan_id"], owner="owner"
             )
         self.assertEqual(confirmed["result"]["data"]["in_flight_dispatches"], 1)
-        self.assertEqual(db.get_media_subscription(self.sid)["action"], "notify")
+        get_media_subscription_result_4 = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result_4 is not None
+        self.assertEqual(get_media_subscription_result_4["action"], "notify")
 
     def test_subscription_policy_stales_when_admission_enters_dispatching(self) -> None:
         self._seed_inflight_state()
@@ -398,7 +413,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
                 "SELECT id FROM media_download_admissions WHERE subscription_id=? AND status='claimed'",
                 (self.sid,),
             ).fetchone()
-        self.assertIsNotNone(admission)
+        assert (admission) is not None
         service = get_agent_service()
         prepared = service.prepare(
             "media.set_subscription_policy",
@@ -411,6 +426,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
         self.assertEqual(
             prepared["result"]["data"]["pending_admissions_at_preflight"], 1
         )
+        assert row is not None
         self.assertTrue(
             db.begin_media_download_dispatch(
                 int(admission["id"]),
@@ -421,6 +437,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
         confirmed = service.confirm(prepared["action_plan"]["plan_id"], owner="owner")
         self.assertEqual(confirmed["result"]["status"], "conflict")
         unchanged = db.get_media_subscription(self.sid)
+        assert unchanged is not None
         self.assertEqual(unchanged["action"], "confirm")
         self.assertEqual(int(unchanged["revision"]), int(row["revision"]))
 
@@ -434,8 +451,10 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
         db.update_media_subscription_config(self.sid, action="notify")
         confirmed = service.confirm(prepared["action_plan"]["plan_id"], owner="owner")
         self.assertEqual(confirmed["result"]["status"], "conflict")
+        get_media_subscription_result_5 = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result_5 is not None
         self.assertEqual(
-            db.get_media_subscription(self.sid)["download_target"], "guangya"
+            get_media_subscription_result_5["download_target"], "guangya"
         )
 
     def test_safe_list_and_detail_do_not_expose_private_configuration(self) -> None:
@@ -604,7 +623,9 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
             owner="owner",
         )
         after_prepare = db.get_media_subscription(self.sid)
+        assert after_prepare is not None
         self.assertEqual(int(after_prepare["enabled"]), 1)
+        assert before is not None
         self.assertEqual(int(after_prepare["revision"]), int(before["revision"]))
         self.assertEqual(prepared["mode"], "confirmation_required")
         scheduler = Mock()
@@ -621,8 +642,10 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
         self.assertEqual(confirmed["result"]["data"]["cancelled_runs"], 1)
         scheduler.reload.assert_called_once_with()
         row = db.get_media_subscription(self.sid)
+        assert row is not None
         self.assertEqual(int(row["enabled"]), 0)
         self.assertEqual(row["status"], "paused")
+        assert before is not None
         self.assertEqual(int(row["revision"]), int(before["revision"]) + 1)
         with db.get_conn() as conn:
             self.assertEqual(
@@ -786,7 +809,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
         self.assertEqual(confirmed["result"]["data"]["season"], 2)
         self.assertEqual(confirmed["result"]["data"]["check_interval_minutes"], 10080)
         row = self._subscription_by_identity("999", "tv")
-        self.assertIsNotNone(row)
+        assert (row) is not None
         self.assertEqual(json.loads(row["seasons_json"]), [2])
         self.assertEqual(row["monitor_mode"], "selected")
         self.assertEqual(row["check_interval_minutes"], 10080)
@@ -800,7 +823,7 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
             "media.delete_subscription", {"subscription_id": self.sid}, owner="owner"
         )
         self.assertEqual(prepared["action_plan"]["confirmation"]["risk"], "danger")
-        self.assertIsNotNone(db.get_media_subscription(self.sid))
+        assert (db.get_media_subscription(self.sid)) is not None
         with patch(
             "app.modules.media_subscription_scheduler.get_media_subscription_scheduler",
             return_value=scheduler,
@@ -813,7 +836,9 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
         self.assertEqual(confirmed["result"]["data"]["cancelled_admissions"], 1)
         self.assertEqual(confirmed["result"]["data"]["cancelled_runs"], 1)
         self.assertIsNone(db.get_media_subscription(self.sid))
+        get_media_subscription_result_6 = db.get_media_subscription(self.sid, include_deleted=True)
+        assert get_media_subscription_result_6 is not None
         self.assertTrue(
-            db.get_media_subscription(self.sid, include_deleted=True)["deleted_at"]
+            get_media_subscription_result_6["deleted_at"]
         )
         scheduler.reload.assert_called_once_with()

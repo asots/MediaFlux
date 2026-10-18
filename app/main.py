@@ -12,7 +12,12 @@ from urllib.parse import parse_qs
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -22,8 +27,8 @@ from starlette.routing import Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import config, database
-from app.modules import first_run, web_secret
 from app.logger import get_logger
+from app.modules import first_run, web_secret
 from app.security import SAFE_METHODS
 from app.web import APP_DIR, render_template
 
@@ -185,7 +190,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                         RedirectResponse("/setup", status_code=302),
                     )
             expected = str(request.session.get("csrf_token") or "")
-            supplied = str(request.headers.get("X-CSRF-Token") or "")
+            supplied = (request.headers.get("X-CSRF-Token") or "")
             if (
                 not supplied
                 and not request.url.path.startswith("/api/agent/")
@@ -195,7 +200,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             ):
                 body = await request.body()
                 values = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
-                supplied = str((values.get("csrf_token") or [""])[0])
+                supplied = (values.get("csrf_token") or [""])[0]
             if not (expected and supplied and hmac.compare_digest(expected, supplied)):
                 if request.url.path == "/login":
                     from app.modules.login_wallpaper import get_login_wallpaper
@@ -278,8 +283,11 @@ def _initialize_runtime_storage() -> None:
     """Validate existing authorization before schema migration can create state."""
     import sqlite3
     from contextlib import closing
+
     from app.agent.feature_gate import (
-        RUNTIME_FENCE_KEY, RuntimeFenceError, initialize_runtime_fence,
+        RUNTIME_FENCE_KEY,
+        RuntimeFenceError,
+        initialize_runtime_fence,
         read_runtime_fence,
     )
 
@@ -322,26 +330,28 @@ def _resolve_bind_host(host: str | None) -> str:
 
 def start_background_services() -> None:
     """启动进程内后台服务；重复调用安全。"""
-    from app.modules.scheduler import get_scheduler
-    from app.modules.rss_scheduler import get_rss_scheduler
-    from app.modules.media_subscription_scheduler import get_media_subscription_scheduler
-    from app.modules.organize_scheduler import get_organize_scheduler
-    from app.modules.organize_tasks import get_organize_manager
-    from app.modules.download_tracker import get_download_tracker
     from app.modules.agent_download_verification_scheduler import (
         get_download_library_verification_scheduler,
     )
+    from app.modules.agent_jobs_scheduler import get_agent_jobs_scheduler
     from app.modules.agent_library_patrol_scheduler import (
         get_agent_library_patrol_scheduler,
     )
-    from app.modules.agent_jobs_scheduler import get_agent_jobs_scheduler
+    from app.modules.agent_runtime import resume_agent_runtime
+    from app.modules.download_tracker import get_download_tracker
     from app.modules.local_media_scheduler import get_local_media_scheduler
+    from app.modules.media_refresh_coordinator import get_media_refresh_coordinator
+    from app.modules.media_subscription_scheduler import (
+        get_media_subscription_scheduler,
+    )
     from app.modules.organize_confirmations import start_confirmation_dispatcher
+    from app.modules.organize_scheduler import get_organize_scheduler
+    from app.modules.organize_tasks import get_organize_manager
+    from app.modules.rss_scheduler import get_rss_scheduler
+    from app.modules.scheduler import get_scheduler
     from app.modules.telegram_notification_center import (
         start_telegram_notification_dispatcher,
     )
-    from app.modules.agent_runtime import resume_agent_runtime
-    from app.modules.media_refresh_coordinator import get_media_refresh_coordinator
 
     resume_agent_runtime()
     get_media_refresh_coordinator().start()
@@ -392,7 +402,7 @@ def stop_background_services() -> bool:
     try:
         from app.modules.agent_runtime import shutdown_agent_runtime
 
-        agent_runtime_stopped = bool(shutdown_agent_runtime())
+        agent_runtime_stopped = shutdown_agent_runtime()
         if not agent_runtime_stopped:
             logger.warning("Agent 运行时协调线程未在关机窗口内退出")
     except Exception as exc:
@@ -403,7 +413,7 @@ def stop_background_services() -> bool:
     try:
         from app.bot import stop_bot
 
-        bot_workers_stopped = bool(stop_bot())
+        bot_workers_stopped = stop_bot()
         if not bot_workers_stopped:
             logger.warning("停止 TG Bot 超时，保留依赖运行时直到进程退出")
     except Exception as exc:
@@ -412,7 +422,7 @@ def stop_background_services() -> bool:
     try:
         from app.modules.agent_jobs_scheduler import get_agent_jobs_scheduler
 
-        agent_jobs_stopped = bool(get_agent_jobs_scheduler().stop())
+        agent_jobs_stopped = get_agent_jobs_scheduler().stop()
     except Exception as exc:
         agent_jobs_stopped = False
         logger.warning("停止 Agent 持久化长任务调度器失败 type=%s", type(exc).__name__)
@@ -421,7 +431,7 @@ def stop_background_services() -> bool:
             get_agent_library_patrol_scheduler,
         )
 
-        agent_patrol_stopped = bool(get_agent_library_patrol_scheduler().stop())
+        agent_patrol_stopped = get_agent_library_patrol_scheduler().stop()
     except Exception as exc:
         agent_patrol_stopped = False
         logger.warning("停止 Agent 全库缺集巡检调度器失败 type=%s", type(exc).__name__)
@@ -430,16 +440,14 @@ def stop_background_services() -> bool:
             get_download_library_verification_scheduler,
         )
 
-        agent_verification_stopped = bool(
-            get_download_library_verification_scheduler().stop()
-        )
+        agent_verification_stopped = get_download_library_verification_scheduler().stop()
     except Exception as exc:
         agent_verification_stopped = False
         logger.warning("停止 Agent 下载后媒体库复核调度器失败 type=%s", type(exc).__name__)
     try:
         from app.modules.download_tracker import get_download_tracker
 
-        download_tracker_stopped = bool(get_download_tracker().stop())
+        download_tracker_stopped = get_download_tracker().stop()
         if not download_tracker_stopped:
             logger.warning("停止下载跟踪器超时，保留依赖运行时直到进程退出")
     except Exception as exc:
@@ -455,7 +463,9 @@ def stop_background_services() -> bool:
         rss_workers_stopped = False
         logger.warning("停止 RSS 调度器失败 type=%s", type(exc).__name__)
     try:
-        from app.modules.media_subscription_scheduler import get_media_subscription_scheduler
+        from app.modules.media_subscription_scheduler import (
+            get_media_subscription_scheduler,
+        )
 
         subscription_workers_stopped = get_media_subscription_scheduler().stop()
     except Exception as exc:
@@ -464,14 +474,14 @@ def stop_background_services() -> bool:
     try:
         from app.modules.organize_scheduler import get_organize_scheduler
 
-        organize_scheduler_stopped = bool(get_organize_scheduler().stop())
+        organize_scheduler_stopped = get_organize_scheduler().stop()
     except Exception as exc:
         organize_scheduler_stopped = False
         logger.warning("停止网盘整理调度器失败 type=%s", type(exc).__name__)
     try:
         from app.modules.local_media_scheduler import get_local_media_scheduler
 
-        local_media_scheduler_stopped = bool(get_local_media_scheduler().shutdown())
+        local_media_scheduler_stopped = get_local_media_scheduler().shutdown()
     except Exception as exc:
         local_media_scheduler_stopped = False
         logger.warning("停止本地媒体调度器失败 type=%s", type(exc).__name__)
@@ -480,14 +490,14 @@ def stop_background_services() -> bool:
     try:
         from app.modules.organize_confirmations import stop_confirmation_dispatcher
 
-        confirmation_dispatcher_stopped = bool(stop_confirmation_dispatcher())
+        confirmation_dispatcher_stopped = stop_confirmation_dispatcher()
     except Exception as exc:
         confirmation_dispatcher_stopped = False
         logger.warning("停止 Telegram 整理确认队列失败 type=%s", type(exc).__name__)
 
     # 整理完成时可能排队触发 STRM，因此先收敛整理，再停止 STRM。
     try:
-        organize_drained = bool(organize_manager.shutdown(timeout=30.0))
+        organize_drained = organize_manager.shutdown(timeout=30.0)
         if not organize_drained:
             logger.warning("停止网盘整理任务超时，保留依赖运行时直到进程退出")
     except Exception as exc:
@@ -496,7 +506,7 @@ def stop_background_services() -> bool:
     try:
         from app.modules.scheduler import get_scheduler
 
-        strm_workers_stopped = bool(get_scheduler().stop())
+        strm_workers_stopped = get_scheduler().stop()
         if not strm_workers_stopped:
             logger.warning("停止 STRM 调度器超时，保留依赖运行时直到进程退出")
     except Exception as exc:
@@ -505,7 +515,7 @@ def stop_background_services() -> bool:
     try:
         from app.modules.media_refresh_coordinator import get_media_refresh_coordinator
 
-        media_refresh_stopped = bool(get_media_refresh_coordinator().stop())
+        media_refresh_stopped = get_media_refresh_coordinator().stop()
         if not media_refresh_stopped:
             logger.warning("停止媒体库刷新合并器超时，持久队列将在下次启动恢复")
     except Exception as exc:
@@ -516,9 +526,7 @@ def stop_background_services() -> bool:
             stop_telegram_notification_dispatcher,
         )
 
-        notification_dispatcher_stopped = bool(
-            stop_telegram_notification_dispatcher(timeout=3.0)
-        )
+        notification_dispatcher_stopped = stop_telegram_notification_dispatcher(timeout=3.0)
         if not notification_dispatcher_stopped:
             logger.warning("停止 Telegram 通知中心超时，待投递记录将在下次启动恢复")
     except Exception as exc:
@@ -711,7 +719,7 @@ def create_app(*, start_background: bool = False) -> FastAPI:
                         runtime_safe_to_close = await asyncio.to_thread(
                             stop_background_services
                         )
-                        shutdown_complete = bool(runtime_safe_to_close)
+                        shutdown_complete = runtime_safe_to_close
                     except Exception as exc:
                         runtime_safe_to_close = False
                         shutdown_complete = False
@@ -720,16 +728,16 @@ def create_app(*, start_background: bool = False) -> FastAPI:
                             type(exc).__name__,
                         )
 
-                from app.discovery.service import shutdown_discovery_service
                 from app.discovery.calendar.service import shutdown_calendar_service
                 from app.discovery.search import shutdown_discovery_search_service
-                from app.modules.directory_scrape import close_directory_scrape_service
-                from app.modules.local_media_service import close_local_media_service
-                from app.routes.discovery_image import close_poster_session
+                from app.discovery.service import shutdown_discovery_service
                 from app.indexers.runtime import (
                     shutdown_indexer_service,
                     unbind_indexer_event_loop,
                 )
+                from app.modules.directory_scrape import close_directory_scrape_service
+                from app.modules.local_media_service import close_local_media_service
+                from app.routes.discovery_image import close_poster_session
 
                 try:
                     if runtime_safe_to_close:
@@ -869,30 +877,32 @@ def create_app(*, start_background: bool = False) -> FastAPI:
         static_files = CachedStaticFiles(directory=str(APP_DIR / "static"))
         app.mount("/static", StaticTextGZipMiddleware(static_files), name="static")
 
-        from app.routes.auth import router as auth_router
-        from app.routes.pages import router as pages_router
+        from app.routes.agent_api import router as agent_api_router
         from app.routes.api import router as api_router
-        from app.routes.proxy import router as proxy_router
-        from app.routes.guangya_api import router as gy_router
-        from app.routes.guangya_scrape_api import router as guangya_scrape_router
-        from app.routes.rss_api import router as rss_router
-        from app.routes.subscriptions_api import router as subscriptions_router
-        from app.routes.strm_api import router as strm_router
-        from app.routes.downloads_api import router as download_router
-        from app.routes.tools_api import router as tools_router
-        from app.routes.logs_api import router as logs_router
-        from app.routes.offline_api import router as offline_router
-        from app.routes.share_api import router as share_router
-        from app.routes.media_image import router as media_image_router
-        from app.routes.media_proxy_api import router as media_proxy_api_router
+        from app.routes.auth import router as auth_router
         from app.routes.discovery_api import router as discovery_api_router
         from app.routes.discovery_image import router as discovery_image_router
+        from app.routes.downloads_api import router as download_router
+        from app.routes.guangya_api import router as gy_router
+        from app.routes.guangya_scrape_api import router as guangya_scrape_router
         from app.routes.indexers_api import router as indexers_api_router
-        from app.routes.local_media_api import router as local_media_api_router
-        from app.routes.media_libraries_api import router as media_libraries_api_router
         from app.routes.jellyfin_api import router as jellyfin_api_router
-        from app.routes.agent_api import router as agent_api_router
-        from app.routes.recognition_knowledge_api import router as recognition_knowledge_api_router
+        from app.routes.local_media_api import router as local_media_api_router
+        from app.routes.logs_api import router as logs_router
+        from app.routes.media_image import router as media_image_router
+        from app.routes.media_libraries_api import router as media_libraries_api_router
+        from app.routes.media_proxy_api import router as media_proxy_api_router
+        from app.routes.offline_api import router as offline_router
+        from app.routes.pages import router as pages_router
+        from app.routes.proxy import router as proxy_router
+        from app.routes.recognition_knowledge_api import (
+            router as recognition_knowledge_api_router,
+        )
+        from app.routes.rss_api import router as rss_router
+        from app.routes.share_api import router as share_router
+        from app.routes.strm_api import router as strm_router
+        from app.routes.subscriptions_api import router as subscriptions_router
+        from app.routes.tools_api import router as tools_router
 
         for router in (
             auth_router, pages_router, api_router, proxy_router, gy_router,
@@ -916,8 +926,9 @@ def create_app(*, start_background: bool = False) -> FastAPI:
 
         @app.get("/readyz", name="readyz")
         async def readyz(request: Request):
-            from app.version import BuildInfo
             from urllib.parse import urlsplit
+
+            from app.version import BuildInfo
 
             ready = bool(getattr(request.app.state, "ready", False))
             payload = {
@@ -927,7 +938,7 @@ def create_app(*, start_background: bool = False) -> FastAPI:
             }
             response = JSONResponse(payload, status_code=200 if ready else 503)
             response.headers["Cache-Control"] = "no-store"
-            origin = str(request.headers.get("origin") or "").strip()
+            origin = (request.headers.get("origin") or "").strip()
             if origin:
                 parsed = urlsplit(origin)
                 if (
@@ -948,7 +959,7 @@ def create_app(*, start_background: bool = False) -> FastAPI:
         async def handle_http_error(request: Request, exc: HTTPException):
             if request.url.path.startswith("/api/"):
                 return JSONResponse({"error": exc.detail or "request failed"}, status_code=exc.status_code)
-            return PlainTextResponse(str(exc.detail), status_code=exc.status_code)
+            return PlainTextResponse(exc.detail, status_code=exc.status_code)
 
         @app.exception_handler(Exception)
         async def handle_unexpected_error(request: Request, exc: Exception):

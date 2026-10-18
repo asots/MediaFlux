@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
+from app.modules.scraper import TMDBScraper
+
 import json
 import subprocess
 import tempfile
@@ -850,6 +855,7 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
                     second, size=5, mtime_ns=123, device=1, inode=22,
                 )
 
+        assert first_profile is not None
         self.assertEqual(first_profile.render(), "1080p.SDR.H.265.24fps.AAC.2.0")
         self.assertEqual(cached_profile, first_profile)
         self.assertEqual(second_profile, first_profile)
@@ -869,7 +875,7 @@ class OrganizeP1PerformanceTests(IsolatedDatabaseTestCase):
         db.upsert_media_probe_cache("alpha", "etag-a", 100, payload)
         db.upsert_media_probe_cache("beta", "etag-b", 200, payload)
         client = _ProbeTreeClient(files)
-        organizer = Organizer(client=client, scraper=_ProbeScraper())
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _ProbeScraper()))
         rules = OrganizeRules(
             target_dir_id="target",
             region_split=False,
@@ -1054,7 +1060,7 @@ class OrganizeTaskRuntimeRecognitionTests(unittest.TestCase):
                 )
 
         scraper = _CountingScraper()
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=cast(TMDBScraper, scraper))
         runtime = OrganizeTaskRuntime()
         stats = organizer._initial_stats()
         file = GuangYaFile(
@@ -1069,7 +1075,7 @@ class OrganizeTaskRuntimeRecognitionTests(unittest.TestCase):
             "recognition_work_cache": None,
             "recognition_work_cache_key": None,
             "task_runtime": runtime,
-            "task_recognition_key": ("tmdb-tv", "renegadeimmortal", "2023"),
+            "task_recognition_key": ("tmdb-tv", "renegadeimmortal", "2023", "tv", False, ""),
             "stats": stats,
         }
         with patch.object(
@@ -1078,8 +1084,8 @@ class OrganizeTaskRuntimeRecognitionTests(unittest.TestCase):
             first = organizer._resolve_plan_match(file, OrganizeRules(), **kwargs)
             second = organizer._resolve_plan_match(file, OrganizeRules(), **kwargs)
 
-        self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
+        assert (first) is not None
+        assert (second) is not None
         self.assertEqual(scraper.calls, 1)
         self.assertEqual(stats["task_recognition_cache_bindings"], 1)
         self.assertEqual(stats["task_recognition_cache_hits"], 1)
@@ -1087,8 +1093,8 @@ class OrganizeTaskRuntimeRecognitionTests(unittest.TestCase):
     def test_task_identity_key_ignores_episode_but_keeps_title_and_year(self):
         from app.modules.scraper import TMDBScraper
 
-        scraper = TMDBScraper(client=SimpleNamespace(api_key="", base_url=""))
-        organizer = Organizer(client=SimpleNamespace(), scraper=scraper)
+        scraper = TMDBScraper(client=cast(TMDBClient, SimpleNamespace(api_key="", base_url="")))
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=scraper)
         rules = OrganizeRules()
         common = {
             "parent_path": "光鸭/仙逆",

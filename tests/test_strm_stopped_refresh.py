@@ -1,4 +1,7 @@
 """STRM 落盘后的正常停止必须保留刷新意图，不在关停期间联网。"""
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -32,8 +35,8 @@ def test_committed_strm_stop_retains_refresh_for_skip_only_replay(tmp_path, mode
         stack.enter_context(patch("app.modules.scheduler.get", side_effect=lambda k, d="": values.get(k, d)))
         stack.enter_context(patch("app.modules.scheduler.get_int", return_value=0))
         stack.enter_context(patch("app.modules.scheduler.configured_strm_source_plans", return_value=([source], "")))
-        stack.enter_context(patch("app.modules.scheduler.sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=client, **kw)))
-        stack.enter_context(patch("app.modules.scheduler.sync_strm", side_effect=lambda **kw: strm.sync_strm(client=client, **kw)))
+        stack.enter_context(patch("app.modules.scheduler.sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=cast(GuangYaClient, client), **kw)))
+        stack.enter_context(patch("app.modules.scheduler.sync_strm", side_effect=lambda **kw: strm.sync_strm(client=cast(GuangYaClient, client), **kw)))
         refresh = stack.enter_context(patch("app.modules.media_refresh_coordinator.enqueue_media_refresh_paths", return_value={"Jellyfin": "queued"}))
         original = strm._track_change
 

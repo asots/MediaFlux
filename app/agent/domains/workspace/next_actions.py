@@ -232,7 +232,7 @@ def summarize_workspace_next_actions(_arguments: dict[str, Any]) -> ToolResult:
         for source in _ACTION_SPECS
         if source in projected_by_source
     ]
-    snapshot_status = str(todo.status or "").strip()
+    snapshot_status = (todo.status or "").strip()
     if snapshot_status not in _SNAPSHOT_STATUSES:
         snapshot_status = "unavailable" if not todo.ok else "partial"
     unavailable_areas = _safe_sources(todo_data.get("unavailable_areas"))

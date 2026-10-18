@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+
 from fastapi import APIRouter, Body, Query, Request
 
 from app import config
@@ -27,12 +28,12 @@ from app.modules.qb_control import (
     qb_control_write_lease,
     remove_qb_tasks,
 )
-from app.web import api_error, api_response, require_api_login
 from app.repositories.download_requests import (
     can_retry_download_local_import,
     download_display_title,
     retry_download_local_import,
 )
+from app.web import api_error, api_response, require_api_login
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/downloads")
@@ -210,7 +211,7 @@ def _public_resubmit_result(result: dict, *, source_request_id: int, target: str
     return {
         "ok": bool(result.get("ok")),
         "duplicate": bool(result.get("duplicate")),
-        "source_request_id": int(source_request_id),
+        "source_request_id": source_request_id,
         "request_id": int(result.get("request_id") or 0),
         "target": target,
         "status": str(result.get("status") or "failed"),
@@ -298,7 +299,7 @@ def test_qb_connection(request: Request, data: object = Body(default=None)):
 @router.get("/overview")
 def overview(request: Request):
     require_api_login(request)
-    result = {
+    result: dict = {
         "qb": {
             "configured": False,
             "online": False,
@@ -582,7 +583,7 @@ def clear_issue(request_id: int, request: Request):
         return api_error("该请求当前无需处理", 409)
     return api_response({
         "ok": True,
-        "request_id": int(request_id),
+        "request_id": request_id,
         "already_cleared": bool(result["already_cleared"]),
         "message": "已移出待处理",
     })

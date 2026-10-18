@@ -1,4 +1,5 @@
 """Task-only projection privacy and provenance through native wire/cold SQLite."""
+from typing import cast
 
 import asyncio
 import json
@@ -135,7 +136,7 @@ def test_private_call_id_stays_internal_and_native(storage):
         with patch.object(agent_api, "get_agent_kernel_runtime", return_value=runtime):
             response = await agent_api.get_session(request, SID)
         assert response.status_code == 200
-        public_tasks = [events[-1].payload["task"], builder.build().to_dict()["task"], json.loads(response.body)["task"]]
+        public_tasks = [events[-1].payload["task"], builder.build().to_dict()["task"], json.loads(cast(bytearray | bytes | str, response.body))["task"]]
         assert public_tasks[0] == public_tasks[1] == public_tasks[2]
         prompts = [r["system_prompt"] for r in script.model_requests if MARK in r["system_prompt"]]
         assert prompts and fact["evidence_id"] in prompts[-1]

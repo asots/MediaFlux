@@ -17,7 +17,7 @@ import random
 import re
 import tempfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -147,7 +147,7 @@ _TOKEN_LOCKS: dict[Path, threading.RLock] = {}
 _TOKEN_PROCESS_LOCKS: dict[Path, CrossProcessLock] = {}
 # 整理与 STRM 链路会创建大量短命客户端，每个实例都会加载一次 token。
 # 该指纹只用于抑制重复日志，不参与任何凭据有效性判定。
-_LAST_LOGGED_TOKEN_FINGERPRINT = ""
+_LAST_LOGGED_TOKEN_FINGERPRINT: str = ""
 
 
 _READ_METRICS_MAX_LATENCY_SAMPLES = 1024
@@ -394,7 +394,7 @@ class GuangYaReadMetrics:
 def _log_token_loaded(fingerprint: str) -> None:
     """token 内容真正变化时才记 INFO，避免实时日志被同一凭据刷屏。"""
     global _LAST_LOGGED_TOKEN_FINGERPRINT
-    current = str(fingerprint or "")
+    current = (fingerprint or "")
     if current and current == _LAST_LOGGED_TOKEN_FINGERPRINT:
         logger.debug("光鸭 token 已加载（内容未变化）")
         return
@@ -538,9 +538,9 @@ class GuangYaWriteRejected(RuntimeError):
     """Provider 以 HTTP 成功响应拒绝了云端写操作。"""
 
     def __init__(self, operation: str, *, code: str = "", message: str = "") -> None:
-        self.operation = str(operation or "write")
-        self.code = str(code or "").strip()[:40]
-        self.public_message = str(message or "").strip()[:160]
+        self.operation = (operation or "write")
+        self.code = (code or "").strip()[:40]
+        self.public_message = (message or "").strip()[:160]
         detail = f" code={self.code}" if self.code else ""
         super().__init__(f"光鸭写操作被拒绝 operation={self.operation}{detail}")
 
@@ -549,9 +549,9 @@ class GuangYaReadRejected(RuntimeError):
     """Provider 以 HTTP 成功响应拒绝了只读操作。"""
 
     def __init__(self, operation: str, *, code: str = "", message: str = "") -> None:
-        self.operation = str(operation or "read")
-        self.code = str(code or "").strip()[:40]
-        normalized_message = str(message or "").strip()[:160]
+        self.operation = (operation or "read")
+        self.code = (code or "").strip()[:40]
+        normalized_message = (message or "").strip()[:160]
         lowered = normalized_message.lower()
         self.rate_limited = self.code in _READ_RATE_LIMIT_CODES or any(
             token in lowered
@@ -674,7 +674,7 @@ def _validate_write_response(response, *, operation: str) -> None:
         if normalized_message:
             messages.append(normalized_message)
         if isinstance(payload.get("success"), bool):
-            success_flags.append(bool(payload.get("success")))
+            success_flags.append(payload.get("success"))
 
     failure_code = next(
         (code for code in codes if code.casefold() not in success_codes), "",
@@ -785,7 +785,7 @@ def _detail_file_payload(response) -> dict | None:
     """从文件详情接口的直返或 data.fileInfo 包装中提取真实文件对象。"""
     if not isinstance(response, dict):
         return None
-    candidates = [response]
+    candidates: list[object] = [response]
     data = response.get("data")
     if isinstance(data, dict):
         candidates.extend((data.get("fileInfo"), data.get("file_info"), data))
@@ -1185,7 +1185,7 @@ class GuangYaClient:
             if expires_in in (None, ""):
                 expires_in = payload.get("expiresIn")
             try:
-                duration = float(expires_in)
+                duration = float(expires_in) if expires_in is not None else 0
             except (TypeError, ValueError):
                 duration = 0
             if math.isfinite(duration) and duration > 0:
@@ -1340,7 +1340,7 @@ class GuangYaClient:
 
     @staticmethod
     def _mask_token(value: str) -> str:
-        token = str(value or "")
+        token = (value or "")
         if not token:
             return ""
         return "••••" if len(token) <= 4 else f"••••{token[-4:]}"
@@ -1359,7 +1359,7 @@ class GuangYaClient:
             "has_access_token": bool(access),
             "has_refresh_token": bool(refresh),
             "expires_at": expires_at,
-            "valid": locally_valid if valid is None else bool(valid),
+            "valid": locally_valid if valid is None else valid,
             "access_token_masked": self._mask_token(access),
             "refresh_token_masked": self._mask_token(refresh),
         }
@@ -1493,7 +1493,7 @@ class GuangYaClient:
             # 请求，避免修改共享 refresh_token_value，也避免网络等待期间
             # 占用全局凭据锁。httpx.Client 支持跨线程复用连接池。
             transport = getattr(raw, "_client", None)
-            transport_request = getattr(transport, "request", None)
+            transport_request: Callable[..., httpx.Response] | None = getattr(transport, "request", None)
             if callable(transport_request):
                 headers = {
                     "traceparent": f"00-{token_hex(16)}-{token_hex(8)}-01",
@@ -1558,7 +1558,7 @@ class GuangYaClient:
             return self.refresh_now()
 
     @staticmethod
-    def _exception_status_code(exc: Exception) -> int:
+    def _exception_status_code(exc: BaseException) -> int:
         response = getattr(exc, "response", None)
         try:
             return int(getattr(response, "status_code", 0) or 0)
@@ -1850,7 +1850,7 @@ class GuangYaClient:
             # 凭证，禁止用旧 refresh token 再次刷新造成轮换竞态。
             try:
                 disk = json.loads(self.token_file.read_text(encoding="utf-8"))
-            except (FileNotFoundError, OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError):
                 disk = {}
             disk_access = str(disk.get("access_token") or "")
             memory_access = str(getattr(raw, "token", "") or "")
@@ -1943,7 +1943,7 @@ class GuangYaClient:
         strict: bool = False,
         expected_total: int | None = None,
         max_pages: int | None = None,
-    ) -> Iterator[tuple[Iterator[GuangYaFile], int | None]]:
+    ) -> Generator[tuple[Iterator[GuangYaFile], int | None], None, None]:
         """共用目录分页读取；strict 仅用于要求完整性的全账号快照。"""
         seen_ids: set[str] = set()
         yielded = 0
@@ -2043,12 +2043,12 @@ class GuangYaClient:
         *,
         should_stop: Callable[[], bool] | None = None,
         max_items: int | None = None,
-    ) -> Iterator[GuangYaFile]:
+    ) -> Generator[GuangYaFile, None, None]:
         """逐页迭代目录，并由调用方预算限制条目数而非固定页数。"""
         normalized_parent = parent_id if parent_id != "0" else None
         item_limit = (
             _DEFAULT_DIRECTORY_ITEM_LIMIT
-            if max_items is None else max(1, int(max_items))
+            if max_items is None else max(1, max_items)
         )
         page_size = min(1000, item_limit + 1)
         yielded = 0
@@ -2071,7 +2071,7 @@ class GuangYaClient:
         should_stop: Callable[[], bool] | None = None,
     ) -> dict[str, GuangYaFile] | None:
         """预算内取得连续两轮一致快照；分页漂移最多重新采集两次，绝不合并残片。"""
-        remaining = max(1, int(request_budget))
+        remaining = max(1, request_budget)
         last_change: DirectorySnapshotChangedError | None = None
         minimum_budget = 3
 
@@ -2181,13 +2181,13 @@ class GuangYaClient:
     def copy(self, file_ids: list[str], parent_id: str) -> str:
         """复制明确指定的对象并返回 Provider 异步任务编号（若有）。"""
         ids = list(
-            dict.fromkeys(str(item).strip() for item in file_ids if str(item).strip())
+            dict.fromkeys(item.strip() for item in file_ids if item.strip())
         )
         if not ids:
             raise ValueError("至少选择一个要复制的光鸭对象")
         response = self.raw.fs_copy(
             ids,
-            None if str(parent_id or "0") == "0" else str(parent_id),
+            None if (parent_id or "0") == "0" else parent_id,
         )
         _validate_write_response(response, operation="copy")
         return _extract_task_id(response)
@@ -2199,7 +2199,7 @@ class GuangYaClient:
 
     def delete(self, file_ids: list[str]) -> bool:
         """删除明确指定的云端对象。上层必须先完成权限、快照和确认校验。"""
-        ids = list(dict.fromkeys(str(item).strip() for item in file_ids if str(item).strip()))
+        ids = list(dict.fromkeys(item.strip() for item in file_ids if item.strip()))
         if not ids:
             return True
         response = self.raw.fs_delete(ids)
@@ -2213,8 +2213,8 @@ class GuangYaClient:
         max_items: int = 20_000,
     ) -> Iterator[GuangYaFile]:
         """完整、安全地分页读取回收站；超过预算时显式失败而非静默截断。"""
-        safe_page_size = max(1, min(int(page_size or 200), 200))
-        safe_limit = max(1, min(int(max_items or 20_000), 100_000))
+        safe_page_size = max(1, min((page_size or 200), 200))
+        safe_limit = max(1, min((max_items or 20_000), 100_000))
         page = 0
         yielded = 0
         seen_ids: set[str] = set()
@@ -2256,7 +2256,7 @@ class GuangYaClient:
 
     def restore_from_recycle(self, file_ids: list[str]) -> str:
         ids = list(
-            dict.fromkeys(str(item).strip() for item in file_ids if str(item).strip())
+            dict.fromkeys(item.strip() for item in file_ids if item.strip())
         )
         if not ids:
             raise ValueError("至少选择一个要恢复的光鸭对象")
@@ -2270,7 +2270,7 @@ class GuangYaClient:
         return _extract_task_id(response)
 
     def task_status(self, task_id: str) -> dict:
-        normalized = str(task_id or "").strip()
+        normalized = (task_id or "").strip()
         if not normalized:
             raise ValueError("光鸭任务编号不能为空")
         response = self._call_read(
@@ -2313,9 +2313,9 @@ class GuangYaClient:
     ) -> None:
         if current is None or not current.is_dir:
             raise RuntimeError("目录状态已变化，已保留")
-        if expected_etag and str(current.etag or "") != expected_etag:
+        if expected_etag and (current.etag or "") != expected_etag:
             raise RuntimeError("目录版本已变化，已保留")
-        if expected_updated_at and int(current.updated_at or 0) != expected_updated_at:
+        if expected_updated_at and (current.updated_at or 0) != expected_updated_at:
             raise RuntimeError("目录更新时间已变化，已保留")
 
     def delete_empty_directory(
@@ -2326,10 +2326,10 @@ class GuangYaClient:
         expected_updated_at: int = 0,
     ) -> bool:
         """复核空目录身份后移入回收站，优先使用 Provider 原子接口。"""
-        normalized_id = str(file_id or "").strip()
-        expected_etag = str(expected_etag or "").strip()
+        normalized_id = (file_id or "").strip()
+        expected_etag = (expected_etag or "").strip()
         try:
-            expected_updated_at = max(0, int(expected_updated_at or 0))
+            expected_updated_at = max(0, (expected_updated_at or 0))
         except (TypeError, ValueError):
             expected_updated_at = 0
         if not normalized_id:
@@ -2375,6 +2375,7 @@ class GuangYaClient:
                 )
                 if self.list_dir(normalized_id):
                     raise RuntimeError("目录已包含内容，已保留")
+                assert callable(fallback_delete)
                 result = fallback_delete([normalized_id])
                 failure_prefix = "光鸭空目录回收站删除失败"
 
@@ -2413,8 +2414,8 @@ class GuangYaClient:
         share_id, code = self._parse_share(share_url)
         if not share_id:
             raise ValueError("无法识别光鸭分享 ID")
-        page_size = max(1, min(int(page_size or 100), 200))
-        max_pages = max(1, min(int(max_pages or 10), 50))
+        page_size = max(1, min((page_size or 100), 200))
+        max_pages = max(1, min((max_pages or 10), 50))
         Raw = _load_raw()
         token_resp = Raw.share_access_token(share_id, code)
         access_token = self._extract_share_token(token_resp)
@@ -2466,7 +2467,7 @@ class GuangYaClient:
     def restore_share(self, access_token: str, file_ids: list[str],
                       target_dir_id: str = "0") -> dict:
         """把已解析分享中的指定文件转存到目标目录。"""
-        selected = list(dict.fromkeys(str(item).strip() for item in file_ids if str(item).strip()))
+        selected = list(dict.fromkeys(item.strip() for item in file_ids if item.strip()))
         if not selected:
             return {"success": False, "error": "至少选择一个文件", "count": 0}
         result = self.raw.share_restore(
@@ -2558,7 +2559,7 @@ class GuangYaClient:
 
     def list_user_shares(self, *, max_items: int = 2_000) -> list[dict]:
         """完整读取当前账号创建的分享，保留原始结构供领域层私有解析。"""
-        safe_limit = max(1, min(int(max_items or 2_000), 10_000))
+        safe_limit = max(1, min((max_items or 2_000), 10_000))
         page_size = 100
         page = 0
         result: list[dict] = []
@@ -2622,18 +2623,18 @@ class GuangYaClient:
         allow_download: bool = True,
     ) -> dict:
         ids = list(
-            dict.fromkeys(str(item).strip() for item in file_ids if str(item).strip())
+            dict.fromkeys(item.strip() for item in file_ids if item.strip())
         )
         if not ids:
             raise ValueError("至少选择一个要分享的光鸭对象")
-        normalized_code = str(code or "").strip()
+        normalized_code = (code or "").strip()
         response = self.raw.share_create(
             ids,
-            title=str(title or "").strip(),
-            validate_duration=max(0, int(validate_duration or 0)),
+            title=(title or "").strip(),
+            validate_duration=max(0, (validate_duration or 0)),
             code=normalized_code,
-            auto_fill_code=bool(auto_fill_code) and not bool(normalized_code),
-            max_restore_count=max(0, int(max_restore_count or 0)),
+            auto_fill_code=auto_fill_code and not bool(normalized_code),
+            max_restore_count=max(0, (max_restore_count or 0)),
             download_type=1 if allow_download else 0,
         )
         # 分享 data.code 是提取码，不属于响应错误码命名空间。
@@ -2645,7 +2646,7 @@ class GuangYaClient:
 
     def delete_user_shares(self, share_ids: list[str]) -> bool:
         ids = list(
-            dict.fromkeys(str(item).strip() for item in share_ids if str(item).strip())
+            dict.fromkeys(item.strip() for item in share_ids if item.strip())
         )
         if not ids:
             raise ValueError("至少选择一个要撤销的光鸭分享")
@@ -2659,7 +2660,7 @@ class GuangYaClient:
         *,
         name: str = "",
         parent_id: str = "0",
-        chunk_size: int = 5 * 1024 * 1024,
+        chunk_size: int | str | float = 5 * 1024 * 1024,
     ) -> dict:
         """单次建任务，复用 SDK 秒传/分片原语；调用方负责路径和落盘核验。"""
         from base64 import b64encode
@@ -2683,9 +2684,9 @@ class GuangYaClient:
         )
         raw = self.raw
         token = raw.upload_token(
-            str(name or "").strip() or path.name,
+            (name or "").strip() or path.name,
             file_size,
-            None if str(parent_id or "0") == "0" else str(parent_id),
+            None if (parent_id or "0") == "0" else parent_id,
             **md5_arguments,
         )
         validate(token, "upload_token")
@@ -2716,7 +2717,8 @@ class GuangYaClient:
             if not isinstance(etag, str) or not etag.strip().strip('"'):
                 raise GuangYaWriteRejected("upload_cdn", code="invalid_response")
 
-        for attempt in range(4):
+        attempt = 0
+        while True:
             response = raw.upload_info(task_id)
             if not isinstance(response, dict) or not response:
                 raise GuangYaWriteRejected("upload", code="invalid_response")
@@ -2731,6 +2733,7 @@ class GuangYaClient:
             if not pending or attempt == 3:
                 return response
             sleep(2)
+            attempt += 1
 
     # ===== 秒传 JSON =====
     def generate_gcid_json(self, source_dir_id: str, source_name: str = "") -> dict:
@@ -2746,7 +2749,7 @@ class GuangYaClient:
         result = validate_manifest(gcid_data)
         return {
             **result,
-            "target_dir_id": str(target_dir_id or "0"),
+            "target_dir_id": (target_dir_id or "0"),
             "executed": False,
         }
 
@@ -2755,7 +2758,7 @@ class GuangYaClient:
                          task_type: str = "magnet") -> dict:
         response = self.raw.cloud_create_task(
             url=url,
-            parent_id=None if target_dir_id == "0" else str(target_dir_id),
+            parent_id=None if target_dir_id == "0" else target_dir_id,
         )
         payload = response.json() if callable(getattr(response, "json", None)) else response
         payload = payload if isinstance(payload, dict) else {"raw": str(payload)}
@@ -2780,22 +2783,19 @@ class GuangYaClient:
         for value in file_indexes:
             if isinstance(value, bool):
                 raise ValueError("文件索引必须为非负整数")
-            try:
-                index = int(value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("文件索引必须为非负整数") from exc
-            if index < 0:
+
+            if value < 0:
                 raise ValueError("文件索引必须为非负整数")
-            if index not in seen:
-                seen.add(index)
-                indexes.append(index)
+            if value not in seen:
+                seen.add(value)
+                indexes.append(value)
         if not indexes:
             raise ValueError("至少选择一个文件")
 
         task_ids: list[str] = []
         responses: list[dict] = []
         completed_indexes: list[int] = []
-        parent_id = "" if str(target_dir_id or "0") == "0" else str(target_dir_id)
+        parent_id = "" if (target_dir_id or "0") == "0" else target_dir_id
         batch_count = (len(indexes) + 499) // 500
         for offset in range(0, len(indexes), 500):
             batch_indexes = indexes[offset:offset + 500]

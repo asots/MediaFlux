@@ -113,6 +113,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
                 pipeline = ToolPipeline(catalog=catalog, state_store=state)
                 context = await context_for(state)
                 preview = await pipeline.execute(spec.name, {}, context=context)
+                assert preview.effect_plan is not None
                 outcome = await pipeline.execute_confirmed(preview.effect_plan.plan_id, context=context)
                 public = outcome.outcome.public_content
                 self.assertFalse(public["ok"])
@@ -456,7 +457,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
                 },
                 context=context,
             )
-            self.assertIsNotNone(preview.effect_plan)
+            assert (preview.effect_plan) is not None
             self.assertEqual(len(client.items), 1)
 
             completed = await pipeline.execute_confirmed(
@@ -564,6 +565,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
             return_value=7,
         ):
             preview = await pipeline.execute(tool.name, {}, context=context)
+        assert preview.effect_plan is not None
         self.assertTrue(preview.effect_plan.snapshot_fingerprint.startswith("mfkr1:7:"))
 
         @contextmanager
@@ -576,6 +578,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
             "app.agent.kernel.ports.existing_actions.agent_runtime_admission",
             side_effect=admitted,
         ):
+            assert preview.effect_plan is not None
             await pipeline.execute_confirmed(
                 preview.effect_plan.plan_id, context=context
             )
@@ -696,6 +699,6 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
         context = await context_for(state)
         preview = await pipeline.execute(tool.name, {"name": "x"}, context=context)
         self.assertEqual(calls["execute"], 0)
-        self.assertIsNotNone(preview.effect_plan)
+        assert (preview.effect_plan) is not None
         await pipeline.execute_confirmed(preview.effect_plan.plan_id, context=context)
         self.assertEqual(calls["execute"], 1)

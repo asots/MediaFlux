@@ -267,7 +267,7 @@ def _candidate_summary(items: list[dict[str, Any]], *, explicit_selection: bool 
         return None
     if not explicit_selection:
         items = [item for item in items if item["position"] in recommended]
-    summary = {"items": items, "recommended_positions": recommended}
+    summary: dict[str, Any] = {"items": items, "recommended_positions": recommended}
     if explicit_selection:
         summary["explicit_selection"] = True
     return summary
@@ -283,7 +283,7 @@ async def issue_candidate_view(
     summary = _candidate_summary(items, explicit_selection=selected_positions is not None)
     if summary is None:
         return None
-    ttl = max(1, min(int(ttl_seconds), 86_400))
+    ttl = max(1, min(ttl_seconds, 86_400))
     expires_at = time.time() + ttl
     selection = await store.put(
         owner=owner, session_id=session_id, kind=SELECTION_KIND, ttl_seconds=ttl,

@@ -1,4 +1,7 @@
 """B 工作片：真实失败台账 + 临时文件，禁止连接真实 provider。"""
+
+from typing import Any, cast
+from app.clients.guangya import GuangYaClient
 from pathlib import Path
 from unittest.mock import patch
 import threading
@@ -18,7 +21,7 @@ def seed(root, count=3):
         db.record_strm_failure(source_id="s", source_name="S", file_id=file.file_id,
             parent_id="s", filename=file.name,
             rel_dir="", target_rel_path=f"{file.name}.strm", action="generate", error="disk failed")
-    runtime = {"sources": strm.plan_strm_sources([{"id": "s", "name": "S"}]),
+    runtime: dict[str, Any] = {"sources": strm.plan_strm_sources([{"id": "s", "name": "S"}]),
                "strm_root": str(root), "base_url": "http://play.invalid"}
     return _TreeClient({"s": files}), runtime
 
@@ -91,7 +94,7 @@ def test_metadata_retry_only_visits_related_index_rows(tmp_path, count):
             target = strm._metadata_target(file, "", str(tmp_path))
             db.upsert_strm_index("guangya-meta:s", file.file_id, file.etag, file.size, file.name, str(target))
         client = _TreeClient({"s": files})
-        runtime = {"sources": strm.plan_strm_sources([{"id": "s", "name": "S"}]),
+        runtime: dict[str, Any] = {"sources": strm.plan_strm_sources([{"id": "s", "name": "S"}]),
                    "strm_root": str(tmp_path), "base_url": "http://play.invalid"}
         visits = []
         original = strm._install_metadata_candidate
@@ -108,7 +111,7 @@ def test_metadata_retry_only_visits_related_index_rows(tmp_path, count):
             return original(*args, **kwargs)
 
         with patch.object(strm, "prepare_metadata_download", side_effect=download), patch.object(strm, "_install_metadata_candidate", side_effect=install), patch.object(db, "list_strm_index", wraps=db.list_strm_index) as reads:
-            result = strm.retry_all_strm_failures("s", "metadata", "test", client=client, runtime_config=runtime)
+            result = strm.retry_all_strm_failures("s", "metadata", "test", client=cast(GuangYaClient, client), runtime_config=runtime)
         assert result["resolved"] == count, result
         assert reads.call_count == 1
         assert sum(visits) <= count * 2, {"n": count, "visited": sum(visits)}
@@ -149,13 +152,13 @@ def test_retry_batches_flow_through_durable_refresh_coordinator(tmp_path):
         plans = strm.plan_strm_sources([{"id": "s1", "name": "Films"}, {"id": "s2", "name": "Films"}])
         files = [GuangYaFile(f"v{i}", "Same.mkv", False, 100, f"e{i}", f"s{i}") for i in (1, 2)]
         client = _TreeClient({file.parent_id: [file] for file in files})
-        runtime = {"sources": plans, "strm_root": str(tmp_path), "base_url": "http://play.invalid"}
+        runtime: dict[str, Any] = {"sources": plans, "strm_root": str(tmp_path), "base_url": "http://play.invalid"}
         for file in files:
             db.record_strm_failure(source_id=file.parent_id, source_name="Films", file_id=file.file_id,
                 parent_id=file.parent_id, filename=file.name, rel_dir="", target_rel_path=file.name,
                 action="generate", error="previous failure")
         for file in files:
-            result = strm.retry_all_strm_failures(file.parent_id, "generate", "test", client=client, runtime_config=runtime)
+            result = strm.retry_all_strm_failures(file.parent_id, "generate", "test", client=cast(GuangYaClient, client), runtime_config=runtime)
             assert result["resolved"] == 1
         paths = sorted(tmp_path.rglob("*.strm"))
         assert len(paths) == 2 and paths[0].read_bytes() != paths[1].read_bytes()
@@ -181,7 +184,7 @@ def test_metadata_retry_download_stop_releases_instead_of_failing(tmp_path):
         file = GuangYaFile("m", "Movie.nfo", False, 8, "e", "s")
         db.record_strm_failure(source_id="s", source_name="S", file_id="m", parent_id="s", filename=file.name,
             action="metadata", rel_dir="", target_rel_path=file.name, error="old failure")
-        runtime = {"sources": strm.plan_strm_sources([{"id": "s", "name": "S"}]),
+        runtime: dict[str, Any] = {"sources": strm.plan_strm_sources([{"id": "s", "name": "S"}]),
                    "strm_root": str(tmp_path), "base_url": "http://play.invalid"}
         stop = threading.Event()
 
@@ -191,7 +194,7 @@ def test_metadata_retry_download_stop_releases_instead_of_failing(tmp_path):
             raise strm._STRMStopped("cancelled during download")
 
         with patch.object(strm, "prepare_metadata_download", side_effect=download):
-            result = strm.retry_all_strm_failures("s", "metadata", "test", client=_TreeClient({"s": [file]}), runtime_config=runtime, should_stop=stop.is_set)
+            result = strm.retry_all_strm_failures("s", "metadata", "test", client=cast(GuangYaClient, _TreeClient({"s": [file]})), runtime_config=runtime, should_stop=stop.is_set)
         assert result["stopped"] and result["deferred"] == 1
         assert result["failed"] == 0
         row = db.list_strm_failures(status="open")[0]

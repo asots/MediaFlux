@@ -113,7 +113,7 @@ def _receiving_folders(target: str, resources: list[dict[str, Any]]) -> tuple[li
     public: list[str] = []
     frozen: dict[str, Any] = {}
     if target in {"qb", "both"}:
-        path = str(config.get("TG_QB_SAVE_PATH", config.get("RSS_QB_SAVE_PATH", "")) or "").strip()
+        path = (config.get("TG_QB_SAVE_PATH", config.get("RSS_QB_SAVE_PATH", "")) or "").strip()
         frozen["qb"] = path
         name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] if path else ""
         public.append("qBittorrent：" + (_safe_text(name, 100) or "使用下载器默认保存目录"))
@@ -148,8 +148,8 @@ class AgentIngestSessionStore:
         token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(18),
         share_store: ShareTransferPreviewStore | None = None,
     ) -> None:
-        self.ttl_seconds = max(1, int(ttl_seconds))
-        self.max_entries = max(1, int(max_entries))
+        self.ttl_seconds = max(1, ttl_seconds)
+        self.max_entries = max(1, max_entries)
         self._clock = clock
         self._token_factory = token_factory
         self.share_store = share_store or ShareTransferPreviewStore(
@@ -164,8 +164,8 @@ class AgentIngestSessionStore:
     @staticmethod
     def _scope(owner: str, conversation_session_id: str = "") -> tuple[str, str]:
         return (
-            str(owner or "").strip(),
-            str(conversation_session_id or "").strip(),
+            (owner or "").strip(),
+            (conversation_session_id or "").strip(),
         )
 
     def _prune_locked(self, now: float) -> None:
@@ -198,10 +198,10 @@ class AgentIngestSessionStore:
         identity: str,
         conversation_session_id: str = "",
     ) -> IngestSessionSnapshot:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             raise AgentToolError("请先登录后检查资源", code="precondition_failed")
-        snapshot_id = str(self._token_factory() or "").strip()
+        snapshot_id = (self._token_factory() or "").strip()
         if not snapshot_id:
             raise AgentToolError("暂时无法保存资源检查结果", code="unavailable")
         scope = self._scope(owner_key, conversation_session_id)
@@ -239,7 +239,7 @@ class AgentIngestSessionStore:
         source_type: str = "",
         conversation_session_id: str = "",
     ) -> IngestSessionSnapshot | None:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return None
         with self._lock:
@@ -265,7 +265,7 @@ class AgentIngestSessionStore:
             return deepcopy(snapshot)
 
     def clear_owner(self, *, owner: str) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return False
         with self._lock:
@@ -423,7 +423,7 @@ class IngestActions:
 
     @staticmethod
     def _owner(context: ToolContext) -> str:
-        owner = str(context.owner or "").strip()
+        owner = (context.owner or "").strip()
         if not owner:
             raise AgentToolError("请先登录后使用资源接入", code="precondition_failed")
         return owner
@@ -1012,7 +1012,7 @@ class IngestActions:
         context: ToolContext,
     ) -> ToolResult:
         """确认只恢复预检时冻结的目标；绝不再读取当前用户偏好。"""
-        fingerprint = str(expected_context or "")
+        fingerprint = (expected_context or "")
         requested = str(arguments.get("target") or "preferred").strip().lower()
         if fingerprint.startswith(_PREFERRED_TARGET_CONTEXT_PREFIX):
             target, separator, inner = fingerprint[len(_PREFERRED_TARGET_CONTEXT_PREFIX):].partition(":")
@@ -1074,7 +1074,7 @@ class IngestActions:
                     "destination_context": destination_context,
                 }
             )
-            if not secrets.compare_digest(current, str(expected_context or "")):
+            if not secrets.compare_digest(current, (expected_context or "")):
                 raise AgentToolError(
                     "资源候选或下载目标已变化，请重新预检", code="confirmation_stale"
                 )
@@ -1100,7 +1100,7 @@ class IngestActions:
                 range(1, len(snapshot.private.get("file_ids") or []) + 1)
             )
         current = self._submission_context(snapshot, frozen_arguments)
-        if not secrets.compare_digest(current, str(expected_context or "")):
+        if not secrets.compare_digest(current, (expected_context or "")):
             raise AgentToolError(
                 "资源快照或提交目标已变化，请重新预检", code="confirmation_stale"
             )
@@ -1116,7 +1116,7 @@ class IngestActions:
             dispatched = dispatch_request(request_number, arguments["target"])
             public = public_dispatch_summary(dispatched)
             row = db.get_download_request(request_number)
-            data = {
+            data: dict[str, Any] = {
                 "source_type": "direct_url",
                 "request_number": request_number,
                 "target": arguments["target"],
@@ -1173,7 +1173,7 @@ class IngestActions:
         success = bool(result.get("success"))
         duplicate = bool(result.get("duplicate"))
         status = str(result.get("status") or ("completed" if success else "failed"))
-        data = {
+        data: dict[str, Any] = {
             "source_type": "guangya_share",
             "request_number": request_number,
             "target": "guangya",

@@ -9,8 +9,8 @@ import re
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timedelta
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from app.agent.public_safety import sanitize_resource_title
@@ -81,6 +81,7 @@ class OrganizeOperationAdmissionError(RuntimeError):
 class OrganizeOperationCancelled(RuntimeError):
     """持久任务收到协作式取消；当前 provider 写入尚未开始。"""
 
+    operation_result: dict[str, Any]
     provider_write_not_started = True
 
 
@@ -107,7 +108,7 @@ def organize_operation_owner_digest(owner: str) -> str:
 
 
 def _secret() -> bytes:
-    secret = str(get_web_secret() or "")
+    secret = (get_web_secret() or "")
     if not secret:
         raise ValueError("光鸭操作队列密钥不可用")
     return secret.encode("utf-8")
@@ -140,7 +141,7 @@ def _safe_json(value: object, *, field: str) -> str:
         raise ValueError(f"{field}过大")
     try:
         parsed = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError(f"{field}无效") from exc
     if not isinstance(parsed, dict):
         raise ValueError(f"{field}无效")
@@ -316,7 +317,7 @@ def _cloud_plan_job_payload(
         raise ValueError("光鸭云盘任务参数完整性校验失败")
     try:
         payload = json.loads(str(row["payload_json"] or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError("光鸭云盘任务参数损坏") from exc
     if (
         not isinstance(payload, dict)
@@ -505,7 +506,7 @@ def enqueue_organize_operation_job(
         job_kind=safe_kind,
         payload_json=safe_payload,
     )
-    lifetime = max(60, min(int(ttl_seconds), 86_400))
+    lifetime = max(60, min(ttl_seconds, 86_400))
     current_epoch = time.time()
     expires_at = current_epoch + lifetime
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
@@ -645,7 +646,7 @@ def defer_organize_operation_job(
 ) -> bool:
     """安全地把已提交云端复制、仍需轮询的计划放回延后领取队列。"""
     safe_id = _safe_job_id(job_id)
-    generation = max(0, int(expected_lease_generation))
+    generation = max(0, expected_lease_generation)
     safe_result = sanitize_organize_operation_result(result or {})
     safe_result_json = _safe_json(safe_result, field="光鸭操作任务结果")
     with get_conn() as conn:
@@ -723,7 +724,7 @@ def request_cancel_organize_operation_job(
     """Owner 与 lease CAS 保护的协作取消；不终止已受理的云端复制。"""
     safe_id = _safe_job_id(job_id)
     owner_digest = organize_operation_owner_digest(owner)
-    generation = max(0, int(expected_lease_generation))
+    generation = max(0, expected_lease_generation)
     timestamp = now()
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -793,7 +794,7 @@ def is_organize_operation_cancel_requested(
     return (
         bool(row["cancel_requested"])
         or str(row["status"] or "") != "running"
-        or int(row["lease_generation"] or 0) != max(0, int(expected_lease_generation))
+        or int(row["lease_generation"] or 0) != max(0, expected_lease_generation)
     )
 
 
@@ -807,7 +808,7 @@ def finish_organize_operation_job(
     error: str = "",
 ) -> bool:
     safe_id = _safe_job_id(job_id)
-    safe_status = str(status or "").strip().lower()
+    safe_status = (status or "").strip().lower()
     if safe_status not in _TERMINAL_STATUSES:
         raise ValueError("光鸭操作任务终态无效")
     safe_result_payload = sanitize_organize_operation_result(result or {})
@@ -815,7 +816,7 @@ def finish_organize_operation_job(
         safe_result_payload,
         field="光鸭操作任务结果",
     )
-    safe_error_code = re.sub(r"[^A-Za-z0-9_.-]", "", str(error_code or ""))[:80]
+    safe_error_code = re.sub(r"[^A-Za-z0-9_.-]", "", (error_code or ""))[:80]
     safe_error = _safe_text(error, limit=500)
     timestamp = now()
     with get_conn() as conn:
@@ -823,7 +824,7 @@ def finish_organize_operation_job(
         row = conn.execute(
             "SELECT * FROM organize_operation_jobs WHERE job_id=? "
             "AND status='running' AND lease_generation=?",
-            (safe_id, max(0, int(expected_lease_generation))),
+            (safe_id, max(0, expected_lease_generation)),
         ).fetchone()
         if row is None:
             return False
@@ -833,7 +834,7 @@ def finish_organize_operation_job(
             "WHERE job_id=? AND status='running' AND lease_generation=?",
             (
                 safe_status, safe_result, safe_error_code, safe_error, timestamp,
-                timestamp, safe_id, max(0, int(expected_lease_generation)),
+                timestamp, safe_id, max(0, expected_lease_generation),
             ),
         )
         if cur.rowcount != 1:
@@ -866,7 +867,7 @@ def fail_pending_organize_operation_job(
         if row is None:
             return False
         safe_error_code = re.sub(
-            r"[^A-Za-z0-9_.-]", "", str(error_code or "")
+            r"[^A-Za-z0-9_.-]", "", (error_code or "")
         )[:80]
         cur = conn.execute(
             "UPDATE organize_operation_jobs SET status='failed',reference='',payload_json='{}',"
@@ -994,7 +995,7 @@ def count_pending_organize_operation_jobs() -> int:
 def list_pending_organize_operation_jobs(
     *, limit: int = 64, ready_only: bool = False
 ) -> list[sqlite3.Row]:
-    safe_limit = max(1, min(int(limit), 64))
+    safe_limit = max(1, min(limit, 64))
     try:
         with get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")

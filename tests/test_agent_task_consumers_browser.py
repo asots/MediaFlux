@@ -11,7 +11,7 @@ from tests.test_agent_ux_shell_browser import AgentShellBrowserCase
 class TaskConsumerBrowserTests(AgentShellBrowserCase):
     @classmethod
     def setUpClass(cls):
-        cls.snapshots = native_snapshots.__wrapped__()
+        cls.snapshots = native_snapshots._get_wrapped_function()()
         super().setUpClass()
 
     def configured_shell(self, config, session, viewport=None):
@@ -304,7 +304,9 @@ class TaskConsumerBrowserTests(AgentShellBrowserCase):
                     '(label)=>document.querySelector("#agentTaskSnapshot")?.textContent.includes(label)',
                     arg=label,
                 )
-                self.assertNotIn("DO NOT DISPLAY", page.locator("#agentTaskSnapshot").text_content())
+                text_content = page.locator("#agentTaskSnapshot").text_content()
+                assert text_content is not None
+                self.assertNotIn("DO NOT DISPLAY", text_content)
             self.assertIn("部分完成", page.locator("#agentTranscript").inner_text())
         page.evaluate("window.__kernelConfig.sessions.draft_scope='b'.repeat(64)")
         page.locator("#toggleAgentRail").click()

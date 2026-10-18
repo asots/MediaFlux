@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-
 from typing import Any
-
 
 _BUSINESS_LOG_FIELDS = (
     "tmdb_id", "provider", "external_id", "media_type", "title", "year",
@@ -18,7 +16,7 @@ def list_organize_operation_steps(log_id: int, limit: int = 300) -> list[sqlite3
     with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM organize_operation_steps WHERE log_id=? ORDER BY id DESC LIMIT ?",
-            (log_id, max(1, min(int(limit or 300), 1000))),
+            (log_id, max(1, min((limit or 300), 1000))),
         ).fetchall()
 
 
@@ -43,7 +41,7 @@ def add_organize_operation_step(
             (
                 log_id,
                 operation_token,
-                int(step_index),
+                step_index,
                 action,
                 str(fields.get("file_id") or ""),
                 str(fields.get("from_parent_id") or ""),
@@ -57,7 +55,8 @@ def add_organize_operation_step(
                 before_json,
             ),
         )
-        return int(cur.lastrowid)
+        assert cur.lastrowid is not None
+        return cur.lastrowid
 
 
 def finish_organize_operation_step(step_id: int, status: str, error: str = "") -> bool:
@@ -98,13 +97,13 @@ def capture_organize_business_snapshot(log_id: int) -> dict[str, Any]:
     with db.get_conn() as conn:
         conn.execute("BEGIN")
         log = conn.execute(
-            f"SELECT {','.join(_BUSINESS_LOG_FIELDS)} FROM organize_log WHERE id=?", (int(log_id),),
+            f"SELECT {','.join(_BUSINESS_LOG_FIELDS)} FROM organize_log WHERE id=?", (log_id,),
         ).fetchone()
         if log is None:
             raise LookupError("整理日志不存在")
         items = conn.execute(
             "SELECT id,file_id,target_parent_id,target_name FROM organize_log_items "
-            "WHERE log_id=? ORDER BY id", (int(log_id),),
+            "WHERE log_id=? ORDER BY id", (log_id,),
         ).fetchall()
         return {"version": 1, "log": dict(log), "items": [dict(row) for row in items]}
 
@@ -117,10 +116,10 @@ def restore_organize_business_snapshot(log_id: int, snapshot: dict, **log_fields
     database = db
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        if conn.execute("SELECT id FROM organize_log WHERE id=?", (int(log_id),)).fetchone() is None:
+        if conn.execute("SELECT id FROM organize_log WHERE id=?", (log_id,)).fetchone() is None:
             raise LookupError("整理日志不存在")
         members = conn.execute(
-            "SELECT id,file_id FROM organize_log_items WHERE log_id=?", (int(log_id),),
+            "SELECT id,file_id FROM organize_log_items WHERE log_id=?", (log_id,),
         ).fetchall()
         actual = {(int(row["id"]), str(row["file_id"])) for row in members}
         expected = {(item["id"], item["file_id"]) for item in state["items"]}
@@ -131,13 +130,13 @@ def restore_organize_business_snapshot(log_id: int, snapshot: dict, **log_fields
         assignments = ','.join(f'{key}=?' for key in values)
         conn.execute(
             f"UPDATE organize_log SET {assignments},version=version+1,updated_at=? WHERE id=?",
-            [*values.values(), timestamp, int(log_id)],
+            [*values.values(), timestamp, log_id],
         )
         for item in state["items"]:
             conn.execute(
                 "UPDATE organize_log_items SET target_parent_id=?,target_name=?,updated_at=? "
                 "WHERE id=? AND log_id=? AND file_id=?",
-                (item["target_parent_id"], item["target_name"], timestamp, item["id"], int(log_id), item["file_id"]),
+                (item["target_parent_id"], item["target_name"], timestamp, item["id"], log_id, item["file_id"]),
             )
     return True
 
@@ -149,14 +148,14 @@ def list_latest_reversible_organize_steps(log_id: int) -> list[sqlite3.Row]:
         latest = conn.execute(
             "SELECT operation_token FROM organize_operation_steps "
             "WHERE log_id=? AND status='success' AND action='move_rename' "
-            "ORDER BY id DESC LIMIT 1", (int(log_id),),
+            "ORDER BY id DESC LIMIT 1", (log_id,),
         ).fetchone()
         if latest is None:
             return []
         return conn.execute(
             "SELECT * FROM organize_operation_steps WHERE log_id=? AND operation_token=? "
             "AND status='success' AND action='move_rename' ORDER BY id DESC",
-            (int(log_id), latest["operation_token"]),
+            (log_id, latest["operation_token"]),
         ).fetchall()
 
 
@@ -171,7 +170,7 @@ def list_pending_organize_probe_steps(
             "SELECT * FROM organize_operation_steps WHERE log_id=? "
             "AND operation_token GLOB ? AND action='probe_rename' "
             f"AND status IN ({placeholders}) ORDER BY id DESC",
-            (int(log_id), f"probe:{int(job_id)}:*", *statuses),
+            (log_id, f"probe:{job_id}:*", *statuses),
         ).fetchall()
 
 
@@ -186,7 +185,7 @@ def _recover_after_restart(conn, timestamp: str) -> None:
             stored_payload = json.loads(
                 str(interrupted["payload_json"] or "{}")
             )
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             stored_payload = {}
         if not isinstance(stored_payload, dict):
             stored_payload = {}
@@ -249,7 +248,7 @@ def _recover_after_restart(conn, timestamp: str) -> None:
         for interrupted_run in interrupted_organize_runs:
             try:
                 raw_result = json.loads(str(interrupted_run["result"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 raw_result = {}
             normalized_result = read_organize_result(raw_result)
             previous_error = str(
@@ -287,5 +286,4 @@ def _recover_after_restart(conn, timestamp: str) -> None:
 
 # 在函数定义后绑定门面，兼容 repository-first 导入；运行期始终使用同一连接/时钟所有者。
 from app import database as db  # noqa: E402
-
 from app.repositories import telegram_notifications  # noqa: E402

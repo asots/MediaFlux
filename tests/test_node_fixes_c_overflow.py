@@ -1,4 +1,9 @@
 """C02：真实 scheduler/outbox/消费者，包含默认无前缀来源与停止策略。"""
+
+from typing import Any
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
@@ -45,8 +50,8 @@ def test_C02_saturated_sync_delivers_every_library_with_policy(tmp_path, mode, p
         stack.enter_context(patch("app.modules.scheduler.get", side_effect=lambda k, d="": values.get(k, d)))
         stack.enter_context(patch("app.modules.scheduler.get_int", return_value=0))
         stack.enter_context(patch("app.modules.scheduler.configured_strm_source_plans", return_value=([source], "")))
-        stack.enter_context(patch("app.modules.scheduler.sync_strm", side_effect=lambda **kw: strm.sync_strm(client=cloud, **kw)))
-        stack.enter_context(patch("app.modules.scheduler.sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=cloud, **kw)))
+        stack.enter_context(patch("app.modules.scheduler.sync_strm", side_effect=lambda **kw: strm.sync_strm(client=cast(GuangYaClient, cloud), **kw)))
+        stack.enter_context(patch("app.modules.scheduler.sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=cast(GuangYaClient, cloud), **kw)))
         stack.enter_context(patch.object(strm, "_MAX_TRACKED_CHANGED_PATHS", 1))
         stack.enter_context(patch.object(strm, "_MAX_TRACKED_OVERFLOW_DIRS", 1))
         handoff = stack.enter_context(patch("app.modules.media_refresh_coordinator.enqueue_media_refresh_paths", return_value={"Jellyfin": "failed"}))
@@ -171,13 +176,13 @@ def test_C02_spill_write_failure_keeps_batch_and_stops_further_install(tmp_path,
         def fail(paths):
             raise OSError("temporary SQLite write failure")
         if mode == "full":
-            stats = strm.sync_strm("source", "http://play.invalid", str(tmp_path), client=cloud,
+            stats = strm.sync_strm("source", "http://play.invalid", str(tmp_path), client=cast(GuangYaClient, cloud),
                 on_refresh_paths=fail, clean_invalid=False, clean_empty_dirs=False)
         else:
             changes = [{"source_id": "source", "kind": "video", "action": "upsert", "file_id": str(i),
                         "name": f"E{i}.mkv", "rel_dir": f"L{i}", "parent_id": f"L{i}"} for i in range(10)]
             stats = strm.sync_strm_incremental("source", changes, "http://play.invalid", str(tmp_path),
-                client=cloud, on_refresh_paths=fail)
+                client=cast(GuangYaClient, cloud), on_refresh_paths=fail)
         assert stats["stopped"] and stats["stop_stage"] == "refresh-persist"
         assert stats["generated"] == 3
         assert len(stats["changed_overflow_dirs"]) == 2  # 失败批次不删除；下一项前停止
@@ -208,7 +213,7 @@ def test_C02_scheduler_retries_failed_spill_on_stop_without_consuming(tmp_path, 
             **{f"L{i}": [GuangYaFile(str(i), f"E{i}.mkv", False, 100, "e", f"L{i}")] for i in range(6)}}
         if stage == "deferred-cleanup":
             # 先建立真实文件/索引，正式 run 在整轮安全门之后执行延后删除。
-            strm.sync_strm("source", "http://play.invalid", str(tmp_path), client=_TreeClient(tree), clean_empty_dirs=False)
+            strm.sync_strm("source", "http://play.invalid", str(tmp_path), client=cast(GuangYaClient, _TreeClient(tree)), clean_empty_dirs=False)
             tree = {"source": []}
         cloud = _TreeClient(tree)
         scheduler = STRMScheduler()
@@ -221,8 +226,8 @@ def test_C02_scheduler_retries_failed_spill_on_stop_without_consuming(tmp_path, 
         stack.enter_context(patch("app.modules.scheduler.get", side_effect=lambda k, d="": values.get(k, d)))
         stack.enter_context(patch("app.modules.scheduler.get_int", return_value=0))
         stack.enter_context(patch("app.modules.scheduler.configured_strm_source_plans", return_value=([source], "")))
-        stack.enter_context(patch("app.modules.scheduler.sync_strm", side_effect=lambda **kw: strm.sync_strm(client=cloud, **kw)))
-        stack.enter_context(patch("app.modules.scheduler.sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=cloud, **kw)))
+        stack.enter_context(patch("app.modules.scheduler.sync_strm", side_effect=lambda **kw: strm.sync_strm(client=cast(GuangYaClient, cloud), **kw)))
+        stack.enter_context(patch("app.modules.scheduler.sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=cast(GuangYaClient, cloud), **kw)))
         stack.enter_context(patch.object(strm, "_MAX_TRACKED_CHANGED_PATHS", 1))
         stack.enter_context(patch.object(strm, "_MAX_TRACKED_OVERFLOW_DIRS", 1))
         handoff = stack.enter_context(patch("app.modules.media_refresh_coordinator.enqueue_media_refresh_paths", return_value={"Jellyfin": "queued"}))
@@ -239,7 +244,7 @@ def test_C02_scheduler_retries_failed_spill_on_stop_without_consuming(tmp_path, 
                 raise OSError("one-shot outbox write failure")
             return original_enqueue(paths, **kw)
         stack.enter_context(patch.object(db, "enqueue_strm_refresh_paths", side_effect=flaky))
-        options = {"sync_mode": "fast" if stage == "fast" else "full"}
+        options: dict[str, Any] = {"sync_mode": "fast" if stage == "fast" else "full"}
         if stage == "fast":
             options["organize_changes"] = [{"source_id": "source", "kind": "video", "action": "upsert",
                 "file_id": str(i), "name": f"E{i}.mkv", "rel_dir": f"L{i}", "parent_id": f"L{i}"} for i in range(6)]

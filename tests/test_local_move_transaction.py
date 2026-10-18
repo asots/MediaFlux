@@ -10,13 +10,13 @@ from unittest.mock import patch
 
 from app import database as db
 from app.modules.local_move_transaction import LocalMoveError, LocalMoveTransaction
-from app.modules.local_storage import LocalFilesystemAdapter
+from app.modules.local_storage import LocalFileSnapshot, LocalFilesystemAdapter
 from tests.support import IsolatedDatabaseTestCase
 
 
 @dataclass(frozen=True)
 class Plan:
-    source: object
+    source: LocalFileSnapshot
     target: Path
     role: str = "video"
     action: str = "move"

@@ -1,6 +1,8 @@
 """Media Agent 受控资源站点配置测试。"""
 
 from __future__ import annotations
+from starlette.requests import Request
+from typing import cast
 
 import os
 import tempfile
@@ -105,9 +107,9 @@ class IndexerSiteConfigUnitTests(unittest.TestCase):
         ), patch(
             "app.routes.api.config.has_external_override", return_value=False,
         ), patch("app.routes.api.config.get", side_effect=get_value):
-            old_settings = get_config(object())
+            old_settings = get_config(cast(Request, object()))
             format_version[0] = "2"
-            new_settings = get_config(object())
+            new_settings = get_config(cast(Request, object()))
 
         self.assertEqual(
             old_settings["INDEXER_ENABLED_SITES"],
@@ -266,7 +268,9 @@ class IndexerSiteConfigUnitTests(unittest.TestCase):
         self.assertIs(checked.references, result.references)
         self.assertIs(checked.effect_metadata, result.effect_metadata)
         self.assertIn("已提交", checked.summary)
+        assert checked.error is not None
         self.assertIn("待核验", checked.error)
+        assert checked.error is not None
         self.assertIn("请先查看配置而非直接重试", checked.error)
         public = format_public_result(checked.to_dict())
         self.assertTrue(public.startswith("⚠️ "))

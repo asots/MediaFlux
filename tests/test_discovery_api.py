@@ -5,29 +5,30 @@ import re
 import tempfile
 import unittest
 from collections.abc import Mapping
-
-import requests
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import requests
 from fastapi.testclient import TestClient
-
-from tests.support import InitializedWebTestCase
 
 from app import config as app_config
 from app import database
-from app.discovery.models import (
-    ProviderAuthenticationError,
-    ProviderRateLimited,
-    ProviderTimeout,
-)
 from app.clients.douban_public import DoubanPublicPage
 from app.discovery.cache import DiscoveryCache
-from app.discovery.models import DiscoveryPage, MediaCard, ProviderHealth, ProviderUnavailable
+from app.discovery.models import (
+    DiscoveryPage,
+    MediaCard,
+    ProviderAuthenticationError,
+    ProviderHealth,
+    ProviderRateLimited,
+    ProviderTimeout,
+    ProviderUnavailable,
+)
 from app.discovery.providers.douban import DoubanProvider
 from app.discovery.registry import ProviderRegistry
 from app.discovery.service import DiscoveryService
 from app.main import create_app
+from tests.support import InitializedWebTestCase
 
 
 class FakeDiscoveryService:
@@ -53,7 +54,7 @@ class FakeDiscoveryService:
         if category == "down":
             raise ProviderUnavailable("数据源暂不可用")
         return DiscoveryPage(
-            items=[MediaCard(provider="tmdb", external_id="550", media_type="movie", title="Fight Club", poster_key="abc.jpg")],
+            items=(MediaCard(provider="tmdb", external_id="550", media_type="movie", title="Fight Club", poster_key="abc.jpg"),),
             page=page,
             has_more=False,
             cached=True,
@@ -146,8 +147,9 @@ class _BaseClientTests(InitializedWebTestCase):
             "DISCOVERY_ENABLED": "1",
         })
         self.env_patch.start()
-        from tests.support import initialized_web_runtime
         from contextlib import ExitStack
+
+        from tests.support import initialized_web_runtime
         self._installed_runtime = ExitStack()
         self.addCleanup(self._installed_runtime.close)
         self._installed_runtime.enter_context(initialized_web_runtime())
@@ -288,7 +290,7 @@ class DiscoveryAPITests(_BaseClientTests):
         session.__exit__.assert_called_once()
         exit_args = session.__exit__.call_args.args
         self.assertIs(exit_args[0], ProviderTimeout)
-        self.assertIsInstance(exit_args[1], ProviderTimeout)
+        assert isinstance(exit_args[1], ProviderTimeout)
         client.check_authentication.assert_called_once_with()
 
     def test_tmdb_tv_detail_adds_season_counts_without_changing_web_identity_or_images(self):
@@ -714,7 +716,11 @@ class DiscoveryPosterTests(_BaseClientTests):
 
     def test_bangumi_cached_cards_and_legacy_tokens_share_bounded_poster_policy(self):
         from app.routes.discovery_api import _card_payload
-        from app.routes.discovery_image import _serializer, decode_poster_token, encode_poster_token
+        from app.routes.discovery_image import (
+            _serializer,
+            decode_poster_token,
+            encode_poster_token,
+        )
         self.authenticate()
         original_key = "lain.bgm.tv/pic/cover/l/ab/cd/42.jpg"
         bounded_key = "lain.bgm.tv/r/800/pic/cover/l/ab/cd/42.jpg"
@@ -756,6 +762,7 @@ class DiscoveryPosterTests(_BaseClientTests):
 
     def test_poster_token_rejects_encoded_traversal_unknown_host_and_tampering(self):
         from fastapi import HTTPException
+
         from app.routes.discovery_image import encode_poster_token
         with self.assertRaises(HTTPException):
             encode_poster_token("tmdb", "%2e%2e/%2e%2e/x.jpg")

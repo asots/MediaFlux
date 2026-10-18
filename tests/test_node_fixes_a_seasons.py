@@ -57,7 +57,9 @@ class SeasonCompletenessTests(unittest.IsolatedAsyncioTestCase):
             await MediaSubscriptionService().check_subscription(self.sid)
         self.assertEqual(error.exception.code, "season_limit_exceeded")
         self.assertEqual(self.calls, [])
-        self.assertEqual(db.get_media_subscription(self.sid)["status"], "error")
+        get_media_subscription_result = db.get_media_subscription(self.sid)
+        assert get_media_subscription_result is not None
+        self.assertEqual(get_media_subscription_result["status"], "error")
         self.search.assert_not_awaited()
 
     async def test_selected_seasons_allow_late_season_of_oversized_show(self):

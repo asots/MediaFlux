@@ -1,4 +1,6 @@
 """Global context and provider configuration share one supported snapshot."""
+from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter
+from app.agent.kernel.effects import ConfirmationEffectPlanStore
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +16,6 @@ from app.agent.kernel import model_rounds as model_rounds_module
 from app.agent.kernel.model import ModelEvent, ModelEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.provider_model import (
-    OpenAICompatibleModelAdapter,
     ProviderSettings,
 )
 from app.agent.kernel.state_types import AgentInput
@@ -120,6 +121,7 @@ def test_runtime_context_uses_same_provider_snapshot(harness, config_api, initia
     assert config.get(CONTEXT) == updated
     assert config.get('AGENT_LLM_MODEL') == 'updated-model'
     assert config._read_env_file(config.ENV_FILE)[CONTEXT] == updated
+    assert isinstance(runtime.session.model, OpenAICompatibleModelAdapter)
     settings = runtime.session.model.settings
     assert settings.model == 'tenant/opaque-alias'
     assert settings.api_url == profile_support.BASE + '/chat/completions'
@@ -144,6 +146,7 @@ def test_runtime_context_uses_same_provider_snapshot(harness, config_api, initia
     assert [output(r['body']) for r in wire.requests] == [old_output, new_output]
     assert (wire.requests[-1]['host'], wire.requests[-1]['protocol'], wire.requests[-1]['body']['model']) == (
         'other.example.com', 'responses', 'updated-model')
+    assert isinstance(rebuilt.session.model, OpenAICompatibleModelAdapter)
     assert rebuilt.session.model.settings.api_key == 'synthetic-updated-key'
     assert rebuilt.session.limits.context_window_tokens == int(updated)
 
@@ -203,6 +206,7 @@ def test_injected_model_keeps_global_limits_and_custom_stores(harness):
     assert runtime.store is store
     assert runtime.session.state_store is store
     assert runtime.session.journal is store
+    assert isinstance(runtime.session.pipeline.effect_store, ConfirmationEffectPlanStore)
     assert runtime.session.pipeline.effect_store.store is confirmations
     assert runtime.session.limits.context_window_tokens == 16384
     complete(turn(runtime.session))

@@ -464,11 +464,15 @@ def test_non_catalog_modes_do_not_report_catalog_totals(arguments):
 def test_overview_uses_same_live_visible_catalog_as_discovery(restriction):
     spec = next(s for s in build_tool_specs() if s.name == "agent.capabilities")
     allowed = [False]
-    options = ({restriction: lambda _: allowed[0]} if restriction != "context_requirements"
-               else {restriction: frozenset({"resource_candidates"})})
-    hidden = replace(read_tool("library.private"), **options)
+    hidden = replace(
+        read_tool("library.private"),
+        availability=(lambda _: allowed[0]) if restriction == "availability" else None,
+        authorize=(lambda _: allowed[0]) if restriction == "authorize" else None,
+        context_requirements=frozenset({"resource_candidates"}) if restriction == "context_requirements" else frozenset(),
+    )
     finder = CapabilityDiscovery(ToolCatalog([adapt_tool_spec(spec), hidden]), context={})
     context = ToolContext(capability_search=finder.search)
+    assert spec.context_handler is not None
     result = spec.context_handler({}, context)
     assert result.ok and result.status == "success"
     assert result.data["total_tools"] == result.data["discovery"]["visible_count"] == 1
@@ -485,6 +489,7 @@ def test_overview_uses_same_live_visible_catalog_as_discovery(restriction):
 
 def test_overview_without_session_catalog_does_not_fall_back_to_global_registry():
     spec = next(s for s in build_tool_specs() if s.name == "agent.capabilities")
+    assert spec.context_handler is not None
     result = spec.context_handler({}, ToolContext())
     assert not result.ok and result.status == "unavailable"
     assert "total_tools" not in result.data
@@ -496,6 +501,7 @@ def test_overview_without_session_catalog_does_not_fall_back_to_global_registry(
 def test_overview_groups_by_runtime_domain_instead_of_tool_name_prefix(name, group_title):
     specs = {spec.name: spec for spec in build_tool_specs()}
     finder = CapabilityDiscovery(ToolCatalog([adapt_tool_spec(specs["agent.capabilities"]), adapt_tool_spec(specs[name])]), context={})
+    assert specs['agent.capabilities'].context_handler is not None
     result = specs["agent.capabilities"].context_handler({}, ToolContext(capability_search=finder.search))
     groups = {group["title"]: group["tool_count"] for group in result.data["groups"]}
     assert groups[group_title] == 1
@@ -543,6 +549,7 @@ def test_ranked_discovery_is_explicitly_a_subset_not_domain_total():
     spec = next(s for s in build_tool_specs() if s.name == "agent.capabilities")
     finder = CapabilityDiscovery(ToolCatalog([adapt_tool_spec(spec), *[read_tool(f"rss.item{i}", description="feed inspection", domain="rss") for i in range(14)]]), context={})
     context = ToolContext(capability_search=finder.search)
+    assert spec.context_handler is not None
     result = spec.context_handler({"query": "feed inspection"}, context)
     assert result.ok and len(result.data["tools"]) == 6
     assert "不是完整目录" in result.summary

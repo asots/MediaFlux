@@ -240,7 +240,7 @@ class AgentLibraryPatrolScheduler:
                 logger.info("Agent 全库缺集巡检批次进度已被更新租约丢弃")
             return
 
-        outcome = str(result.status or "").strip()
+        outcome = (result.status or "").strip()
         if outcome not in _ALLOWED_OUTCOMES:
             outcome = "failed"
         projection = finalize_patrol_progress(
@@ -336,7 +336,7 @@ class AgentLibraryPatrolScheduler:
         """发送一条到期 outbox；关闭 Agent 或代次变化时无损释放。"""
         generation_guard = (
             current_agent_runtime_generation()
-            if runtime_generation is None else int(runtime_generation)
+            if runtime_generation is None else runtime_generation
         )
         with self._notification_gate:
             if not self._runtime_allows(generation_guard):
@@ -455,7 +455,7 @@ class AgentLibraryPatrolScheduler:
                 error_type=error_type,
             )
             return
-        delay = max(0, int(delay_override or 0)) or _NOTIFICATION_RETRY_DELAYS[
+        delay = max(0, (delay_override or 0)) or _NOTIFICATION_RETRY_DELAYS[
             min(attempts, len(_NOTIFICATION_RETRY_DELAYS) - 1)
         ]
         db.retry_agent_library_patrol_notification(

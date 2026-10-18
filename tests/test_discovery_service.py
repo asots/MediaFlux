@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, patch
 
 from app import database
@@ -51,7 +52,7 @@ class FakeProvider:
         if self.error:
             raise self.error
         return DiscoveryPage(
-            items=[MediaCard(provider=self.name, external_id=str(page), media_type=media_type, title=f"Page {page}")],
+            items=(MediaCard(provider=self.name, external_id=str(page), media_type=media_type, title=f"Page {page}"),),
             page=page,
             has_more=page < 2,
             provider=ProviderHealth(name=self.name),
@@ -336,8 +337,8 @@ class DiscoveryServiceTests(unittest.TestCase):
             "tmdb", "movie", "2", year="2026", release_date="2026-03-04",
             ttl_seconds=60, stale_seconds=300,
         )
-        self.provider.list_items = lambda *_args: DiscoveryPage(
-            items=[
+        self.provider.list_items = lambda *_args, **_kwargs: DiscoveryPage(
+            items=(
                 MediaCard(
                     provider="tmdb", external_id="1", media_type="movie", title="List",
                     year="2020",
@@ -346,7 +347,7 @@ class DiscoveryServiceTests(unittest.TestCase):
                     provider="tmdb", external_id="2", media_type="movie", title="Existing",
                     year="unknown", release_date="TBA",
                 ),
-            ],
+            ),
             provider=ProviderHealth(name="tmdb"),
         )
 
@@ -362,8 +363,8 @@ class DiscoveryServiceTests(unittest.TestCase):
             "tmdb", "movie", "2", year="2026", release_date="2026-03-04",
             ttl_seconds=60, stale_seconds=300,
         )
-        self.provider.list_items = lambda *_args: DiscoveryPage(
-            items=[
+        self.provider.list_items = lambda *_args, **_kwargs: DiscoveryPage(
+            items=(
                 MediaCard(
                     provider="tmdb", external_id="1", media_type="movie", title="Complete",
                     year="2020", release_date="2020-05-06",
@@ -371,7 +372,7 @@ class DiscoveryServiceTests(unittest.TestCase):
                 MediaCard(
                     provider="tmdb", external_id="2", media_type="movie", title="Missing",
                 ),
-            ],
+            ),
             provider=ProviderHealth(name="tmdb"),
         )
 
@@ -558,10 +559,12 @@ class DiscoveryServiceTests(unittest.TestCase):
             started.set()
             release.wait(2)
             return DiscoveryPage(
-                items=[MediaCard(
-                    provider="tmdb", external_id=str(page), media_type=media_type,
-                    title="Late refresh",
-                )],
+                items=(
+                    MediaCard(
+                        provider="tmdb", external_id=str(page), media_type=media_type,
+                        title="Late refresh",
+                    ),
+                ),
                 page=page, has_more=False, provider=ProviderHealth(name="tmdb"),
             )
 
@@ -722,7 +725,7 @@ class DiscoveryServiceTests(unittest.TestCase):
 
         shutdown_discovery_service()
         registry = Registry()
-        service = DiscoveryService(registry=registry, cache=self.cache)
+        service = DiscoveryService(registry=cast(ProviderRegistry, registry), cache=self.cache)
         discovery_service._service = service
         try:
             self.assertFalse(shutdown_discovery_service())
@@ -845,6 +848,7 @@ class DiscoveryServiceTests(unittest.TestCase):
 
         stored = database.get_media_external_id("douban", "confirmed-7", "movie")
         self.assertEqual((result["tmdb_id"], result["confirmed"]), ("550", True))
+        assert stored is not None
         self.assertEqual(
             (stored["tmdb_id"], stored["title"], stored["year"], stored["confirmed"]),
             ("550", "Existing Movie", "1999", 1),
@@ -870,6 +874,7 @@ class DiscoveryServiceTests(unittest.TestCase):
 
         stored = database.get_media_external_id("douban", "7", "movie")
         self.assertEqual((result["tmdb_id"], result["confirmed"]), ("551", True))
+        assert stored is not None
         self.assertEqual(
             (stored["tmdb_id"], stored["title"], stored["year"], stored["confirmed"]),
             ("551", "Correct Movie", "2000", 1),

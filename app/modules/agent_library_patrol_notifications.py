@@ -71,7 +71,7 @@ def serialize_patrol_notification_payload(projection: Any) -> str:
 def load_patrol_notification_payload(raw: object) -> dict[str, Any]:
     try:
         value = json.loads(str(raw or ""))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError("巡检通知载荷损坏") from exc
     return _validated_projection(value)
 
@@ -114,13 +114,13 @@ def build_library_patrol_event(projection: Any) -> NotificationEvent:
 
 
 def _patrol_actions_configured() -> bool:
-    enabled = str(get("TG_AGENT_ENABLED", "0") or "").strip().lower()
+    enabled = (get("TG_AGENT_ENABLED", "0") or "").strip().lower()
     if enabled not in {"1", "true", "yes", "on"}:
         return False
-    chat_id = str(get("TG_CHAT_ID", "") or "").strip()
+    chat_id = (get("TG_CHAT_ID", "") or "").strip()
     if not _ALLOWED_TELEGRAM_ID_RE.fullmatch(chat_id):
         return False
-    raw_users = str(get("TG_AGENT_ALLOWED_USER_IDS", "") or "")
+    raw_users = (get("TG_AGENT_ALLOWED_USER_IDS", "") or "")
     return any(
         _ALLOWED_TELEGRAM_ID_RE.fullmatch(part)
         for part in re.split(r"[,;\s，；]+", raw_users.strip())
@@ -156,6 +156,6 @@ def send_library_patrol_notification_result(projection: Any) -> TelegramSendResu
     )
     return TelegramSendResult(
         ok=bool(outcome),
-        error="" if outcome else str(outcome.status or "DeliveryFailed"),
+        error="" if outcome else (outcome.status or "DeliveryFailed"),
         status_code=0 if outcome else 503,
     )

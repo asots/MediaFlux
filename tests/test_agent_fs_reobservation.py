@@ -103,7 +103,7 @@ def prepare(case, observation, operations, *, source=None):
     result, fingerprint = case.domain_actions.fs_change.prepare_guangya_fs_change_confirmation(arguments, context)
     assert result.ok is True and result.data["total"] == len(operations)
     assert result.data["cloud_write"] is False
-    assert result.ok is True and result.status == "confirmation_required"
+    assert result.status == "confirmation_required"
     assert len(fingerprint) == 64
     source = result.effect_metadata.get("reobservation_source")
     assert isinstance(source, dict), "fs.change prepare 必须从冻结 plan 输出私有 reobservation_source"
@@ -608,6 +608,7 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
     assert item["previous_ref"] == current.old_ref
     saved = workspace.load_directory_observation(result.data["observation_ref"], owner=current.context.owner)
     entries = workspace.observation_entry_map(saved)
+    selected = None
     if change in {"renamed", "deeper_inside"}:
         assert item["state"] == "same_identity", "原 query 未命中但 ID 仍在原根：必须做有界身份核验，不能只报 missing"
         assert comparison["complete"] is True and item["object_ref"] != current.old_ref
@@ -673,6 +674,7 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
         assert {entry["file_id"] for entry in continued_saved["entries"]} == {MOVIE}
         assert {entry["file_id"] for entry in continued_entries.values()} == {MOVIE, FILMS["file_id"]}
         continued_selected = continued_entries[continued_item["object_ref"]]
+        assert selected is not None
         for key in ("file_id", "name", "is_dir", "etag", "parent_id", "parent_path", "source_root", "observed_by"):
             assert continued_selected[key] == selected[key]
         continued_info = [row["id"] for row in current.provider.trace if row["method"] == "file_info"]

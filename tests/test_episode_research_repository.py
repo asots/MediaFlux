@@ -8,8 +8,10 @@ import subprocess
 import sys
 import threading
 import unittest
+import unittest.mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from app import config, database_migrations, database_schema
@@ -32,10 +34,10 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         self.database_path = self.enterContext(isolated_test_database())
         self.enterContext(patch.object(repository.time, "time", return_value=STAMP))
 
-    def put(self, key=KEY, payload=None, **kwargs):
+    def put(self, key: Any = KEY, payload: Any = None, **kwargs: Any):
+        options: dict[str, Any] = {"status": "verified", "ttl_seconds": 60, **kwargs}
         return repository.put_episode_research_cache(
-            key, {} if payload is None else payload,
-            **{"status": "verified", "ttl_seconds": 60, **kwargs},
+            key, {} if payload is None else payload, **options,
         )
 
     def rows(self):
@@ -65,10 +67,13 @@ class EpisodeResearchCacheTests(unittest.TestCase):
                     "status": status, "payload": payload,
                     "expires_at": STAMP + 60, "policy_version": 2,
                 })
+                assert actual is not None
                 actual["payload"]["evidence"].clear()
-                self.assertEqual(repository.get_episode_research_cache(
+                get_episode_research_cache_result = repository.get_episode_research_cache(
                     KEY, policy_version=2,
-                )["payload"], payload)
+                )
+                assert get_episode_research_cache_result is not None
+                self.assertEqual(get_episode_research_cache_result["payload"], payload)
         self.assertEqual(len(self.rows()), 1)
 
     def test_expiration_is_exact_and_get_is_read_only(self):
@@ -84,7 +89,9 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         for ttl in (60, 2_592_000):
             with self.subTest(ttl=ttl):
                 self.put(ttl_seconds=ttl)
-                self.assertEqual(repository.get_episode_research_cache(KEY)["expires_at"], STAMP + ttl)
+                get_episode_research_cache_result_2 = repository.get_episode_research_cache(KEY)
+                assert get_episode_research_cache_result_2 is not None
+                self.assertEqual(get_episode_research_cache_result_2["expires_at"], STAMP + ttl)
         for ttl in (None, False, True, 0, 59, 2_592_001, -1, "60", 60.0, float("inf"), float("nan")):
             with self.subTest(ttl=ttl), patch.object(db, "get_conn") as connection:
                 with self.assertRaises(ValueError):
@@ -97,8 +104,7 @@ class EpisodeResearchCacheTests(unittest.TestCase):
             for operation in (self.put, repository.get_episode_research_cache,
                               repository.invalidate_episode_research_cache):
                 with self.subTest(key=key, operation=operation), patch.object(db, "get_conn") as connection:
-                    with self.assertRaises(ValueError):
-                        operation(key)
+                    self.assertRaises(ValueError, operation, key)
                     connection.assert_not_called()
 
     def test_invalid_status_and_policy_versions_rejected_before_database_access(self):
@@ -110,16 +116,15 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         for version in (None, True, False, 0, -1, "1", 1.0, 2**63, float("nan")):
             for operation in (self.put, repository.get_episode_research_cache):
                 with self.subTest(version=version, operation=operation), patch.object(db, "get_conn") as connection:
-                    with self.assertRaises(ValueError):
-                        operation(KEY, policy_version=version)
+                    self.assertRaises(ValueError, operation, KEY, policy_version=version)
                     connection.assert_not_called()
         self.put(policy_version=2**63 - 1)
-        self.assertIsNotNone(repository.get_episode_research_cache(KEY, policy_version=2**63 - 1))
+        assert (repository.get_episode_research_cache(KEY, policy_version=2**63 - 1)) is not None
 
     def test_bad_json_objects_and_nonfinite_values_are_rejected_without_writes(self):
         cyclic = {}
         cyclic["cycle"] = cyclic
-        deep = {}
+        deep: dict[str, object] = {}
         for _ in range(100):
             deep = {"nested": deep}
         invalid = [None, [], "{}", 1, True, {1: "key"}, {"nested": {None: "key"}},
@@ -130,15 +135,17 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         before = self.rows()
         for payload in invalid:
             with self.subTest(kind=type(payload)), patch.object(db, "get_conn") as connection:
-                with self.assertRaises(ValueError):
-                    repository.put_episode_research_cache(KEY, payload, status="proposal", ttl_seconds=60)
+                self.assertRaises(ValueError, repository.put_episode_research_cache,
+                                  KEY, payload, status="proposal", ttl_seconds=60)
                 connection.assert_not_called()
         self.assertEqual(self.rows(), before)
 
     def test_shared_subtree_expansion_is_bounded_but_small_aliases_are_valid(self):
-        subtree = ["value"]
+        subtree: list[object] = ["value"]
         self.put(payload={"values": [subtree, subtree]})
-        self.assertEqual(repository.get_episode_research_cache(KEY)["payload"],
+        get_episode_research_cache_result_3 = repository.get_episode_research_cache(KEY)
+        assert get_episode_research_cache_result_3 is not None
+        self.assertEqual(get_episode_research_cache_result_3["payload"],
                          {"values": [["value"], ["value"]]})
         for _ in range(48):
             subtree = [subtree, subtree]
@@ -150,11 +157,15 @@ class EpisodeResearchCacheTests(unittest.TestCase):
     def test_payload_limit_counts_compact_utf8_bytes(self):
         payload = {"x": "a" * (PAYLOAD_LIMIT - 8)}
         self.put(payload=payload)
-        self.assertEqual(repository.get_episode_research_cache(KEY)["payload"], payload)
+        get_episode_research_cache_result_4 = repository.get_episode_research_cache(KEY)
+        assert get_episode_research_cache_result_4 is not None
+        self.assertEqual(get_episode_research_cache_result_4["payload"], payload)
         for oversized in ({"x": payload["x"] + "a"}, {"x": "季" * (PAYLOAD_LIMIT // 3)}):
             with self.subTest(unicode=oversized["x"][0]), self.assertRaises(ValueError):
                 self.put(payload=oversized)
-        self.assertEqual(repository.get_episode_research_cache(KEY)["payload"], payload)
+        get_episode_research_cache_result_5 = repository.get_episode_research_cache(KEY)
+        assert get_episode_research_cache_result_5 is not None
+        self.assertEqual(get_episode_research_cache_result_5["payload"], payload)
 
     def test_malformed_persisted_payload_is_miss_and_never_deleted_on_read(self):
         self.put()
@@ -199,19 +210,19 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         self.assertIsNone(repository.invalidate_episode_research_cache(KEY.upper()))
         repository.invalidate_episode_research_cache(KEY)
         self.assertIsNone(repository.get_episode_research_cache(KEY))
-        self.assertIsNotNone(repository.get_episode_research_cache("b" * 64))
+        assert (repository.get_episode_research_cache("b" * 64)) is not None
 
     def test_expired_entries_are_evicted_before_oldest_live_entries(self):
         self.seed(511)
         self.seed(1, start=511, stamp=STAMP - 60, ttl=60)
         self.put()
         self.assertEqual(len(self.rows()), 512)
-        self.assertIsNotNone(repository.get_episode_research_cache("0" * 64))
+        assert (repository.get_episode_research_cache("0" * 64)) is not None
         self.assertIsNone(repository.get_episode_research_cache(f"{511:064x}"))
         self.put("b" * 64)
         self.assertEqual(len(self.rows()), 512)
         self.assertIsNone(repository.get_episode_research_cache("0" * 64))
-        self.assertIsNotNone(repository.get_episode_research_cache(f"{1:064x}"))
+        assert (repository.get_episode_research_cache(f"{1:064x}")) is not None
 
     def test_upsert_refreshes_age_without_evicting_unrelated_rows(self):
         self.seed()
@@ -219,9 +230,11 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         self.assertEqual(len(self.rows()), 512)
         self.put()
         self.assertIsNone(repository.get_episode_research_cache(f"{1:064x}"))
-        self.assertEqual(repository.get_episode_research_cache(
+        get_episode_research_cache_result_6 = repository.get_episode_research_cache(
             "0" * 64, policy_version=2,
-        )["payload"], {"new": 1})
+        )
+        assert get_episode_research_cache_result_6 is not None
+        self.assertEqual(get_episode_research_cache_result_6["payload"], {"new": 1})
 
     def test_failed_insert_rolls_back_expiration_cleanup(self):
         self.seed(1, ttl=60)
@@ -273,6 +286,7 @@ class EpisodeResearchCacheTests(unittest.TestCase):
             self.put(payload={"worker": worker, "values": [worker] * 100},
                      status="proposal", ttl_seconds=60 + worker)
             actual = repository.get_episode_research_cache(KEY)
+            assert actual is not None
             winner = actual["payload"]["worker"]
             self.assertEqual(actual["payload"]["values"], [winner] * 100)
             self.assertEqual(actual["expires_at"], STAMP + 60 + winner)
@@ -291,7 +305,9 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         with isolated_test_database("other.db"):
             self.assertIsNone(repository.get_episode_research_cache(KEY))
             self.put(payload={"database": "inner"})
-        self.assertEqual(repository.get_episode_research_cache(KEY)["payload"], {"database": "outer"})
+        get_episode_research_cache_result_7 = repository.get_episode_research_cache(KEY)
+        assert get_episode_research_cache_result_7 is not None
+        self.assertEqual(get_episode_research_cache_result_7["payload"], {"database": "outer"})
 
     def cache_schema(self, conn):
         return [tuple(row) for row in conn.execute(
@@ -350,14 +366,14 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         self.assertEqual(visited, [29])
         db.init_db()
         self.put()
-        self.assertIsNotNone(repository.get_episode_research_cache(KEY))
+        assert (repository.get_episode_research_cache(KEY)) is not None
 
     def test_init_db_29_to_31_uses_registered_migration(self):
         with db.get_conn() as conn:
             self.legacy_29(conn)
         migration = database_migrations._SCHEMA_MIGRATIONS[29]
-        with patch.dict(database_migrations._SCHEMA_MIGRATIONS, {29: unittest.mock.Mock(wraps=migration)}):
-            observed = database_migrations._SCHEMA_MIGRATIONS[29]
+        observed = unittest.mock.Mock(wraps=migration)
+        with patch.dict(database_migrations._SCHEMA_MIGRATIONS, {29: observed}):
             db.init_db()
             self.assertEqual(observed.call_count, 1)
         with db.get_conn() as conn:
@@ -402,7 +418,7 @@ class EpisodeResearchCacheTests(unittest.TestCase):
         self.put()
 
     def test_new_table_constraints(self):
-        base = [KEY, 1, "verified", "{}", STAMP + 60, STAMP]
+        base: list[object] = [KEY, 1, "verified", "{}", STAMP + 60, STAMP]
         for index, invalid in ((0, "bad"), (0, "g" * 64), (0, KEY + "\0extra"), (1, 0), (1, 1.5),
                                (2, "approved"), (3, b"{}"), (3, "x" * (PAYLOAD_LIMIT + 1)),
                                (4, "bad"), (5, -1)):

@@ -1,6 +1,8 @@
 """Jellyfin 联动删除回归：真实临时 STRM/索引/审计，禁止生产网络与任务。"""
 from __future__ import annotations
 
+from typing import Any
+
 import hashlib
 import json
 import re
@@ -82,7 +84,7 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
         self.values = {}
         original_get = config.get
 
-        def get_value(key, default=None):
+        def get_value(key, default=""):
             return self.values[key] if key in self.values else original_get(key, default)
 
         self.enterContext(patch.object(config, "get", side_effect=get_value))
@@ -147,7 +149,7 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
                           item.name, str(path), fingerprint(contents))
         return path
 
-    def payload(self, *paths, mode="mf", mappings=None):
+    def payload(self, *paths, mode="mf", mappings=None) -> dict[str, Any]:
         raw = ["/jellyfin/" + path.relative_to(self.media_root).as_posix() for path in paths]
         result = {"paths": raw, "mapping_mode": mode,
                   "fingerprints": {remote: fingerprint(local.read_bytes()) for remote, local in zip(raw, paths)}}
@@ -220,7 +222,7 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
             with self.subTest(remote=remote):
                 mappings = [{"local": str(self.media_root), "server": server}]
                 self.values["JELLYFIN_PATH_MAPPINGS"] = json.dumps(mappings)
-                payload = {"paths": [remote], "fingerprints": {remote: fingerprint(path.read_bytes())}}
+                payload: dict[str, Any] = {"paths": [remote], "fingerprints": {remote: fingerprint(path.read_bytes())}}
                 expected = deletion.prepare_delete(payload)
                 self.assertEqual(expected[0].path, str(path))
                 self.assertEqual(deletion.prepare_delete(dict(payload, mapping_mode="manual", mappings=mappings)), expected)
@@ -369,7 +371,9 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
         self.assertEqual(kwargs, {"queue_if_busy": False, "dedupe_key": deletion.delete_key(deletion.prepare_delete(payload))})
         self.factory.assert_not_called()
         self.assert_no_write()
-        self.assertTrue(args[2]()["ok"])
+        operation_result = args[2]()
+        assert isinstance(operation_result, dict)
+        self.assertTrue(operation_result["ok"])
         self.provider.delete.assert_called_once_with(["file-a"])
 
 

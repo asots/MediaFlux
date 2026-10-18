@@ -54,7 +54,9 @@ class TenPassReverseContractTests(unittest.TestCase):
                 gy_task_id="unknown-peer",
                 gy_staging_name="keep-stage",
             )
-            before = dict(db.get_download_request(request_id))
+            get_download_request_result = db.get_download_request(request_id)
+            assert get_download_request_result is not None
+            before = dict(get_download_request_result)
             client = Mock()
             client.add_torrent_detailed.return_value = SimpleNamespace(
                 ok=True, failure_code="", task_ids=[], retryable=False
@@ -86,7 +88,9 @@ class TenPassReverseContractTests(unittest.TestCase):
             )
             self.assertEqual(client.add_torrent_detailed.call_args.kwargs["urls"], "")
             client.close.assert_called_once()
-            after = dict(db.get_download_request(request_id))
+            get_download_request_result_2 = db.get_download_request(request_id)
+            assert get_download_request_result_2 is not None
+            after = dict(get_download_request_result_2)
             for key in (
                 "request_key",
                 "gy_status",

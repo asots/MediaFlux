@@ -1,6 +1,8 @@
 """光鸭真实单文件 BT 响应回归：根文件描述不是空清单，也不是任意缺树补零。"""
 from __future__ import annotations
 
+from typing import Any, cast
+
 import copy
 import unittest
 from unittest.mock import Mock, patch
@@ -9,7 +11,7 @@ from app.clients.guangya import GuangYaClient
 from app.modules import offline
 from tests.test_guangya_offline_selection import FakeSelectionClient
 
-SINGLE = {
+SINGLE: dict[str, Any] = {
     "msg": "success",
     "data": {
         "resType": 1,
@@ -51,7 +53,7 @@ class GuangYaSingleFileManifestTests(unittest.TestCase):
             with self.subTest(torrent=torrent is not None):
                 client = FakeSelectionClient(copy.deepcopy(SINGLE))
                 result = offline.submit_offline("magnet:?xt=urn:btih:" + "a" * 40,
-                                                client=client, torrent_data=torrent)
+                                                client=cast(GuangYaClient, client), torrent_data=torrent)
                 self.assertTrue(result["ok"], result)
                 self.assertEqual(result["selected_count"], 1)
                 self.assertEqual(result["selection_mode"], "files")
@@ -118,7 +120,7 @@ class GuangYaSingleFileManifestTests(unittest.TestCase):
                 client = FakeSelectionClient(response)
                 client.create_dir = Mock()
                 result = offline.submit_offline("magnet:?xt=urn:btih:" + "a" * 40,
-                                                client=client, isolate_task=True)
+                                                client=cast(GuangYaClient, client), isolate_task=True)
                 self.assertFalse(result["ok"])
                 self.assertIn("仅视频规则", result["error"])
                 client.create_dir.assert_not_called()

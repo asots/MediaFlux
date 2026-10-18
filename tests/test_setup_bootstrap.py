@@ -90,7 +90,9 @@ def test_single_installation_publishes_stable_and_cold_login(tmp_path):
         with TestClient(create_app()) as client:
             response = client.get('/login')
             import re
-            token = re.search(r'name="csrf_token" value="([^"]+)"', response.text).group(1)
+            search_result = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
+            assert search_result is not None
+            token = search_result.group(1)
             result = client.post('/login', data={'username': 'operator', 'password': 'test-bootstrap-password', 'csrf_token': token}, follow_redirects=False)
             return [response.status_code, result.status_code, result.headers.get('location'), client.get('/readyz').status_code]
     assert cold_run(tmp_path, login) == {'result': [200, 302, '/', 200]}
@@ -125,7 +127,9 @@ def test_recovery_residual_is_never_read_or_rebuilt_by_setup(tmp_path):
             assert client.get('/readyz').status_code == 503
             assert not (tmp_path / 'db/mediaflux.db').exists()
             assert not (config / 'user.env').exists()
-            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            search_result_2 = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+            assert search_result_2 is not None
+            token = search_result_2.group(1)
             response = client.post('/setup', data={'username':'operator', 'password':'test-bootstrap-password',
                                                   'password_confirm':'test-bootstrap-password', 'csrf_token':token},
                                    follow_redirects=False)

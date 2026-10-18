@@ -102,7 +102,7 @@ def _read_preview(token: str, owner: str, operation: str) -> dict[str, Any]:
         ):
             raise ValueError()
         return payload
-    except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+    except (ValueError, KeyError, TypeError) as exc:
         raise ValueError("元数据确认凭证无效或已过期，请重新预览") from exc
 
 

@@ -365,10 +365,13 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
             )
 
         self.assertEqual(len(actions), 2)
-        self.assertIn("测试动画", actions[0].label)
+        label = actions[0].label
+        assert isinstance(label, str)
+        self.assertIn("测试动画", label)
         self.assertEqual(actions[-1].label, "跳过此组")
         token = actions[0].callback_data.split(":")[1]
         row = db.get_organize_confirmation(token)
+        assert row is not None
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["review_status"], "waiting")
         self.assertEqual(row["confirmation_actor"], "")
@@ -385,8 +388,10 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
                 chat_id="100",
             )
         self.assertTrue(published)
+        get_organize_confirmation_result = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result is not None
         self.assertEqual(
-            db.get_organize_confirmation(token)["review_status"], "pending"
+            get_organize_confirmation_result["review_status"], "pending"
         )
 
     def test_failed_initial_notification_still_releases_review_to_web_fallback(self) -> None:
@@ -431,8 +436,10 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
             )
 
         self.assertFalse(published)
+        get_organize_confirmation_result_2 = db.get_organize_confirmation(token)
+        assert get_organize_confirmation_result_2 is not None
         self.assertEqual(
-            db.get_organize_confirmation(token)["review_status"], "pending"
+            get_organize_confirmation_result_2["review_status"], "pending"
         )
 
     def test_review_activation_failure_does_not_break_human_notification(self) -> None:
@@ -538,6 +545,7 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
             )
 
         current = db.get_organize_confirmation("silent-expired")
+        assert current is not None
         self.assertEqual(current["status"], "expired")
         dispatch.assert_not_called()
         with db.get_conn() as conn:
@@ -550,7 +558,7 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
     def test_agent_approval_claims_same_confirmation_once(self) -> None:
         self._create_review()
         row = db.claim_next_organize_confirmation_review()
-        self.assertIsNotNone(row)
+        assert (row) is not None
         decision = RecognitionReviewDecision(
             status="approved",
             candidate_index=0,
@@ -581,6 +589,7 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
 
         current = db.get_organize_confirmation("review-token")
         self.assertEqual(status, "approved")
+        assert current is not None
         self.assertEqual(current["status"], "queued")
         self.assertEqual(current["review_status"], "approved")
         self.assertEqual(current["confirmation_actor"], "agent")
@@ -592,7 +601,7 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
     def test_human_claim_cancels_running_agent_review(self) -> None:
         self._create_review()
         row = db.claim_next_organize_confirmation_review()
-        self.assertIsNotNone(row)
+        assert (row) is not None
 
         claimed = db.claim_organize_confirmation(
             "review-token", chat_id="100", selected_index=0, actor="human"
@@ -609,7 +618,7 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
     def test_disabling_review_during_model_run_preserves_human_confirmation(self) -> None:
         self._create_review()
         row = db.claim_next_organize_confirmation_review()
-        self.assertIsNotNone(row)
+        assert (row) is not None
         decision = RecognitionReviewDecision(
             status="approved",
             candidate_index=0,
@@ -635,6 +644,7 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
 
         current = db.get_organize_confirmation("review-token")
         self.assertEqual(status, "cancelled")
+        assert current is not None
         self.assertEqual(current["status"], "pending")
         self.assertEqual(current["review_status"], "cancelled")
         self.assertEqual(current["confirmation_actor"], "")
@@ -643,7 +653,7 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
     def test_superseding_card_cancels_running_review(self) -> None:
         self._create_review()
         running = db.claim_next_organize_confirmation_review()
-        self.assertIsNotNone(running)
+        assert (running) is not None
 
         db.create_organize_confirmation(
             token="replacement-token",
@@ -661,16 +671,18 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
 
         old = db.get_organize_confirmation("review-token")
         replacement = db.get_organize_confirmation("replacement-token")
+        assert old is not None
         self.assertEqual(old["status"], "expired")
         self.assertEqual(old["review_status"], "cancelled")
         self.assertTrue(old["review_completed_at"])
+        assert replacement is not None
         self.assertEqual(replacement["status"], "pending")
         self.assertEqual(replacement["review_status"], "pending")
 
     def test_cancelling_card_cancels_running_review(self) -> None:
         self._create_review()
         running = db.claim_next_organize_confirmation_review()
-        self.assertIsNotNone(running)
+        assert (running) is not None
 
         cancelled = db.cancel_organize_confirmation(
             "review-token",
@@ -685,16 +697,20 @@ class RecognitionReviewQueueTests(IsolatedDatabaseTestCase):
     def test_interrupted_review_recovers_twice_then_falls_back_to_human(self) -> None:
         self._create_review()
         first = db.claim_next_organize_confirmation_review()
+        assert first is not None
         self.assertEqual(first["review_attempts"], 1)
         self.assertEqual(db.recover_interrupted_organize_confirmation_reviews(), 1)
         second = db.claim_next_organize_confirmation_review()
+        assert second is not None
         self.assertEqual(second["review_attempts"], 2)
         self.assertEqual(db.recover_interrupted_organize_confirmation_reviews(), 1)
         third = db.claim_next_organize_confirmation_review()
+        assert third is not None
         self.assertEqual(third["review_attempts"], 3)
         self.assertEqual(db.recover_interrupted_organize_confirmation_reviews(), 1)
 
         current = db.get_organize_confirmation("review-token")
+        assert current is not None
         self.assertEqual(current["status"], "pending")
         self.assertEqual(current["review_status"], "failed")
         self.assertIsNone(db.claim_next_organize_confirmation_review())

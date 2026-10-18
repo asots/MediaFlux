@@ -1,5 +1,7 @@
 """A 工作片：真实隔离落盘后的批量回执与历史恢复业务断言。"""
 from __future__ import annotations
+from app.agent.provider_gateway import ProviderTransport
+from typing import cast
 
 import asyncio
 from types import SimpleNamespace
@@ -101,6 +103,7 @@ def test_history_two_confirmations_keep_earlier_download_receipt_after_restart(i
         # 与 Web 恢复端一致：带当前 candidate_result_ref 的消息由候选卡取代。
         visible = [m["content"] for m in messages if not m.get("candidate_result_ref")]
         assert any(f"下载请求 #{first_id}" in text for text in visible), messages
+        assert restored is not None
         assert f"下载请求 #{second_id}" in restored["last_result"]["text"]
         assert sum(bool(m.get("candidate_result_ref")) for m in messages) == 1
     asyncio.run(exercise())
@@ -277,7 +280,7 @@ def test_provider_extended_list_keeps_later_selection_resolvable(isolated_chain)
     for spec in _catalog().operations():
         catalog.register(replace(spec, max_items=100))
     transport = _FakeTransport()
-    gateway = ProviderGateway(catalog=catalog, transports=[transport])
+    gateway = ProviderGateway(catalog=catalog, transports=cast(list[ProviderTransport], [transport]))
     context = ToolContext(owner=OWNER, session_id=SESSION)
     payload = ProviderPayload(summary="50 项", source="demo", data={
         "items": [{"__object_id": f"raw-{n}", "__object_kind": "demo_item", "name": f"条目 {n}"} for n in range(50)],

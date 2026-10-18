@@ -1,6 +1,8 @@
 """确认终态的会话回写不能清除同 generation 的另一张票据。"""
 from __future__ import annotations
 
+from tests.support import assert_present
+
 import unittest
 from dataclasses import replace
 from unittest.mock import Mock, patch
@@ -55,6 +57,7 @@ class ConfirmationSessionPointerTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(model=Mock(), catalog=catalog,
             retriever=CapabilityRetriever(minimum=1, maximum=1), pipeline=pipeline, state_store=store)
         prepared = await pipeline.execute("downloads.submit", {}, context=context)
+        assert prepared.effect_plan is not None
         return session, context, prepared.effect_plan.plan_id, execute
 
     async def test_failed_old_confirmation_retains_current_ticket_and_result_history(self):
@@ -74,8 +77,9 @@ class ConfirmationSessionPointerTests(unittest.IsolatedAsyncioTestCase):
                 old = await session.pipeline.execute("downloads.submit", {}, context=context)
                 new = await session.pipeline.execute("downloads.submit", {}, context=context)
                 events = [e async for e in session.confirm(owner=context.owner,
-                    session_id=context.session_id, plan_id=old.effect_plan.plan_id)]
+                    session_id=context.session_id, plan_id=assert_present(old.effect_plan).plan_id)]
                 state = await session.state_store.load(owner=context.owner, session_id=context.session_id)
+                assert new.effect_plan is not None
                 self.assertEqual(state.pending_effect_plan_id, new.effect_plan.plan_id)
                 self.assertEqual(events[-1].type.value, "turn.failed")
                 self.assertEqual(state.conversation, history)

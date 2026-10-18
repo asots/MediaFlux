@@ -84,7 +84,9 @@ db.init_db()
             rules.finish_rule(good["id"], second[0]["lease_token"], tomorrow)
         )
         self.assertEqual(rules.claim_due_rules(self.clock + timedelta(minutes=6)), [])
-        self.assertTrue(rules.get_rule("restart-audit", broken["id"])["settings_error"])
+        get_rule_result = rules.get_rule("restart-audit", broken["id"])
+        assert get_rule_result is not None
+        self.assertTrue(get_rule_result["settings_error"])
 
     def test_uncommitted_child_claim_is_rolled_back_after_abrupt_exit(self):
         good = self._rule()
@@ -102,6 +104,7 @@ with db.get_conn() as conn:
             expected_exit=17,
         )
         current = rules.get_rule("restart-audit", good["id"])
+        assert current is not None
         self.assertEqual((current["lease_token"], current["lease_until"]), ("", ""))
         self.assertEqual(
             [row["id"] for row in rules.claim_due_rules(self.clock)], [good["id"]]
@@ -117,6 +120,7 @@ with db.get_conn() as conn:
             )
         db.init_db()
         damaged = rules.get_rule("restart-audit", row["id"])
+        assert damaged is not None
         self.assertTrue(damaged["settings_error"])
         fixed = rules.save_rule(
             "restart-audit",
@@ -127,6 +131,7 @@ with db.get_conn() as conn:
             rule_id=row["id"],
             expected_revision=damaged["revision"],
         )
+        assert fixed is not None
         self.assertNotIn("settings_error", fixed)
         self.assertFalse(rules.owns_lease(row["id"], old["lease_token"]))
         self.assertFalse(

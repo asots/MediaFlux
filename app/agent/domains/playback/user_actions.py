@@ -576,7 +576,7 @@ def preview_media_user(
             )
     else:
         data.update(
-            affected=len(checked.get("ids", checked.get("entries", []))),
+            affected=len(checked["ids"] if "ids" in checked else checked.get("entries", [])),
             items=checked.get("names", []),
             scope="播放列表成员关系",
             may_be_shared=operation != "media.playlist.create",
@@ -694,7 +694,7 @@ def execute_media_user(
                 "name": checked["name"],
                 "action": checked["action"],
                 "member_count": len(after["members"]),
-                "affected": len(checked.get("ids", checked.get("entries", [])))
+                "affected": len(checked["ids"] if "ids" in checked else checked.get("entries", []))
                 if changed
                 else 0,
                 "verification": "已回读验证",

@@ -16,7 +16,6 @@ from app.modules.naming import (
 from app.modules.recognition_policy import normalize_automatic_match_preset
 from app.modules.scraper import MatchResult
 
-
 DEFAULT_ORGANIZE_VIDEO_EXTS = (
     "mkv", "mp4", "ts", "m2ts", "mts", "avi", "mov", "m4v", "webm",
     "mpeg", "mpg", "wmv", "flv", "vob", "tp", "f4v", "rm", "rmvb",
@@ -72,7 +71,7 @@ def automatic_match_requires_confirmation(
     if str(decision.get("reason") or "") != "below_threshold":
         return True
     try:
-        if abs(float(decision.get("score")) - confidence) > 0.001:
+        if abs(float(decision.get("score", "")) - confidence) > 0.001:
             return True
     except (TypeError, ValueError):
         return True
@@ -143,7 +142,7 @@ class OrganizeRules:
     def from_config(cls, target_dir_id: str = "") -> "OrganizeRules":
         """读取 Web/TG/自动入库共用的正式整理配置。"""
         return cls(
-            target_dir_id=str(target_dir_id or get("GY_ORGANIZE_TARGET_DIR", "0") or "0"),
+            target_dir_id=(target_dir_id or get("GY_ORGANIZE_TARGET_DIR", "0") or "0"),
             add_kids=get_bool("GY_ORGANIZE_ADD_KIDS", False),
             add_concert=get_bool("GY_ORGANIZE_ADD_CONCERT", False),
             region_split=get_bool("GY_ORGANIZE_REGION_SPLIT", True),
@@ -202,7 +201,7 @@ class OrganizeRules:
         selected = self.selected_nsfw_source_ids()
         if not self.nsfw_enabled or not selected:
             return replace(self, nsfw_enabled=False, nsfw_exclusive=False)
-        source = str(source_id or "").strip()
+        source = (source_id or "").strip()
         if source not in selected and source not in {"", "0"}:
             from app.repositories.download_requests import get_guangya_staging_parent
 
@@ -230,8 +229,8 @@ class OrganizeRules:
 
     def for_local_source(self, media_type: str) -> "OrganizeRules":
         """把全局规则收敛为一个本地来源的实际识别边界。"""
-        selected = str(media_type or "").strip().lower() == "nsfw"
-        active = bool(self.nsfw_enabled and selected)
+        selected = (media_type or "").strip().lower() == "nsfw"
+        active = (self.nsfw_enabled and selected)
         return replace(self, nsfw_enabled=active, nsfw_exclusive=active)
 
 

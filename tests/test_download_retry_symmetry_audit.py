@@ -72,7 +72,9 @@ class DownloadRetrySymmetryAuditTests(unittest.TestCase):
             ):
                 with self.subTest(target=target, peer_status=peer_status):
                     request_id = self.request(target, peer_status)
-                    before = dict(db.get_download_request(request_id))
+                    get_download_request_result_7 = db.get_download_request(request_id)
+                    assert get_download_request_result_7 is not None
+                    before = dict(get_download_request_result_7)
                     selected = "_submit_qb" if target == "qb" else "_submit_guangya"
                     other = "_submit_guangya" if target == "qb" else "_submit_qb"
                     with (
@@ -91,7 +93,9 @@ class DownloadRetrySymmetryAuditTests(unittest.TestCase):
                     self.assertEqual(result["request_id"], request_id)
                     submit.assert_called_once()
                     untouched.assert_not_called()
-                    after = dict(db.get_download_request(request_id))
+                    get_download_request_result_8 = db.get_download_request(request_id)
+                    assert get_download_request_result_8 is not None
+                    after = dict(get_download_request_result_8)
                     self.assertEqual(after["request_key"], before["request_key"])
                     preserved = (
                         (
@@ -128,6 +132,7 @@ class DownloadRetrySymmetryAuditTests(unittest.TestCase):
                 self.assertTrue(result["ok"], result)
                 self.assertTrue(result["created"])
                 old = db.get_download_request(request_id)
+                assert old is not None
                 self.assertEqual(old["gy_status"], "completed")
                 self.assertEqual(old["organize_started"], 0)
                 self.assertEqual(old["organize_status"], "settle_wait")
@@ -143,6 +148,7 @@ class DownloadRetrySymmetryAuditTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         old = db.get_download_request(request_id)
         self.assertTrue(result["source_attention_preserved"])
+        assert old is not None
         self.assertEqual(old["local_import_status"], "failed")
         self.assertEqual(old["qb_status"], "completed")
         self.assertIn(request_id, {row["id"] for row in db.list_download_requests_requiring_attention()})
@@ -162,16 +168,20 @@ class DownloadRetrySymmetryAuditTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertTrue(result["source_attention_preserved"])
                 self.assertEqual(result["request_id"], request_id)
+                get_download_request_result = db.get_download_request(request_id)
+                assert get_download_request_result is not None
                 self.assertEqual(
-                    db.get_download_request(request_id)["gy_status"], "downloading"
+                    get_download_request_result["gy_status"], "downloading"
                 )
                 expected = (
                     "outcome_unknown"
                     if backend_result.get("failure_code")
                     else "failed"
                 )
+                get_download_request_result_2 = db.get_download_request(request_id)
+                assert get_download_request_result_2 is not None
                 self.assertEqual(
-                    db.get_download_request(request_id)["qb_status"], expected
+                    get_download_request_result_2["qb_status"], expected
                 )
 
     def test_reentrant_retry_cannot_submit_twice(self):
@@ -210,7 +220,9 @@ class DownloadRetrySymmetryAuditTests(unittest.TestCase):
             result = dispatcher.resubmit_download_request(request_id, "qb")
         self.assertFalse(result["ok"])
         backend.assert_not_called()
-        self.assertEqual(db.get_download_request(request_id)["status"], "cancelled")
+        get_download_request_result_3 = db.get_download_request(request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["status"], "cancelled")
 
     def test_http_retry_keeps_previously_resolved_torrent_identity(self):
         request_id = self.request(kind="http")
@@ -226,7 +238,9 @@ class DownloadRetrySymmetryAuditTests(unittest.TestCase):
         ):
             result = dispatcher.resubmit_download_request(request_id, "qb")
         self.assertTrue(result["ok"], result)
-        self.assertEqual(db.get_download_request(request_id)["qb_task_id"], "a" * 40)
+        get_download_request_result_4 = db.get_download_request(request_id)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["qb_task_id"], "a" * 40)
         untouched.assert_not_called()
 
 
@@ -255,15 +269,21 @@ class DownloadRetrySymmetryAuditTests(unittest.TestCase):
         sub = db.add_rss_subscription("rollback", "https://fixture.invalid/rss", download_method="guangya")
         entry = db.add_rss_entry_with_media(sub, "rollback", "rollback")["id"]
         self.assertTrue(db.claim_rss_entry(entry))
-        bind_rss_entry_download(entry, db.get_download_request(request_id)["request_key"], "guangya")
+        get_download_request_result_5 = db.get_download_request(request_id)
+        assert get_download_request_result_5 is not None
+        bind_rss_entry_download(entry, get_download_request_result_5["request_key"], "guangya")
         db.record_rss_entry_failure(entry, "guangya_manifest_unavailable", True)
         with self.assertRaisesRegex(RuntimeError, "rollback fixture"):
             with db.get_conn() as conn:
                 _update_download_request_conn(conn, request_id, {"gy_status": "submitted"}, db.now())
                 self.assertEqual(conn.execute("SELECT status FROM rss_entries WHERE id=?", (entry,)).fetchone()[0], "downloaded")
                 raise RuntimeError("rollback fixture")
-        self.assertEqual(db.get_download_request(request_id)["gy_status"], "failed")
-        self.assertEqual(db.get_rss_entry(entry)["status"], "failed")
+        get_download_request_result_6 = db.get_download_request(request_id)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6["gy_status"], "failed")
+        get_rss_entry_result = db.get_rss_entry(entry)
+        assert get_rss_entry_result is not None
+        self.assertEqual(get_rss_entry_result["status"], "failed")
 
 
 class GuangYaRetryDestinationTests(unittest.TestCase):
@@ -290,6 +310,7 @@ class GuangYaRetryDestinationTests(unittest.TestCase):
                 ):
                     dispatcher.dispatch_request(request_id, targets, gy_target_dir="adult-folder", gy_target_name="NewNsfw")
                 saved = db.get_download_request(request_id)
+                assert saved is not None
                 self.assertEqual(saved["gy_requested_target_dir"], "adult-folder")
                 self.assertEqual(saved["gy_requested_nsfw"], 1)
                 with patch.object(dispatcher, "submit_offline", return_value={"ok": True, "task_ids": ["accepted"]}) as submit:
@@ -298,6 +319,7 @@ class GuangYaRetryDestinationTests(unittest.TestCase):
                 self.assertEqual(submit.call_args.kwargs["target_dir_id"], "adult-folder")
                 self.assertEqual(result["request_id"] == request_id, active_peer)
                 successor = db.get_download_request(result["request_id"])
+                assert successor is not None
                 self.assertEqual(successor["gy_requested_target_dir"], "adult-folder")
                 self.assertEqual(successor["gy_requested_nsfw"], 1)
 
@@ -335,12 +357,16 @@ class GuangYaRetryDestinationTests(unittest.TestCase):
     def test_existing_database_adds_routing_columns_without_changing_history(self):
         request_id = self.request(6)
         db.update_download_request(request_id, status="failed", gy_staging_parent_dir="adult-folder")
-        original = dict(db.get_download_request(request_id))
+        get_download_request_result_9 = db.get_download_request(request_id)
+        assert get_download_request_result_9 is not None
+        original = dict(get_download_request_result_9)
         with db.get_conn() as conn:
             conn.execute("ALTER TABLE download_requests DROP COLUMN gy_requested_target_dir")
             conn.execute("ALTER TABLE download_requests DROP COLUMN gy_requested_nsfw")
         db.init_db()
-        restored = dict(db.get_download_request(request_id))
+        get_download_request_result_10 = db.get_download_request(request_id)
+        assert get_download_request_result_10 is not None
+        restored = dict(get_download_request_result_10)
         self.assertEqual(restored["gy_requested_target_dir"], "")
         self.assertEqual(restored["gy_requested_nsfw"], 0)
         for key in ("id", "source_value", "status", "gy_staging_parent_dir"):

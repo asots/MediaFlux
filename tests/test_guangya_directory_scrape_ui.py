@@ -10,10 +10,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from tests.support import InitializedWebTestCase
-
 from app.config import web_credentials
 from app.main import create_app
+from tests.support import InitializedWebTestCase
 
 try:
     from playwright.sync_api import sync_playwright
@@ -181,7 +180,7 @@ class GuangYaDirectoryScrapeUiTests(InitializedWebTestCase):
             r"function parseGuangYaDirName\(rawName\) \{([\s\S]*?)\n\}\n\nconst gyNameCollator",
             html,
         )
-        self.assertIsNotNone(match)
+        assert (match) is not None
         node_script = textwrap.dedent(
             f"""
             function parseGuangYaDirName(rawName) {{{match.group(1)}
@@ -478,6 +477,7 @@ class GuangYaDirectDeleteBrowserTests(unittest.TestCase):
         )
         if not cls.browser_path:
             raise unittest.SkipTest("未找到可用的本机 Chrome/Chromium")
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         try:
             cls.browser = cls.playwright.chromium.launch(

@@ -14,8 +14,8 @@ from app import database as db
 from app.clients.base import close_media_server_client
 from app.logger import get_logger
 from app.modules.local_directory_browser import VIRTUAL_ROOT, browse_local_directories
+from app.modules.local_media_models import LOCAL_MEDIA_CATEGORIES
 from app.modules.local_path_mapping import (
-    PathMappingError,
     require_container_absolute_path,
     validate_source_target_roots,
 )
@@ -26,8 +26,10 @@ from app.modules.media_server_path_mapping import (
     media_server_path_is_within,
     parse_media_server_path_mappings,
 )
-from app.modules.local_media_models import LOCAL_MEDIA_CATEGORIES
-from app.modules.media_server_profiles import MediaServerProfile, list_configured_profiles
+from app.modules.media_server_profiles import (
+    MediaServerProfile,
+    list_configured_profiles,
+)
 from app.modules.process_lock import CrossProcessLock
 from app.modules.strm import (
     STRM_SUBDIR,
@@ -131,10 +133,10 @@ def _probe_profile(profile: MediaServerProfile) -> tuple[str, list[dict[str, Any
 def _local_sources() -> list[dict[str, Any]]:
     return [
         {
-            "id": int(source.id),
+            "id": source.id,
             "name": source.name,
             "local_root": source.local_root,
-            "enabled": bool(source.enabled),
+            "enabled": source.enabled,
         }
         for source in db.list_local_media_sources(owner=_OWNER)
     ]
@@ -187,11 +189,11 @@ def _strm_directory_options(
 
     source_roots: list[tuple[str, str, Path]] = []
     for item in plans:
-        rel_prefix = str(item.get("rel_prefix") or "").strip()
+        rel_prefix = (item.get("rel_prefix") or "").strip()
         safe_prefix = safe_path_component(rel_prefix) if rel_prefix else ""
         source_path = root_path / safe_prefix if safe_prefix else root_path
-        source_id = str(item.get("id") or "")
-        source_name = str(item.get("name") or "STRM 来源")
+        source_id = (item.get("id") or "")
+        source_name = (item.get("name") or "STRM 来源")
         source_roots.append((source_id, source_name, source_path))
         if source_path != root_path and source_path.is_dir():
             add_option(
@@ -226,7 +228,7 @@ def _strm_directory_options(
 
 
 def _strm_summary() -> dict[str, Any]:
-    root = str(config.get("STRM_ROOT", "") or "").strip()
+    root = (config.get("STRM_ROOT", "") or "").strip()
     sources, error = parse_strm_sources(
         config.get("GY_STRM_SOURCE_DIRS", ""),
         require_nonempty=False,
@@ -235,7 +237,7 @@ def _strm_summary() -> dict[str, Any]:
     output_root = str(Path(root) / STRM_SUBDIR) if root else ""
     source_payload = []
     for item in plans:
-        rel_prefix = str(item.get("rel_prefix") or "").strip()
+        rel_prefix = (item.get("rel_prefix") or "").strip()
         safe_prefix = safe_path_component(rel_prefix) if rel_prefix else ""
         source_payload.append({
             "id": item["id"],
@@ -254,7 +256,7 @@ def _strm_summary() -> dict[str, Any]:
 
 def _strm_output_root() -> Path:
     """返回当前实例真实的 STRM 输出根，目录浏览不得越过此边界。"""
-    root = str(config.get("STRM_ROOT", "") or "").strip()
+    root = (config.get("STRM_ROOT", "") or "").strip()
     if not root:
         raise ValueError("尚未配置 STRM 本地根目录")
     output_root = Path(root).expanduser() / STRM_SUBDIR
@@ -271,11 +273,11 @@ def list_strm_directories(request: Request, path: str = ""):
     require_api_login(request)
     try:
         output_root = _strm_output_root()
-        requested = str(path or "").strip()
+        requested = (path or "").strip()
         if not requested or requested == VIRTUAL_ROOT:
             requested = str(output_root)
         return browse_local_directories(requested, allowed_root=output_root)
-    except (PathMappingError, ValueError, FileNotFoundError) as exc:
+    except (ValueError, FileNotFoundError) as exc:
         return api_error(str(exc), 400)
     except OSError as exc:
         logger.warning("STRM 目录浏览失败 type=%s", type(exc).__name__)
@@ -288,7 +290,7 @@ def list_local_directories(request: Request, path: str = VIRTUAL_ROOT):
     require_api_login(request)
     try:
         return browse_local_directories(path)
-    except (PathMappingError, ValueError, FileNotFoundError) as exc:
+    except (ValueError, FileNotFoundError) as exc:
         return api_error(str(exc), 400)
     except OSError as exc:
         logger.warning("本地归档目录浏览失败 type=%s", type(exc).__name__)
@@ -306,7 +308,7 @@ def media_library_overview(request: Request):
             provider, libraries, error = future.result()
             probes[provider] = (libraries, error)
 
-    servers = []
+    servers: list[dict[str, Any]] = []
     for profile in profiles:
         mapping_key, fallback_key = _MAPPING_CONFIG[profile.server_type]
         mappings, mapping_error = _mapping_payload(profile.server_type)
@@ -369,13 +371,13 @@ def _optional_text(payload: dict[str, Any], key: str, *, maximum: int = 2048) ->
     return text
 
 
-def _validated_local_bindings(raw: object) -> list[dict[str, object]]:
+def _validated_local_bindings(raw: object) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         raise ValueError("local_bindings 必须是数组")
-    sources = {int(item.id): item for item in db.list_local_media_sources(owner=_OWNER)}
+    sources = {item.id: item for item in db.list_local_media_sources(owner=_OWNER)}
     if len(raw) > max(64, len(sources) * len(LOCAL_MEDIA_CATEGORIES)):
         raise ValueError("本地归档映射数量过多")
-    normalized: list[dict[str, object]] = []
+    normalized: list[dict[str, Any]] = []
     seen: set[tuple[int, str]] = set()
     for item in raw:
         if not isinstance(item, dict):
@@ -480,7 +482,7 @@ def save_media_library_mappings(request: Request, data: dict | None = Body(defau
                     type(exc).__name__,
                 )
             return {"success": True, "local_bindings": _local_bindings()}
-    except (ValueError, LookupError, PathMappingError) as exc:
+    except (ValueError, LookupError) as exc:
         return api_error(str(exc), 400)
     except Exception as exc:
         logger.error("统一媒体库映射保存失败 type=%s", type(exc).__name__)

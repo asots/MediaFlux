@@ -17,14 +17,14 @@ def _database() -> "ModuleType":
 
 
 def _future_stamp(seconds: int) -> str:
-    return (datetime.now() + timedelta(seconds=max(0, int(seconds)))).strftime(
+    return (datetime.now() + timedelta(seconds=max(0, seconds))).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
 
 def _safe_error(value: object, limit: int = 500) -> str:
     text = " ".join(str(value or "").split())
-    return text[: max(40, int(limit))]
+    return text[: max(40, limit)]
 
 
 def enqueue_organize_probe_completion(
@@ -40,7 +40,7 @@ def enqueue_organize_probe_completion(
     """登记整理成功但在线探测未完成的文件；同一日志幂等。"""
     database = _database()
     stamp = database.now()
-    next_attempt = _future_stamp(max(30, int(delay_seconds)))
+    next_attempt = _future_stamp(max(30, delay_seconds))
     payload = json.dumps(rules if isinstance(rules, dict) else {}, ensure_ascii=False)
     from app.modules.organize_probe_notifications import normalize_notification_context
 
@@ -55,13 +55,13 @@ def enqueue_organize_probe_completion(
             "rel_dir=excluded.rel_dir,rules_json=excluded.rules_json,"
             "max_attempts=excluded.max_attempts,updated_at=excluded.updated_at",
             (
-                int(organize_log_id), str(source_id or ""), str(rel_dir or ""), payload, context_json,
-                max(1, min(int(max_attempts or 2), 5)), next_attempt, stamp, stamp,
+                organize_log_id, (source_id or ""), (rel_dir or ""), payload, context_json,
+                max(1, min((max_attempts or 2), 5)), next_attempt, stamp, stamp,
             ),
         )
         row = conn.execute(
             "SELECT id FROM organize_probe_queue WHERE organize_log_id=?",
-            (int(organize_log_id),),
+            (organize_log_id,),
         ).fetchone()
         return int(row["id"]) if row else 0
 
@@ -71,8 +71,8 @@ def claim_due_organize_probe_jobs(
 ) -> list[dict]:
     database = _database()
     stamp = database.now()
-    lease_until = time.time() + max(30, int(lease_seconds or 900))
-    safe_limit = max(1, min(int(limit or 1), 20))
+    lease_until = time.time() + max(30, (lease_seconds or 900))
+    safe_limit = max(1, min((limit or 1), 20))
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
@@ -86,7 +86,7 @@ def claim_due_organize_probe_jobs(
             cur = conn.execute(
                 "UPDATE organize_probe_queue SET status='running',lease_owner=?,lease_until=?,"
                 "updated_at=? WHERE id=? AND status IN ('queued','retry_wait')",
-                (str(owner or ""), lease_until, stamp, int(row["id"])),
+                ((owner or ""), lease_until, stamp, int(row["id"])),
             )
             if cur.rowcount != 1:
                 continue
@@ -113,7 +113,7 @@ def complete_organize_probe_job(
             "pending_strm_changes_json='[]' "
             "WHERE id=? AND status='running' AND lease_owner=? AND lease_until>? "
             "AND (pending_strm_changes_json='[]' OR ?)",
-            (stamp, stamp, int(job_id), str(owner or ""), time.time(), bool(handoff_completed)),
+            (stamp, stamp, job_id, (owner or ""), time.time(), handoff_completed),
         )
         return cur.rowcount == 1
 
@@ -127,10 +127,10 @@ def cancel_organize_probe_job(
         "UPDATE organize_probe_queue SET status='cancelled',lease_owner='',lease_until=0,"
         "last_error_type='Cancelled',last_error=?,completed_at=?,updated_at=? WHERE id=?"
     )
-    params: list[object] = [_safe_error(reason), stamp, stamp, int(job_id)]
+    params: list[object] = [_safe_error(reason), stamp, stamp, job_id]
     if owner:
         sql += " AND status='running' AND lease_owner=?"
-        params.append(str(owner))
+        params.append(owner)
     with database.get_conn() as conn:
         cur = conn.execute(sql, params)
         return cur.rowcount == 1
@@ -147,8 +147,8 @@ def release_organize_probe_job(
             "lease_owner='',lease_until=0,last_error_type='Busy',last_error=?,updated_at=? "
             "WHERE id=? AND status='running' AND lease_owner=?",
             (
-                _future_stamp(max(5, int(delay_seconds))), _safe_error(reason), stamp,
-                int(job_id), str(owner or ""),
+                _future_stamp(max(5, delay_seconds)), _safe_error(reason), stamp,
+                job_id, (owner or ""),
             ),
         )
         return cur.rowcount == 1
@@ -169,14 +169,14 @@ def fail_or_retry_organize_probe_job(
         row = conn.execute(
             "SELECT attempts,max_attempts FROM organize_probe_queue "
             "WHERE id=? AND status='running' AND lease_owner=?",
-            (int(job_id), str(owner or "")),
+            (job_id, (owner or "")),
         ).fetchone()
         if not row:
             return "stale"
         attempts = int(row["attempts"] or 0) + 1
         exhausted = attempts >= max(1, int(row["max_attempts"] or 1))
         status = "failed" if exhausted else "retry_wait"
-        delay = max(30, int(base_backoff_seconds or 600)) * (2 ** max(0, attempts - 1))
+        delay = max(30, (base_backoff_seconds or 600)) * (2 ** max(0, attempts - 1))
         next_attempt = stamp if exhausted else _future_stamp(min(delay, 3600))
         cur = conn.execute(
             "UPDATE organize_probe_queue SET status=?,attempts=?,next_attempt_at=?,"
@@ -184,8 +184,8 @@ def fail_or_retry_organize_probe_job(
             "completed_at=CASE WHEN ?='failed' THEN ? ELSE completed_at END,updated_at=? "
             "WHERE id=? AND status='running' AND lease_owner=?",
             (
-                status, attempts, next_attempt, str(error_type or "Error")[:100],
-                _safe_error(error), status, stamp, stamp, int(job_id), str(owner or ""),
+                status, attempts, next_attempt, (error_type or "Error")[:100],
+                _safe_error(error), status, stamp, stamp, job_id, (owner or ""),
             ),
         )
         return status if cur.rowcount == 1 else "stale"
@@ -237,13 +237,13 @@ def commit_organize_probe_rename(
             "SELECT id FROM organize_probe_queue WHERE id=? AND organize_log_id=? "
             "AND status='running' AND lease_owner=? AND lease_until>? "
             "AND pending_strm_changes_json='[]'",
-            (int(job_id), int(organize_log_id), str(owner or ""), time.time()),
+            (job_id, organize_log_id, (owner or ""), time.time()),
         ).fetchone()
         if not owner or job is None:
             return False
         row = conn.execute(
             "SELECT status,legacy_incomplete FROM organize_log WHERE id=?",
-            (int(organize_log_id),),
+            (organize_log_id,),
         ).fetchone()
         if (
             row is None or str(row["status"] or "") != "success"
@@ -257,7 +257,7 @@ def commit_organize_probe_rename(
                 (
                     str(item.get("current_name") or ""),
                     str(item.get("target_name") or item.get("current_name") or ""),
-                    stamp, int(item.get("id") or 0), int(organize_log_id),
+                    stamp, int(item.get("id") or 0), organize_log_id,
                     str(item.get("expected_name") or ""),
                 ),
             )
@@ -266,7 +266,7 @@ def commit_organize_probe_rename(
         cur = conn.execute(
             "UPDATE organize_log SET current_name=?,new_path=?,error='',version=version+1,"
             "updated_at=? WHERE id=? AND status='success' AND legacy_incomplete=0",
-            (str(current_name or ""), str(new_path or ""), stamp, int(organize_log_id)),
+            ((current_name or ""), (new_path or ""), stamp, organize_log_id),
         )
         if cur.rowcount != 1:
             raise RuntimeError("整理日志快照已变化，拒绝提交媒体规格补全")
@@ -274,7 +274,7 @@ def commit_organize_probe_rename(
             "UPDATE organize_probe_queue SET pending_strm_changes_json=?,updated_at=? "
             "WHERE id=? AND organize_log_id=? AND status='running' "
             "AND lease_owner=? AND lease_until>? AND pending_strm_changes_json='[]'",
-            (pending, stamp, int(job_id), int(organize_log_id), str(owner), time.time()),
+            (pending, stamp, job_id, organize_log_id, owner, time.time()),
         )
         if cur.rowcount != 1:
             # 此处不能 return False：必须让审计更新一并回滚。

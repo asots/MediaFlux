@@ -113,7 +113,7 @@ def task_changed(state):
     record["expected_task"] = identity(task)
 
 
-def interrupt_read_wait(state, now):
+def interrupt_read_wait(state: SessionState, now: float) -> bool:
     """调用方已独占续行 OS 锁；开始过的 READ 只能收束，不能重放。"""
     record = state.metadata.get("read_wait") or {}
     if record.get("state") != "running":
@@ -189,7 +189,7 @@ def apply_actions(state, lease, updates, now, conn=None):
             if not isinstance(permit, _ReadPermitRejected) or permit.rate_limit["reason"] != "quota":
                 raise ValueError("untrusted READ rejection")
             due = permit.rate_limit["retry_at_epoch"]
-            if (type(due) not in (float, int) or not math.isfinite(due) or due < now
+            if ((type(due) is not float and type(due) is not int) or not math.isfinite(due) or due < now
                     or state.pending_effect_plan_id or task["status"] in {"complete", "cancelled"}
                     or budget["wait_segments"] >= MAX_WAIT_SEGMENTS
                     or budget["model_spent"] >= budget["model_limit"]
@@ -429,7 +429,7 @@ def apply_effect_action(state, lease, update, now):
         if not isinstance(permit, _ReadPermitRejected) or permit.rate_limit["reason"] != "quota":
             raise ValueError("untrusted READ rejection")
         due = permit.rate_limit["retry_at_epoch"]
-        if (type(due) not in (float, int) or not math.isfinite(due) or not now <= due < record["expires_at"]
+        if ((type(due) is not float and type(due) is not int) or not math.isfinite(due) or not now <= due < record["expires_at"]
                 or state.pending_effect_plan_id or budget["wait_segments"] >= MAX_WAIT_SEGMENTS
                 or budget["model_spent"] >= budget["model_limit"] or budget["tool_spent"] >= budget["tool_limit"]
                 or budget["wait_seconds_spent"] + due - now > MAX_WAIT_SECONDS):

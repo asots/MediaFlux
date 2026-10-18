@@ -1,6 +1,13 @@
 """整理并行规划与单 Writer 边界回归测试。"""
 from __future__ import annotations
 
+from app.modules.process_lock import CrossProcessLock
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+from app.modules.organize_scan import OrganizeScanResult
+
 import os
 import threading
 import time
@@ -63,7 +70,7 @@ class OrganizeWorkerBudgetTests(unittest.TestCase):
 
 class OrganizeWholeSourceSingleWriterTests(unittest.TestCase):
     def test_scoped_whole_source_finalizes_and_executes_under_shared_gate(self):
-        organizer = Organizer(client=SimpleNamespace(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=cast(TMDBScraper, object()))
         gate = threading.Lock()
         context = OrganizeContext(
             source_dir_id="root",
@@ -137,7 +144,7 @@ class OrganizeWholeSourceSingleWriterTests(unittest.TestCase):
 
 class OrganizeGroupParallelPlanningTests(unittest.TestCase):
     def test_planning_overlaps_but_writer_commits_in_source_order(self):
-        organizer = Organizer(client=SimpleNamespace(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=cast(TMDBScraper, object()))
         tasks = [
             OrganizeGroupTask(
                 source_dir_id="root",
@@ -209,7 +216,7 @@ class OrganizeGroupParallelPlanningTests(unittest.TestCase):
                 return _PreparedOrganizeGroup(
                     task=task,
                     stats=stats,
-                    scan_result=SimpleNamespace(),
+                    scan_result=cast(OrganizeScanResult, SimpleNamespace()),
                     planning_result=OrganizePlanningResult(
                         plans=[plan], subtitle_plans_by_video={}
                     ),
@@ -265,7 +272,7 @@ class OrganizeGroupParallelPlanningTests(unittest.TestCase):
         organizer.close()
 
     def test_shared_executor_waits_for_running_planners_before_returning_on_cancel(self):
-        organizer = Organizer(client=SimpleNamespace(), scraper=object())
+        organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=cast(TMDBScraper, object()))
         tasks = [
             OrganizeGroupTask(
                 source_dir_id="root",
@@ -386,9 +393,9 @@ class OrganizeGroupParallelPlanningTests(unittest.TestCase):
                     return dict(self.cached)
 
         scraper = _SharedDetailScraper()
-        coordinator = Organizer(client=SimpleNamespace(), scraper=scraper)
+        coordinator = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=cast(TMDBScraper, scraper))
         planners = [
-            Organizer(client=SimpleNamespace(), scraper=scraper)
+            Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=cast(TMDBScraper, scraper))
             for _ in range(2)
         ]
         key = ("42", "tv")
@@ -522,7 +529,7 @@ class OrganizeSourceParallelPlanningTests(unittest.TestCase):
                 return True
 
         manager = OrganizeTaskManager()
-        manager._lock = _NoopLock()
+        manager._lock = cast(CrossProcessLock, _NoopLock())
         manager._task = {"id": "parallel-task", "status": "running", "stats": {}}
         manager._wake_download_tracker = lambda *_args, **_kwargs: None
         sources = [
@@ -544,7 +551,7 @@ class OrganizeSourceParallelPlanningTests(unittest.TestCase):
             return_value=None,
         ):
             manager._run("parallel-task", 0, sources, rules)
-        manager._test_writer_order = writer_order
+        setattr(manager, "_test_writer_order", writer_order)
         return manager, planning_peak, writer_peak, organize_kwargs
 
     def test_two_sources_share_budget_and_single_writer(self):
@@ -573,13 +580,13 @@ class OrganizeSourceParallelPlanningTests(unittest.TestCase):
         self.assertIs(
             kwargs[0]["planning_executor"], kwargs[1]["planning_executor"],
         )
-        self.assertIsNotNone(kwargs[0]["planning_executor"])
+        assert (kwargs[0]["planning_executor"]) is not None
         self.assertIsNot(kwargs[0]["execution_lock"], kwargs[1]["execution_lock"])
         self.assertIs(
             kwargs[0]["execution_lock"]._coordinator,
             kwargs[1]["execution_lock"]._coordinator,
         )
-        self.assertEqual(manager._test_writer_order, ["source-a", "source-b"])
+        self.assertEqual(getattr(manager, "_test_writer_order"), ["source-a", "source-b"])
 
     def test_short_sources_release_the_shared_pool_to_the_remaining_source(self):
         manager, planning_peak, writer_peak, kwargs = self._run_manager(
@@ -600,7 +607,7 @@ class OrganizeSourceParallelPlanningTests(unittest.TestCase):
         self.assertEqual(writer_peak, 1)
         self.assertEqual(len(kwargs), 3)
         shared_pool = kwargs[0]["planning_executor"]
-        self.assertIsNotNone(shared_pool)
+        assert (shared_pool) is not None
         self.assertTrue(all(item["planning_executor"] is shared_pool for item in kwargs))
         self.assertEqual([item["planning_workers"] for item in kwargs], [2, 2, 2])
         self.assertEqual(
@@ -705,7 +712,7 @@ class OrganizeSourceParallelPlanningTests(unittest.TestCase):
                 return True
 
         manager = OrganizeTaskManager()
-        manager._lock = _NoopLock()
+        manager._lock = cast(CrossProcessLock, _NoopLock())
         manager._task = {"id": "partial-task", "status": "running", "stats": {}}
         manager._wake_download_tracker = lambda *_args, **_kwargs: None
         with patch(

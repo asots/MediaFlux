@@ -1,6 +1,8 @@
 """目录展示不携带NSFW内部标记，计划仍按真实身份防止混入。"""
 from __future__ import annotations
 
+from typing import cast
+
 import unittest
 from unittest.mock import Mock, patch
 
@@ -15,7 +17,7 @@ from tests.support import isolated_test_database
 class NsfwDirectoryNamingTests(unittest.TestCase):
     def setUp(self):
         self.organizer = Organizer(client=Mock(), scraper=Mock())
-        self.organizer.scraper.get_detail.return_value = {}
+        cast(Mock, self.organizer.scraper.get_detail).return_value = {}
         self.rules = OrganizeRules(nsfw_enabled=True, nsfw_category_name="NSFW")
         self.enterContext(patch("app.modules.media_probe.probe_media_profile", return_value=None))
 
@@ -88,7 +90,7 @@ class NsfwDirectoryNamingTests(unittest.TestCase):
         self.assertEqual(first.action, "move")
         self.assertEqual(second.action, "conflict")
         self.assertEqual(second.conflict_decision, "identity_blocked")
-        self.organizer.client.create_dir.assert_not_called()
+        cast(Mock, self.organizer.client.create_dir).assert_not_called()
 
     def test_history_identity_is_retained_without_visible_marker(self):
         with isolated_test_database():

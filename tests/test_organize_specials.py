@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
+
 import re
 import unittest
 from unittest.mock import Mock
@@ -247,7 +251,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
                 False, 512, "special-etag", "show",
             ),
         ]
-        scraper = TMDBScraper(client=_ExactTVClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _ExactTVClient()))
 
         def match(filename, _parent_path="", **_kwargs):
             if "Extra" in filename:
@@ -255,7 +259,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
             return self._strict_tmdb_match()
 
         scraper.match = Mock(side_effect=match)
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=scraper)
         rules = OrganizeRules(
             target_dir_id="archive",
             small_file_mb=0,
@@ -285,7 +289,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
             )
         ]
         client.info["assets"] = assets
-        scraper = TMDBScraper(client=_ExactTVClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _ExactTVClient()))
 
         def match(filename, _parent_path="", **_kwargs):
             if filename.startswith("[Group]"):
@@ -293,7 +297,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
             return self._strict_tmdb_match()
 
         scraper.match = Mock(side_effect=match)
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=scraper)
         rules = OrganizeRules(
             target_dir_id="archive", small_file_mb=0,
             region_split=False, year_split=False, clean_empty=False,
@@ -473,7 +477,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
             )
         ]
         client.info.update({"donor": donor, "other": other})
-        scraper = TMDBScraper(client=_ExactTVClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _ExactTVClient()))
 
         def match(filename, _parent_path="", **_kwargs):
             if "Extra" in filename:
@@ -481,7 +485,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
             return self._strict_tmdb_match()
 
         scraper.match = Mock(side_effect=match)
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=scraper)
         rules = OrganizeRules(
             target_dir_id="archive", small_file_mb=0,
             region_split=False, year_split=False, clean_empty=False,
@@ -516,7 +520,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
                 False, 512, "special-etag", "show",
             ),
         ]
-        scraper = TMDBScraper(client=_ExactTVClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _ExactTVClient()))
 
         def match(filename, _parent_path="", **_kwargs):
             if "Extra" in filename:
@@ -524,7 +528,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
             return self._strict_tmdb_match()
 
         scraper.match = Mock(side_effect=match)
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=scraper)
         rules = OrganizeRules(
             target_dir_id="archive", small_file_mb=0,
             region_split=False, year_split=False, clean_empty=False,
@@ -544,7 +548,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
     def test_extra_subtree_uses_parent_show_and_specials(self):
         client = _TreeClient()
         scraper = _ShowScraper()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper))
         rules = OrganizeRules(
             target_dir_id="archive",
             small_file_mb=0,
@@ -589,7 +593,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
         ]
         client.info["show"] = noisy_show
         scraper = _ShowScraper()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper))
         rules = OrganizeRules(
             target_dir_id="archive",
             small_file_mb=0,
@@ -620,8 +624,8 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
         ]
         client.info["show"] = client.tree["source"][0]
         client.info["extra"] = client.tree["show"][0]
-        scraper = TMDBScraper(client=_ExactTVClient())
-        organizer = Organizer(client=client, scraper=scraper)
+        scraper = TMDBScraper(client=cast(TMDBClient, _ExactTVClient()))
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=scraper)
         rules = OrganizeRules(
             target_dir_id="archive",
             small_file_mb=0,
@@ -654,7 +658,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
         ]
         client.info["endings"] = endings
         scraper = _ShowScraper()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper))
         rules = OrganizeRules(
             target_dir_id="archive",
             small_file_mb=0,
@@ -696,10 +700,10 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
         client.info.update({"batch-a": batch_a, "batch-b": batch_b})
         scraper = _ShowScraper()
         # 测试替身补齐与生产 TMDBScraper 一致的目录标题清洗能力。
-        scraper.clean_title = lambda value: re.sub(
+        setattr(scraper, "clean_title", lambda value: re.sub(
             r"(?i)[\[【(（](?:01-(?:10|12)|GB|BIG5)[\]】)）]", " ", value
-        ).replace("[KTXP]", "").strip(" []")
-        organizer = Organizer(client=client, scraper=scraper)
+        ).replace("[KTXP]", "").strip(" []"))
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper))
         rules = OrganizeRules(
             target_dir_id="archive", small_file_mb=0, region_split=False,
             year_split=False, clean_empty=False, link_strm=False,
@@ -714,8 +718,8 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
 
     def test_identical_special_titles_in_different_source_trees_restart_sequence(self):
         scraper = _ShowScraper()
-        scraper.clean_title = lambda _value: "Example Show"
-        organizer = Organizer(client=_TreeClient(), scraper=scraper)
+        setattr(scraper, "clean_title", lambda _value: "Example Show")
+        organizer = Organizer(client=cast(GuangYaClient, _TreeClient()), scraper=cast(TMDBScraper, scraper))
         candidates = [
             ScannedVideo(
                 file=GuangYaFile("tree-a-op", "NCOP.mkv", False, 300, "a", "a-batch"),
@@ -737,7 +741,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
         self.assertEqual(positions["tree-b-ed"], (0, 1))
 
     def test_fractional_specials_for_different_root_titles_restart_sequence(self):
-        organizer = Organizer(client=_TreeClient(), scraper=_ShowScraper())
+        organizer = Organizer(client=cast(GuangYaClient, _TreeClient()), scraper=cast(TMDBScraper, _ShowScraper()))
         candidates = [
             ScannedVideo(
                 file=GuangYaFile(
@@ -779,7 +783,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
         client.tree["twitter"] = [picture]
         client.info["twitter"] = nested
         scraper = _ShowScraper()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper))
         rules = OrganizeRules(
             target_dir_id="archive",
             small_file_mb=0,
@@ -835,7 +839,7 @@ class AutomaticSpecialsTests(IsolatedDatabaseTestCase):
         ]
         client.info["sps"] = sps
         scraper = _ShowScraper()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper))
         rules = OrganizeRules(
             target_dir_id="archive",
             small_file_mb=0,
@@ -987,7 +991,7 @@ class SpecialMediaTokenTests(unittest.TestCase):
         ):
             with self.subTest(filename=filename):
                 self.assertTrue(has_fractional_episode_position(filename))
-                self.assertIsNotNone(fractional_episode_position(filename))
+                assert (fractional_episode_position(filename)) is not None
         for filename in (
             "Show.S01E01.1080p.mkv",
             "Movie.1.5GB.mkv",
@@ -1107,7 +1111,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
         )
         client.tree["source"] = [ambiguous]
         scraper = _ShowScraper()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper))
         rules = OrganizeRules(
             target_dir_id="archive",
             small_file_mb=0,
@@ -1159,7 +1163,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
             notify_enabled=False,
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", rules, dry_run=True
         )
 
@@ -1184,7 +1188,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
                     1024, "fractional", "source",
                 )]
                 plans, stats = Organizer(
-                    client=client, scraper=_ShowScraper()
+                    client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _ShowScraper())
                 ).organize("source", rules, dry_run=True, automatic=automatic)
 
                 self.assertEqual(plans[0].action, "move")
@@ -1229,7 +1233,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
             notify_enabled=False,
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper)).organize(
             "source", rules, dry_run=True, automatic=True,
         )
 
@@ -1258,7 +1262,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
             AutomaticSpecialsTests._slime_specials_detail()
             if season == 0 else AutomaticSpecialsTests._slime_season_two_detail()
         ))
-        position_overrides = {
+        position_overrides: dict[str | tuple[str, str], tuple[int | None, int | None]] = {
             item.name: (2, episode)
             for item, episode in zip(files, (25, 26))
         }
@@ -1287,7 +1291,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
             notify_enabled=False,
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper)).organize(
             "source", rules, dry_run=True,
         )
         by_id = {plan.file_id: plan for plan in plans}
@@ -1387,7 +1391,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
             notify_enabled=False,
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=scraper).organize(
             "source", rules, dry_run=True, automatic=True,
         )
         by_id = {plan.file_id: plan for plan in plans}
@@ -1425,7 +1429,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
         )
 
         plans, stats = Organizer(
-            client=client, scraper=_ShowScraper()
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _ShowScraper())
         ).organize("source", rules, dry_run=True, automatic=True)
         by_id = {plan.file_id: plan for plan in plans}
 
@@ -1447,7 +1451,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
         )
 
         plans, stats = Organizer(
-            client=client, scraper=_ShowScraper()
+            client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _ShowScraper())
         ).organize("source", rules, dry_run=True, automatic=True)
 
         self.assertEqual(plans[0].action, "move")
@@ -1463,7 +1467,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
         )]
         delegate = _ShowScraper()
         scraper = FixedMatchScraper(
-            delegate,
+            cast(TMDBScraper, delegate),
             MatchResult(
                 tmdb_id="86034", title="平凡职业造就世界最强", year="2019",
                 media_type="tv", confidence=1.0, status="matched",
@@ -1479,7 +1483,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
             notify_enabled=False,
         )
 
-        plans, stats = Organizer(client=client, scraper=scraper).organize(
+        plans, stats = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper)).organize(
             "source", rules, dry_run=True
         )
 
@@ -1495,7 +1499,7 @@ class OrganizePositionSafetyTests(unittest.TestCase):
         )
         client.tree["source"] = [ranged]
         scraper = _ShowScraper()
-        organizer = Organizer(client=client, scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, scraper))
         rules = OrganizeRules(
             target_dir_id="archive", small_file_mb=0, region_split=False,
             year_split=False, clean_empty=False, link_strm=False,

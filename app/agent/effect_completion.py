@@ -38,7 +38,7 @@ def _effect_seed(result: Mapping[str, Any], tracker: observers._CompletionTracke
         "owner": scope.lease.owner, "session_id": scope.lease.session_id,
         "request_id": scope.lease.request_id, "turn_id": scope.lease.turn_id,
         "plan_id": scope.plan_id, "channel": scope.channel,
-        "tool": "agent.batch" if (scope.origin or {}).get("batch_plan") else str(tool),
+        "tool": "agent.batch" if (scope.origin or {}).get("batch_plan") else tool,
         **({"tracker": {"kind": tracker.kind, "value": tracker.value}} if tracker else {}),
         "result": deepcopy(dict(result)),
         **({"origin": scope.origin} if scope.origin else {}),
@@ -212,7 +212,7 @@ async def _record_effect_observation(
         row = (state.metadata.get(_EFFECT_WAITS_KEY) or {}).get(scope.plan_id)
         if row is None:
             return False
-        row["last_status"] = str(status or "unknown")
+        row["last_status"] = (status or "unknown")
         row["next_poll_at"] = time.time() + (0 if due_now else _EFFECT_POLL_SECONDS)
         if final is not None:
             from .kernel.batch_progress import observe_batch
@@ -252,7 +252,7 @@ def agent_effect_reply_is_current(event_key: str) -> bool:
 
     match = re.fullmatch(
         r"tg:event:agent:agent-effect:([0-9a-f]{64}):([0-9a-f]{64}):([0-9a-f]{64}):[0-9a-f]{16}",
-        str(event_key),
+        event_key,
     )
     if match is None:
         return False
@@ -422,8 +422,8 @@ async def current_session_effect_trackers(
     store: SessionStateStore, *, owner: str, session_id: str,
 ) -> list[dict[str, Any]]:
     """解密并校验一个 owner/session 的 effect_wait tracker；不 claim 或修改回执。"""
-    owner_key = str(owner or "").strip()
-    session_key = str(session_id or "").strip()
+    owner_key = (owner or "").strip()
+    session_key = (session_id or "").strip()
     if not owner_key or not session_key:
         return []
     state = await store.load(owner=owner_key, session_id=session_key)
@@ -484,7 +484,7 @@ async def wait_for_effect_completion(
     scope: receipts.EffectCompletionScope | None = None,
 ) -> ToolResult:
     """追踪有稳定句柄的后台写操作；纯提交结果原样交给公开语义层。"""
-    status = str(result.status or "").strip().casefold()
+    status = (result.status or "").strip().casefold()
     tracker = observers._completion_tracker(result)
     if not result.ok or status not in _WAITABLE_STATUSES or tracker is None:
         return result
@@ -500,7 +500,7 @@ async def wait_for_effect_completion(
             return
         payload = {
             "phase": "background_job",
-            "tool": str(tool or "")[:120],
+            "tool": (tool or "")[:120],
             "status": task_status,
             "summary": sanitize_public_text(snapshot.summary, limit=240)
             or "后台任务状态已更新",

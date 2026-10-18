@@ -11,11 +11,11 @@ from typing import Any
 import requests
 
 from app.clients.douban_public import (
-    DoubanPublicPage,
     _CATEGORY_SORTS,
     _CATEGORY_TAGS,
-    _DetailHTMLParser,
     _SORTS,
+    DoubanPublicPage,
+    _DetailHTMLParser,
     _html_detail,
     _json_ld_detail,
     _normalize_item,
@@ -68,7 +68,7 @@ _AUTHENTICATED_MARKER_RE = re.compile(
 
 def normalize_dbcl2(value: str | None) -> str:
     """接受原始值或 Cookie 字符串，但只返回 dbcl2 的值。"""
-    raw = str(value or "").strip()
+    raw = (value or "").strip()
     if not raw:
         return ""
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in raw):
@@ -116,7 +116,7 @@ def _finite_timeout(value: TimeoutValue | None) -> TimeoutValue:
 def _header(headers: Mapping[str, Any], name: str) -> str:
     wanted = name.lower()
     for key, value in (headers or {}).items():
-        if str(key).lower() == wanted:
+        if key.lower() == wanted:
             return str(value or "")
     return ""
 
@@ -159,8 +159,8 @@ class DoubanAuthenticatedClient:
         self.dbcl2 = normalize_dbcl2(dbcl2)
         self.session = session or requests.Session()
         self.timeout = _finite_timeout(timeout)
-        self.page_size = max(1, min(int(page_size), 100))
-        self.max_response_bytes = int(max_response_bytes)
+        self.page_size = max(1, min(page_size, 100))
+        self.max_response_bytes = max_response_bytes
         if self.max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be positive")
         self._prepare_session()
@@ -345,15 +345,12 @@ class DoubanAuthenticatedClient:
         filters: Mapping[str, Any] | None,
     ) -> DoubanPublicPage:
         self._ensure_configured()
-        normalized_category = str(category or "").strip().lower()
-        normalized_type = str(media_type or "").strip().lower()
+        normalized_category = (category or "").strip().lower()
+        normalized_type = (media_type or "").strip().lower()
         if normalized_type not in {"movie", "tv"}:
             raise ProviderInvalidResponse("豆瓣认证媒体类型无效")
-        try:
-            normalized_page = int(page)
-        except (TypeError, ValueError) as exc:
-            raise ProviderInvalidResponse("豆瓣认证页码无效") from exc
-        if normalized_page < 1:
+
+        if page < 1:
             raise ProviderInvalidResponse("豆瓣认证页码无效")
         raw_filters = dict(filters or {})
         raw_sort = str(raw_filters.get("sort") or "").strip()
@@ -373,13 +370,13 @@ class DoubanAuthenticatedClient:
                 "tag": tag,
                 "sort": sort,
                 "page_limit": self.page_size,
-                "page_start": (normalized_page - 1) * self.page_size,
+                "page_start": (page - 1) * self.page_size,
             },
             expected="json",
         )
         try:
             payload = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             logger.warning("Douban authenticated list invalid error=invalid_response")
             raise ProviderInvalidResponse("豆瓣认证 JSON 无效") from exc
         raw_items = payload.get("subjects") if isinstance(payload, dict) else None
@@ -403,8 +400,8 @@ class DoubanAuthenticatedClient:
 
     def get_detail(self, external_id: str, media_type: str) -> dict[str, Any]:
         self._ensure_configured()
-        subject_id = str(external_id or "").strip()
-        normalized_type = str(media_type or "").strip().lower()
+        subject_id = (external_id or "").strip()
+        normalized_type = (media_type or "").strip().lower()
         if not _EXTERNAL_ID_RE.fullmatch(subject_id):
             raise ProviderInvalidResponse("豆瓣认证条目 ID 无效")
         if normalized_type not in {"movie", "tv"}:
@@ -420,7 +417,7 @@ class DoubanAuthenticatedClient:
             parser = _DetailHTMLParser()
             parser.feed(html)
             parser.close()
-        except (LookupError, UnicodeDecodeError, TypeError, ValueError) as exc:
+        except (LookupError, TypeError, ValueError) as exc:
             raise ProviderInvalidResponse("豆瓣认证详情 HTML 无效") from exc
         detail = _json_ld_detail(parser) or _html_detail(parser)
         if not detail.get("title"):

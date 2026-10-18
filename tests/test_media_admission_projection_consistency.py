@@ -45,6 +45,7 @@ class MediaAdmissionProjectionConsistencyTests(unittest.TestCase):
             episode=episode,
             subscription_revision=1,
         )
+        assert admission is not None
         self.assertTrue(
             db.begin_media_download_dispatch(
                 admission, subscription_id=self.subscription, subscription_revision=1
@@ -89,6 +90,7 @@ class MediaAdmissionProjectionConsistencyTests(unittest.TestCase):
                     db.sync_media_download_admission_for_request(request), 1
                 )
                 expected = self.view(admission)
+                assert admission is not None
                 db.update_media_download_admission(
                     admission, status="dispatching", error="", completed_at=None
                 )
@@ -170,6 +172,7 @@ class MediaAdmissionProjectionConsistencyTests(unittest.TestCase):
     ):
         import subprocess
         import sys
+
         from app.modules import backup
         from tests.test_ten_pass_process_restore_audit import runtime_paths
 

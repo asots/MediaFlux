@@ -1,4 +1,6 @@
 from __future__ import annotations
+from app.agent.kernel.session import AgentSession
+from typing import cast
 
 import unittest
 
@@ -79,7 +81,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         token = await session.coordinator.begin(lease)
         provider_clears: list[tuple[str, str]] = []
         lifecycle = AgentSessionLifecycle(
-            session=session,
+            session=cast(AgentSession, session),
             store=store,
             effect_store=effects,
             clear_provider_state=lambda *, owner, session_id: provider_clears.append(
@@ -114,7 +116,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         effects = ConfirmationEffectPlanStore(ConfirmationStore())
         provider_clears: list[tuple[str, str]] = []
         lifecycle = AgentSessionLifecycle(
-            session=session,
+            session=cast(AgentSession, session),
             store=store,
             effect_store=effects,
             clear_provider_state=lambda *, owner, session_id: provider_clears.append(
@@ -143,7 +145,7 @@ class AgentSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         token = await session.coordinator.begin(lease, protected=True)
         provider_clears: list[tuple[str, str]] = []
         lifecycle = AgentSessionLifecycle(
-            session=session,
+            session=cast(AgentSession, session),
             store=store,
             effect_store=effects,
             clear_provider_state=lambda *, owner, session_id: provider_clears.append(

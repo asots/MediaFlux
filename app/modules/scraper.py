@@ -17,36 +17,41 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from datetime import date
 from dataclasses import dataclass, field, replace
+from datetime import date
 from difflib import SequenceMatcher
 from functools import lru_cache
-from typing import Optional
+from typing import Any, Mapping, Optional
 
+from app.clients.ai_recognition import (
+    AIRecognitionClient,
+    AIRecognitionError,
+    AIRecognitionInput,
+    AIRecognitionProviderError,
+    AIRecognitionResult,
+    AIRecognitionUnavailableError,
+    AIReleaseGroupInput,
+    AIReleaseGroupResult,
+)
 from app.clients.openai_compatible import (
     normalize_provider_location,
     resolve_protocol,
 )
-from app.clients.ai_recognition import (
-    AIRecognitionClient,
-    AIRecognitionError,
-    AIRecognitionProviderError,
-    AIRecognitionUnavailableError,
-    AIRecognitionInput,
-    AIRecognitionResult,
-    AIReleaseGroupInput,
-    AIReleaseGroupResult,
-)
 from app.clients.tmdb import TMDBClient, close_tmdb_client
 from app.config import get, get_bool
-from app.discovery.models import ProviderRateLimited, ProviderTimeout, ProviderUnavailable
+from app.discovery.models import (
+    ProviderRateLimited,
+    ProviderTimeout,
+    ProviderUnavailable,
+)
 from app.logger import get_logger, redact_sensitive_text
-from app.sensitive_data import contains_sensitive_credential
 from app.modules import media_identity
 from app.modules.ai_recognition_governance import provider_fingerprint
-from app.modules.recognition.models import (
-    ReleaseParseEvidence,
-    ReleaseParseToken,
+from app.modules.episode_mapping import (
+    EpisodeMappingPlan,
+    infer_episode_mapping,
+    infer_merged_season_cour_mapping,
+    season_episode_counts,
 )
 from app.modules.recognition.cleaner import (
     _AUDIO_CODEC_PATTERN,
@@ -76,7 +81,10 @@ from app.modules.recognition.extractors.guessit_adapter import (
     _position_number,
     _season_number,
 )
-from app.repositories.recognition import get_tmdb_lock, upsert_tmdb_lock
+from app.modules.recognition.models import (
+    ReleaseParseEvidence,
+    ReleaseParseToken,
+)
 from app.modules.recognition.resolver import (
     _explicit_tmdb_id_from_path,
     _resolve_explicit_tmdb_marker,
@@ -96,12 +104,8 @@ from app.modules.special_media import (
     is_special_directory_name,
     strip_special_media_markers,
 )
-from app.modules.episode_mapping import (
-    EpisodeMappingPlan,
-    infer_episode_mapping,
-    infer_merged_season_cour_mapping,
-    season_episode_counts,
-)
+from app.repositories.recognition import get_tmdb_lock, upsert_tmdb_lock
+from app.sensitive_data import contains_sensitive_credential
 
 logger = get_logger(__name__)
 
@@ -221,7 +225,7 @@ class _ReleaseParseCore:
     """单次发布名事实解析及其领域投影。"""
 
     context: RecognitionContext
-    release_fields: dict[str, object] | None = None
+    release_fields: dict[str, str] | None = None
 
 
 def _copy_cleaned_components(
@@ -236,14 +240,12 @@ def _copy_cleaned_components(
 
 def _copy_recognition_context(
     context: RecognitionContext,
-    **changes: object,
 ) -> RecognitionContext:
     """复制上下文及其嵌套集合；规则/回退只修改自己的投影。"""
     return replace(
         context,
         title_variants=list(context.title_variants),
         cleaned_components=_copy_cleaned_components(context.cleaned_components),
-        **changes,
     )
 
 
@@ -265,11 +267,11 @@ class ReleaseParseResult:
     effective_season: int | None
     effective_episode: int | None
     context: RecognitionContext
-    preprocess_rules: tuple[dict[str, object], ...] = ()
+    preprocess_rules: tuple[dict[str, Any], ...] = ()
     tokens: tuple[ReleaseParseToken, ...] = ()
     evidence: tuple[ReleaseParseEvidence, ...] = ()
 
-    def diagnostic_dict(self) -> dict[str, object]:
+    def diagnostic_dict(self) -> dict[str, Any]:
         return {
             "filename": self.filename,
             "parent_path": self.parent_path,
@@ -327,7 +329,7 @@ class Candidate:
     score_breakdown: CandidateScoreBreakdown | None = None
     provider: str = "tmdb"
     external_id: str = ""
-    metadata: dict[str, object] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -351,10 +353,10 @@ class MatchResult:
     recognition_parent_path: str = ""
     effective_season: int | None = None
     effective_episode: int | None = None
-    preprocess_rules: list[dict[str, object]] = field(default_factory=list)
+    preprocess_rules: list[dict[str, Any]] = field(default_factory=list)
     provider: str = ""
     external_id: str = ""
-    metadata: dict[str, object] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     # 仅原生、严格通过的 TMDB 搜索结果可提升为目录级身份缓存。
     # BGM/豆瓣、AI、Tavily、人工规则等结果即使最终通过，也只能绑定当前
     # 文件/任务，避免辅助线索被无意放大到同目录的其它媒体。
@@ -365,9 +367,9 @@ class MatchResult:
 class RecognitionResult(MatchResult):
     context: RecognitionContext | None = None
     query_variants: list[str] = field(default_factory=list)
-    threshold_decision: dict[str, object] = field(default_factory=dict)
+    threshold_decision: dict[str, Any] = field(default_factory=dict)
     rejected_constraints: list[str] = field(default_factory=list)
-    ai_diagnostic: dict[str, object] = field(default_factory=dict)
+    ai_diagnostic: dict[str, Any] = field(default_factory=dict)
 
 
 _RELEASE_PREFIX = re.compile(r"^\s*(\[[^\]]{1,96}\]|【[^】]{1,96}】)\s*")
@@ -851,7 +853,7 @@ def _explicit_quoted_title_matches(
     if not matched_query or _low_information_query(matched_query):
         return False
     for primary in primary_queries:
-        wrapper = _EXPLICIT_QUOTED_TITLE_WRAPPER.fullmatch(str(primary or "").strip())
+        wrapper = _EXPLICIT_QUOTED_TITLE_WRAPPER.fullmatch((primary or "").strip())
         if not wrapper:
             continue
         wrapper_tokens = re.findall(r"[A-Za-z0-9]+", wrapper.group("wrapper"))
@@ -1008,7 +1010,7 @@ def _primary_title_parts_covered(primary_queries: list[str], candidate_values: l
     """
     coverage_values: list[str] = list(candidate_values)
     for value in candidate_values:
-        normalized = unicodedata.normalize("NFKD", str(value or ""))
+        normalized = unicodedata.normalize("NFKD", (value or ""))
         normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
         coverage_values.extend(_split_title_variants(normalized))
     coverage_values = _unique_text(coverage_values)
@@ -1138,7 +1140,7 @@ _ROMAN_SEASON_NUMBERS = {
 
 def _implicit_season_body_is_safe(value: str) -> bool:
     """判断续作数字前是否有足够稳定的作品标题主体。"""
-    body = re.sub(r"\s+", " ", str(value or "")).strip(" ._-")
+    body = re.sub(r"\s+", " ", (value or "")).strip(" ._-")
     if not body or _AMBIGUOUS_SEQUEL_PREDECESSOR.search(body):
         return False
     cjk_count = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", body))
@@ -1153,7 +1155,7 @@ def _implicit_cjk_subtitle_season_is_safe(
 ) -> bool:
     """校验 ``短标题 Ⅱ－长 CJK 副标题－ - 集号`` 的窄例外。"""
     body = re.sub(
-        r"\s+", " ", str(source or "")[:match.start("season")]
+        r"\s+", " ", (source or "")[:match.start("season")]
     ).strip(" ._-—–－:：")
     if not body or _AMBIGUOUS_SEQUEL_PREDECESSOR.search(body):
         return False
@@ -1172,7 +1174,7 @@ def _implicit_season_has_release_evidence(
     """隐式季号必须同时具备发布结构证据，不能只凭标题尾部数字。"""
     if match.groupdict().get("volume"):
         return True
-    tail = str(source or "")[match.end("season"):]
+    tail = (source or "")[match.end("season"):]
     if _RELEASE_TECHNICAL_EVIDENCE.search(tail):
         return True
     return any(
@@ -1192,7 +1194,7 @@ def _implicit_season_hint(
     """
     if not episode_context:
         return None, None
-    source = str(text or "")
+    source = (text or "")
     matches = [
         *(_IMPLICIT_SEASON_EPISODE_TOKEN.finditer(source)),
         *(_IMPLICIT_SEASON_BRACKET_EPISODE_TOKEN.finditer(source)),
@@ -1241,9 +1243,9 @@ def _implicit_season_hint(
 
 def _remove_text_span(value: str, span: tuple[int, int] | None) -> str:
     if not span:
-        return str(value or "")
+        return (value or "")
     start, end = span
-    source = str(value or "")
+    source = (value or "")
     if start < 0 or end <= start or start >= len(source):
         return source
     return f"{source[:start]} {source[min(end, len(source)):]}"
@@ -1269,7 +1271,7 @@ def _extract_season(text: str, *, episode_context: bool = False) -> int | None:
 
 def _contains_unresolved_season_hint(value: str) -> bool:
     """只把带作品标题主体的 Part/Cour 等结构视为未决季号。"""
-    source = str(value or "").strip()
+    source = (value or "").strip()
     match = _UNRESOLVED_SEQUEL_HINT.search(source)
     if not match:
         return False
@@ -1292,7 +1294,7 @@ def has_unresolved_season_hint(filename: str, parent_path: str = "") -> bool:
     父路径只检查最邻近的媒体目录，避免 ``/downloads/Part 2/Normal Show``
     这类上层分类目录误伤正常 S01 回落。
     """
-    raw = str(filename or "")
+    raw = (filename or "")
     stem = raw.rsplit(".", 1)[0] if "." in raw else raw
     episode = _extract_episode(stem)
     if episode is None or _extract_season(stem, episode_context=True) is not None:
@@ -1301,7 +1303,7 @@ def has_unresolved_season_hint(filename: str, parent_path: str = "") -> bool:
         return True
     parts = [
         part.strip()
-        for part in re.split(r"[\\/]+", str(parent_path or ""))
+        for part in re.split(r"[\\/]+", (parent_path or ""))
         if part.strip()
     ]
     for part in reversed(parts):
@@ -1312,7 +1314,7 @@ def has_unresolved_season_hint(filename: str, parent_path: str = "") -> bool:
 
 
 def _strip_season_tokens(value: str) -> str:
-    source = str(value or "")
+    source = (value or "")
     if _SEASON_RANGE_TOKEN.search(source):
         return source
     cleaned = _CHINESE_SEASON_COMPLETION_TOKEN.sub(" ", source)
@@ -1367,7 +1369,7 @@ def _strip_known_episode_suffix(
 ) -> str:
     """只移除已由解析器确认的尾部集号，避免把片名中的数字误删。"""
     if episode is None:
-        return str(value or "")
+        return (value or "")
 
     def replace(match: re.Match) -> str:
         if any(
@@ -1376,18 +1378,18 @@ def _strip_known_episode_suffix(
         ):
             return match.group(0)
         try:
-            return " " if int(match.group(1)) == int(episode) else match.group(0)
+            return " " if int(match.group(1)) == episode else match.group(0)
         except (TypeError, ValueError):
             return match.group(0)
 
-    cleaned = str(value or "")
+    cleaned = (value or "")
 
     cleaned = _ANGLE_EPISODE_TOKEN.sub(" ", cleaned)
 
     def strip_ordinal_total(match: re.Match[str]) -> str:
         try:
-            same_episode = int(match.group("episode")) == int(episode)
-            same_season = season is None or int(match.group("season")) == int(season)
+            same_episode = int(match.group("episode")) == episode
+            same_season = season is None or int(match.group("season")) == season
         except (TypeError, ValueError):
             return match.group(0)
         return " " if same_episode and same_season else match.group(0)
@@ -1396,8 +1398,8 @@ def _strip_known_episode_suffix(
 
     def strip_season_bare(match: re.Match[str]) -> str:
         try:
-            same_episode = int(match.group("episode")) == int(episode)
-            same_season = season is None or int(match.group("season")) == int(season)
+            same_episode = int(match.group("episode")) == episode
+            same_season = season is None or int(match.group("season")) == season
         except (TypeError, ValueError):
             return match.group(0)
         return " " if same_episode and same_season else match.group(0)
@@ -1409,8 +1411,8 @@ def _strip_known_episode_suffix(
     if compact is not None:
         compact_season, compact_episode, compact_span = compact
         if (
-            compact_episode == int(episode)
-            and (season is None or compact_season == int(season))
+            compact_episode == episode
+            and (season is None or compact_season == season)
         ):
             cleaned = _remove_text_span(cleaned, compact_span)
     cleaned = _BARE_EPISODE_SUFFIX.sub(replace, cleaned)
@@ -1437,7 +1439,7 @@ def parse_release_position(
     ``Title 014`` 这种普通空格末尾集号，并保留显式源 E00，不能在用户
     指定映射前先改写成 S00E01；默认关闭，不改变自动识别契约。
     """
-    name = _strip_explicit_tmdb_markers(str(value or ""))
+    name = _strip_explicit_tmdb_markers(value or "")
     # 资源站发布标题不一定带文件扩展名，发布组本身却可能包含点号，
     # 例如 ``[c.c动漫][约会大作战 第四季][12]``。只有结尾确实像
     # 媒体/种子文件扩展名时才剥离，不能直接按最后一个点截断标题。
@@ -1498,7 +1500,7 @@ def parse_release_position(
 
 
 def _bracket_content(token: str) -> str:
-    text = str(token or "").strip()
+    text = (token or "").strip()
     if len(text) >= 2 and text[0] in "[【" and text[-1] in "]】":
         return text[1:-1].strip()
     return text
@@ -1506,13 +1508,13 @@ def _bracket_content(token: str) -> str:
 
 def _strip_trailing_checksum(value: str) -> str:
     """在 GuessIt/年份提取前移除尾部 CRC，避免十六进制片段伪装成年份。"""
-    text = str(value or "")
+    text = (value or "")
     checksum = _CHECKSUM_SUFFIX.search(text)
     return text[:checksum.start()].rstrip() if checksum else text
 
 
 def _is_valid_bracket_release_date(value: str) -> bool:
-    match = _BRACKET_RELEASE_DATE.fullmatch(str(value or "").strip())
+    match = _BRACKET_RELEASE_DATE.fullmatch((value or "").strip())
     if not match:
         return False
     try:
@@ -1531,7 +1533,7 @@ def _is_valid_release_date_match(match: re.Match[str]) -> bool:
 
 
 def _is_explicit_subtitle_language_noise(value: str) -> bool:
-    compact = re.sub(r"\s+", "", str(value or "")).strip()
+    compact = re.sub(r"\s+", "", (value or "")).strip()
     return bool(
         compact
         and _EXPLICIT_SUBTITLE_MARKER.search(compact)
@@ -1541,7 +1543,7 @@ def _is_explicit_subtitle_language_noise(value: str) -> bool:
 
 
 def _is_bracket_noise(content: str) -> bool:
-    compact = re.sub(r"\s+", " ", str(content or "")).strip()
+    compact = re.sub(r"\s+", " ", (content or "")).strip()
     if not compact or _BRACKET_EPISODE_RANGE.fullmatch(compact):
         return True
     if (
@@ -1631,8 +1633,8 @@ def _probable_unknown_release_prefix(content: str, remainder: str) -> bool:
     还要求前缀具备发布组织结构信号；不能仅因后方标题较长就把 ``[The]``、
     ``[86]`` 等真实标题片段误判为制作组。
     """
-    prefix = re.sub(r"\s+", " ", str(content or "")).strip()
-    suffix = re.sub(r"\s+", " ", str(remainder or "")).strip()
+    prefix = re.sub(r"\s+", " ", (content or "")).strip()
+    suffix = re.sub(r"\s+", " ", (remainder or "")).strip()
     if not prefix or not suffix or len(prefix) > 40:
         return False
     if re.search(r"[^A-Za-z0-9 '&+._-]", prefix):
@@ -1663,7 +1665,7 @@ def _probable_unknown_release_prefix(content: str, remainder: str) -> bool:
         1 for match in _BRACKETED_SEGMENT.finditer(suffix)
         if _is_bracket_noise(match.group(1))
     )
-    structured_release = bool(
+    structured_release = (
         bracket_noise_count >= 1
         and len(prefix_tokens) == 1
         and compact.casefold() not in {
@@ -1689,7 +1691,7 @@ def _non_destructive_release_title_candidates(
     去掉首段方括号后的标题加入候选列表。括号中的媒介/修订/语言标签则
     作为结构化发布元数据记录，供诊断和后续学习使用。
     """
-    source = str(value or "").strip()
+    source = (value or "").strip()
     candidates: list[str] = []
     components = {
         "candidate_release_groups": [],
@@ -1876,7 +1878,7 @@ def _is_known_release_group(value: str) -> bool:
 
 
 def _is_release_prefix(content: str, remainder: str) -> bool:
-    compact = re.sub(r"\s+", " ", str(content or "")).strip()
+    compact = re.sub(r"\s+", " ", (content or "")).strip()
     compound_groups = [
         item.strip()
         for item in re.split(r"\s*(?:&|＆|\+|/|、)\s*", compact)
@@ -1904,7 +1906,7 @@ _CJK_TAIL_RELEASE_GROUP = re.compile(
 
 def _candidate_tail_release_group(stem: str) -> tuple[str, int] | None:
     """识别中文/日文尾部发布组，但只生成候选，不直接删除未知标题。"""
-    match = _CJK_TAIL_RELEASE_GROUP.search(str(stem or "").strip())
+    match = _CJK_TAIL_RELEASE_GROUP.search((stem or "").strip())
     if not match:
         return None
     candidate = re.sub(r"\s+", " ", match.group("group")).strip()
@@ -1912,7 +1914,7 @@ def _candidate_tail_release_group(stem: str) -> tuple[str, int] | None:
         return None
     if not (_CJK_RELEASE_GROUP_SUFFIX.search(candidate) or _is_known_release_group(candidate)):
         return None
-    prefix = str(stem or "")[:match.start("separator")].strip()
+    prefix = (stem or "")[:match.start("separator")].strip()
     if not prefix or not (
         _STRUCTURED_EPISODE_POSITION.search(prefix)
         or _BRACKETED_SEGMENT.search(prefix)
@@ -1924,7 +1926,7 @@ def _candidate_tail_release_group(stem: str) -> tuple[str, int] | None:
 
 def _tail_release_group(stem: str) -> tuple[str, int] | None:
     """保守提取紧凑的尾部制作组，避免把 ``WEB-DL.1080p...`` 当作组名。"""
-    dot_at = str(stem or "").rfind(".")
+    dot_at = (stem or "").rfind(".")
     if dot_at >= 0:
         dot_suffix = stem[dot_at + 1:].strip()
         if (
@@ -1932,7 +1934,7 @@ def _tail_release_group(stem: str) -> tuple[str, int] | None:
             and _known_recognition_value(dot_suffix, "release_suffix")
         ):
             return dot_suffix, dot_at
-    split_at = str(stem or "").rfind("-")
+    split_at = (stem or "").rfind("-")
     if split_at < 0:
         return None
     candidate = stem[split_at + 1:].strip()
@@ -1952,7 +1954,7 @@ def _tail_release_group(stem: str) -> tuple[str, int] | None:
 
 
 def _clean_release_stem(value: str) -> tuple[str, dict[str, list[str]]]:
-    stem = _AVAILABILITY_TAG.sub(" ", str(value or "")).strip()
+    stem = _AVAILABILITY_TAG.sub(" ", (value or "")).strip()
     # Crunchyroll 常缩写为 CR/C R，仅在紧邻 WEBRip 时作为发布源清除，
     # 避免把标题中的普通字母组合误当噪声。
     stem = _CR_WEBRIP_SOURCE.sub(" ", stem)
@@ -2090,7 +2092,7 @@ def _prefer_guessit_numeric_title(
     guessed_title: str, cleaned_title: str, guessed_year: object,
 ) -> bool:
     """GuessIt 保留了正式数字片名时，避免清洗器把它当发布年份删掉。"""
-    guessed_text = re.sub(r"\s+", " ", str(guessed_title or "")).strip(" ._-")
+    guessed_text = re.sub(r"\s+", " ", (guessed_title or "")).strip(" ._-")
     if not guessed_text:
         return False
     numeric_tokens = [match.group(1) for match in _YEAR_TOKEN.finditer(guessed_text)]
@@ -2112,7 +2114,7 @@ def _folder_context(
     # 必须在年份、季号和发布组解析前去掉；原始 parent_path 仍留给快照和规则作用域。
     parts = [
         re.sub(r"^MF-(?:[1-9][0-9]*|download)-", "", part.strip())
-        for part in re.split(r"[\\/]+", str(parent_path or "")) if part.strip()
+        for part in re.split(r"[\\/]+", (parent_path or "")) if part.strip()
     ]
     media_type = ""
     lowered = "/".join(parts).lower()
@@ -2206,9 +2208,9 @@ def _folder_context(
 
 def _parse_release_surface(
     stem: str, *, context_mode: bool,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """解析一个文件名 surface；领域差异只通过输入策略表达。"""
-    source = str(stem or "")
+    source = (stem or "")
     identity_stem = _strip_trailing_checksum(source) if context_mode else source
     guessed = _guessit_info(identity_stem)
     guessed_title_raw = str(guessed.get("title") or "").strip()
@@ -2378,15 +2380,15 @@ def _parse_release_core(
     _format_rules: list[dict] | None = None, filename_only: bool = False,
 ) -> _ReleaseParseCore:
     """构造一次事实解析，并按需提供 release 领域投影。"""
-    raw_name = str(filename or "")
-    raw_parent_path = "" if filename_only else str(parent_path or "")
+    raw_name = (filename or "")
+    raw_parent_path = "" if filename_only else (parent_path or "")
     parse_name = _strip_explicit_tmdb_markers(raw_name)
     parse_parent_path = _strip_explicit_tmdb_markers_from_path(raw_parent_path)
     filename_stem = strip_media_file_suffix(parse_name)
     surface = _parse_release_surface(filename_stem, context_mode=True)
     from app.modules.recognition.formats import apply_to_surface
 
-    apply_to_surface(surface, raw_name, str(parent_path or ""), rules=_format_rules)
+    apply_to_surface(surface, raw_name, (parent_path or ""), rules=_format_rules)
     format_fields = surface.get("format_fields")
     guessed = surface["info"]
     filename_title = str(surface["filename_title"] or "")
@@ -2507,10 +2509,10 @@ def _explicit_animation_source_marker(context: RecognitionContext) -> str:
         if kind in _CLASSIFIED_ANIMATION_KINDS:
             return kind
     values = (
-        str(context.filename or ""),
-        str(context.parent_path or ""),
+        (context.filename or ""),
+        (context.parent_path or ""),
         *(
-            str(item or "")
+            (item or "")
             for items in (context.cleaned_components or {}).values()
             for item in (items or ())
         ),
@@ -2524,7 +2526,7 @@ def _explicit_animation_source_marker(context: RecognitionContext) -> str:
 
 def _tmdb_genre_ids(candidate: dict) -> set[int]:
     """兼容 TMDB 搜索 ``genre_ids`` 与详情 ``genres`` 两种结构。"""
-    values: list[object] = list(candidate.get("genre_ids") or ())
+    values: list[Any] = list(candidate.get("genre_ids") or ())
     for genre in candidate.get("genres") or ():
         values.append(genre.get("id") if isinstance(genre, dict) else genre)
     genre_ids: set[int] = set()
@@ -2547,7 +2549,7 @@ def _enclosed_high_season_fallback_context(
         or context.episode < 1
     ):
         return None
-    raw = _strip_explicit_tmdb_markers(str(context.filename or ""))
+    raw = _strip_explicit_tmdb_markers(context.filename or "")
     stem = raw.rsplit(".", 1)[0] if "." in raw else raw
     for match in reversed(list(
         _AMBIGUOUS_ENCLOSED_HIGH_SEASON_EPISODE_TOKEN.finditer(stem)
@@ -2695,7 +2697,7 @@ def generate_search_only_query_variants(
     sources = list(primary_queries or generate_query_variants(context))
     variants: list[str] = []
     for source in sources:
-        value = str(source or "").strip()
+        value = (source or "").strip()
         if not value:
             continue
         cleaned = _SEARCH_ONLY_TRAILING_DUB_NOISE.sub("", value).strip(" ._-—–:：")
@@ -2724,7 +2726,7 @@ _GENERIC_TMDB_SEASON_NAME = re.compile(
 
 def _season_name_is_significant(value: str) -> bool:
     """TMDB 季名必须包含可区分篇章的真实语义，不能只写“第 2 季”。"""
-    text = str(value or "").strip()
+    text = (value or "").strip()
     if not text or _GENERIC_TMDB_SEASON_NAME.fullmatch(text):
         return False
     cjk_count = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", text))
@@ -2740,7 +2742,7 @@ def infer_tmdb_season_from_title_evidence(
     parent_path: str,
     detail: dict | None,
     *,
-    episode: int | None = None,
+    episode: int | str | float | None = None,
 ) -> int | None:
     """用发布名中的篇章名保守映射唯一 TMDB 季。
 
@@ -2758,7 +2760,7 @@ def infer_tmdb_season_from_title_evidence(
     context = extract_recognition_context(filename, parent_path)
     nearest_parent = next((
         part.strip()
-        for part in reversed(re.split(r"[\\/]+", str(parent_path or "")))
+        for part in reversed(re.split(r"[\\/]+", (parent_path or "")))
         if part.strip() and not _GENERIC_FOLDER.fullmatch(part.strip())
     ), "")
     source_values = _unique_text((
@@ -2826,7 +2828,7 @@ def has_unresolved_candidate_title_remainder(
         return False
     candidate_values: list[str] = []
     if match is not None:
-        candidate_values.append(str(match.title or ""))
+        candidate_values.append(match.title or "")
         for candidate in list(match.candidates or []):
             candidate_values.extend((candidate.title, candidate.original_title))
             candidate_values.extend(candidate.aliases or [])
@@ -2873,7 +2875,7 @@ def implicit_season_conflicts_with_candidate_title(
     显式 ``S02``、``Season 2``、``第二季`` 不参与此保护；它们本身就是
     确定性的季号证据。
     """
-    raw = str(filename or "")
+    raw = (filename or "")
     stem = raw.rsplit(".", 1)[0] if "." in raw else raw
     context = extract_recognition_context(filename, parent_path)
     episode = _extract_episode(stem) or context.episode
@@ -2887,7 +2889,7 @@ def implicit_season_conflicts_with_candidate_title(
     sources = [stem]
     sources.extend(
         part.strip()
-        for part in reversed(re.split(r"[\\/]+", str(parent_path or "")))
+        for part in reversed(re.split(r"[\\/]+", (parent_path or "")))
         if part.strip()
     )
     implicit_source = ""
@@ -2932,7 +2934,7 @@ def implicit_season_conflicts_with_candidate_title(
     # 正式标题，会把真实的第二季误拦成“作品名中的罗马数字”。
     candidate_values: list[str] = []
     if match is not None:
-        candidate_values.append(str(match.title or ""))
+        candidate_values.append(match.title or "")
     if isinstance(detail, dict):
         candidate_values.extend((
             str(detail.get("name") or detail.get("title") or ""),
@@ -3087,7 +3089,7 @@ def _validated_target_season_year_evidence(
     candidate: dict,
     context: RecognitionContext,
     expected_year: str,
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """复核候选上已经由 TMDB 详情构造的“目标季首播年”强证据。"""
     evidence = candidate.get("_verified_target_season_year")
     if not isinstance(evidence, dict):
@@ -3101,7 +3103,7 @@ def _validated_target_season_year_evidence(
     candidate_id = str(candidate.get("id") or "").strip()
     if not candidate_id or str(evidence.get("tmdb_id") or "").strip() != candidate_id:
         return None
-    expected = str(expected_year or "").strip()
+    expected = (expected_year or "").strip()
     if not re.fullmatch(r"(?:19|20)\d{2}", expected):
         return None
     if str(evidence.get("expected_year") or "").strip() != expected:
@@ -3109,10 +3111,10 @@ def _validated_target_season_year_evidence(
     if context.media_type != "tv" or context.season is None or context.episode is None:
         return None
     try:
-        source_season = int(evidence.get("source_season"))
-        source_episode = int(evidence.get("source_episode"))
-        target_season = int(evidence.get("target_season"))
-        target_episode = int(evidence.get("target_episode"))
+        source_season = int(evidence.get("source_season", ""))
+        source_episode = int(evidence.get("source_episode", ""))
+        target_season = int(evidence.get("target_season", ""))
+        target_episode = int(evidence.get("target_episode", ""))
     except (TypeError, ValueError):
         return None
     if (
@@ -3130,9 +3132,9 @@ def _validated_target_season_year_evidence(
     if str(validation.get("reason") or "") != "episode_verified":
         return None
     try:
-        if int(validation.get("season")) != target_season:
+        if int(validation.get("season", "")) != target_season:
             return None
-        if int(validation.get("episode")) != target_episode:
+        if int(validation.get("episode", "")) != target_episode:
             return None
     except (TypeError, ValueError):
         return None
@@ -3140,17 +3142,17 @@ def _validated_target_season_year_evidence(
     if not isinstance(mapping, dict):
         return None
     try:
-        if int(mapping.get("source_season")) != source_season:
+        if int(mapping.get("source_season", "")) != source_season:
             return None
-        if int(mapping.get("source_episode")) != source_episode:
+        if int(mapping.get("source_episode", "")) != source_episode:
             return None
-        if int(mapping.get("target_season")) != target_season:
+        if int(mapping.get("target_season", "")) != target_season:
             return None
-        if int(mapping.get("target_episode")) != target_episode:
+        if int(mapping.get("target_episode", "")) != target_episode:
             return None
     except (TypeError, ValueError):
         return None
-    mapping_changed = bool(
+    mapping_changed = (
         source_season != target_season or source_episode != target_episode
     )
     if mapping.get("changed") is not mapping_changed:
@@ -3173,9 +3175,9 @@ def _validated_target_season_year_evidence(
         if not mapping_changed:
             return None
         try:
-            range_start = int(mapping.get("range_start"))
-            range_end = int(mapping.get("range_end"))
-            year_anchor_episode = int(evidence.get("year_anchor_episode"))
+            range_start = int(mapping.get("range_start", ""))
+            range_end = int(mapping.get("range_end", ""))
+            year_anchor_episode = int(evidence.get("year_anchor_episode", ""))
         except (TypeError, ValueError):
             return None
         if (
@@ -3198,9 +3200,9 @@ def _build_target_season_year_evidence(
     expected_year: str,
     mapping: EpisodeMappingPlan,
     season_detail: dict | None = None,
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """构造绑定源位置、目标位置与 TMDB 播出时间的年份证据。"""
-    expected = str(expected_year or "").strip()
+    expected = (expected_year or "").strip()
     if (
         context.media_type != "tv"
         or context.season is None
@@ -3208,11 +3210,11 @@ def _build_target_season_year_evidence(
         or context.episode is None
         or context.episode < 1
         or not re.fullmatch(r"(?:19|20)\d{2}", expected)
-        or not str(tmdb_id or "").strip()
+        or not (tmdb_id or "").strip()
     ):
         return None
     detail_id = str(detail.get("id") or "").strip() if isinstance(detail, dict) else ""
-    if detail_id != str(tmdb_id).strip():
+    if detail_id != tmdb_id.strip():
         return None
     if (
         mapping.source_season != context.season
@@ -3285,7 +3287,7 @@ def _build_target_season_year_evidence(
         return None
     return {
         "kind": _TARGET_SEASON_YEAR_EVIDENCE_KIND,
-        "tmdb_id": str(tmdb_id).strip(),
+        "tmdb_id": tmdb_id.strip(),
         "media_type": "tv",
         "expected_year": expected,
         "source_season": context.season,
@@ -3315,7 +3317,7 @@ def _validated_target_season_year_proof_evidence(
     target_episode: int,
     proof_position_validation: dict,
     proof_episode_mapping: object,
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """复核已经序列化进自动身份 proof 的目标季年份证据。"""
     if not isinstance(evidence, dict):
         return None
@@ -3323,9 +3325,9 @@ def _validated_target_season_year_proof_evidence(
         return None
     if str(evidence.get("media_type") or "").strip().lower() != "tv":
         return None
-    if str(evidence.get("tmdb_id") or "").strip() != str(tmdb_id or "").strip():
+    if str(evidence.get("tmdb_id") or "").strip() != (tmdb_id or "").strip():
         return None
-    expected = str(expected_year or "").strip()
+    expected = (expected_year or "").strip()
     if (
         not re.fullmatch(r"(?:19|20)\d{2}", expected)
         or str(evidence.get("expected_year") or "").strip() != expected
@@ -3334,10 +3336,10 @@ def _validated_target_season_year_proof_evidence(
     ):
         return None
     try:
-        evidence_source_season = int(evidence.get("source_season"))
-        evidence_source_episode = int(evidence.get("source_episode"))
-        evidence_target_season = int(evidence.get("target_season"))
-        evidence_target_episode = int(evidence.get("target_episode"))
+        evidence_source_season = int(evidence.get("source_season", ""))
+        evidence_source_episode = int(evidence.get("source_episode", ""))
+        evidence_target_season = int(evidence.get("target_season", ""))
+        evidence_target_episode = int(evidence.get("target_episode", ""))
     except (TypeError, ValueError):
         return None
     if (
@@ -3357,28 +3359,31 @@ def _validated_target_season_year_proof_evidence(
         if str(payload.get("reason") or "") != "episode_verified":
             return None
         try:
-            if int(payload.get("season")) != target_season:
+            if int(payload.get("season", "")) != target_season:
                 return None
-            if int(payload.get("episode")) != target_episode:
+            if int(payload.get("episode", "")) != target_episode:
                 return None
         except (TypeError, ValueError):
             return None
 
-    mapping_changed = bool(
+    mapping_changed = (
         source_season != target_season or source_episode != target_episode
     )
-    mappings = (evidence.get("episode_mapping"), proof_episode_mapping)
+    evidence_mapping = evidence.get("episode_mapping")
+    if not isinstance(evidence_mapping, dict) or not isinstance(proof_episode_mapping, dict):
+        return None
+    mappings = (evidence_mapping, proof_episode_mapping)
     for mapping in mappings:
         if not isinstance(mapping, dict) or mapping.get("changed") is not mapping_changed:
             return None
         try:
-            if int(mapping.get("source_season")) != source_season:
+            if int(mapping.get("source_season", "")) != source_season:
                 return None
-            if int(mapping.get("source_episode")) != source_episode:
+            if int(mapping.get("source_episode", "")) != source_episode:
                 return None
-            if int(mapping.get("target_season")) != target_season:
+            if int(mapping.get("target_season", "")) != target_season:
                 return None
-            if int(mapping.get("target_episode")) != target_episode:
+            if int(mapping.get("target_episode", "")) != target_episode:
                 return None
         except (TypeError, ValueError):
             return None
@@ -3400,11 +3405,11 @@ def _validated_target_season_year_proof_evidence(
             return None
         try:
             evidence_mapping = mappings[0]
-            range_start = int(evidence_mapping.get("range_start"))
-            range_end = int(evidence_mapping.get("range_end"))
-            proof_range_start = int(mappings[1].get("range_start"))
-            proof_range_end = int(mappings[1].get("range_end"))
-            year_anchor_episode = int(evidence.get("year_anchor_episode"))
+            range_start = int(evidence_mapping.get("range_start", ""))
+            range_end = int(evidence_mapping.get("range_end", ""))
+            proof_range_start = int(mappings[1].get("range_start", ""))
+            proof_range_end = int(mappings[1].get("range_end", ""))
+            year_anchor_episode = int(evidence.get("year_anchor_episode", ""))
         except (AttributeError, TypeError, ValueError):
             return None
         if (
@@ -3449,8 +3454,8 @@ def target_season_year_evidence_matches_detail(
     ):
         return False
     try:
-        target_season = int(evidence.get("target_season"))
-        target_episode = int(evidence.get("target_episode"))
+        target_season = int(evidence.get("target_season", ""))
+        target_episode = int(evidence.get("target_episode", ""))
     except (TypeError, ValueError):
         return False
     validation = _validate_tmdb_position(
@@ -3474,7 +3479,7 @@ def target_season_year_evidence_matches_detail(
         current_air_date = str(
             current_season.get("air_date") or ""
         ).strip() if isinstance(current_season, dict) else ""
-        return bool(
+        return (
             current_air_date == target_air_date
             and str(evidence.get("season_air_date") or "").strip()
             == target_air_date
@@ -3490,9 +3495,9 @@ def target_season_year_evidence_matches_detail(
     if not isinstance(mapping, dict) or mapping.get("changed") is not True:
         return False
     try:
-        range_start = int(mapping.get("range_start"))
-        range_end = int(mapping.get("range_end"))
-        year_anchor_episode = int(evidence.get("year_anchor_episode"))
+        range_start = int(mapping.get("range_start", ""))
+        range_end = int(mapping.get("range_end", ""))
+        year_anchor_episode = int(evidence.get("year_anchor_episode", ""))
     except (TypeError, ValueError):
         return False
     if (
@@ -3685,7 +3690,7 @@ def score_candidate(context: RecognitionContext, candidate: dict) -> CandidateSc
 
 
 def decide_threshold(score: float, threshold: float,
-                     rejected_constraints: list[str] | None = None) -> dict[str, object]:
+                     rejected_constraints: list[str] | None = None) -> dict[str, Any]:
     """阶段 5：生成可解析的最终阈值决定。"""
     rejected = list(rejected_constraints or [])
     passed = float(score) >= float(threshold) and not rejected
@@ -3710,7 +3715,7 @@ def verified_automatic_identity_proof(
     *,
     global_threshold: float | None = None,
     preset: str | None = None,
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """读取并复核可供自动整理消费的剧集身份强证据。
 
     证明绑定生成时的自动安全预设与阈值。保守预设不会被历史 90% 证明
@@ -3825,16 +3830,20 @@ def verified_automatic_identity_proof(
     source_position = proof.get("source_position")
     target_position = proof.get("target_position")
     validation = proof.get("position_validation")
-    if not all(isinstance(item, dict) for item in (source_position, target_position, validation)):
+    if (
+        not isinstance(source_position, dict)
+        or not isinstance(target_position, dict)
+        or not isinstance(validation, dict)
+    ):
         return None
     try:
         source_season_raw = source_position.get("season")
         source_season = (
             None if source_season_raw is None else int(source_season_raw)
         )
-        source_episode = int(source_position.get("episode"))
-        target_season = int(target_position.get("season"))
-        target_episode = int(target_position.get("episode"))
+        source_episode = int(source_position.get("episode", ""))
+        target_season = int(target_position.get("season", ""))
+        target_episode = int(target_position.get("episode", ""))
     except (TypeError, ValueError):
         return None
 
@@ -3865,9 +3874,9 @@ def verified_automatic_identity_proof(
     if str(validation.get("reason") or "") != "episode_verified":
         return None
     try:
-        if int(validation.get("season")) != target_season:
+        if int(validation.get("season", "")) != target_season:
             return None
-        if int(validation.get("episode")) != target_episode:
+        if int(validation.get("episode", "")) != target_episode:
             return None
     except (TypeError, ValueError):
         return None
@@ -3921,7 +3930,7 @@ def _verified_automatic_identity_precheck(
     )
     if (
         expected_year
-        and str(result.year or "").strip() != expected_year
+        and (result.year or "").strip() != expected_year
         and season_year_evidence is None
     ):
         return False
@@ -3939,9 +3948,9 @@ def _build_verified_automatic_identity_proof(
     scored: list[tuple[CandidateScoreBreakdown, dict]],
     decision_constraints: list[str],
     mapping: EpisodeMappingPlan,
-    position: dict[str, object],
+    position: dict[str, Any],
     expected_year: str,
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """生成每个文件独立的低分强证据；不得跨目录文件复用。"""
     policy = automatic_match_policy()
     if not _verified_automatic_identity_precheck(
@@ -3960,12 +3969,12 @@ def _build_verified_automatic_identity_proof(
     target_season_raw = (
         mapping.target_season
         if mapping.target_season is not None
-        else position.get("season")
+        else position.get("season", "")
     )
     target_episode_raw = (
         mapping.target_episode
         if mapping.target_episode is not None
-        else position.get("episode")
+        else position.get("episode", "")
     )
     try:
         target_season = int(target_season_raw)
@@ -3981,9 +3990,9 @@ def _build_verified_automatic_identity_proof(
     )
     if season_year_evidence is not None:
         try:
-            if int(season_year_evidence.get("target_season")) != target_season:
+            if int(season_year_evidence.get("target_season", "")) != target_season:
                 return None
-            if int(season_year_evidence.get("target_episode")) != target_episode:
+            if int(season_year_evidence.get("target_episode", "")) != target_episode:
                 return None
         except (TypeError, ValueError):
             return None
@@ -3999,7 +4008,7 @@ def _build_verified_automatic_identity_proof(
         "version": _VERIFIED_AUTOMATIC_IDENTITY_PROOF_VERSION,
         "kind": "tmdb_tv_episode_identity",
         "provider": "tmdb",
-        "external_id": str(result.tmdb_id or ""),
+        "external_id": (result.tmdb_id or ""),
         "media_type": "tv",
         "confidence": float(round(result.confidence, 3)),
         "recognition_threshold": float(round(result.threshold, 3)),
@@ -4010,8 +4019,8 @@ def _build_verified_automatic_identity_proof(
         "candidate_gap": float(round(candidate_gap, 3)),
         "decision_constraints": list(decision_constraints),
         "selected_constraints": list(selected.rejected_constraints),
-        "expected_year": str(expected_year or ""),
-        "candidate_year": str(result.year or ""),
+        "expected_year": (expected_year or ""),
+        "candidate_year": (result.year or ""),
         "source_title_key": _comparison_key(context.normalized_title),
         "matched_title_key": _comparison_key(selected.matched_title),
         "source_position": {
@@ -4047,12 +4056,12 @@ class TMDBScraper:
     @staticmethod
     def validate_position(
         detail: dict, media_type: str, season: int | None, episode: int | None,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         """供整理层复核最终季集；目录身份缓存和预处理不得绕过此门禁。"""
         return _validate_tmdb_position(detail, media_type, season, episode)
 
     @staticmethod
-    def position_validation_error(validation: dict[str, object]) -> str:
+    def position_validation_error(validation: dict[str, Any]) -> str:
         return _tmdb_position_error(validation)
 
     def __init__(self, client: TMDBClient | None = None):
@@ -4122,7 +4131,7 @@ class TMDBScraper:
     def performance_snapshot(self) -> dict[str, int]:
         """返回累计只读性能计数；调用方可用前后快照计算本次任务增量。"""
         with self._tmdb_state_lock, self._ai_lock:
-            return {key: int(value) for key, value in self._performance_counters.items()}
+            return {key: value for key, value in self._performance_counters.items()}
 
     @staticmethod
     def _clone_search_results(results: list[dict]) -> list[dict]:
@@ -4138,7 +4147,7 @@ class TMDBScraper:
     def _begin_tmdb_flight(
         self, kind: str, key: object
     ) -> tuple[_TMDBFlight, bool]:
-        flight_key = (str(kind), key)
+        flight_key = (kind, key)
         with self._tmdb_state_lock:
             flight = self._tmdb_inflight.get(flight_key)
             if flight is not None:
@@ -4151,7 +4160,7 @@ class TMDBScraper:
     def _finish_tmdb_flight(
         self, kind: str, key: object, flight: _TMDBFlight, result: object
     ) -> None:
-        flight_key = (str(kind), key)
+        flight_key = (kind, key)
         with self._tmdb_state_lock:
             flight.result = result
             if self._tmdb_inflight.get(flight_key) is flight:
@@ -4211,7 +4220,7 @@ class TMDBScraper:
                 cache.pop(item_key, None)
             if key not in cache and len(cache) >= _TMDB_FAILURE_CACHE_LIMIT:
                 cache.pop(next(iter(cache)))
-            cache[key] = (now, str(message or "")[:500])
+            cache[key] = (now, (message or "")[:500])
 
     def _remember_recognition_detail(
         self, key: tuple[str, str], detail: dict, *, failed: bool,
@@ -4279,7 +4288,7 @@ class TMDBScraper:
         for item_key in expired:
             cache.pop(item_key, None)
         cache.pop(key, None)
-        cache[key] = (current, str(error or "")[:500], str(kind or ""))
+        cache[key] = (current, (error or "")[:500], (kind or ""))
         while len(cache) > _AI_FAILURE_CACHE_LIMIT:
             cache.popitem(last=False)
 
@@ -4338,8 +4347,8 @@ class TMDBScraper:
         self, title: str, year: str, media_type: str,
     ) -> _SearchOutcome:
         normalized_type = "tv" if media_type == "tv" else "movie"
-        normalized_title = " ".join(str(title or "").split()).casefold()
-        normalized_year = str(year or "").strip()
+        normalized_title = " ".join((title or "").split()).casefold()
+        normalized_year = (year or "").strip()
         cache_key = (normalized_type, normalized_title, normalized_year)
         cached = self._cached_search_outcome(cache_key)
         if cached is not None:
@@ -4460,7 +4469,7 @@ class TMDBScraper:
             cache[key] = dict(detail)
 
     def get_detail(
-        self, tmdb_id: str, media_type: str, *, force_refresh: bool = False
+        self, tmdb_id: str | int, media_type: str, *, force_refresh: bool = False
     ) -> dict:
         """获取 TMDB 详情；成功结果在当前进程内做有界复用。
 
@@ -4527,7 +4536,7 @@ class TMDBScraper:
         if season_number is None:
             return None
         try:
-            season_detail = self.get_tv_season_detail(tmdb_id, int(season_number))
+            season_detail = self.get_tv_season_detail(tmdb_id, season_number)
         except Exception:
             return None
         episodes = (
@@ -4536,7 +4545,7 @@ class TMDBScraper:
         return episodes if isinstance(episodes, list) else None
 
     def get_tv_season_detail(
-        self, tmdb_id: str, season_number: int, *, force_refresh: bool = False
+        self, tmdb_id: str | int, season_number: int, *, force_refresh: bool = False
     ) -> dict:
         """获取 TV 季逐集详情；供严格的发布季/TMDB 合并季映射复用。"""
         if (
@@ -4546,7 +4555,7 @@ class TMDBScraper:
             or not 0 <= season_number <= 99
         ):
             return {}
-        key = (str(tmdb_id).strip(), int(season_number))
+        key = (str(tmdb_id).strip(), season_number)
         if force_refresh:
             with self._tmdb_state_lock:
                 self._season_detail_cache.pop(key, None)
@@ -4612,7 +4621,7 @@ class TMDBScraper:
                 "season_detail", key, flight, dict(result)
             )
 
-    def get_detail_with_credits(self, tmdb_id: str, media_type: str) -> dict:
+    def get_detail_with_credits(self, tmdb_id: str | int, media_type: str) -> dict:
         """获取候选详情及演职员；搜索与预览复用同一成功响应。"""
         if not tmdb_id:
             return {}
@@ -4679,7 +4688,7 @@ class TMDBScraper:
             return []
         return self._pick_best(clean, year, media_type, candidates).candidates
 
-    def match_from_tmdb(self, tmdb_id: str, media_type: str) -> MatchResult:
+    def match_from_tmdb(self, tmdb_id: str | int, media_type: str) -> MatchResult:
         """按人工指定的 TMDB ID 构建完整匹配结果，并绑定详情响应身份。"""
         media_type = "tv" if media_type == "tv" else "movie"
         requested_id = str(tmdb_id or "").strip()
@@ -4719,7 +4728,7 @@ class TMDBScraper:
     @staticmethod
     def _explicit_match_evidence(
         result: MatchResult, context: RecognitionContext,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         matched = bool(
             result.status == "matched" and result.tmdb_id and result.title
         )
@@ -4737,24 +4746,24 @@ class TMDBScraper:
             if anchors and candidate_titles
             else (1.0 if matched and not anchors else 0.0)
         )
-        expected_year = str(
+        expected_year = (
             context.folder_year or context.filename_year or ""
         ).strip()
-        result_year = str(result.year or "").strip()
+        result_year = (result.year or "").strip()
         year_distance: int | None = None
         if expected_year and result_year and expected_year.isdigit() and result_year.isdigit():
             year_distance = abs(int(expected_year) - int(result_year))
         year_matches = not expected_year or result_year == expected_year
         # 电影首映、地区发行与流媒体年份偶尔会相差一年。显式 ID 的类型
         # 复核只把这种差异视为可接受，不放宽标题证据或更大的年份冲突。
-        year_compatible = bool(
+        year_compatible = (
             not expected_year or year_matches or year_distance == 1
         )
         position_matches = (
             result.media_type == "tv"
             or (context.season is None and context.episode is None)
         )
-        qualified = bool(
+        qualified = (
             matched
             and position_matches
             and year_compatible
@@ -4780,22 +4789,22 @@ class TMDBScraper:
 
     @staticmethod
     def _explicit_result_candidate(
-        result: MatchResult, evidence: dict[str, object],
+        result: MatchResult, evidence: dict[str, Any],
     ) -> Candidate | None:
         if not evidence.get("matched"):
             return None
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
         return Candidate(
-            tmdb_id=str(result.tmdb_id or ""),
-            title=str(result.title or ""),
-            year=str(result.year or ""),
+            tmdb_id=(result.tmdb_id or ""),
+            title=(result.title or ""),
+            year=(result.year or ""),
             score=round(min(float(evidence.get("rank") or 0.0), 1.0), 3),
-            media_type=str(result.media_type or ""),
+            media_type=(result.media_type or ""),
             original_title=str(metadata.get("original_title") or ""),
             poster_path=str(metadata.get("poster_path") or ""),
             backdrop_path=str(metadata.get("backdrop_path") or ""),
             provider="tmdb",
-            external_id=str(result.tmdb_id or ""),
+            external_id=(result.tmdb_id or ""),
         )
 
     def _match_inherited_tmdb(
@@ -4829,8 +4838,8 @@ class TMDBScraper:
             )
             if candidate is not None
         ]
-        folder_label = str(context.folder_title or context.normalized_title or "").strip()
-        expected_year = str(
+        folder_label = (context.folder_title or context.normalized_title or "").strip()
+        expected_year = (
             context.folder_year or context.filename_year or ""
         ).strip()
         if not candidates:
@@ -4845,7 +4854,7 @@ class TMDBScraper:
             )
             status = "low_confidence"
         return MatchResult(
-            tmdb_id=str(tmdb_id or ""), external_id=str(tmdb_id or ""),
+            tmdb_id=(tmdb_id or ""), external_id=(tmdb_id or ""),
             provider="tmdb", media_type=primary_type, confidence=0.0,
             candidates=candidates, locked=False, need_confirm=True,
             error=error, status=status, matched_by="tmdb_id_type_check",
@@ -4858,7 +4867,7 @@ class TMDBScraper:
         tokens: list[ReleaseParseToken] = []
         for kind, values in context.cleaned_components.items():
             for value in values:
-                text = str(value or "").strip()
+                text = (value or "").strip()
                 if text:
                     tokens.append(ReleaseParseToken(kind=kind, value=text))
         if context.filename_year:
@@ -4871,7 +4880,7 @@ class TMDBScraper:
 
     @staticmethod
     def _release_parse_evidence(
-        context: RecognitionContext, processed, fields: dict[str, object],
+        context: RecognitionContext, processed, fields: dict[str, Any],
     ) -> tuple[ReleaseParseEvidence, ...]:
         evidence: list[ReleaseParseEvidence] = []
         for rule_name in context.cleaned_components.get("release_formats", []):
@@ -4938,12 +4947,12 @@ class TMDBScraper:
             effective_season = match.season_override
 
         result = ReleaseParseResult(
-            filename=str(filename or ""),
-            parent_path=str(parent_path or ""),
-            title=str(fields.get("title") or context.normalized_title or ""),
-            year=str(fields.get("year") or context.filename_year or context.folder_year or ""),
-            media_type=str(fields.get("type") or context.media_type or "movie"),
-            tmdb_id=str(fields.get("tmdb_id") or ""),
+            filename=(filename or ""),
+            parent_path=(parent_path or ""),
+            title=(fields.get("title") or context.normalized_title or ""),
+            year=(fields.get("year") or context.filename_year or context.folder_year or ""),
+            media_type=(fields.get("type") or context.media_type or "movie"),
+            tmdb_id=(fields.get("tmdb_id") or ""),
             source_season=context.season,
             source_episode=context.episode,
             effective_season=effective_season,
@@ -5012,7 +5021,7 @@ class TMDBScraper:
         """生成搜索词；只删除已知发布噪声，保留正式括号副标题。"""
         if not title:
             return ""
-        raw = str(title or "").strip()
+        raw = (title or "").strip()
         stem = raw.rsplit(".", 1)[0] if re.search(r"\.[A-Za-z0-9]{2,5}$", raw) else raw
         guessed = _guessit_info(stem)
         episode = _extract_episode(stem)
@@ -5064,7 +5073,7 @@ class TMDBScraper:
     @staticmethod
     def parse_resource_tags(filename: str) -> dict[str, str]:
         """仅从文件名中提取可验证的发布规格，不猜测缺失信息。"""
-        raw = str(filename or "")
+        raw = (filename or "")
         text = re.sub(r"[\[\]【】()（）]", " ", raw)
 
         def first(patterns: tuple[tuple[str, str], ...]) -> str:
@@ -5242,7 +5251,7 @@ class TMDBScraper:
         90% 阈值。后续仍须通过低分强证据、候选间距、歧义门禁、identity
         映射以及 Organizer 的最终季集复核，才能进入自动整理。
         """
-        expected = str(expected_year or "").strip()
+        expected = (expected_year or "").strip()
         if (
             context.media_type != "tv"
             or context.season is None
@@ -5357,7 +5366,7 @@ class TMDBScraper:
         scored: list[tuple[CandidateScoreBreakdown, dict]],
         ambiguous_aliases: list[str],
         threshold: float,
-    ) -> tuple[str, EpisodeMappingPlan, dict[str, object]] | None:
+    ) -> tuple[str, EpisodeMappingPlan, dict[str, Any]] | None:
         """用 TMDB 季集位置对精确同名候选做一次严格、失败关闭的消歧。
 
         该步骤不降低标题阈值，也不把网络失败当作候选淘汰证据。只有一个
@@ -5376,7 +5385,7 @@ class TMDBScraper:
             or not ambiguous_aliases
         ):
             return None
-        bare_absolute_episode = bool(
+        bare_absolute_episode = (
             context.season is None and context.episode >= 100
         )
         if context.season is None and not bare_absolute_episode:
@@ -5405,14 +5414,14 @@ class TMDBScraper:
             return None
 
         passed: list[tuple[str, EpisodeMappingPlan]] = []
-        excluded: list[dict[str, object]] = []
+        excluded: list[dict[str, Any]] = []
         hard_fail_reasons = {"season_not_found", "episode_out_of_range"}
         hard_year_fail_reasons = {
             "year_mismatch",
             "target_season_year_mismatch",
             "target_season_not_found",
         }
-        source_year = str(context.filename_year or context.folder_year or "").strip()
+        source_year = (context.filename_year or context.folder_year or "").strip()
         mapping_source_season = 1 if bare_absolute_episode else context.season
         allow_absolute_probe = (
             mapping_source_season == 1 and context.episode >= 100
@@ -5571,7 +5580,7 @@ class TMDBScraper:
             return None
 
         selected_id, selected_mapping = passed[0]
-        diagnostic: dict[str, object] = {
+        diagnostic: dict[str, Any] = {
             "selected_tmdb_id": selected_id,
             "source_season": context.season,
             "source_episode": context.episode,
@@ -5605,7 +5614,7 @@ class TMDBScraper:
         search_only_queries: list[str] = []
         search_only_variant_used = False
         type_mismatch_seen = False
-        search_attempts: list[dict[str, object]] = []
+        search_attempts: list[dict[str, Any]] = []
 
         def collect(
             year: str,
@@ -5614,19 +5623,19 @@ class TMDBScraper:
             search_only: bool = False,
         ) -> None:
             nonlocal type_mismatch_seen
-            requested_type = str(context.media_type or "").strip().lower()
+            requested_type = (context.media_type or "").strip().lower()
             for query in list(query_pool or queries):
                 self._clear_thread_search_outcome()
                 results = self.search(query, year, context.media_type)
                 outcome = self._take_thread_search_outcome(results)
                 search_attempts.append({
-                    "query": str(query or ""),
-                    "year": str(year or ""),
+                    "query": (query or ""),
+                    "year": (year or ""),
                     "status": outcome.status,
                     "error": outcome.error,
                     "cache_hit": outcome.cache_hit,
                     "empty_cache_hit": outcome.empty_cache_hit,
-                    "search_only": bool(search_only),
+                    "search_only": search_only,
                     "result_count": len(outcome.results),
                 })
                 for candidate in results:
@@ -5793,7 +5802,7 @@ class TMDBScraper:
         position_ambiguities = _unique_text((
             *ambiguous_aliases, *ambiguous_identities,
         ))
-        alias_position_resolution: dict[str, object] | None = None
+        alias_position_resolution: dict[str, Any] | None = None
         resolved_mapping: EpisodeMappingPlan | None = None
         resolved_tmdb_id = ""
         if position_ambiguities and not alias_validation_incomplete:
@@ -5846,7 +5855,7 @@ class TMDBScraper:
             best.score_breakdown.rejected_constraints if best.score_breakdown else []
         )
         best_genre_ids = _tmdb_genre_ids(scored[0][1])
-        animation_verified = bool(
+        animation_verified = (
             not animation_marker
             or _TMDB_ANIMATION_GENRE_ID in best_genre_ids
         )
@@ -5912,8 +5921,8 @@ class TMDBScraper:
             # `best` 来自当前 TMDB 搜索结果。身份字段必须在产生处保持一致，
             # 否则下游需要跨文件复用“已验证 TMDB 身份”时会把真实搜索结果
             # 误判为来源不明。不要在消费端把空 provider 猜成 TMDB。
-            provider=str(best.provider or "tmdb"),
-            external_id=str(best.external_id or best.tmdb_id or ""),
+            provider=(best.provider or "tmdb"),
+            external_id=(best.external_id or best.tmdb_id or ""),
             confidence=best.score, candidates=candidates, matched_by=matched_by,
             threshold=threshold, context=context, query_variants=queries,
             threshold_decision=decision, rejected_constraints=rejected_constraints,
@@ -5947,16 +5956,16 @@ class TMDBScraper:
                     if animation_marker else {}
                 ),
                 "recognition_evidence": {
-                    "matched_query": str(
+                    "matched_query": (
                         best.score_breakdown.matched_query
                         if best.score_breakdown else ""
                     ),
-                    "matched_title": str(
+                    "matched_title": (
                         best.score_breakdown.matched_title
                         if best.score_breakdown else ""
                     ),
-                    "filename_title": str(context.filename_title or ""),
-                    "folder_title": str(context.folder_title or ""),
+                    "filename_title": (context.filename_title or ""),
+                    "folder_title": (context.folder_title or ""),
                 },
             },
         )
@@ -6082,9 +6091,9 @@ class TMDBScraper:
         if decision["passed"]:
             result.status = "matched"
             result.need_confirm = False
-            result.directory_identity_cache_eligible = bool(
+            result.directory_identity_cache_eligible = (
                 matched_by == "search"
-                and str(result.provider or "").strip().lower() == "tmdb"
+                and (result.provider or "").strip().lower() == "tmdb"
                 and bool(result.tmdb_id)
             )
             if allow_lock:
@@ -6157,7 +6166,7 @@ class TMDBScraper:
         core = _core or _parse_release_core(filename, parent_path)
         context = _copy_recognition_context(core.context)
         _inherit_source_query_provenance(context, source_context)
-        hint = str(media_type_hint or "").strip().lower()
+        hint = (media_type_hint or "").strip().lower()
         if hint in {"movie", "tv"}:
             context.media_type = hint
         primary = self._recognize_context(
@@ -6209,7 +6218,7 @@ class TMDBScraper:
             or fallback.need_confirm
             or not fallback.tmdb_id
             or str(position_resolution.get("selected_tmdb_id") or "")
-            != str(fallback.tmdb_id)
+            != fallback.tmdb_id
             or int(position_resolution.get("candidate_count") or 0) < 2
             or not list(position_resolution.get("excluded") or [])
         ):
@@ -6268,7 +6277,7 @@ class TMDBScraper:
         for card in hints.items:
             if card.media_type not in {context.media_type, "all"}:
                 continue
-            if expected_year and card.year and str(card.year) != str(expected_year):
+            if expected_year and card.year and card.year != expected_year:
                 continue
             titles = _unique_text((card.title, card.original_title))
             if not titles:
@@ -6288,9 +6297,9 @@ class TMDBScraper:
                 parent_path=context.parent_path,
                 normalized_title=titles[0],
                 filename_title=titles[0],
-                filename_year=str(card.year or context.filename_year or ""),
+                filename_year=(card.year or context.filename_year or ""),
                 folder_title=titles[1] if len(titles) > 1 else titles[0],
-                folder_year=str(card.year or context.folder_year or ""),
+                folder_year=(card.year or context.folder_year or ""),
                 media_type=context.media_type,
                 season=context.season,
                 episode=context.episode,
@@ -6308,9 +6317,9 @@ class TMDBScraper:
             second_titles = _unique_text((
                 second.title,
                 *(candidate.title for candidate in (second.candidates or [])
-                  if str(candidate.tmdb_id) == str(second.tmdb_id)),
+                  if candidate.tmdb_id == second.tmdb_id),
                 *(candidate.original_title for candidate in (second.candidates or [])
-                  if str(candidate.tmdb_id) == str(second.tmdb_id)),
+                  if candidate.tmdb_id == second.tmdb_id),
             ))
             # 外部卡片已经证明与源标题相关；二次 TMDB 结果还必须独立
             # 证明与该卡片相关，不能让已通过的卡片标题替无关 TMDB 结果背书。
@@ -6334,22 +6343,22 @@ class TMDBScraper:
                     "recognition_evidence": {
                         **tmdb_evidence,
                         "kind": "external_title_hint",
-                        "provider": str(card.provider or ""),
-                        "external_id": str(card.external_id or ""),
-                        "hint_title": str(card.title or ""),
-                        "hint_year": str(card.year or ""),
+                        "provider": (card.provider or ""),
+                        "external_id": (card.external_id or ""),
+                        "hint_title": (card.title or ""),
+                        "hint_year": (card.year or ""),
                         "source_anchor_verified": True,
                         "source": {
-                            "filename_title": str(context.filename_title or ""),
-                            "folder_title": str(context.folder_title or ""),
-                            "approved_anchor": str(matched_source or ""),
-                            "matched_hint_title": str(matched_hint_title or ""),
+                            "filename_title": (context.filename_title or ""),
+                            "folder_title": (context.folder_title or ""),
+                            "approved_anchor": (matched_source or ""),
+                            "matched_hint_title": (matched_hint_title or ""),
                             "anchor_score": float(round(source_score, 3)),
                         },
                         "tmdb_revalidated": True,
-                        "tmdb_id": str(second.tmdb_id or ""),
+                        "tmdb_id": (second.tmdb_id or ""),
                         "tmdb": {
-                            "id": str(second.tmdb_id or ""),
+                            "id": (second.tmdb_id or ""),
                             "matched_query": str(
                                 tmdb_evidence.get("matched_query") or ""
                             ),
@@ -6394,13 +6403,13 @@ class TMDBScraper:
     @classmethod
     def _ai_provider_settings(cls) -> tuple[str, str, str, int, str]:
         """复用 Media Agent Provider，未配置时关闭 AI 回退。"""
-        agent_url = str(get("AGENT_LLM_API_URL", "") or "").strip()
-        agent_model = str(get("AGENT_LLM_MODEL", "") or "").strip()
+        agent_url = (get("AGENT_LLM_API_URL", "") or "").strip()
+        agent_model = (get("AGENT_LLM_MODEL", "") or "").strip()
         if agent_url and agent_model and cls._shared_ai_endpoint_is_valid(agent_url):
             return (
                 agent_url,
                 agent_model,
-                str(get("AGENT_LLM_API_KEY", "") or ""),
+                (get("AGENT_LLM_API_KEY", "") or ""),
                 cls._ai_timeout_seconds(),
                 resolve_protocol(get("AGENT_LLM_PROTOCOL", "auto"), agent_url),
             )
@@ -6414,7 +6423,7 @@ class TMDBScraper:
                 client_key[0], https_only=True, public_only=True
             ).base_url
         except ValueError:
-            base_url = str(client_key[0] or "").strip()
+            base_url = (client_key[0] or "").strip()
         return provider_fingerprint(
             base_url=base_url,
             model=client_key[1],
@@ -6424,7 +6433,7 @@ class TMDBScraper:
 
     @classmethod
     def _ai_cache_key(
-        cls, payload: dict[str, object], client_key: AIClientKey, *, namespace: str
+        cls, payload: Mapping[str, object], client_key: AIClientKey, *, namespace: str
     ) -> str:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         identity = cls._ai_client_fingerprint(client_key)
@@ -6440,7 +6449,7 @@ class TMDBScraper:
         cache_key: str,
     ) -> AIRecognitionResult:
         """复用 AI 客户端并只合并相同输入；不同输入不互相阻塞。"""
-        timeout_seconds = int(client_key[3])
+        timeout_seconds = client_key[3]
         protocol = client_key[5] if len(client_key) > 5 else None
         scoped_client_key = (
             self._ai_client_fingerprint(client_key),
@@ -6541,7 +6550,7 @@ class TMDBScraper:
         cache_key: str,
     ) -> AIReleaseGroupResult:
         """对未知前置方括号做独立缓存分类，不污染媒体身份 AI 缓存。"""
-        timeout_seconds = int(client_key[3])
+        timeout_seconds = client_key[3]
         protocol = client_key[5] if len(client_key) > 5 else None
         scoped_client_key = (
             self._ai_client_fingerprint(client_key),
@@ -6637,12 +6646,12 @@ class TMDBScraper:
 
     @staticmethod
     def _unknown_release_group_candidate(filename: str) -> tuple[str, str, str] | None:
-        match = _RELEASE_PREFIX.match(str(filename or ""))
+        match = _RELEASE_PREFIX.match(filename or "")
         if not match:
             return None
         raw_token = match.group(1)
         content = _bracket_content(raw_token)
-        remainder = str(filename or "")[match.end():].lstrip()
+        remainder = (filename or "")[match.end():].lstrip()
         if not content or not remainder or _is_release_prefix(content, remainder):
             return None
         # 停用词条代表用户明确否决，不能被 AI 作为“未知发布组”重新学习并绕过。
@@ -6691,7 +6700,7 @@ class TMDBScraper:
             group_token=group_token, remainder_title=remainder
         )
         try:
-            proxy_url = str(get("PROXY_URL", "") or "")
+            proxy_url = (get("PROXY_URL", "") or "")
             client_key = (api_url, model, api_key, timeout_seconds, proxy_url, protocol)
             cache_key = self._ai_cache_key(
                 ai_input.safe_payload(), client_key, namespace="release_group"
@@ -6728,7 +6737,7 @@ class TMDBScraper:
             )
             retry.context.cleaned_components = cleaned
         retry.matched_by = "ai_release_group"
-        learning = {
+        learning: dict[str, Any] = {
             "group_token": group_token,
             "canonical_name": ai_result.canonical_name or group_token,
             "confidence": ai_result.confidence,
@@ -6785,7 +6794,7 @@ class TMDBScraper:
         *,
         media_type: str,
         year: str,
-        diagnostic: dict[str, object],
+        diagnostic: dict[str, Any],
         log_context: str,
     ):
         """请求网页标题线索并统一记录可用性、缓存与性能诊断。"""
@@ -6806,11 +6815,11 @@ class TMDBScraper:
 
         self._record_tavily_hint_result(hints)
         diagnostic.update(
-            attempted=bool(hints.attempted),
-            status=str(hints.status or "unavailable"),
-            cached=bool(hints.cached),
+            attempted=hints.attempted,
+            status=(hints.status or "unavailable"),
+            cached=hints.cached,
             title_count=len(hints.titles),
-            error=str(hints.error or "")[:240],
+            error=(hints.error or "")[:240],
         )
         return hints
 
@@ -6820,7 +6829,7 @@ class TMDBScraper:
         parent_path: str,
         deterministic: RecognitionResult,
         *,
-        diagnostic: dict[str, object] | None = None,
+        diagnostic: dict[str, Any] | None = None,
         source_anchors: list[str] | None = None,
     ) -> RecognitionResult:
         """AI Provider 真正不可用时，用 Tavily 标题线索重走严格 TMDB 复核。
@@ -6830,7 +6839,7 @@ class TMDBScraper:
         待确认结果；这条回退不能修饰已有 TMDB 歧义或越界冲突。
         """
         safe_diagnostic = dict(diagnostic or {})
-        web_diagnostic: dict[str, object] = {
+        web_diagnostic: dict[str, Any] = {
             "attempted": False,
             "status": "not_eligible",
             "cached": False,
@@ -6871,7 +6880,7 @@ class TMDBScraper:
             web_diagnostic["status"] = "no_original_source_anchor"
             return deterministic
 
-        expected_year = str(context.filename_year or context.folder_year or "")
+        expected_year = (context.filename_year or context.folder_year or "")
         hints = self._search_tavily_title_hints(
             search_anchors[0],
             media_type=context.media_type,
@@ -6938,7 +6947,7 @@ class TMDBScraper:
                 (
                     candidate
                     for candidate in second.candidates
-                    if str(candidate.tmdb_id) == str(second.tmdb_id)
+                    if candidate.tmdb_id == second.tmdb_id
                 ),
                 None,
             )
@@ -6972,7 +6981,7 @@ class TMDBScraper:
                 not expected_year
                 or (detail_year and detail_year == expected_year)
             )
-            id_verified = str(detail.get("id") or "") == str(second.tmdb_id)
+            id_verified = str(detail.get("id") or "") == second.tmdb_id
             mapping = infer_episode_mapping(
                 source_season=context.season,
                 source_episode=context.episode,
@@ -7046,8 +7055,8 @@ class TMDBScraper:
         candidate_titles: list[str],
         source_anchors: list[str],
         detail_year: str,
-        position: dict[str, object],
-        diagnostic: dict[str, object],
+        position: dict[str, Any],
+        diagnostic: dict[str, Any],
     ) -> bool:
         """用独立网页标题桥接来源标题与 AI/TMDB 同一实体。
 
@@ -7059,7 +7068,7 @@ class TMDBScraper:
         tmdb_revalidation = diagnostic.get("tmdb_revalidation")
         if not isinstance(tmdb_revalidation, dict):
             return False
-        corroboration: dict[str, object] = {
+        corroboration: dict[str, Any] = {
             "attempted": False,
             "status": "not_eligible",
             "cached": False,
@@ -7169,15 +7178,15 @@ class TMDBScraper:
                 strict.status == "matched"
                 and not strict.need_confirm
                 and strict.tmdb_id
-                and str(strict.tmdb_id) == str(second.tmdb_id)
+                and strict.tmdb_id == second.tmdb_id
                 and strict.media_type == second.media_type
                 and strict.confidence >= 0.9
             )
             corroboration.update(
                 source_web_score=round(source_hint_score, 3),
                 web_tmdb_score=round(hint_candidate_score, 3),
-                matched_hint=str(hint_title)[:200],
-                strict_tmdb_id=str(strict.tmdb_id or ""),
+                matched_hint=hint_title[:200],
+                strict_tmdb_id=(strict.tmdb_id or ""),
                 strict_confidence=round(float(strict.confidence or 0.0), 3),
                 strict_same_id=strict_same_id,
             )
@@ -7190,7 +7199,7 @@ class TMDBScraper:
                 **dict(second.metadata or {}),
                 "recognition_evidence": {
                     "mode": "llm_tavily_tmdb",
-                    "tmdb_id": str(second.tmdb_id),
+                    "tmdb_id": second.tmdb_id,
                     "llm_confidence": round(float(ai_result.confidence), 3),
                     "source_web_score": round(source_hint_score, 3),
                     "web_tmdb_score": round(hint_candidate_score, 3),
@@ -7251,7 +7260,7 @@ class TMDBScraper:
                 "error": redact_sensitive_text(exc)[:500],
             }
             return deterministic
-        diagnostic: dict[str, object] = {
+        diagnostic: dict[str, Any] = {
             "attempted": True,
             "reason": "deterministic_failed",
             "input": safe_input,
@@ -7269,7 +7278,7 @@ class TMDBScraper:
             deterministic.ai_diagnostic = diagnostic
             return deterministic
         try:
-            proxy_url = str(get("PROXY_URL", "") or "")
+            proxy_url = (get("PROXY_URL", "") or "")
             client_key = (api_url, model, api_key, timeout_seconds, proxy_url, protocol)
             cache_key = self._ai_cache_key(
                 safe_input, client_key, namespace="media_identity"
@@ -7353,12 +7362,12 @@ class TMDBScraper:
             and second.media_type in {"movie", "tv"}
             and second.confidence >= 0.82
         )
-        detail_revalidation_eligible = bool(
+        detail_revalidation_eligible = (
             (local_passed and local_strict_passed) or corroboration_candidate
         )
         source_year_verified = True
         detail_available = False
-        position_validation: dict[str, object] | None = None
+        position_validation: dict[str, Any] | None = None
         if detail_revalidation_eligible and ai_passed and second.tmdb_id:
             detail = self.get_detail(second.tmdb_id, second.media_type)
             detail_available = bool(detail)
@@ -7373,7 +7382,7 @@ class TMDBScraper:
             matching_candidate_aliases = [
                 alias
                 for candidate in second.candidates
-                if str(candidate.tmdb_id or "") == str(second.tmdb_id or "")
+                if (candidate.tmdb_id or "") == (second.tmdb_id or "")
                 for alias in candidate.aliases
             ]
             # 详情主标题不足以覆盖跨语言发布名。只扩充 TMDB 详情返回的
@@ -7412,8 +7421,8 @@ class TMDBScraper:
                 ai_result.year is None
                 or (bool(detail_year) and detail_year == str(ai_result.year))
             )
-            source_year = str(context.filename_year or context.folder_year or "")
-            id_verified = str(detail.get("id") or "") == str(second.tmdb_id)
+            source_year = (context.filename_year or context.folder_year or "")
+            id_verified = str(detail.get("id") or "") == second.tmdb_id
             episode_mapping = infer_episode_mapping(
                 source_season=ai_context.season,
                 source_episode=ai_context.episode,
@@ -7542,7 +7551,7 @@ class TMDBScraper:
             # 2) AI 高置信且 TMDB 候选达到 82%，但未达到 90% 自动线。
             # 两类都仍需网页标题双向桥接，并由 strict TMDB 重搜返回同一 ID；
             # Tavily 不能覆盖年份、季集位置、类型或候选歧义等硬冲突。
-            needs_title_corroboration = bool(
+            needs_title_corroboration = (
                 not source_anchor_verified or not local_strict_passed or not local_passed
             )
             if needs_title_corroboration and not position["passed"]:
@@ -7676,7 +7685,7 @@ class TMDBScraper:
                 parent_path, nearest_first=True
             )
         parsed["tmdb_id"] = filename_tmdb_id or inherited_tmdb_id
-        hint = str(media_type_hint or "").strip().lower()
+        hint = (media_type_hint or "").strip().lower()
         if hint not in {"movie", "tv"}:
             hint = ""
 
@@ -7809,7 +7818,7 @@ class TMDBScraper:
             )
             return self._attach_preprocess(result, processed)
 
-        deterministic_kwargs = {
+        deterministic_kwargs: dict[str, Any] = {
             "source_context": raw_context,
             "_core": processed_core,
         }
@@ -7907,10 +7916,10 @@ class TMDBScraper:
         context: RecognitionContext | None = None,
     ) -> tuple[str, str, int]:
         normalized_parent = re.sub(
-            r"/+", "/", str(parent_path or "").replace("\\", "/").strip()
+            r"/+", "/", (parent_path or "").replace("\\", "/").strip()
         ).strip("/")
         context = context or extract_recognition_context(raw_name, normalized_parent)
-        hint = str(media_type_hint or "").strip().lower()
+        hint = (media_type_hint or "").strip().lower()
         media_type = hint if hint in {"movie", "tv"} else context.media_type
         season = context.season if isinstance(context.season, int) and context.season >= 0 else -1
         return normalized_parent, media_type, season
@@ -7951,12 +7960,12 @@ class TMDBScraper:
             lock_source=source,
         )
 
-    def confirm(self, raw_name: str, tmdb_id: str, title: str,
-                year: str, media_type: str = "", parent_path: str = "",
+    def confirm(self, raw_name: str, tmdb_id: str | int, title: str,
+                year: str | int, media_type: str = "", parent_path: str = "",
                 rejected_tmdb_ids: list[str] | None = None) -> None:
         """人工确认后按文件名、父目录、类型与季号锁定映射。"""
         self._set_lock(
-            raw_name, tmdb_id, title, year, media_type, parent_path=parent_path
+            raw_name, str(tmdb_id), title, str(year), media_type, parent_path=parent_path
         )
         try:
             from app.modules.media_aliases import record_manual_confirmation
@@ -7993,7 +8002,7 @@ class TMDBScraper:
             )
             normalized_parent = re.sub(
                 r"/+", "/", unicodedata.normalize(
-                    "NFKC", str(parent_path or "").replace("\\", "/")
+                    "NFKC", (parent_path or "").replace("\\", "/")
                 ).strip(),
             ).strip("/")
             package_identity = (
@@ -8013,9 +8022,9 @@ class TMDBScraper:
                         "sample_key": sample_key,
                         "source": "manual_confirmation",
                         "tmdb_id": str(tmdb_id),
-                        "title": str(title or ""),
+                        "title": (title or ""),
                         "year": str(year or ""),
-                        "media_type": str(media_type or context.media_type or ""),
+                        "media_type": (media_type or context.media_type or ""),
                         "package_identity": package_identity,
                     },
                 )

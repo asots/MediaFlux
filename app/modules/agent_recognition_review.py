@@ -101,8 +101,8 @@ def recognition_review_enabled() -> bool:
         config.get_bool("AGENT_ENABLED", False)
         and config.get_bool("AGENT_LLM_ENABLED", False)
         and config.get_bool("AGENT_RECOGNITION_REVIEW_ENABLED", False)
-        and str(config.get("AGENT_LLM_API_URL", "") or "").strip()
-        and str(config.get("AGENT_LLM_MODEL", "") or "").strip()
+        and (config.get("AGENT_LLM_API_URL", "") or "").strip()
+        and (config.get("AGENT_LLM_MODEL", "") or "").strip()
     )
 
 
@@ -169,7 +169,7 @@ def _season_projection(detail: dict[str, Any], *, season: int) -> dict[str, Any]
     for item in list(detail.get("episodes") or [])[:500]:
         if not isinstance(item, dict):
             continue
-        number = item.get("episode_number")
+        number: Any = item.get("episode_number")
         if isinstance(number, bool):
             continue
         try:
@@ -202,7 +202,7 @@ def _normalized_reason_code(value: object) -> str:
     return normalized[:80] or "unspecified"
 
 
-def _validate_index(value: object, candidates: list[dict[str, Any]]) -> int:
+def _validate_index(value: Any, candidates: list[dict[str, Any]]) -> int:
     if isinstance(value, bool):
         raise TypeError("候选序号无效")
     index = int(value)
@@ -381,6 +381,7 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
                 "summary": "该候选不属于已支持的 TMDB 核验或光鸭清洗范围",
                 "data": {"candidate_index": index, "provider": provider},
             }
+        assert scraper is not None
         detail = scraper.get_detail(tmdb_id, media_type)
         projected = _detail_projection(detail, media_type=media_type)
         inspected_candidates[index] = bool(
@@ -400,7 +401,8 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
                 "复核决定提交后不能继续读取证据", code="decision_already_proposed"
             )
         index = _validate_index(arguments.get("candidate_index"), candidates)
-        season = int(arguments.get("season"))
+        season_value: Any = arguments.get("season")
+        season = int(season_value)
         if not 0 <= season <= 99:
             raise ValueError("季号超出允许范围")
         candidate = candidates[index]
@@ -414,6 +416,7 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
                 "summary": "该候选不是可核对季集的 TMDB 剧集",
                 "data": {"candidate_index": index, "season": season},
             }
+        assert scraper is not None
         detail = scraper.get_tv_season_detail(
             str(candidate.get("tmdb_id") or "").strip(), season
         )
@@ -556,7 +559,7 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
             session_id=f"review-{secrets.token_urlsafe(10)}",
             channel="internal",
         )
-        timeout = max(20, min(90, int(settings.timeout_seconds) * 2 + 10))
+        timeout = max(20, min(90, settings.timeout_seconds * 2 + 10))
 
         async def consume() -> None:
             nonlocal tool_calls, failure_code
@@ -574,7 +577,7 @@ async def _review_async(payload: dict[str, Any]) -> RecognitionReviewDecision:
             scraper.close()
 
     elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
-    model_name = str(settings.model or "")[:200]
+    model_name = (settings.model or "")[:200]
     if not proposed:
         return RecognitionReviewDecision(
             status="failed",

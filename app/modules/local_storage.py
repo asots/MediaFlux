@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Generator, Iterable, Iterator
 
 from app.modules.local_path_mapping import assert_within
 from app.modules.organize import METADATA_EXTS, VIDEO_EXTS
@@ -55,7 +55,7 @@ _IMAGE_SUFFIXES = {"jpg", "jpeg", "png", "webp", "avif"}
 
 def is_ignored_local_media_directory(value: str | Path) -> bool:
     """仅按完整目录名屏蔽系统目录与临时目录，避免误伤包含相同片段的媒体名。"""
-    name = value.name if isinstance(value, Path) else str(value)
+    name = value.name if isinstance(value, Path) else value
     return name.strip().casefold() in IGNORED_LOCAL_MEDIA_DIRECTORY_NAMES
 
 
@@ -171,14 +171,14 @@ class LocalFilesystemAdapter:
         cache_directory_names: bool = False,
     ) -> None:
         self.allowed_root = assert_within(Path(allowed_root), Path(allowed_root))
-        self.item_limit = max(1, int(item_limit))
-        self.depth_limit = max(1, int(depth_limit))
-        self.min_video_size = max(0, int(min_video_size))
+        self.item_limit = max(1, item_limit)
+        self.depth_limit = max(1, depth_limit)
+        self.min_video_size = max(0, min_video_size)
         self._cache_directory_names = cache_directory_names
         self._directory_names: dict | None = None
 
     @contextmanager
-    def directory_name_scope(self) -> Iterator[None]:
+    def directory_name_scope(self) -> Generator[None, None, None]:
         """显式限定一次发现操作的名称缓存；退出（含异常）后不得跨操作复用。
 
         目录时间戳可能在增删名称后保持不变，不能用作跨操作失效凭据。
@@ -226,10 +226,10 @@ class LocalFilesystemAdapter:
         if not stat_module.S_ISREG(info.st_mode):
             raise LocalStorageError("快照目标不是普通文件")
         return (
-            int(info.st_size),
-            int(info.st_mtime_ns),
-            int(info.st_dev),
-            int(info.st_ino),
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_dev,
+            info.st_ino,
         )
 
     def snapshot(self, path: Path) -> LocalFileSnapshot:
@@ -448,7 +448,7 @@ class LocalFilesystemAdapter:
             probe = probe.parent
         if not probe.exists():
             raise LocalStorageError("无法确定目标磁盘可用空间")
-        return int(shutil.disk_usage(probe).free)
+        return shutil.disk_usage(probe).free
 
 
 def snapshot_digest(snapshots: Iterable[LocalFileSnapshot]) -> str:

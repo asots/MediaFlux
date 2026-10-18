@@ -7,33 +7,52 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 import re
+import time
 import uuid
 from dataclasses import dataclass, replace
+from typing import Any
 
 from app import database as db
-from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaReadRejected, close_guangya_client
+from app.clients.guangya import (
+    GuangYaClient,
+    GuangYaFile,
+    GuangYaReadRejected,
+    close_guangya_client,
+)
 from app.logger import get_logger
 from app.modules.guangya_compensation import restore_guangya_file
+from app.modules.nsfw import (
+    CleanTitleCandidate,
+    build_clean_title_candidate,
+    extract_nsfw_identifier,
+    normalize_code,
+)
 from app.modules.organize import (
     OrganizePlan,
-    OrganizeRules,
     Organizer,
+    OrganizeRules,
     organize_rules_snapshot,
     organize_rules_snapshot_matches,
     restore_organize_rules_snapshot,
 )
 from app.modules.organize_delete_audit import (
-    DeleteCandidate, execute_recycle_bin_delete, record_blocked_delete,
+    DeleteCandidate,
+    execute_recycle_bin_delete,
+    record_blocked_delete,
 )
-from app.modules.nsfw import (
-    build_clean_title_candidate, extract_nsfw_identifier, normalize_code,
-)
-from app.modules.organize_postprocess import companion_target_name, normalize_media_number
-from app.modules.scraper import Candidate, MatchResult, TMDBScraper, extract_recognition_context
 from app.modules.organize_identity import _usable_filename_identity_hint
+from app.modules.organize_postprocess import (
+    companion_target_name,
+    normalize_media_number,
+)
 from app.modules.recognition.cleaner import _comparison_key
+from app.modules.scraper import (
+    Candidate,
+    MatchResult,
+    TMDBScraper,
+    extract_recognition_context,
+)
 
 logger = get_logger(__name__)
 
@@ -108,7 +127,7 @@ class OrganizeCorrectionService:
             return dict(raw)
         try:
             payload = json.loads(str(raw))
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             return None
         return payload if isinstance(payload, dict) else None
 
@@ -192,7 +211,7 @@ class OrganizeCorrectionService:
                 "请根据成员快照和操作步骤人工核对云端现状，禁止猜测式续写。"
             )
         rules = self._rules_for_log(data)
-        nsfw_only = bool(rules.nsfw_exclusive)
+        nsfw_only = rules.nsfw_exclusive
         data["recognition"] = {
             "provider": "metatube" if nsfw_only else "tmdb",
             "label": "MetaTube / 清洗标题" if nsfw_only else "TMDB",
@@ -205,7 +224,7 @@ class OrganizeCorrectionService:
 
     def validate_batch(self, log_ids: list[int], action: str) -> list[dict]:
         """批量操作写入前统一校验；任何不合格成员都会阻止整个批次。"""
-        unique_ids = list(dict.fromkeys(int(log_id) for log_id in log_ids))
+        unique_ids = list(dict.fromkeys(log_id for log_id in log_ids))
         if len(unique_ids) != len(log_ids):
             raise ValueError("批量日志列表包含重复 ID")
         if len(unique_ids) < 2:
@@ -409,7 +428,7 @@ class OrganizeCorrectionService:
         }
 
     def search_candidates(self, log_id: int, query: str = "", year: str = "",
-                          media_type: str = "") -> list[dict]:
+                          media_type: str = "") -> list[dict | CleanTitleCandidate]:
         detail = self.detail(log_id)
         if not detail["allowed_actions"]["search"]:
             raise ValueError(detail.get("safety_notice") or "该日志不能人工纠偏")
@@ -477,15 +496,15 @@ class OrganizeCorrectionService:
                source_values: tuple[str, ...] = ()) -> MatchResult:
         """按来源边界解析人工候选；成人来源绝不接受 TMDB 回退。"""
         effective_rules = rules or OrganizeRules.from_config().for_source("")
-        normalized_provider = str(provider or "").strip().lower()
+        normalized_provider = (provider or "").strip().lower()
         if effective_rules.nsfw_exclusive:
-            if normalized_provider not in {"metatube", "clean_title"} or not str(external_id or "").strip():
+            if normalized_provider not in {"metatube", "clean_title"} or not (external_id or "").strip():
                 raise ValueError("请选择有效的成人内容候选")
             source_codes: set[str] = set()
             source_seed = ""
             for value in source_values:
-                if not source_seed and str(value or "").strip():
-                    source_seed = str(value)
+                if not source_seed and (value or "").strip():
+                    source_seed = value
                 identifier = extract_nsfw_identifier(value, effective_rules.nsfw_strip_domains)
                 if identifier is not None:
                     source_codes.add(normalize_code(identifier.code))
@@ -497,11 +516,11 @@ class OrganizeCorrectionService:
                 )
                 if fallback is None:
                     raise ValueError("原文件名无法生成安全的清洗标题")
-                resolved_code = normalize_code(str(fallback.get("external_id") or ""))
-                if normalize_code(str(external_id)) != resolved_code:
+                resolved_code = normalize_code(fallback.get("external_id") or "")
+                if normalize_code(external_id) != resolved_code:
                     raise ValueError("清洗标题候选番号与原文件不一致，请重新生成")
                 # Web 请求中的 title 可被修改；清洗入库始终以原文件服务端重算结果为准。
-                resolved_title = str(fallback.get("title") or resolved_code).strip()
+                resolved_title = (fallback.get("title") or resolved_code).strip()
                 metadata = {
                     **dict(fallback.get("metadata") or {}),
                     "number": resolved_code,
@@ -516,7 +535,7 @@ class OrganizeCorrectionService:
             with self.organizer._nsfw_recognizer_lease(effective_rules) as recognizer:
                 if recognizer is None:
                     raise ValueError("成人来源未配置可用的 MetaTube 服务")
-                result, detail = recognizer.resolve(str(external_id).strip())
+                result, detail = recognizer.resolve(external_id.strip())
             resolved_code = normalize_code(str(detail.get("number") or ""))
             if not resolved_code or resolved_code not in source_codes:
                 raise ValueError("MetaTube 候选番号与原文件不一致，请重新搜索")
@@ -524,7 +543,7 @@ class OrganizeCorrectionService:
         if normalized_provider not in {"", "tmdb"}:
             raise ValueError("普通媒体来源只允许使用 TMDB 候选")
         media_type = "tv" if media_type == "tv" else "movie"
-        resolved_tmdb_id = str(tmdb_id or external_id or "").strip()
+        resolved_tmdb_id = (tmdb_id or external_id or "").strip()
         result = self.scraper.match_from_tmdb(resolved_tmdb_id, media_type)
         if not result.tmdb_id:
             raise ValueError(result.error or "TMDB 详情不存在")
@@ -678,9 +697,9 @@ class OrganizeCorrectionService:
         remote = self.client.file_info(item.file_id)
         if not remote:
             raise RuntimeError(f"云端文件不存在或详情不可用: {item.current_name or item.file_id}")
-        if not str(remote.file_id or "").strip():
+        if not (remote.file_id or "").strip():
             raise RuntimeError(f"无法读取云端文件详情: {item.current_name or item.file_id}")
-        if str(remote.file_id) != str(item.file_id):
+        if remote.file_id != item.file_id:
             raise RuntimeError(f"云端文件详情不匹配: {item.current_name or item.file_id}")
         if item.current_parent_id and remote.parent_id != item.current_parent_id:
             raise RuntimeError(f"文件位置已被外部修改: {item.current_name}")
@@ -707,21 +726,21 @@ class OrganizeCorrectionService:
             entries = directory_cache[parent_id]
             if not any(entry.file_id == item.file_id for entry in entries):
                 raise RuntimeError(f"删除对象扫描缺失: {item.current_name}")
-            if not item.etag or int(item.size or 0) <= 0:
+            if not item.etag or (item.size or 0) <= 0:
                 raise RuntimeError(f"GCID/size 歧义，禁止删除: {item.current_name}")
             matches = [
                 entry for entry in entries
                 if entry.etag == item.etag
-                and int(entry.size or 0) == int(item.size or 0)
+                and (entry.size or 0) == (item.size or 0)
             ]
             if len(matches) != 1 or matches[0].file_id != item.file_id:
                 raise RuntimeError(f"GCID/size 歧义，禁止删除: {item.current_name}")
-            if remote.etag != item.etag or int(remote.size or 0) != int(item.size or 0):
+            if remote.etag != item.etag or (remote.size or 0) != (item.size or 0):
                 raise RuntimeError(f"GCID/size 与日志快照不一致: {item.current_name}")
         return remotes
 
     def _ensure_target_dir(self, root_id: str, path: str) -> tuple[str, list[str]]:
-        current = str(root_id or "0")
+        current = (root_id or "0")
         created: list[str] = []
         for part in (piece for piece in path.split("/") if piece):
             children = self.client.list_dir(current)
@@ -746,7 +765,7 @@ class OrganizeCorrectionService:
                     trigger="correction_empty_dir_cleanup",
                     reason="整理纠偏失败补偿：清理本次创建且仍为空的目录",
                     candidate=DeleteCandidate(
-                        file_id=str(dir_id),
+                        file_id=dir_id,
                         name=f"纠偏临时目录 {dir_id}",
                         parent_id="",
                     ),
@@ -832,7 +851,7 @@ class OrganizeCorrectionService:
                         to_parent_id=parent_id, to_name=name, status='running',
                     )
                     try:
-                        result = str(self.client.create_dir(name, parent_id) or '')
+                        result = (self.client.create_dir(name, parent_id) or '')
                         current = self.client.file_info(result) if result else None
                         matches = [entry for entry in self.client.list_dir(parent_id) if entry.name == name]
                         if (current is None or not current.is_dir or current.parent_id != parent_id
@@ -874,7 +893,7 @@ class OrganizeCorrectionService:
                 )
 
     def _snapshot_after_rollback_failure(self, item: CorrectionItem, error: Exception) -> None:
-        fields = {"status": "rollback_failed", "error": str(error),
+        fields: dict[str, Any] = {"status": "rollback_failed", "error": str(error),
                   "current_parent_id": "", "current_name": ""}
         try:
             remote = self.client.file_info(item.file_id)
@@ -977,7 +996,7 @@ class OrganizeCorrectionService:
         from app.modules.organize_tasks import _protected_organize_root_ids
 
         protected, error = _protected_organize_root_ids(rules)
-        protected.update(str(item.original_parent_id or "").strip() for item in items)
+        protected.update((item.original_parent_id or "").strip() for item in items)
         protected.discard("")
         return protected, error
 
@@ -990,11 +1009,11 @@ class OrganizeCorrectionService:
         read_directory,
     ) -> bool:
         """只接受祖先链仍明确到达目标根且未进入来源/保护子树的目录。"""
-        normalized_target = str(target_root_id or "").strip()
+        normalized_target = (target_root_id or "").strip()
         if not normalized_target:
             return False
-        current_id = str(directory.file_id or "").strip()
-        ancestor_id = str(directory.parent_id or "").strip()
+        current_id = (directory.file_id or "").strip()
+        ancestor_id = (directory.parent_id or "").strip()
         visited = {current_id}
         for _ in range(32):
             if ancestor_id in forbidden_ancestor_ids:
@@ -1083,7 +1102,7 @@ class OrganizeCorrectionService:
             return [], protected, [
                 "云盘接口无法核验整理目标目录，已安全保留空目录"
             ]
-        target_root_id = str(rules.target_dir_id or "").strip()
+        target_root_id = (rules.target_dir_id or "").strip()
         if not target_root_id:
             return [], protected, [
                 "整理目标根目录配置为空，已安全保留空目录"
@@ -1095,7 +1114,7 @@ class OrganizeCorrectionService:
             cached = snapshot_cache.get(directory_id)
             if cached is not None:
                 return cached
-            current = file_info(directory_id)
+            current = self.client.file_info(directory_id)
             if (
                 current is None
                 or not bool(getattr(current, "is_dir", False))
@@ -1109,7 +1128,7 @@ class OrganizeCorrectionService:
         forbidden_ancestor_ids = protected - {target_root_id}
 
         def belongs_to_target_root(media_root: GuangYaFile) -> bool:
-            media_root_id = str(media_root.file_id or "").strip()
+            media_root_id = (media_root.file_id or "").strip()
             if media_root_id not in ancestry_cache:
                 ancestry_cache[media_root_id] = self._directory_belongs_to_target_root(
                     media_root,
@@ -1123,8 +1142,8 @@ class OrganizeCorrectionService:
         seen: set[str] = set()
         warnings: list[str] = []
         target_parent_ids = list(dict.fromkeys(
-            str(item.current_parent_id or "").strip() for item in items
-            if str(item.current_parent_id or "").strip()
+            (item.current_parent_id or "").strip() for item in items
+            if (item.current_parent_id or "").strip()
         ))
         for leaf_id in target_parent_ids:
             current_id = leaf_id
@@ -1142,11 +1161,11 @@ class OrganizeCorrectionService:
                     )
                     warnings.append("无法核验部分整理目标目录，已安全保留")
                     break
-                if current is None or str(current.name or "") != expected_name:
+                if current is None or (current.name or "") != expected_name:
                     warnings.append("整理目标目录与日志快照不一致，已安全保留")
                     break
                 branch.append(current)
-                next_parent = str(current.parent_id or "").strip()
+                next_parent = (current.parent_id or "").strip()
                 if not next_parent or next_parent == current_id:
                     break
                 current_id = next_parent
@@ -1162,7 +1181,7 @@ class OrganizeCorrectionService:
                 warnings.append("整理目标目录不属于当前整理目标根，已安全保留")
                 continue
             for current in branch:
-                directory_id = str(current.file_id or "").strip()
+                directory_id = (current.file_id or "").strip()
                 if directory_id in seen:
                     continue
                 captured.append(current)
@@ -1192,7 +1211,7 @@ class OrganizeCorrectionService:
         if not callable(delete_empty) or guarded_capability is not True:
             audit_failed = False
             for snapshot in directories:
-                directory_id = str(snapshot.file_id or "").strip()
+                directory_id = (snapshot.file_id or "").strip()
                 if not directory_id or directory_id in protected:
                     continue
                 try:
@@ -1201,9 +1220,9 @@ class OrganizeCorrectionService:
                         reason="当前 Provider 不支持带版本与空目录复核的回收站删除",
                         candidate=DeleteCandidate(
                             file_id=directory_id,
-                            name=str(snapshot.name or "整理目标空目录"),
-                            parent_id=str(snapshot.parent_id or ""),
-                            gcid=str(snapshot.etag or ""),
+                            name=(snapshot.name or "整理目标空目录"),
+                            parent_id=(snapshot.parent_id or ""),
+                            gcid=(snapshot.etag or ""),
                         ),
                         organize_log_id=log_id,
                     )
@@ -1225,7 +1244,7 @@ class OrganizeCorrectionService:
         unique_directories: list[GuangYaFile] = []
         directory_by_id: dict[str, GuangYaFile] = {}
         for snapshot in directories:
-            directory_id = str(snapshot.file_id or "").strip()
+            directory_id = (snapshot.file_id or "").strip()
             if not directory_id or directory_id in directory_by_id:
                 continue
             directory_by_id[directory_id] = snapshot
@@ -1233,12 +1252,12 @@ class OrganizeCorrectionService:
 
         def candidate_depth(snapshot: GuangYaFile) -> int:
             depth = 0
-            seen_ids = {str(snapshot.file_id or "").strip()}
-            parent_id = str(snapshot.parent_id or "").strip()
+            seen_ids = {(snapshot.file_id or "").strip()}
+            parent_id = (snapshot.parent_id or "").strip()
             while parent_id in directory_by_id and parent_id not in seen_ids:
                 depth += 1
                 seen_ids.add(parent_id)
-                parent_id = str(
+                parent_id = (
                     directory_by_id[parent_id].parent_id or ""
                 ).strip()
             return depth
@@ -1261,7 +1280,7 @@ class OrganizeCorrectionService:
         cleaned = 0
         warnings: list[str] = []
         for snapshot in ordered_directories:
-            directory_id = str(snapshot.file_id or "").strip()
+            directory_id = (snapshot.file_id or "").strip()
             if not directory_id or directory_id in protected:
                 continue
             try:
@@ -1271,9 +1290,9 @@ class OrganizeCorrectionService:
                         reason="目录仍含其他内容，已保留",
                         candidate=DeleteCandidate(
                             file_id=directory_id,
-                            name=str(snapshot.name or "整理目标目录"),
-                            parent_id=str(snapshot.parent_id or ""),
-                            gcid=str(snapshot.etag or ""),
+                            name=(snapshot.name or "整理目标目录"),
+                            parent_id=(snapshot.parent_id or ""),
+                            gcid=(snapshot.etag or ""),
                         ),
                         organize_log_id=log_id,
                     )
@@ -1284,9 +1303,9 @@ class OrganizeCorrectionService:
                     current is None
                     or not bool(getattr(current, "is_dir", False))
                     or str(getattr(current, "file_id", "") or "") != directory_id
-                    or str(getattr(current, "name", "") or "") != str(snapshot.name or "")
+                    or str(getattr(current, "name", "") or "") != (snapshot.name or "")
                     or str(getattr(current, "parent_id", "") or "")
-                    != str(snapshot.parent_id or "")
+                    != (snapshot.parent_id or "")
                 ):
                     raise RuntimeError("目录身份或位置已变化")
                 expected_etag = str(getattr(current, "etag", "") or "")
@@ -1298,7 +1317,7 @@ class OrganizeCorrectionService:
                     expected_updated_at = 0
                 if not expected_etag and expected_updated_at <= 0:
                     raise RuntimeError("目录缺少可验证版本")
-                normalized_target_root = str(target_root_id or "").strip()
+                normalized_target_root = (target_root_id or "").strip()
                 if not self._directory_belongs_to_target_root(
                     current,
                     target_root_id=normalized_target_root,
@@ -1315,8 +1334,8 @@ class OrganizeCorrectionService:
                     ),
                     candidate=DeleteCandidate(
                         file_id=directory_id,
-                        name=str(current.name or "整理目标空目录"),
-                        parent_id=str(current.parent_id or ""),
+                        name=(current.name or "整理目标空目录"),
+                        parent_id=(current.parent_id or ""),
                         gcid=expected_etag,
                     ),
                     organize_log_id=log_id,
@@ -1397,7 +1416,7 @@ class OrganizeCorrectionService:
         for member in members:
             remote = self._verify_item(self._to_item(member))
             if (remote.is_dir or remote.size != member['size']
-                    or str(remote.etag or '').lower() != str(member['etag']).lower()):
+                    or (remote.etag or '').lower() != str(member['etag']).lower()):
                 raise RuntimeError("重整成员的云端身份尚未核实，未恢复失败请求")
         # 复用现有严格空树扫描，不让未记日志的残留、分页/身份异常被成功记录掩盖。
         _empty_tree(self.client, expected, set(), cleanup_report())
@@ -1420,7 +1439,7 @@ class OrganizeCorrectionService:
             reconcile_reorganized_confirmations,
         )
 
-        source_dir_id = str(source_dir_id or "").strip()
+        source_dir_id = (source_dir_id or "").strip()
         if not source_dir_id:
             return []
         stats: dict = {}
@@ -1442,6 +1461,7 @@ class OrganizeCorrectionService:
             )
             for token in tokens:
                 confirmation = db.get_organize_confirmation(token)
+                assert confirmation is not None
                 _finalize_confirmed_downloads(
                     json.loads(confirmation["payload_json"]), self.client, stats, rules,
                     confirmation_token=token,
@@ -1453,7 +1473,7 @@ class OrganizeCorrectionService:
                 completed = [row for row in rows if row.get("organize_status") == "completed"]
                 if completed:
                     report = OrganizeTaskManager._cleanup_download_staging(
-                        self.organizer, [int(row["id"]) for row in completed],
+                        self.organizer.client, [int(row["id"]) for row in completed],
                         [{"id": str(row["gy_target_dir"]), "name": str(row["gy_staging_name"])}
                          for row in completed], rules=rules,
                     )
@@ -1500,11 +1520,14 @@ class OrganizeCorrectionService:
             return []
         warnings: list[str] = []
         try:
-            from app.notifier import build_media_events
-            from app.modules.telegram_notification_center import publish_notification_event
-            from app.modules.telegram_notification_policy import (
-                NotificationImportance, NotificationTopic,
+            from app.modules.telegram_notification_center import (
+                publish_notification_event,
             )
+            from app.modules.telegram_notification_policy import (
+                NotificationImportance,
+                NotificationTopic,
+            )
+            from app.notifier import build_media_events
             match = preview.get("match") or {}
             video = self._video(items)
             parsed = self.organizer._parse_media_fields(
@@ -1557,6 +1580,7 @@ class OrganizeCorrectionService:
         self._verify_nsfw_target_identity(MatchResult(**preview["match"]), preview["target_path"])
         before = db.capture_organize_business_snapshot(log_id)
         previous_log = db.get_organize_log(log_id)
+        assert previous_log is not None
         # 回退可能回到上一部作品的归档，也可能回到最初来源；用恢复后的
         # 业务路径和目标父目录区分，不能把所有 reverted 都当成原始来源。
         already_archived = previous_log["status"] == "success" or bool(
@@ -1886,7 +1910,7 @@ class OrganizeCorrectionService:
         self, log_id: int, operation_token: str,
         items: list[CorrectionItem], ordered: list[CorrectionItem],
     ) -> dict:
-        deleted = 0
+        deleted: int = 0
         try:
             for index, item in enumerate(ordered, start=1):
                 step_id = db.add_organize_operation_step(

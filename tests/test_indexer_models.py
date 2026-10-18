@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
-from app.indexers.errors import IndexerResultExpired, IndexerResultNotFound, IndexerValidationError
-from app.indexers.models import AggregatedIndexerResult, IndexerItem, IndexerMediaSearchRequest, IndexerSearchRequest
+from app.indexers.errors import (
+    IndexerResultExpired,
+    IndexerResultNotFound,
+    IndexerValidationError,
+)
+from app.indexers.models import (
+    AggregatedIndexerResult,
+    IndexerItem,
+    IndexerMediaSearchRequest,
+    IndexerSearchRequest,
+)
 from app.indexers.result_store import IndexerResultStore
 
 
@@ -13,8 +23,8 @@ class IndexerModelTests(unittest.TestCase):
         self.assertEqual(IndexerSearchRequest.create("征途", year="2026").year, 2026)
         self.assertIsNone(IndexerSearchRequest.create("1917").year)
         for value in (True, 1799, 2201, "2026年", 2026.5):
-            with self.subTest(year=value), self.assertRaises(IndexerValidationError):
-                IndexerSearchRequest.create("征途", year=value)
+            with self.subTest(year=cast(int | str | None, value)), self.assertRaises(IndexerValidationError):
+                IndexerSearchRequest.create("征途", year=cast(int | str | None, value))
 
     def test_search_request_normalizes_query_and_bounds_page(self):
         request = IndexerSearchRequest.create(
@@ -86,7 +96,7 @@ class IndexerModelTests(unittest.TestCase):
         )
 
     def test_media_search_request_rejects_unbounded_or_invalid_metadata(self):
-        invalid_cases = (
+        invalid_cases: tuple[dict[str, Any], ...] = (
             {"title": ""},
             {"title": "x" * 121},
             {"title": "Demo", "aliases": [f"alias-{index}" for index in range(9)]},

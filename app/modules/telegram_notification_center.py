@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypedDict
 
 from app import config
 from app.agent.feature_gate import is_agent_enabled
@@ -92,7 +92,7 @@ class NotificationThreadSnapshot:
     @property
     def current_revision_delivered(self) -> bool:
         """最新 revision 已原位送达，而不是仅写入 outbox。"""
-        return bool(
+        return (
             self.status == "sent"
             and self.revision > 0
             and self.delivered_revision >= self.revision
@@ -109,25 +109,25 @@ def serialize_notification_event(event: NotificationEvent) -> str:
             for label, value in tuple(event.fields or ())
         ],
         "lines": [str(item or "") for item in tuple(event.lines or ())],
-        "image_url": str(event.image_url or ""),
+        "image_url": (event.image_url or ""),
         "footer": str(event.footer or ""),
         "actions": [
             {
                 "label": str(action.label or ""),
-                "callback_data": str(action.callback_data or ""),
+                "callback_data": (action.callback_data or ""),
             }
             for action in tuple(event.actions or ())
         ],
-        "layout": str(event.layout or "default"),
-        "field_emojis": bool(event.field_emojis),
-        "state": str(event.state or ""),
+        "layout": (event.layout or "default"),
+        "field_emojis": event.field_emojis,
+        "state": (event.state or ""),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def deserialize_notification_event(payload: str) -> NotificationEvent:
     try:
-        data = json.loads(str(payload or "{}"))
+        data = json.loads(payload or "{}")
     except (TypeError, ValueError) as exc:
         raise ValueError("Telegram 通知数据损坏") from exc
     if not isinstance(data, dict):
@@ -187,7 +187,7 @@ def _importance(value: NotificationImportance | str) -> str:
 
 
 def _scope_digest(chat_id: str) -> str:
-    return hashlib.sha256(str(chat_id or "default").encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256((chat_id or "default").encode("utf-8")).hexdigest()[:16]
 
 
 def _bounded_logical_key(logical_key: object) -> str:
@@ -257,9 +257,9 @@ def get_notification_thread_snapshot(
 
 
 def _edit_can_fallback_to_new_message(result: TelegramSendResult) -> bool:
-    if int(result.status_code or 0) != 400 or result.outcome_unknown:
+    if (result.status_code or 0) != 400 or result.outcome_unknown:
         return False
-    description = str(result.error or "").casefold()
+    description = (result.error or "").casefold()
     return any(marker in description for marker in (
         "message to edit not found",
         "message can't be edited",
@@ -274,7 +274,7 @@ def _edit_can_fallback_to_new_message(result: TelegramSendResult) -> bool:
 
 def _normalize_action(action: NotificationAction) -> NotificationAction | None:
     label = truncate_telegram_text(str(action.label or "").strip(), 64)
-    callback_data = str(action.callback_data or "").strip()
+    callback_data = (action.callback_data or "").strip()
     if not label or not callback_data or len(callback_data.encode("utf-8")) > 64:
         return None
     return NotificationAction(label=label, callback_data=callback_data)
@@ -337,12 +337,12 @@ def _agent_interaction_enabled() -> bool:
 
 
 def _is_agent_interaction_item(item: dict, event: NotificationEvent) -> bool:
-    return bool(
+    return (
         str(item.get("topic") or "") == NotificationTopic.AGENT.value
         and str(item.get("event_key") or "").startswith(
             _AGENT_INTERACTION_EVENT_KEY_PREFIX
         )
-        and str(event.state or "") == _AGENT_INTERACTION_STATE
+        and (event.state or "") == _AGENT_INTERACTION_STATE
     )
 
 
@@ -458,7 +458,9 @@ def _dispatch_item(item: dict) -> bool:
 
     if str(item.get("topic") or "") == NotificationTopic.DOWNLOAD.value:
         try:
-            from app.modules.telegram_download_lifecycle import download_notification_obsolescence
+            from app.modules.telegram_download_lifecycle import (
+                download_notification_obsolescence,
+            )
 
             stale = download_notification_obsolescence(str(item.get("thread_key") or ""), event)
         except Exception as exc:
@@ -504,7 +506,11 @@ def _dispatch_item(item: dict) -> bool:
             message_thread_id = download_request_thread(
                 thread_key[len("download:"):]
             )
-    send_kwargs = {"chat_id": chat_id or None}
+    class SendOptions(TypedDict, total=False):
+        chat_id: str | None
+        message_thread_id: int
+
+    send_kwargs: SendOptions = {"chat_id": chat_id or None}
     if message_thread_id is not None:
         send_kwargs["message_thread_id"] = message_thread_id
     outcome: TelegramSendResult
@@ -543,7 +549,7 @@ def _dispatch_item(item: dict) -> bool:
             notification_id,
             lease_generation=generation,
             claimed_revision=claimed_revision,
-            message_id=int(
+            message_id=(
                 outcome.message_id
                 or (0 if fallback_to_new_message else message_id)
                 or 0
@@ -551,8 +557,8 @@ def _dispatch_item(item: dict) -> bool:
         )
     if (
         not outcome.outcome_unknown
-        and 400 <= int(outcome.status_code or 0) < 500
-        and int(outcome.status_code) not in {408, 429}
+        and 400 <= (outcome.status_code or 0) < 500
+        and outcome.status_code not in {408, 429}
     ):
         fail_notification(
             notification_id,
@@ -570,7 +576,7 @@ def _dispatch_item(item: dict) -> bool:
         retry_after_seconds=outcome.retry_after_seconds,
         clear_message_id=fallback_to_new_message,
         outcome_unknown=outcome.outcome_unknown,
-        message_id=int(outcome.message_id or 0),
+        message_id=(outcome.message_id or 0),
     )
     return False
 
@@ -578,9 +584,9 @@ def _dispatch_item(item: dict) -> bool:
 def drain_telegram_notifications(
     *, limit: int = 20, event_key: str = "",
 ) -> bool:
-    processed = 0
+    processed: int = 0
     delivered = True
-    for _ in range(max(1, min(int(limit or 1), 100))):
+    for _ in range(max(1, min((limit or 1), 100))):
         # 只在真正发送前领取一条，并串行化进程内 transport；避免批量预领取
         # 的后排记录等待超过租约后被另一个 drain 重领。
         if not _delivery_lock.acquire(blocking=False):
@@ -621,7 +627,7 @@ def _publish(
     if agent_continuation:
         if (
             normalized_topic != NotificationTopic.AGENT.value or thread
-            or not str(logical_key).startswith(_AGENT_CONTINUATION_KEY_PREFIX)
+            or not logical_key.startswith(_AGENT_CONTINUATION_KEY_PREFIX)
             or event.state != _AGENT_CONTINUATION_STATE
         ):
             return NotificationPublishResult(False, status="invalid_continuation")
@@ -635,7 +641,7 @@ def _publish(
             or not normalized_logical_key.startswith(
                 _AGENT_INTERACTION_LOGICAL_KEY_PREFIX
             )
-            or str(event.state or "") != _AGENT_INTERACTION_STATE
+            or (event.state or "") != _AGENT_INTERACTION_STATE
         ):
             return NotificationPublishResult(False, status="invalid_interaction")
         if not _agent_interaction_enabled():
@@ -673,7 +679,7 @@ def _publish(
 
             # 已经展示给用户的线程需要完成终态更新，避免 essential 等级下
             # 候选按钮、错误或“等待后处理”永久停留。
-            allowed = bool(thread and continuation and notifications_enabled())
+            allowed = (thread and continuation and notifications_enabled())
         if not allowed:
             return NotificationPublishResult(False, status="disabled")
     try:
@@ -695,13 +701,14 @@ def _publish(
         if agent_interaction_attempt_id or delivery_route or agent_continuation:
             payload = json.loads(event_json)
             if agent_interaction_attempt_id:
-                payload["_agent_interaction_attempt_id"] = str(agent_interaction_attempt_id)
+                payload["_agent_interaction_attempt_id"] = agent_interaction_attempt_id
             if delivery_route:
                 route = normalize_delivery_route(delivery_route)
                 if route.get("chat_id") != target:
                     raise ValueError("Telegram delivery route mismatch")
                 payload["_delivery_route"] = route
             if agent_continuation:
+                assert agent_continuation_delivery is not None
                 payload["_agent_continuation_delivery"] = dict(agent_continuation_delivery)
             event_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     except Exception as exc:
@@ -720,7 +727,7 @@ def _publish(
         importance=normalized_importance.value,
         chat_id=target,
         event_json=event_json,
-        preferred_message_id=int(preferred_message_id or 0),
+        preferred_message_id=(preferred_message_id or 0),
         replace=thread,
     )
     if row is None:
@@ -767,7 +774,7 @@ def publish_agent_interaction_reply(
     logical_key: str,
     event: NotificationEvent,
     *,
-    chat_id: str,
+    chat_id: str | int | None,
     message_thread_id: object = None,
     deliver_now: bool = False,
 ) -> NotificationPublishResult:
@@ -780,7 +787,7 @@ def publish_agent_interaction_reply(
     except ValueError:
         return NotificationPublishResult(False, status="invalid_delivery_route")
 
-    key = str(logical_key or "").strip()
+    key = (logical_key or "").strip()
     try:
         encoded_key = key.encode("utf-8")
     except UnicodeEncodeError:

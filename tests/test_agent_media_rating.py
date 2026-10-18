@@ -1,6 +1,8 @@
 """Agent 媒体评分查询与跨轮媒体身份承接回归测试。"""
 
 from __future__ import annotations
+from typing import Any
+from typing import cast
 
 import unittest
 from unittest.mock import patch
@@ -84,7 +86,7 @@ class MediaRatingArgumentTests(unittest.TestCase):
         )
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(AgentToolError):
-                media_rating_arguments(value)
+                media_rating_arguments(cast(dict[str, Any], value))
 
     def test_arguments_reject_credentials_before_network_access(self):
         with self.assertRaises(AgentToolError) as raised:
@@ -112,7 +114,7 @@ class MediaRatingArgumentTests(unittest.TestCase):
             media_type="tv",
             year="2026",
         )
-        self.assertIsNotNone(selected)
+        assert (selected) is not None
         self.assertEqual(selected.media_type, "tv")
 
 
@@ -245,7 +247,7 @@ class MediaRatingExecutionTests(unittest.TestCase):
             },
         )
         result = _web_rating(query="九门", media_type="tv", year="2026")
-        self.assertIsNotNone(result)
+        assert (result) is not None
         self.assertEqual(result[0], 7.9)
         self.assertEqual(result[2], "web_fetch")
         fetch_rating.assert_called_once_with(

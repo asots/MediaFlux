@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from html.parser import HTMLParser
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,9 +54,9 @@ def _module(name, **attributes):
     return result
 
 
-def _load_settings_api(config):
+def _load_settings_api(config) -> dict[str, Any]:
     """执行真实路由/注册代码，剥离顶层导入和无关校验，防止启动业务服务。"""
-    namespace = {
+    namespace: dict[str, Any] = {
         "config": config, "threading": threading, "time": time, "re": re,
         "logger": logging.getLogger(__name__), "Body": lambda **_: None,
         "require_api_login": Mock(), "redact_config": dict,
@@ -68,7 +69,7 @@ def _load_settings_api(config):
     path = ROOT / "app/routes/api.py"
     tree = ast.parse(path.read_text("utf-8"), filename=str(path))
     functions = {"_is_config_mask", "_normalize_discovery_boolean", VALIDATOR, "get_config", "save_config"}
-    nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+    nodes: list[ast.stmt] = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for node in tree.body:
         if isinstance(node, ast.ImportFrom) and node.module == "app.indexers.config":
             nodes.append(node)
@@ -311,8 +312,10 @@ configReady=false;syncEpisodeResearchAvailability();
 assert.equal(toggle.disabled,true);assert.equal(quota.disabled,true);
 console.log('dependency state matrix passed (no browser/network/DB)');
 '''
+        node = shutil.which("node")
+        assert node is not None
         completed = subprocess.run(
-            [shutil.which("node"), "-e", harness.replace("__SNIPPET__", snippet)],
+            [node, "-e", harness.replace("__SNIPPET__", snippet)],
             cwd=ROOT, capture_output=True, text=True, timeout=15,
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)

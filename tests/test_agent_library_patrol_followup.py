@@ -68,7 +68,7 @@ class RecentPatrolStoreTests(unittest.TestCase):
         )
         store.capture(owner="session-a", result=result)
         snapshot = store.get(owner="session-a")
-        self.assertIsNotNone(snapshot)
+        assert (snapshot) is not None
         self.assertEqual(snapshot["patrol_status"], "inconclusive")
         self.assertEqual(
             snapshot["options"],
@@ -107,8 +107,12 @@ class RecentPatrolStoreTests(unittest.TestCase):
         store.capture(
             owner="owner", result=_patrol_result(findings=[_finding(title="新剧")])
         )
-        self.assertEqual(store.get(owner="owner")["options"][0]["title"], "新剧")
+        get_result = store.get(owner="owner")
+        assert get_result is not None
+        self.assertEqual(get_result["options"][0]["title"], "新剧")
         store.capture(
             owner="owner", result=_patrol_result(findings=[], status="up_to_date")
         )
-        self.assertEqual(store.get(owner="owner")["options"], [])
+        get_result_2 = store.get(owner="owner")
+        assert get_result_2 is not None
+        self.assertEqual(get_result_2["options"], [])

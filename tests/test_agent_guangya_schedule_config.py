@@ -1,6 +1,7 @@
 """Media Agent 光鸭连接与定时整理策略受控配置测试。"""
 
 from __future__ import annotations
+from datetime import datetime
 
 import tempfile
 import unittest
@@ -135,7 +136,7 @@ class GuangyaSchedulePolicyUnitTests(unittest.TestCase):
     def test_scheduler_reload_only_invalidates_schedule(self):
         manager = Mock()
         scheduler = OrganizeScheduler(manager=manager)
-        scheduler._next_run = "future"
+        scheduler._next_run = datetime(2030, 1, 1)
         scheduler._loaded_cron = "0 4 * * *"
         scheduler.reload()
         self.assertIsNone(scheduler._next_run)

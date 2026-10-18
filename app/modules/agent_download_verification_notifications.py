@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unicodedata
+from typing import TypedDict, Unpack
 
 from app import config
 from app.agent.owner_routes import (
@@ -15,6 +16,16 @@ from app.notifier import (
     NotificationEvent,
     TelegramSendResult,
 )
+
+
+class DownloadVerificationPayload(TypedDict):
+    title: str
+    season: int
+    episode: int
+    status: str
+    result: str
+    attempts: int
+
 
 _RESULT_LABELS = {
     "visible": "目标剧集已在媒体库中可见",
@@ -52,16 +63,16 @@ def dump_download_verification_payload(
     """生成可持久化的安全通知投影，不保存下载链接或凭据。"""
     payload = {
         "title": _safe_title(title),
-        "season": max(1, int(season)),
-        "episode": max(1, int(episode)),
+        "season": max(1, season),
+        "episode": max(1, episode),
         "status": status if status in {"visible", "attention"} else "attention",
         "result": result if result in _RESULT_LABELS else "inconclusive",
-        "attempts": max(0, min(int(attempts), 100)),
+        "attempts": max(0, min(attempts, 100)),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def load_download_verification_payload(value: object) -> dict[str, object]:
+def load_download_verification_payload(value: object) -> DownloadVerificationPayload:
     """读取并再次收敛 outbox 载荷，拒绝畸形或扩展字段。"""
     try:
         payload = json.loads(str(value or ""))
@@ -100,13 +111,13 @@ def build_download_verification_event(
     """将复核终态收敛为不含下载凭据和路径的固定通知。"""
     normalized_status = status if status in {"visible", "attention"} else "attention"
     normalized_result = result if result in _RESULT_LABELS else "inconclusive"
-    target = f"S{max(1, int(season)):02d}E{max(1, int(episode)):02d}"
+    target = f"S{max(1, season):02d}E{max(1, episode):02d}"
     fields = (
         ("目标媒体", _safe_title(title)),
         ("目标集", target),
         NOTIFICATION_SECTION_BREAK,
         ("复核结果", _RESULT_LABELS[normalized_result]),
-        ("复核次数", str(max(0, int(attempts)))),
+        ("复核次数", str(max(0, attempts))),
     )
     if normalized_status == "visible":
         return NotificationEvent(
@@ -121,7 +132,7 @@ def build_download_verification_event(
 
 
 def notify_download_verification_terminal_result(
-    *, owner: str, chat_id: str, request_id: int = 0, **payload
+    *, owner: str, chat_id: str | int, request_id: int = 0, **payload: Unpack[DownloadVerificationPayload]
 ) -> TelegramSendResult:
     """向 owner 绑定 chat 投递终态通知，并保留结果未知语义。"""
     if not config.get_bool("AGENT_DOWNLOAD_VERIFICATION_NOTIFY_ENABLED", True):
@@ -132,25 +143,26 @@ def notify_download_verification_terminal_result(
         return TelegramSendResult(False, error="InvalidRoute", status_code=403)
     if not telegram_owner_route_is_currently_authorized(route, chat_id=target):
         return TelegramSendResult(False, error="AuthorizationRevoked", status_code=403)
-    if int(request_id or 0) > 0:
+    if (request_id or 0) > 0:
         from app.modules.telegram_download_lifecycle import publish_download_lifecycle
 
-        normalized_status = str(payload.get("status") or "attention")
-        normalized_result = str(payload.get("result") or "inconclusive")
+        normalized_status = (payload.get("status") or "attention")
+        normalized_result = (payload.get("result") or "inconclusive")
         outcome = publish_download_lifecycle(
-            int(request_id),
+            request_id,
             verification_status=normalized_status,
             verification_result=_RESULT_LABELS.get(normalized_result, _RESULT_LABELS[""]),
         )
         return TelegramSendResult(
             ok=bool(outcome),
-            error="" if outcome else str(outcome.status or "DeliveryFailed"),
+            error="" if outcome else (outcome.status or "DeliveryFailed"),
             status_code=0 if outcome else 503,
         )
 
     from app.modules.telegram_notification_center import publish_notification_event
     from app.modules.telegram_notification_policy import (
-        NotificationImportance, NotificationTopic,
+        NotificationImportance,
+        NotificationTopic,
     )
     safe_payload_json = dump_download_verification_payload(**payload)
     safe_payload = load_download_verification_payload(safe_payload_json)
@@ -164,7 +176,7 @@ def notify_download_verification_terminal_result(
         topic=NotificationTopic.AGENT,
         importance=(
             NotificationImportance.RESULT
-            if str(safe_payload.get("status") or "") == "visible"
+            if (safe_payload.get("status") or "") == "visible"
             else NotificationImportance.ERROR
         ),
         chat_id=target,
@@ -172,6 +184,6 @@ def notify_download_verification_terminal_result(
     )
     return TelegramSendResult(
         ok=bool(outcome),
-        error="" if outcome else str(outcome.status or "DeliveryFailed"),
+        error="" if outcome else (outcome.status or "DeliveryFailed"),
         status_code=0 if outcome else 503,
     )

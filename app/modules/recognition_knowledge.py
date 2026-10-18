@@ -1,12 +1,11 @@
 """本地识别知识库：管理发布组与尾部制作组的可增长精确词条。"""
 from __future__ import annotations
 
-from contextlib import closing
-
 import json
 import sqlite3
 import threading
 import unicodedata
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +40,7 @@ def normalize_value(value: object) -> str:
 def _decode_json(value: object, fallback: Any) -> Any:
     try:
         decoded = json.loads(str(value or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return fallback
     return decoded
 
@@ -111,7 +110,8 @@ def _validate_values(data: dict[str, Any], *, existing: dict[str, Any] | None = 
     if source not in _ALLOWED_SOURCES:
         raise ValueError("知识来源无效")
     try:
-        confidence = float(data.get("confidence", current.get("confidence", 1.0)))
+        raw_confidence: Any = data.get("confidence", current.get("confidence", 1.0))
+        confidence = float(raw_confidence)
     except (TypeError, ValueError) as exc:
         raise ValueError("置信度必须是 0 到 1 的数字") from exc
     if not 0 <= confidence <= 1:
@@ -144,7 +144,7 @@ def _validate_values(data: dict[str, Any], *, existing: dict[str, Any] | None = 
 def _load_seed_payload() -> tuple[int, list[dict[str, Any]]] | None:
     try:
         payload = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("识别知识种子读取失败 type=%s", type(exc).__name__)
         return None
     entries = payload.get("entries")
@@ -298,7 +298,7 @@ def _find_by_normalized(
         (knowledge_type,),
     )) as rows:
         for row in rows:
-            if exclude_id is not None and int(row["id"]) == int(exclude_id):
+            if exclude_id is not None and int(row["id"]) == exclude_id:
                 continue
             item = _row_dict(row)
             values = {normalize_value(item["canonical_value"])}
@@ -340,7 +340,7 @@ def record_hit(entry_id: int, *, success: bool | None = None) -> None:
         with get_conn() as conn:
             conn.execute(
                 f"UPDATE recognition_knowledge SET {','.join(fields)} WHERE id=?",
-                (now(), int(entry_id)),
+                (now(), entry_id),
             )
     except Exception as exc:
         logger.debug("识别知识命中统计写入失败 type=%s", type(exc).__name__)
@@ -348,11 +348,11 @@ def record_hit(entry_id: int, *, success: bool | None = None) -> None:
 
 def list_entries(*, keyword: str = "", knowledge_type: str = "", limit: int = 300) -> dict[str, Any]:
     ensure_seed_knowledge()
-    keyword = str(keyword or "").strip()[:160]
-    knowledge_type = str(knowledge_type or "").strip()
+    keyword = (keyword or "").strip()[:160]
+    knowledge_type = (knowledge_type or "").strip()
     if knowledge_type and knowledge_type not in _ALLOWED_TYPES:
         raise ValueError("知识类型无效")
-    limit = max(1, min(int(limit or 300), 500))
+    limit = max(1, min((limit or 300), 500))
     where: list[str] = []
     values: list[Any] = []
     if knowledge_type:
@@ -390,7 +390,7 @@ def get_entry(entry_id: int) -> dict[str, Any] | None:
     ensure_seed_knowledge()
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM recognition_knowledge WHERE id=?", (int(entry_id),)
+            "SELECT * FROM recognition_knowledge WHERE id=?", (entry_id,)
         ).fetchone()
     return _row_dict(row) if row else None
 
@@ -433,7 +433,8 @@ def create_entry(data: dict[str, Any]) -> dict[str, Any]:
                     json.dumps(normalized["evidence"], ensure_ascii=False), timestamp, timestamp,
                 ),
             )
-            entry_id = int(cursor.lastrowid)
+            assert cursor.lastrowid is not None
+            entry_id = cursor.lastrowid
     except Exception as exc:
         if "UNIQUE constraint failed" in str(exc):
             raise ValueError("相同识别知识已经存在") from None
@@ -449,7 +450,7 @@ def update_entry(entry_id: int, data: dict[str, Any]) -> dict[str, Any]:
         with get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT * FROM recognition_knowledge WHERE id=?", (int(entry_id),)
+                "SELECT * FROM recognition_knowledge WHERE id=?", (entry_id,)
             ).fetchone()
             if not row:
                 raise ValueError("识别知识不存在")
@@ -457,7 +458,7 @@ def update_entry(entry_id: int, data: dict[str, Any]) -> dict[str, Any]:
             normalized = _validate_values(data, existing=existing)
             _assert_no_alias_collision(
                 normalized["knowledge_type"], normalized["aliases"],
-                conn=conn, exclude_id=int(entry_id),
+                conn=conn, exclude_id=entry_id,
             )
             conn.execute(
                 """
@@ -471,7 +472,7 @@ def update_entry(entry_id: int, data: dict[str, Any]) -> dict[str, Any]:
                     normalized["canonical_value"], normalized["normalized_value"],
                     json.dumps(normalized["aliases"], ensure_ascii=False),
                     normalized["confidence"], int(normalized["disabled"]),
-                    json.dumps(normalized["evidence"], ensure_ascii=False), timestamp, int(entry_id),
+                    json.dumps(normalized["evidence"], ensure_ascii=False), timestamp, entry_id,
                 ),
             )
     except Exception as exc:
@@ -489,7 +490,7 @@ def delete_entry(entry_id: int) -> bool:
     if existing["source"] == "builtin":
         raise ValueError("内置知识不能删除，可以将其停用")
     with get_conn() as conn:
-        cursor = conn.execute("DELETE FROM recognition_knowledge WHERE id=?", (int(entry_id),))
+        cursor = conn.execute("DELETE FROM recognition_knowledge WHERE id=?", (entry_id,))
     _invalidate_cache()
     return cursor.rowcount == 1
 
@@ -500,13 +501,13 @@ def record_learned_release_group(
 ) -> dict[str, Any]:
     """记录 AI+TMDB 双重验证样本；两个不同样本后自动启用精确词条。"""
     ensure_seed_knowledge()
-    canonical = unicodedata.normalize("NFKC", str(value or "")).strip()
+    canonical = unicodedata.normalize("NFKC", (value or "")).strip()
     if not canonical:
         raise ValueError("发布组名称不能为空")
     normalized_value = normalize_value(canonical)
     candidate_aliases = []
     for alias in aliases:
-        text = unicodedata.normalize("NFKC", str(alias or "")).strip()
+        text = unicodedata.normalize("NFKC", (alias or "")).strip()
         if text and (
             normalize_value(text) == normalized_value
             or not lookup_any(text, "release_group")
@@ -595,7 +596,8 @@ def record_learned_release_group(
                     json.dumps(stored_evidence, ensure_ascii=False), timestamp, timestamp,
                 ),
             )
-            entry_id = int(cursor.lastrowid)
+            assert cursor.lastrowid is not None
+            entry_id = cursor.lastrowid
     _invalidate_cache()
     return get_entry(entry_id) or {}
 

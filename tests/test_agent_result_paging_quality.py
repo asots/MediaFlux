@@ -87,6 +87,7 @@ async def session_reader_message(*, provider_alias):
     assert message.tool_name == caller.tool_calls[0].name == reader_name
     page = json.loads(message.content)
     assert page["data"]["items"][0]["description"] == "3" * 1000
+    assert caller.tool_calls[0].arguments is not None
     assert page["result_handle"] == caller.tool_calls[0].arguments["handle"]
     return message, caller, calls, reopened
 

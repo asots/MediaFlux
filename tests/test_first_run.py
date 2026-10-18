@@ -593,7 +593,7 @@ class FirstRunTests(unittest.TestCase):
 
     def test_successful_publish_verifies_and_syncs_physical_env(self):
         from app.modules import backup
-        events = []
+        events: list[tuple] = []
         real_fsync = os.fsync
         real_read = self.config._read_verified_file_bytes
         real_sync = backup._fsync_directory

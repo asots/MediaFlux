@@ -1,7 +1,9 @@
 """候选业务容量独立于模型/展示预算，搜索到确认与后置生命周期不丢尾项。"""
 from __future__ import annotations
+from typing import Any
 
 import asyncio
+import inspect
 import json
 import shutil
 import socket
@@ -67,7 +69,7 @@ def no_network(monkeypatch):
 
 @pytest.fixture
 def store(tmp_path):
-    yield from ux.store.__wrapped__(tmp_path)
+    yield from inspect.unwrap(ux.store)(tmp_path)
 
 
 def _resources(count):
@@ -102,6 +104,7 @@ def test_episodic_snapshot_keeps_all_eligible_candidates(count):
                               for position in range(1, count + 1)])
     attach_resource_candidate_reference(result, result_store=IndexerResultStore())
     snapshot = restore_resource_candidate_reference(result.references[0].value)
+    assert snapshot is not None
     assert len(snapshot["candidates"]) == count
     assert snapshot["candidates"][-1]["position"] == count
     assert snapshot["candidates"][-1]["_verification_context"]["episode"] == 3
@@ -132,6 +135,7 @@ def test_private_snapshot_restores_every_handle_after_restart_and_rejects_tamper
     restarted = IndexerResultStore()
     with patch("app.indexers.runtime.get_indexer_service", return_value=SimpleNamespace(result_store=restarted)):
         restored = restore_resource_candidate_reference(private)
+        assert restored is not None
         assert [item["result_id"] for item in restored["candidates"]] == ids
         assert [restarted.get(result_id).title for result_id in ids] == [item["title"] for item in result.data["items"]]
         private["_private_items"][-1]["result_id"] = "tampered-resource-tail"
@@ -200,7 +204,7 @@ def test_inspect_reads_entire_snapshot_or_tail_in_original_request_order():
     search_id = resources.capture(owner=ux.OWNER, result=_resources(20))
     actions = IngestActions(store=AgentIngestSessionStore(), recent_resource_store=resources)
     for positions in (None, [20, 13, 20]):
-        arguments = {"source_type": "resource_candidates"}
+        arguments: dict[str, Any] = {"source_type": "resource_candidates"}
         if positions is not None:
             arguments["positions"] = positions
         result = actions.inspect(ingest_inspect_arguments(arguments), ToolContext(owner=ux.OWNER))

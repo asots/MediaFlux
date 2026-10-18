@@ -1,6 +1,9 @@
 """光鸭只读工作区快照的持久化与公开投影测试。"""
 
 from __future__ import annotations
+from app.agent.session_context import AgentSessionContextRepository
+from app.clients.guangya import GuangYaClient
+from typing import cast
 
 import json
 import tempfile
@@ -126,7 +129,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
 
     def _create_observation(self, owner="owner"):
         payload = guangya_workspace.create_directory_observation(
-            FakeWorkspaceClient(),
+            cast(GuangYaClient, FakeWorkspaceClient()),
             owner=owner,
             path="/a",
             recursive=False,
@@ -154,6 +157,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
     def test_directory_itself_is_selectable_without_changing_content_pagination(self):
         client = FakeWorkspaceClient()
         result = self._query(client, operation="list", page_size=1)
+        assert result.model_data is not None
         self.assertEqual(result.model_data["operation"], "list")
         self.assertEqual(result.data["total"], 3)
         self.assertTrue(result.data["has_more"])
@@ -185,6 +189,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
                 self.assertEqual(result.data["total"], 0)
                 self.assertEqual(result.data["entries"], [])
                 self.assertEqual(result.status, "empty")
+                assert result.model_data is not None
                 self.assertEqual(result.model_data["scope_objects"][0]["kind"], "directory")
                 self.assertFalse(result.data["has_more"])
 
@@ -208,6 +213,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
                 workspace_actions.guangya_fs_query_arguments({"paths": ["/a", "/a/spam.example.com"], "operation": "tree"}),
                 ToolContext(owner="owner", session_id="session"))
         self.assertEqual(result.data["total"], 4)
+        assert result.model_data is not None
         roots = result.model_data["scope_objects"]
         self.assertEqual([root["name"] for root in roots], ["a", "spam.example.com"])
         child = next(entry for entry in result.model_data["entries"] if entry["name"] == "spam.example.com")
@@ -532,7 +538,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
     def test_stale_observation_save_discards_only_new_snapshot(self):
         client = FakeWorkspaceClient()
         previous = guangya_workspace.create_directory_observation(
-            client, owner="owner", path="/a", recursive=False, max_items=10
+            cast(GuangYaClient, client), owner="owner", path="/a", recursive=False, max_items=10
         )
         previous_ref = guangya_workspace.observation_ref(previous["plan_id"])
 
@@ -555,7 +561,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
                 return None
 
         repository = StaleRepository()
-        self._domain_actions.workspace = GuangyaWorkspaceActions(repository)
+        self._domain_actions.workspace = GuangyaWorkspaceActions(cast(AgentSessionContextRepository | None, repository))
         original_list_dir = client.list_dir
 
         def guarded_list_dir(parent_id="0"):

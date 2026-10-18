@@ -4,16 +4,15 @@ import json
 from unittest.mock import Mock, patch
 
 from app import database as db
-
 from app.modules.media_refresh_coordinator import MediaRefreshCoordinator
 from app.repositories.media_refresh_queue import (
     claim_due_media_refreshes,
     clear_media_refresh_queue,
-    settle_media_refresh,
     enqueue_media_refresh,
     media_refresh_queue_status,
     recent_media_refresh_target_ids,
     recover_media_refresh_leases,
+    settle_media_refresh,
 )
 from tests.support import IsolatedDatabaseTestCase
 
@@ -213,7 +212,7 @@ class MediaRefreshQueueTests(IsolatedDatabaseTestCase):
                         enqueue_media_refresh(
                             "jellyfin", ["/media/B"], debounce_seconds=20, now_epoch=107,
                         )
-                    arguments = dict(
+                    arguments: dict = dict(
                         owner="worker", lease_generation=lease["lease_generation"],
                         outcome=outcome, delay_seconds=0, error=" fixture\n reason ",
                         refreshed_target_ids=["series-a"], now_epoch=108,
@@ -255,9 +254,8 @@ class MediaRefreshQueueTests(IsolatedDatabaseTestCase):
                     refreshed_target_ids=["must-not-be-recorded"], now_epoch=132,
                 ))
                 self.assertEqual(db.kv_get("media_refresh_queue:v1"), snapshot)
-        with self.assertRaises(ValueError):
-            settle_media_refresh(
-                queued["group_key"], owner="worker",
+        self.assertRaises(
+                ValueError, settle_media_refresh, queued["group_key"], owner="worker",
                 lease_generation=old["lease_generation"] + 1, outcome="invalid",
             )
         self.assertEqual(db.kv_get("media_refresh_queue:v1"), snapshot)

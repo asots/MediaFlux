@@ -45,14 +45,70 @@ class DiscoveryModelTests(unittest.TestCase):
         self.assertIsNone(card.number_of_episodes)
         self.assertIsNone(card.seasons)
 
+    def test_cached_page_normalizes_json_scalars_without_mutating_payload(self):
+        payload = json.loads('''{
+            "items": [{
+                "provider": " TMDB ", "external_id": 550, "media_type": " MOVIE ",
+                "title": " Movie ", "tmdb_id": 550, "douban_id": 0, "bangumi_id": null,
+                "weekday": "3", "rating": "8.5", "unused": "ignored"
+            }],
+            "page": "2", "has_more": 1, "cached": 0, "stale": "",
+            "provider": {"name": "tmdb", "status": "degraded", "retry_after": "9"}
+        }''')
+        original = json.dumps(payload, sort_keys=True)
+        page = DiscoveryPage.from_dict(payload)
+        card = page.items[0]
+        self.assertEqual(card.stable_id, "tmdb:movie:550")
+        self.assertEqual((card.title, card.tmdb_id, card.douban_id, card.bangumi_id), ("Movie", "550", "", ""))
+        self.assertEqual((card.weekday, card.rating, page.page, page.provider.retry_after), (3, 8.5, 2, 9))
+        self.assertIs(page.has_more, True)
+        self.assertIs(page.cached, False)
+        self.assertIs(page.stale, False)
+        self.assertEqual(json.dumps(payload, sort_keys=True), original)
+        self.assertEqual(DiscoveryPage.from_dict(page.to_dict()), page)
+
+    def test_cached_card_rejects_invalid_weekday_after_numeric_conversion(self):
+        for weekday in ("0", "8", "invalid"):
+            with self.subTest(weekday=weekday), self.assertRaises(ValueError):
+                MediaCard.from_dict({
+                    "provider": "tmdb", "external_id": 550, "media_type": "movie",
+                    "title": "Movie", "weekday": weekday,
+                })
+
+    def test_cached_page_requires_provider_object(self):
+        with self.assertRaises(TypeError):
+            DiscoveryPage.from_dict({"provider": [["name", "tmdb"]]})
+
+    def test_cached_page_preserves_identity_error_before_numeric_errors(self):
+        invalid_card = {"provider": "", "external_id": "42", "media_type": "tv", "title": "Movie"}
+        payloads = (
+            {"items": [{**invalid_card, "weekday": "invalid"}], "provider": {"name": "tmdb"}},
+            {"items": [invalid_card], "provider": {"name": "tmdb", "retry_after": "invalid"}},
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, "^provider is required$"):
+                DiscoveryPage.from_dict(payload)
+        with self.assertRaisesRegex(ValueError, "^unsupported provider status: invalid$"):
+            DiscoveryPage.from_dict({
+                "provider": {"name": "tmdb", "status": "invalid", "retry_after": "invalid"},
+            })
+
+    def test_cached_card_missing_required_field_precedes_weekday_conversion(self):
+        with self.assertRaisesRegex(TypeError, "title"):
+            MediaCard.from_dict({
+                "provider": "tmdb", "external_id": "42", "media_type": "tv", "weekday": "invalid",
+            })
+
     def test_tv_season_counts_survive_json_page_cache_round_trip(self):
         card = MediaCard(
             provider="tmdb", external_id="75787", media_type="tv", title="狐妖小红娘",
             number_of_seasons=1, number_of_episodes=183,
-            seasons=[{"season_number": 0, "name": "特别篇", "episode_count": 29, "air_date": ""},
-                     {"season_number": 1, "name": "全集", "episode_count": 183, "air_date": "2015-06-25"}],
+            seasons=(
+                {"season_number": 0, "name": "特别篇", "episode_count": 29, "air_date": ""},
+                {"season_number": 1, "name": "全集", "episode_count": 183, "air_date": "2015-06-25"},
+            ),
         )
-        page = DiscoveryPage(items=[card], provider=ProviderHealth(name="tmdb"))
+        page = DiscoveryPage(items=(card,), provider=ProviderHealth(name="tmdb"))
         restored = DiscoveryPage.from_dict(json.loads(json.dumps(page.to_dict())))
         self.assertEqual(restored, page)
         self.assertEqual(restored.items[0].to_dict()["seasons"], card.to_dict()["seasons"])
@@ -64,7 +120,7 @@ class DiscoveryModelTests(unittest.TestCase):
 
     def test_discovery_page_serializes_provider_health(self):
         page = DiscoveryPage(
-            items=[MediaCard(provider="tmdb", external_id="1", media_type="movie", title="A")],
+            items=(MediaCard(provider="tmdb", external_id="1", media_type="movie", title="A"),),
             page=1,
             has_more=True,
             cached=True,
@@ -75,7 +131,7 @@ class DiscoveryModelTests(unittest.TestCase):
         self.assertEqual(payload["provider"], {"name": "tmdb", "status": "healthy", "message": "", "retry_after": 0})
         self.assertEqual(payload["items"][0]["stable_id"], "tmdb:movie:1")
         with self.assertRaises(AttributeError):
-            page.items.append(MediaCard(provider="tmdb", external_id="2", media_type="movie", title="B"))
+            getattr(page.items, "append")(MediaCard(provider="tmdb", external_id="2", media_type="movie", title="B"))
 
 
 class DiscoveryDatabaseTests(unittest.TestCase):
@@ -132,10 +188,12 @@ class DiscoveryDatabaseTests(unittest.TestCase):
                 database.upsert_media_external_id("douban", "7", "movie", "550", "Movie", "1999", 0.95, False)
                 database.upsert_media_external_id("douban", "7", "movie", "551", "Wrong", "2000", 0.99, False)
                 row = database.get_media_external_id("douban", "7", "movie")
+                assert row is not None
                 self.assertEqual(row["tmdb_id"], "551")
                 database.upsert_media_external_id("douban", "7", "movie", "550", "Confirmed", "1999", 1.0, True)
                 database.upsert_media_external_id("douban", "7", "movie", "999", "Auto", "2020", 1.0, False)
                 row = database.get_media_external_id("douban", "7", "movie")
+                assert row is not None
                 self.assertEqual((row["tmdb_id"], row["confirmed"]), ("550", 1))
 
 
@@ -203,6 +261,7 @@ class DiscoveryCacheTests(unittest.TestCase):
         key = self.cache.make_key("tmdb", "popular", "movie", 1, {})
         self.cache.set_success(key, "tmdb", {"items": [{"title": "A"}]}, ttl_seconds=60, stale_seconds=180)
         fresh = self.cache.get(key)
+        assert fresh.payload is not None
         self.assertEqual((fresh.status, fresh.payload["items"][0]["title"]), ("fresh", "A"))
 
         self.now += timedelta(seconds=61)
@@ -220,6 +279,7 @@ class DiscoveryCacheTests(unittest.TestCase):
         self.now += timedelta(seconds=2)
         self.cache.set_error(key, "douban", "timeout", ttl_seconds=10)
         lookup = self.cache.get(key)
+        assert lookup.payload is not None
         self.assertEqual((lookup.status, lookup.payload["items"][0]["title"], lookup.last_error), ("stale", "old", "timeout"))
 
     def test_error_can_explicitly_discard_unusable_prior_payload(self):

@@ -79,7 +79,9 @@ def test_snapshot_persists_with_step_and_restores_all_business_fields():
                                                     current_parent_id="old-season", current_name="First.S01E01.mkv", error="")
         actual = db.capture_organize_business_snapshot(lid)
         assert actual == before
-        assert db.get_organize_log(lid)["status"] == "reverted"
+        get_organize_log_result = db.get_organize_log(lid)
+        assert get_organize_log_result is not None
+        assert get_organize_log_result["status"] == "reverted"
 
 
 def test_member_write_failure_rolls_back_log_identity_and_target_updates():

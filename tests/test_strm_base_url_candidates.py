@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from starlette.requests import Request
+
 import json
 import unittest
 from types import SimpleNamespace
@@ -31,7 +34,7 @@ class StrmBaseUrlCandidateTests(unittest.TestCase):
     @staticmethod
     def _payload(response):
         if isinstance(response, JSONResponse):
-            return json.loads(response.body)
+            return json.loads(bytes(response.body))
         return response
 
     def test_lan_addresses_keep_only_rfc1918_and_stable_order(self):
@@ -50,14 +53,18 @@ class StrmBaseUrlCandidateTests(unittest.TestCase):
             addresses=["192.168.1.9"],
         )
         self.assertEqual(loopback["candidates"], [])
-        self.assertIn("lan_binding_disabled", loopback["warnings"])
+        warnings = loopback["warnings"]
+        assert isinstance(warnings, list)
+        self.assertIn("lan_binding_disabled", warnings)
 
         container = build_lan_url_candidates(
             bind_host="0.0.0.0", port=1258, container=True,
             addresses=["172.18.0.2", "192.168.1.9"],
         )
         self.assertEqual(container["candidates"], [])
-        self.assertIn("container_address_unreliable", container["warnings"])
+        warnings = container["warnings"]
+        assert isinstance(warnings, list)
+        self.assertIn("container_address_unreliable", warnings)
 
     def test_candidate_api_returns_bind_and_config_without_mutation(self):
         values = {
@@ -72,7 +79,7 @@ class StrmBaseUrlCandidateTests(unittest.TestCase):
             "app.modules.network_addresses.discover_lan_ipv4_addresses",
             return_value=["192.168.1.20"],
         ):
-            response = strm_api.base_url_candidates(self._request())
+            response = strm_api.base_url_candidates(cast(Request, self._request()))
 
         payload = self._payload(response)
         self.assertEqual(payload["configured"], "http://mediaflux.home")
@@ -84,12 +91,13 @@ class StrmBaseUrlCandidateTests(unittest.TestCase):
             "app.services.clear_dashboard_cache"
         ), patch("app.modules.scheduler.get_scheduler"):
             rejected = save_config(
-                self._request(), {"GY_STRM_BASE_URL": "http://0.0.0.0:1258"}
+                cast(Request, self._request()), {"GY_STRM_BASE_URL": "http://0.0.0.0:1258"}
             )
             accepted = save_config(
-                self._request(), {"GY_STRM_BASE_URL": "http://192.168.1.20:1258/"}
+                cast(Request, self._request()), {"GY_STRM_BASE_URL": "http://192.168.1.20:1258/"}
             )
 
+        assert isinstance(rejected, JSONResponse)
         self.assertEqual(rejected.status_code, 400)
         self.assertIn("0.0.0.0", self._payload(rejected)["error"])
         self.assertEqual(accepted, {"success": True})

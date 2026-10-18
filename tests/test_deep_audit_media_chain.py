@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from requests import Session
+
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.modules.scraper import TMDBScraper
+
 import tests  # noqa: F401 -- 应用导入前隔离 DB/config/log/cache
 import json
 import subprocess
@@ -171,7 +177,7 @@ class MediaEndpoint:
             f"http://{provider}.invalid", "offline-test-key",
         )
         client._session.close()
-        client._session = self
+        client._session = cast(Session, self)
         return client
 
 
@@ -327,7 +333,7 @@ def test_normal_local_recognition_move_probe_and_refresh(tmp_path):
             library_id="audit-library",
             library_name="审查库",
         )
-        service = LocalMediaService(scraper=Catalog())
+        service = LocalMediaService(scraper=cast(TMDBScraper, Catalog()))
         ffprobe_result = subprocess.CompletedProcess(
             [],
             0,
@@ -372,7 +378,9 @@ def test_normal_local_recognition_move_probe_and_refresh(tmp_path):
             assert list(source.iterdir()) == []
             assert preview_probe.call_count + probe.call_count == 2
             assert len(db.list_local_media_operation_steps(task_id)) == 4
-            assert db.get_local_media_task(task_id).status == "completed"
+            get_local_media_task_result = db.get_local_media_task(task_id)
+            assert get_local_media_task_result is not None
+            assert get_local_media_task_result.status == "completed"
             assert queue.media_refresh_queue_status()["paths"] == 1
             endpoint = MediaEndpoint(target)
             worker, claimed = drain_refresh(endpoint)
@@ -393,7 +401,7 @@ def test_batch_cloud_strm_metadata_outbox_and_media_service(tmp_path, enabled, a
         root = tmp_path / "strm"
         root.mkdir()
         worker = metadata.STRMMetadataWorker()
-        worker._client = cloud
+        worker._client = cast(GuangYaClient, cloud)
         # 保留真实批量 flush 门槛，以便观察完成事务产生的真实 outbox。
         worker._last_refresh_at = metadata.time.monotonic()
         media_root = root / strm.STRM_SUBDIR
@@ -446,11 +454,12 @@ def test_batch_metadata_path_migration_keeps_both_refresh_intents(tmp_path, allo
         root = tmp_path / "strm"
         root.mkdir()
         worker = metadata.STRMMetadataWorker()
-        worker._client = cloud
+        worker._client = cast(GuangYaClient, cloud)
         worker._last_refresh_at = metadata.time.monotonic()
         file = cloud.files["nfo-1"]
         policy = StrmRefreshPolicy(str(root / strm.STRM_SUBDIR), allow_emby=allow_emby)
         with cloud_runtime(cloud, root, providers=("jellyfin", "emby")):
+            old = None
             for directory in ("Old Series/Season 01", "New Series/Season 01"):
                 db.enqueue_strm_metadata_jobs(
                     [
@@ -471,6 +480,7 @@ def test_batch_metadata_path_migration_keeps_both_refresh_intents(tmp_path, allo
                     assert old.is_file()
                     db.acknowledge_strm_refresh_paths(db.list_strm_refresh_entries())
             new = Path(db.list_strm_index("guangya-meta:audit")[0]["strm_path"])
+            assert old is not None
             assert not old.exists()
             assert new.read_bytes() == cloud.paths["nfo-1"].read_bytes()
             assert_strm_refresh_delivery(
@@ -499,7 +509,7 @@ def test_interrupt_metadata_ack_crash_reuses_verified_installation(tmp_path):
             ]
         )
         first = metadata.STRMMetadataWorker()
-        first._client = cloud
+        first._client = cast(GuangYaClient, cloud)
         with cloud_runtime(cloud, root):
             with patch.object(
                 db,
@@ -515,7 +525,7 @@ def test_interrupt_metadata_ack_crash_reuses_verified_installation(tmp_path):
             assert db.count_strm_refresh_paths() == 0
             assert db.recover_stale_strm_metadata_jobs(force=True) == 1
             restarted = metadata.STRMMetadataWorker()
-            restarted._client = cloud
+            restarted._client = cast(GuangYaClient, cloud)
             restarted._last_refresh_at = metadata.time.monotonic()
             assert restarted._process_one()
             assert path.stat().st_ino == installed.st_ino
@@ -604,7 +614,7 @@ def test_history_strm_index_backfill_and_old_path_recovery(tmp_path):
         root.mkdir()
         video = [change for change in cloud.changes() if change["kind"] == "video"]
         first = strm.sync_strm_incremental(
-            "audit", video, "http://play.invalid", str(root), client=cloud
+            "audit", video, "http://play.invalid", str(root), client=cast(GuangYaClient, cloud)
         )
         assert first["generated"] == 1
         old = Path(db.list_strm_index("guangya:audit")[0]["strm_path"])
@@ -614,7 +624,7 @@ def test_history_strm_index_backfill_and_old_path_recovery(tmp_path):
                 "UPDATE strm_index SET content_fingerprint='' WHERE source='guangya:audit'"
             )
         restored = strm.sync_strm_incremental(
-            "audit", video, "http://play.invalid", str(root), client=cloud
+            "audit", video, "http://play.invalid", str(root), client=cast(GuangYaClient, cloud)
         )
         row = dict(db.list_strm_index("guangya:audit")[0])
         assert restored["skipped"] == 1 and restored["generated"] == 0
@@ -674,9 +684,9 @@ def test_interrupt_reused_metadata_is_revalidated_under_commit_lock(tmp_path):
             source_name="审查",
         )
         with cloud_runtime(cloud, root):
-            prepared = strm.prepare_strm_metadata_job(job, str(root), client=cloud)
+            prepared = strm.prepare_strm_metadata_job(job, str(root), client=cast(GuangYaClient, cloud))
             installed = strm.commit_strm_metadata_job(job, prepared, str(root))
-            reused = strm.prepare_strm_metadata_job(job, str(root), client=cloud)
+            reused = strm.prepare_strm_metadata_job(job, str(root), client=cast(GuangYaClient, cloud))
             assert reused["prepared"] is None
             target = Path(installed["path"])
             target.write_bytes(b"externally changed")
@@ -744,7 +754,7 @@ def test_normal_cloud_organize_write_to_strm_and_refresh(tmp_path, allow_emby):
         }
         root = tmp_path / "strm"
         root.mkdir()
-        organizer = Organizer(client=cloud, scraper=Catalog())
+        organizer = Organizer(client=cast(GuangYaClient, cloud), scraper=cast(TMDBScraper, Catalog()))
         rules = OrganizeRules(
             target_dir_id="target",
             small_file_mb=0,
@@ -794,7 +804,7 @@ def test_normal_cloud_organize_write_to_strm_and_refresh(tmp_path, allow_emby):
                 stats["strm_changes"],
                 "http://play.invalid",
                 str(root),
-                client=cloud,
+                client=cast(GuangYaClient, cloud),
                 metadata_exts={"nfo"},
                 refresh_policy=StrmRefreshPolicy(
                     str(root / strm.STRM_SUBDIR), allow_emby=allow_emby,
@@ -802,7 +812,7 @@ def test_normal_cloud_organize_write_to_strm_and_refresh(tmp_path, allow_emby):
             )
             assert result["generated"] == 2 and result["metadata_queued"] == 2, result
             worker = metadata.STRMMetadataWorker()
-            worker._client = cloud
+            worker._client = cast(GuangYaClient, cloud)
             worker._last_refresh_at = metadata.time.monotonic()
             assert worker._process_one() and worker._process_one()
             targets = {Path(path).parent for path in result["changed_strm_paths"]}

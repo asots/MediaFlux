@@ -9,7 +9,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO, Iterator, Protocol, Sequence
+from typing import Generator, BinaryIO, Protocol, Sequence
 
 from app import database as db
 from app.modules.local_path_mapping import assert_within
@@ -24,17 +24,26 @@ from app.modules.process_lock import CrossProcessLock
 
 
 class MovePlanLike(Protocol):
-    source: LocalFileSnapshot
-    target: Path
-    role: str
-    action: str
-    expected_target_identity: tuple[int, int, int, int] | None
-    retire_target: Path | None
-    expected_retire_identity: tuple[int, int, int, int] | None
+    @property
+    def source(self) -> LocalFileSnapshot: ...
+    @property
+    def target(self) -> Path: ...
+    @property
+    def role(self) -> str: ...
+    @property
+    def action(self) -> str: ...
+    @property
+    def expected_target_identity(self) -> tuple[int, int, int, int] | None: ...
+    @property
+    def retire_target(self) -> Path | None: ...
+    @property
+    def expected_retire_identity(self) -> tuple[int, int, int, int] | None: ...
 
 
 class LocalMoveError(RuntimeError):
     """移动事务失败且已尽力回滚。"""
+
+    rollback_errors: list[str]
 
 
 @dataclass(frozen=True)
@@ -81,9 +90,9 @@ class LocalMoveTransaction:
             for root in target_roots
         )
         self.task_id = task_id
-        self.owner = str(owner or "admin")
+        self.owner = (owner or "admin")
         self.operation_token = operation_token or uuid.uuid4().hex
-        self.chunk_size = max(64 * 1024, int(chunk_size))
+        self.chunk_size = max(64 * 1024, chunk_size)
         self._moved: list[MovedItem] = []
         self._moved_steps: dict[Path, int] = {}
         self._step_ids: dict[int, int] = {}
@@ -110,7 +119,7 @@ class LocalMoveTransaction:
         roots: Sequence[Path],
         *,
         create_parent: bool = False,
-    ) -> Iterator[tuple[Path, Path]]:
+    ) -> Generator[tuple[Path, Path], None, None]:
         """将最终目录项固定到逐段打开的目录句柄，避免父目录被并发替换。"""
         display = self._within_any(path, roots)
         root = next(
@@ -209,10 +218,10 @@ class LocalMoveTransaction:
     @staticmethod
     def _identity_from_stat(info: os.stat_result) -> tuple[int, int, int, int]:
         return (
-            int(info.st_size),
-            int(info.st_mtime_ns),
-            int(info.st_dev),
-            int(info.st_ino),
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_dev,
+            info.st_ino,
         )
 
     @contextmanager
@@ -220,7 +229,7 @@ class LocalMoveTransaction:
         self,
         snapshot: LocalFileSnapshot,
         source_path: Path | None = None,
-    ) -> Iterator[tuple[BinaryIO, os.stat_result]]:
+    ) -> Generator[tuple[BinaryIO, os.stat_result], None, None]:
         source = Path(source_path) if source_path is not None else self._within_any(
             snapshot.path, self.source_roots
         )
@@ -351,13 +360,13 @@ class LocalMoveTransaction:
                     if os.utime in getattr(os, "supports_follow_symlinks", set()):
                         os.utime(
                             partial,
-                            ns=(int(source_info.st_atime_ns), int(source_info.st_mtime_ns)),
+                            ns=(source_info.st_atime_ns, source_info.st_mtime_ns),
                             follow_symlinks=False,
                         )
                     else:
                         os.utime(
                             partial,
-                            ns=(int(source_info.st_atime_ns), int(source_info.st_mtime_ns)),
+                            ns=(source_info.st_atime_ns, source_info.st_mtime_ns),
                         )
                 except (OSError, NotImplementedError):
                     # 部分 SMB/NAS/Windows 不支持完整 POSIX 元数据；内容与身份校验仍必须继续。
@@ -486,6 +495,7 @@ class LocalMoveTransaction:
             current_target_identity = self._identity_or_none(target)
             if current_target_identity is not None and plan_action != "replace":
                 raise FileExistsError(f"本地媒体库已存在目标文件: {target_display}")
+            current_retire_identity: tuple[int, int, int, int] | None = None
             if plan_action == "replace":
                 expected_target = (
                     getattr(plan, "expected_target_identity", None)
@@ -527,6 +537,7 @@ class LocalMoveTransaction:
             backup_identity: tuple[int, int, int, int] | None = None
             try:
                 if plan_action == "replace":
+                    assert current_retire_identity is not None
                     backup_display, backup_identity = self._backup_replaced_target(
                         retire_display,
                         current_retire_identity,
@@ -548,7 +559,7 @@ class LocalMoveTransaction:
                     moved = MovedItem(
                         source=source_display,
                         target=target_display,
-                        role=str(plan.role),
+                        role=plan.role,
                         cross_filesystem=False,
                         published_identity=published_identity,
                     )
@@ -583,7 +594,7 @@ class LocalMoveTransaction:
                     moved = MovedItem(
                         source=source_display,
                         target=target_display,
-                        role=str(plan.role),
+                        role=plan.role,
                         cross_filesystem=True,
                         published_identity=published_identity,
                     )

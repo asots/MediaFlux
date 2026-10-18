@@ -1,5 +1,6 @@
 """结构化偏好的确认、持久化、单次覆盖与真实推荐消费。"""
 from __future__ import annotations
+from typing import Any
 
 import json
 import sqlite3
@@ -109,6 +110,7 @@ def test_structured_preferences_freeze_then_persist_merge_and_owner_isolation(pr
         saved = json.loads(conn.execute("SELECT profile_json FROM agent_media_preferences").fetchone()[0])
         assert saved["max_episode_size_gb"] == 8
     changed = set_media_preferences(digest, expected_revision=1, updates={"preferred_download_target": "qb"})
+    assert changed is not None
     assert changed["revision"] == 2
     assert changed["revision_token"] != stored["revision_token"]
     assert changed["preferred_genres"] == ["喜剧|Comedy"]
@@ -280,7 +282,7 @@ def test_missing_resource_domain_wrapper_consumes_owner_profile_before_reference
             ("other", None, "a" * 20),
             ("viewer", {"preferred_resolution": "2160p"}, "a" * 20),
         ):
-            requested = dict(arguments)
+            requested: dict[str, Any] = dict(arguments)
             if overrides is not None:
                 requested["preference_overrides"] = overrides
             result = tool.context_handler(tool.validator(requested), _context(owner))
@@ -554,6 +556,7 @@ def test_kernel_default_target_is_prepared_and_confirmed_without_preferences_too
         assert prepared["result"]["data"]["target"] == "qb"
         plan_id = prepared["action_plan"]["plan_id"]
         plan = service._prepared[plan_id].result.effect_plan
+        assert plan is not None
         assert plan.arguments["target"] == "preferred"
         assert "ingest-target-v1:qb:" in plan.snapshot_fingerprint
         create.assert_not_called()
@@ -619,6 +622,7 @@ def test_preference_repository_returns_its_own_committed_row_when_another_writer
     written_b = set_media_preferences(digest, expected_revision=1, updates={"preferred_download_target": "qb"})
     current_c = get_media_preferences(digest)
     assert state["fired"] and state["locked_after_reads"] == 1
+    assert written_b is not None
     assert written_b["revision"] == 2
     assert written_b["preferred_download_target"] == "qb"
     assert written_b["preferred_genres"] == ["A"]
@@ -708,16 +712,19 @@ def test_legacy_empty_preference_nonce_migrates_on_next_write(preference_db):
         ) VALUES ('legacy', 'emby', 'qb', 4, '', '')""")
     assert get_media_preferences("legacy")["revision_token"] == ""
     updated = set_media_preferences("legacy", expected_revision=4, updates={"preferred_server": "emby"})
+    assert updated is not None
     assert updated["revision"] == 5 and len(updated["revision_token"]) == 32
     assert get_media_preferences("legacy") == updated
 
 
 def test_preference_nonce_cas_rejects_aba_between_snapshot_check_and_write(preference_db):
     original = set_media_preferences("owner", expected_revision=0, updates={"preferred_download_target": "qb"})
+    assert original is not None
     assert clear_media_preferences(
         "owner", expected_revision=original["revision"], expected_revision_token=original["revision_token"],
     )
     recreated = set_media_preferences("owner", expected_revision=0, updates={"preferred_download_target": "qb"})
+    assert recreated is not None
     assert recreated["revision"] == original["revision"]
     assert not clear_media_preferences(
         "owner", expected_revision=original["revision"], expected_revision_token=original["revision_token"],
@@ -727,7 +734,9 @@ def test_preference_nonce_cas_rejects_aba_between_snapshot_check_and_write(prefe
         updates={"preferred_download_target": "both"},
     ) is None
     assert get_media_preferences("owner") == recreated
-    assert set_media_preferences(
+    set_media_preferences_result = set_media_preferences(
         "owner", expected_revision=recreated["revision"], expected_revision_token=recreated["revision_token"],
         updates={"preferred_download_target": "both"},
-    )["revision"] == 2
+    )
+    assert set_media_preferences_result is not None
+    assert set_media_preferences_result["revision"] == 2

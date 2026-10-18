@@ -37,14 +37,20 @@ def test_linked_lifecycle_keeps_refresh_result(notification_case, refresh_status
         assert notify_local_media_task(tid, result)
         linked = publish.call_args.args[1]
     if refresh_status == 'failed':
-        assert '刷新失败' in dict(linked.fields)['媒体库']
-        assert '刷新失败' in dict(standalone.fields)['媒体库刷新']
+        refresh_text = dict(linked.fields)['媒体库']
+        assert isinstance(refresh_text, str)
+        assert '刷新失败' in refresh_text
+        refresh_text = dict(standalone.fields)['媒体库刷新']
+        assert isinstance(refresh_text, str)
+        assert '刷新失败' in refresh_text
         assert linked.state == 'error' and '部分完成' in linked.title
     else:
         assert dict(linked.fields)['媒体库'] == dict(standalone.fields)['媒体库刷新']
         assert '归档完成' in linked.title
         assert '下载与入库完成' not in linked.title
-    assert db.get_download_request(rid)['local_import_status'] == 'completed'
+    get_download_request_result = db.get_download_request(rid)
+    assert get_download_request_result is not None
+    assert get_download_request_result['local_import_status'] == 'completed'
 
 
 @pytest.mark.parametrize('warning', [
@@ -56,8 +62,10 @@ def test_refresh_failure_survives_resultless_notification_rebuild(notification_c
     db.update_local_media_task(tid, warning=warning)
     rebuilt = build_download_lifecycle_event(db.get_download_request(rid))
     assert rebuilt.state == 'error'
-    assert '刷新失败' in dict(rebuilt.fields)['媒体库']
-    assert '入库完成' not in rebuilt.title
+    refresh_text = dict(rebuilt.fields)['媒体库']
+    assert isinstance(refresh_text, str)
+    assert '刷新失败' in refresh_text
+    assert '入库完成' not in str(rebuilt.title)
 
 
 def test_unrelated_warning_does_not_invent_refresh_failure(notification_case):
@@ -65,7 +73,9 @@ def test_unrelated_warning_does_not_invent_refresh_failure(notification_case):
     db.update_local_media_task(tid, warning='qB任务移除失败')
     event = build_download_lifecycle_event(db.get_download_request(rid), stats={'media_refresh_status':'completed'})
     assert event.state == 'completed'
-    assert '刷新完成' in dict(event.fields)['媒体库']
+    refresh_text = dict(event.fields)['媒体库']
+    assert isinstance(refresh_text, str)
+    assert '刷新完成' in refresh_text
 
 
 def test_peer_refresh_success_does_not_hide_local_refresh_failure(notification_case):
@@ -73,4 +83,6 @@ def test_peer_refresh_success_does_not_hide_local_refresh_failure(notification_c
     db.update_local_media_task(tid, warning='媒体库刷新失败：连接不可用')
     event = build_download_lifecycle_event(db.get_download_request(rid), media_refresh='云端媒体已刷新')
     assert event.state == 'error'
-    assert '本地媒体库刷新失败' in dict(event.fields)['媒体库']
+    refresh_text = dict(event.fields)['媒体库']
+    assert isinstance(refresh_text, str)
+    assert '本地媒体库刷新失败' in refresh_text

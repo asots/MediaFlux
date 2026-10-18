@@ -56,7 +56,7 @@ _QB_COMPLETE_STATES = frozenset(
 
 
 def _torrent_state_kind(state: str, progress: float) -> str:
-    normalized = str(state or "").strip().casefold()
+    normalized = (state or "").strip().casefold()
     try:
         normalized_progress = max(0.0, min(float(progress or 0), 1.0))
     except (TypeError, ValueError):
@@ -84,12 +84,12 @@ class QBittorrentProviderTransport:
     def profiles(self) -> list[ProviderProfileView]:
         values = self._settings()
         configured = bool(
-            str(values.get("QB_URL") or "").strip()
+            (values.get("QB_URL") or "").strip()
             and (
-                str(values.get("QB_API_KEY") or "").strip()
+                (values.get("QB_API_KEY") or "").strip()
                 or (
-                    str(values.get("QB_USERNAME") or "").strip()
-                    and str(values.get("QB_PASSWORD") or "")
+                    (values.get("QB_USERNAME") or "").strip()
+                    and (values.get("QB_PASSWORD") or "")
                 )
             )
         )
@@ -175,14 +175,14 @@ class QBittorrentProviderTransport:
                     summary="qBittorrent 传输状态已读取",
                     data={
                         "transfer": {
-                            "connection_status": str(info.connection_status or ""),
-                            "download_speed": int(info.dl_info_speed or 0),
-                            "upload_speed": int(info.up_info_speed or 0),
-                            "downloaded_bytes_total": int(info.dl_info_data or 0),
-                            "uploaded_bytes_total": int(info.up_info_data or 0),
-                            "download_rate_limit": int(info.dl_rate_limit or 0),
-                            "upload_rate_limit": int(info.up_rate_limit or 0),
-                            "dht_nodes": int(info.dht_nodes or 0),
+                            "connection_status": (info.connection_status or ""),
+                            "download_speed": (info.dl_info_speed or 0),
+                            "upload_speed": (info.up_info_speed or 0),
+                            "downloaded_bytes_total": (info.dl_info_data or 0),
+                            "uploaded_bytes_total": (info.up_info_data or 0),
+                            "download_rate_limit": (info.dl_rate_limit or 0),
+                            "upload_rate_limit": (info.up_rate_limit or 0),
+                            "dht_nodes": (info.dht_nodes or 0),
                         }
                     },
                     source="qbittorrent_api",
@@ -195,7 +195,7 @@ class QBittorrentProviderTransport:
                     tasks = [
                         task
                         for task in tasks
-                        if query in " ".join(str(task.name or "").split()).casefold()
+                        if query in " ".join((task.name or "").split()).casefold()
                     ]
                 counts = {
                     "active": 0,
@@ -210,19 +210,19 @@ class QBittorrentProviderTransport:
                 limit = int(arguments.get("limit", 20))
                 items = [
                     {
-                        "__object_id": str(task.hash or "").casefold(),
+                        "__object_id": (task.hash or "").casefold(),
                         "__object_kind": "qb_torrent",
-                        "name": str(task.name or ""),
-                        "state": str(task.state or ""),
+                        "name": (task.name or ""),
+                        "state": (task.state or ""),
                         "progress_percent": round(float(task.progress or 0) * 100, 2),
-                        "size": int(task.size or 0),
-                        "downloaded_bytes": int(task.downloaded or 0),
-                        "download_speed": int(task.dlspeed or 0),
-                        "upload_speed": int(task.upspeed or 0),
-                        "eta": int(task.eta or 0),
+                        "size": (task.size or 0),
+                        "downloaded_bytes": (task.downloaded or 0),
+                        "download_speed": (task.dlspeed or 0),
+                        "upload_speed": (task.upspeed or 0),
+                        "eta": (task.eta or 0),
                         "ratio": float(task.ratio or 0),
-                        "category": str(task.category or ""),
-                        "added_on": int(task.added_on or 0),
+                        "category": (task.category or ""),
+                        "added_on": (task.added_on or 0),
                     }
                     for task in tasks[:limit]
                 ]
@@ -243,11 +243,9 @@ class QBittorrentProviderTransport:
                         **(
                             {
                                 "transfer": {
-                                    "connection_status": str(
-                                        transfer.connection_status or ""
-                                    ),
-                                    "download_speed": int(transfer.dl_info_speed or 0),
-                                    "upload_speed": int(transfer.up_info_speed or 0),
+                                    "connection_status": (transfer.connection_status or ""),
+                                    "download_speed": (transfer.dl_info_speed or 0),
+                                    "upload_speed": (transfer.up_info_speed or 0),
                                 }
                             }
                             if transfer is not None
@@ -261,9 +259,9 @@ class QBittorrentProviderTransport:
                 limit = int(arguments.get("limit", 50))
                 items = [
                     {
-                        "index": int(item.index),
-                        "name": str(item.name or ""),
-                        "size": int(item.size or 0),
+                        "index": (item.index),
+                        "name": (item.name or ""),
+                        "size": (item.size or 0),
                         "progress_percent": round(float(item.progress or 0) * 100, 2),
                     }
                     for item in files[:limit]
@@ -294,7 +292,7 @@ class QBittorrentProviderTransport:
     def _selected_tasks(
         client: QBittorrentClient, hashes: list[str]
     ) -> tuple[list[Any], list[str]]:
-        wanted = {str(value or "").strip().casefold() for value in hashes if value}
+        wanted = {(value or "").strip().casefold() for value in hashes if value}
         if not wanted or any(
             not re.fullmatch(r"[0-9a-f]{40,64}", value) for value in wanted
         ):
@@ -302,8 +300,8 @@ class QBittorrentProviderTransport:
                 "qBittorrent 任务引用已失效", code="confirmation_stale"
             )
         tasks = client.list_torrents()
-        selected = [task for task in tasks if str(task.hash or "").casefold() in wanted]
-        found = {str(task.hash or "").casefold() for task in selected}
+        selected = [task for task in tasks if (task.hash or "").casefold() in wanted]
+        found = {(task.hash or "").casefold() for task in selected}
         missing = sorted(wanted - found)
         return selected, missing
 
@@ -435,15 +433,13 @@ class QBittorrentProviderTransport:
                     # 超时、断连和写后核验失败都必须收束为结果未知。
                     external_write_possible = True
                     if operation == "qb.torrents.pause":
-                        accepted = bool(client.pause_torrents(joined))
+                        accepted = (client.pause_torrents(joined))
                         action = "暂停"
                     elif operation == "qb.torrents.resume":
-                        accepted = bool(client.resume_torrents(joined))
+                        accepted = (client.resume_torrents(joined))
                         action = "恢复"
                     else:
-                        accepted = bool(
-                            remove_qb_tasks(client, hashes)
-                        )
+                        accepted = (remove_qb_tasks(client, hashes))
                         action = "移除"
                     if not accepted:
                         raise ProviderGatewayError(

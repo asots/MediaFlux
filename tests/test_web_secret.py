@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from starlette.middleware.sessions import SessionMiddleware
+
 import errno
 import importlib
 import os
@@ -76,7 +78,8 @@ class WebSecretTests(unittest.TestCase):
         from app.routes.discovery_image import _serializer, encode_poster_token
         app = create_app()
         middleware_secret = next(m.kwargs['secret_key'] for m in app.user_middleware
-                                 if m.cls.__name__ == 'SessionMiddleware')
+                                 if m.cls is SessionMiddleware)
+        assert isinstance(middleware_secret, str)
         self.assertEqual(app.state.setup_secret_key, middleware_secret)
         with TestClient(app) as client:
             page = client.get('/setup')
@@ -84,7 +87,9 @@ class WebSecretTests(unittest.TestCase):
             self.assertFalse(self.paths.env_file.exists())
             self.assertFalse(self.paths.database_path.exists())
             self.assertFalse((self.paths.config_dir / '.web-secret-key').exists())
-            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            search_result = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+            assert search_result is not None
+            token = search_result.group(1)
             response = client.post('/setup', data={
                 'username':'admin', 'password':'correct-horse',
                 'password_confirm':'correct-horse', 'csrf_token':token,
@@ -93,7 +98,9 @@ class WebSecretTests(unittest.TestCase):
             self.assertEqual(response.headers['location'], '/login')
             self.assertEqual(self.config._read_env_file()['WEB_SECRET_KEY'], middleware_secret)
             page = client.get('/login')
-            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            search_result_2 = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+            assert search_result_2 is not None
+            token = search_result_2.group(1)
             response = client.post('/login', data={'username':'admin', 'password':'correct-horse',
                                                   'csrf_token':token}, follow_redirects=False)
             self.assertEqual(response.status_code, 302)
@@ -103,7 +110,7 @@ class WebSecretTests(unittest.TestCase):
         self._reload_modules()
         self.assertEqual(self.web_secret.get_web_secret(), middleware_secret)
         self.assertEqual(_serializer().secret_key, middleware_secret.encode())
-        self.assertIsInstance(encode_poster_token('tmdb', 'poster.jpg'), str)
+        assert isinstance(encode_poster_token('tmdb', 'poster.jpg'), str)
         with TestClient(create_app()) as client:
             client.cookies.update(cookies)
             self.assertEqual(client.get('/', follow_redirects=False).status_code, 200)
@@ -153,7 +160,7 @@ class WebSecretTests(unittest.TestCase):
         middleware_secret = next(
             middleware.kwargs["secret_key"]
             for middleware in app.user_middleware
-            if middleware.cls.__name__ == "SessionMiddleware"
+            if middleware.cls is SessionMiddleware
         )
         self.assertEqual(middleware_secret, "external-secret")
         self.assertEqual(_serializer().secret_key, b"external-secret")

@@ -18,7 +18,7 @@ _COUNTER_FIELDS = (
 )
 
 
-def _int(value: object) -> int:
+def _int(value: Any) -> int:
     try:
         return int(value or 0)
     except (TypeError, ValueError):
@@ -60,10 +60,10 @@ def build_organize_result(
         changed_dirs = _derive(strm_changes)
     return {
         "schema_version": ORGANIZE_RESULT_SCHEMA_VERSION,
-        "task_id": str(task_id or ""),
-        "status": str(status or ""),
-        "current_source": str(current_source or ""),
-        "error": str(error or ""),
+        "task_id": (task_id or ""),
+        "status": (status or ""),
+        "current_source": (current_source or ""),
+        "error": (error or ""),
         "counters": counters,
         "groups": _dict_list(stats.get("group_results")),
         "group_progress": (
@@ -77,7 +77,7 @@ def build_organize_result(
             dict(stats["media_refresh"])
             if isinstance(stats.get("media_refresh"), dict) else {}
         ),
-        "notification": {"sent": bool(notification_sent)},
+        "notification": {"sent": notification_sent},
         "confirmations": _text_list(stats.get("confirmations")),
         "confirmation_groups": _dict_list(stats.get("confirmation_groups")),
         "scan_errors": _text_list(stats.get("scan_errors")),

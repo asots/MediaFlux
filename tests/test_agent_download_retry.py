@@ -51,7 +51,7 @@ class DownloadRetryTests(IsolatedDatabaseTestCase):
             gy_status="failed",
             error="private backend error",
         )
-        return int(request_id)
+        return request_id
 
     def test_registry_is_dangerous_and_confirmation_gated(self):
         registry = get_agent_service().registry

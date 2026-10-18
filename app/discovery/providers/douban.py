@@ -126,7 +126,7 @@ def _safe_frodo_credential_source(client: Any) -> str:
 
 def _config_get(config: Mapping[str, Any] | None, key: str, default: str = "") -> str:
     if config is None:
-        return str(app_config.get(key, default) or "")
+        return (app_config.get(key, default) or "")
     return str(config.get(key, default) or "")
 
 
@@ -210,21 +210,18 @@ class DoubanProvider(DiscoveryProvider):
             else _bool_value(enabled, True)
         )
         self._config = config
-        self.api_key = None if api_key is None else str(api_key or "").strip()
-        self.api_secret = None if api_secret is None else str(api_secret or "").strip()
+        self.api_key = None if api_key is None else (api_key or "").strip()
+        self.api_secret = None if api_secret is None else (api_secret or "").strip()
         self._dbcl2_from_config = dbcl2 is None
         self.dbcl2 = "" if dbcl2 is None else normalize_dbcl2(dbcl2)
 
         # 保留旧构造参数/属性，网络主机仍由两个已批准客户端固定控制。
-        self.base_url = str(base_url or "https://frodo.douban.com").rstrip("/")
+        self.base_url = (base_url or "https://frodo.douban.com").rstrip("/")
         self.session = session or requests.Session()
         self.clock = clock or time.time
         self.timeout = timeout
-        try:
-            normalized_page_size = int(page_size)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("page_size must be an integer") from exc
-        self.page_size = max(1, min(normalized_page_size, 100))
+
+        self.page_size = max(1, min(page_size, 100))
 
         if public_client is None:
             public_kwargs: dict[str, Any] = {
@@ -305,9 +302,9 @@ class DoubanProvider(DiscoveryProvider):
                 with self._close_lock:
                     self._pending_close_resources = pending
 
-            resources = tuple(pending)
+            close_resources = tuple(pending)
             failed: list[Any] = []
-            for resource in resources:
+            for resource in close_resources:
                 close = getattr(resource, "close", None)
                 if not callable(close):
                     continue
@@ -421,7 +418,7 @@ class DoubanProvider(DiscoveryProvider):
             if self._open_until > now:
                 return ProviderUnavailable(
                     "豆瓣公共 Provider 熔断中",
-                    retry_after=max(1, int(math.ceil(self._open_until - now))),
+                    retry_after=max(1, math.ceil(self._open_until - now)),
                 )
             if self._open_until:
                 self._open_until = 0.0
@@ -460,7 +457,7 @@ class DoubanProvider(DiscoveryProvider):
                 retry_after = (
                     0
                     if math.isinf(open_until)
-                    else max(1, int(math.ceil(open_until - now)))
+                    else max(1, math.ceil(open_until - now))
                 )
                 return False, waited, retry_after
             if open_until:
@@ -576,18 +573,15 @@ class DoubanProvider(DiscoveryProvider):
         page: int,
         filters: Mapping[str, Any] | None,
     ) -> tuple[str, str, int, dict[str, Any]]:
-        normalized_category = str(category or "").strip().lower()
-        normalized_type = str(media_type or "").strip().lower()
+        normalized_category = (category or "").strip().lower()
+        normalized_type = (media_type or "").strip().lower()
         allowed_media = _CATEGORY_MEDIA.get(normalized_category)
         if allowed_media is None:
             raise ProviderInvalidResponse("不支持的豆瓣分类")
         if normalized_type not in allowed_media:
             raise ProviderInvalidResponse("豆瓣分类与媒体类型不匹配")
-        try:
-            normalized_page = int(page)
-        except (TypeError, ValueError) as exc:
-            raise ProviderInvalidResponse("豆瓣页码无效") from exc
-        if normalized_page < 1:
+
+        if page < 1:
             raise ProviderInvalidResponse("豆瓣页码无效")
         if filters is None:
             normalized_filters: dict[str, Any] = {}
@@ -595,12 +589,12 @@ class DoubanProvider(DiscoveryProvider):
             normalized_filters = dict(filters)
         else:
             raise ProviderInvalidResponse("豆瓣筛选参数无效")
-        return normalized_category, normalized_type, normalized_page, normalized_filters
+        return normalized_category, normalized_type, page, normalized_filters
 
     @staticmethod
     def _validate_detail_request(external_id: str, media_type: str) -> tuple[str, str]:
-        subject_id = str(external_id or "").strip()
-        normalized_type = str(media_type or "").strip().lower()
+        subject_id = (external_id or "").strip()
+        normalized_type = (media_type or "").strip().lower()
         if not _EXTERNAL_ID_RE.fullmatch(subject_id):
             raise ProviderInvalidResponse("豆瓣条目 ID 无效")
         if normalized_type not in {"movie", "tv"}:

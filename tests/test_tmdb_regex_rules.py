@@ -1,6 +1,11 @@
 """TMDB 正则识别规则的边界、优先级、API 与 UI 契约测试。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
+from app.modules.scraper import TMDBScraper
+
 import importlib.util
 import inspect
 import sqlite3
@@ -19,12 +24,12 @@ class TmdbRegexRuleSchemaTests(IsolatedDatabaseTestCase):
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='tmdb_regex_rules'"
             ).fetchone()
-        self.assertIsNotNone(row)
+        assert (row) is not None
 
 
 class TmdbRegexRuleModuleContractTests(unittest.TestCase):
     def test_tmdb_regex_rules_module_is_importable(self):
-        self.assertIsNotNone(importlib.util.find_spec("app.modules.tmdb_regex_rules"))
+        assert (importlib.util.find_spec("app.modules.tmdb_regex_rules")) is not None
 
     def test_tmdb_regex_rules_module_exposes_bounded_crud_and_matcher(self):
         from app.modules import tmdb_regex_rules as rules
@@ -100,7 +105,7 @@ class TmdbRegexBackwardCompatibilityTests(unittest.TestCase):
                 return MatchResult(media_type="movie", need_confirm=True)
 
         scraper = LegacyScraper()
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, scraper))
         organizer._plan_one(
             GuangYaFile("file-1", "Legacy.mkv", False), "旧目录", OrganizeRules()
         )
@@ -130,7 +135,7 @@ class TmdbRegexScraperPrecedenceTests(IsolatedDatabaseTestCase):
 
         self.create_rule(pattern="Movie", media_type="any", season_override=None)
         client = _RegexDetailClient()
-        result = TMDBScraper(client=client).match("Movie.2026.{tmdb-777}.mkv", "/TV")
+        result = TMDBScraper(client=cast(TMDBClient, client)).match("Movie.2026.{tmdb-777}.mkv", "/TV")
 
         self.assertEqual(result.tmdb_id, "777")
         self.assertEqual(result.matched_by, "tmdb_id")
@@ -143,7 +148,7 @@ class TmdbRegexScraperPrecedenceTests(IsolatedDatabaseTestCase):
 
         self.create_rule()
         client = _RegexDetailClient()
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
         scraper.confirm(
             "Example.Show.S01E01.mkv", "888", "人工锁定", "2019", "tv",
             parent_path="/TV/Example",
@@ -171,7 +176,7 @@ class TmdbRegexScraperPrecedenceTests(IsolatedDatabaseTestCase):
     def test_manual_locks_are_isolated_by_parent_context(self):
         from app.modules.scraper import TMDBScraper
 
-        scraper = TMDBScraper(client=_RegexDetailClient())
+        scraper = TMDBScraper(client=cast(TMDBClient, _RegexDetailClient()))
         filename = "01.mkv"
         scraper.confirm(
             filename, "101", "节目甲", "2024", "tv",
@@ -202,7 +207,7 @@ class TmdbRegexScraperPrecedenceTests(IsolatedDatabaseTestCase):
 
         rule = self.create_rule()
         client = _RegexDetailClient()
-        result = TMDBScraper(client=client).match(
+        result = TMDBScraper(client=cast(TMDBClient, client)).match(
             "Example.Show.S02E03.1080p.mkv", "/TV/Example Show"
         )
 
@@ -222,7 +227,7 @@ class TmdbRegexScraperPrecedenceTests(IsolatedDatabaseTestCase):
         self.create_rule(pattern="NeverMatches")
         client = _RegexDetailClient()
         with patch("app.modules.scraper.get_bool", return_value=False):
-            result = TMDBScraper(client=client).match("Search.Show.S01E01.mkv", "/TV")
+            result = TMDBScraper(client=cast(TMDBClient, client)).match("Search.Show.S01E01.mkv", "/TV")
 
         self.assertEqual(result.matched_by, "search")
         self.assertTrue(client.search_calls)
@@ -236,7 +241,7 @@ class TmdbRegexOrganizeIntegrationTests(unittest.TestCase):
 
         scraper = Mock()
         scraper.match.return_value = MatchResult(media_type="movie", need_confirm=True)
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         organizer._plan_one(
             GuangYaFile("file-1", "Example.mkv", False, parent_id="parent-1"),
             "源目录/电影",
@@ -279,7 +284,7 @@ class TmdbRegexOrganizeIntegrationTests(unittest.TestCase):
                 }
 
         scraper = Scraper()
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, scraper))
         plan = organizer._plan_one(
             GuangYaFile(
                 "file-1", "Example.Show.S02E13.mkv", False, parent_id="parent-1",
@@ -316,7 +321,7 @@ class TmdbRegexOrganizeIntegrationTests(unittest.TestCase):
             "seasons": [{"season_number": 1, "episode_count": 12}],
         }
 
-        organizer = Organizer(client=object(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=scraper)
         with self.assertRaisesRegex(TypeError, "parse_media"):
             organizer._plan_one(
                 GuangYaFile(
@@ -351,7 +356,7 @@ class TmdbRegexOrganizeIntegrationTests(unittest.TestCase):
             def get_detail(self, tmdb_id, media_type, *, force_refresh=False):
                 return {"genres": [], "origin_country": ["CN"], "seasons": [{"season_number": 5, "episode_count": 12}]}
 
-        organizer = Organizer(client=object(), scraper=Scraper())
+        organizer = Organizer(client=cast(GuangYaClient, object()), scraper=cast(TMDBScraper, Scraper()))
         plan = organizer._plan_one(
             GuangYaFile("file-1", "Example.Show.S02E03.mkv", False, parent_id="parent-1"),
             "源目录/剧集",
@@ -559,7 +564,7 @@ class TmdbRegexScrapePreviewTests(unittest.TestCase):
                 "filename": "Api.Show.S02E01.mkv", "parent_path": "/TV/Api Show"
             })
 
-        payload = json.loads(response.body)
+        payload = json.loads(bytes(response.body))
         self.assertEqual(payload["diagnostic"]["regex_rule_id"], 17)
         naming.assert_called_once_with(
             "456", "tv", 4, 1, "Api.Show.S02E01.mkv", "规则剧集", "2020"
@@ -668,10 +673,12 @@ class TmdbRegexRulePersistenceTests(IsolatedDatabaseTestCase):
         created = rules.create_rule(self.payload(
             pattern=r"^(?:Example|示例)[ ._-]+S\d{2}E\d{2}(?:\.mkv)?$"
         ))
-        self.assertEqual(
-            rules.find_tmdb_regex_match(
+        find_tmdb_regex_match_result = rules.find_tmdb_regex_match(
                 "Example.S01E02.mkv", "/TV", "tv"
-            ).rule_id,
+            )
+        assert find_tmdb_regex_match_result is not None
+        self.assertEqual(
+            find_tmdb_regex_match_result.rule_id,
             created["id"],
         )
 
@@ -748,22 +755,26 @@ class TmdbRegexRulePersistenceTests(IsolatedDatabaseTestCase):
         ))
 
         match = rules.find_tmdb_regex_match("Example.Show.S01E01.mkv", "/TV", "tv")
+        assert match is not None
         self.assertEqual(match.rule_id, lower["id"])
         self.assertEqual((match.tmdb_id, match.season_override), ("3", 1))
 
         parent_match = rules.find_tmdb_regex_match(
             "Episode.S05E02.mkv", r"TV\Series\Season 05", "tv"
         )
+        assert parent_match is not None
         self.assertEqual(parent_match.rule_id, parent["id"])
         self.assertEqual(parent_match.season_override, 5)
 
         both_match = rules.find_tmdb_regex_match(
             "Episode.E01.mkv", "/TV/Specials", "tv"
         )
+        assert both_match is not None
         self.assertEqual(both_match.rule_id, both["id"])
         self.assertIsNone(rules.find_tmdb_regex_match("Disabled.Show.mkv", "/TV", "tv"))
         self.assertIsNone(rules.find_tmdb_regex_match("Cinema.2026.mkv", "/Movies", "tv"))
         movie_match = rules.find_tmdb_regex_match("Cinema.2026.mkv", "/Movies", "movie")
+        assert movie_match is not None
         self.assertEqual(movie_match.rule_id, movie["id"])
 
     def test_preview_validates_without_persisting(self):

@@ -116,12 +116,12 @@ class RecordedPipeline(ToolPipeline):
         super().__init__(**kwargs)
         self.calls = []
 
-    async def execute(self, tool_name, arguments, *, context, **kwargs):
-        record = {"tool": tool_name, "arguments": deepcopy(arguments),
+    async def execute(self, name, arguments, *, context, **kwargs):
+        record = {"tool": name, "arguments": deepcopy(arguments),
                   "call_id": context.call_id, "turn_id": context.turn_id}
         self.calls.append(record)
         try:
-            result = await super().execute(tool_name, arguments, context=context, **kwargs)
+            result = await super().execute(name, arguments, context=context, **kwargs)
         except ToolPipelineError as exc:
             record["error"] = exc.code
             raise
@@ -233,7 +233,9 @@ class Case:
             message=GOAL, owner=self.owner, session_id=self.sid, request_id="original-user"))]
         self.events.extend(events)
         assert events[-1].payload["status"] == "approval_required"
+        assert self.pipeline is not None
         plan = await self.pipeline.get_pending_plan(owner=self.owner, session_id=self.sid)
+        assert self.script is not None
         assert plan.arguments == {"observation_ref": self.script.initial_ref, "access_code": ""}
         assert plan.snapshot_fingerprint == digest(OLD_BYTES)
         assert "access_code" not in WRITE_SCHEMA["properties"]
@@ -255,12 +257,14 @@ class Case:
                 await self.cold_store().resolve(plan.arguments["observation_ref"], owner=self.owner,
                                                session_id=self.sid, expected_kind="observation")
             assert self.clock[0] >= plan.expires_at
+            assert self.pipeline is not None
             assert await self.pipeline.get_pending_plan(owner=self.owner, session_id=self.sid) is None
         else:
             original = await self.cold_store().resolve(plan.arguments["observation_ref"], owner=self.owner,
                                                      session_id=self.sid, expected_kind="observation")
             assert original["digest"] == digest(OLD_BYTES)
             assert self.clock[0] < plan.expires_at
+            assert self.pipeline is not None
             assert (await self.pipeline.get_pending_plan(owner=self.owner, session_id=self.sid)).plan_id == plan.plan_id
 
     async def confirm(self, plan, *, owner=None):
@@ -273,6 +277,7 @@ class Case:
         assert [row for row in state.conversation if row.get("role") == "user"] == (
             self.source_users if present else []
         ), f"{OFFLINE}：不得从确认按钮、模型或工具回执制造新 user goal"
+        assert self.script is not None
         self.script.assert_user_inputs([GOAL])
 
     def assert_counts(self, *, reads, prepares, attempts, mutations, models):
@@ -280,6 +285,7 @@ class Case:
         assert len(self.domain.prepares) == prepares
         assert len(self.domain.attempts) == attempts
         assert len(self.domain.mutations) == mutations
+        assert self.script is not None
         assert len(self.script.requests) == len(self.script.model_requests) == models
         facts = [json.loads(row) for row in self.domain.journal.read_text().splitlines()] if self.domain.journal.exists() else []
         assert facts == self.domain.mutations
@@ -289,6 +295,7 @@ class Case:
             assert self.domain.source.exists() and not self.domain.target.exists()
 
     def assert_no_canonical_repreview(self):
+        assert self.pipeline is not None
         bypass = [call for call in self.pipeline.calls if call["tool"] == WRITE and "access_code" in call["arguments"]]
         assert not bypass, f"{OFFLINE}：禁止把 original_plan.arguments 重喂公开预检；真实调用记录={bypass}"
 

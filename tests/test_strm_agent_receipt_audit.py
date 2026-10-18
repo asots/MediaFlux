@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from app.modules.process_lock import CrossProcessLock
+from typing import cast
+
 import threading
 import unittest
 from unittest.mock import patch
@@ -16,7 +19,7 @@ class STRMAgentReceiptAuditTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(isolated_test_database())
         self.scheduler = STRMScheduler()
-        self.scheduler._run_lock = threading.Lock()
+        self.scheduler._run_lock = cast(CrossProcessLock, threading.Lock())
         self.enterContext(
             patch("app.modules.scheduler.get_scheduler", return_value=self.scheduler)
         )
@@ -41,6 +44,7 @@ class STRMAgentReceiptAuditTests(unittest.TestCase):
         result = strm_runtime.run_strm_once_confirmed({}, fingerprint)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "failed")
+        assert result.error is not None
         self.assertIn("停止", result.error)
         self.assertNotIn("已在运行", result.summary)
         self.assertIsNone(self.scheduler._worker)
@@ -54,8 +58,10 @@ class STRMAgentReceiptAuditTests(unittest.TestCase):
             result = strm_runtime.run_strm_once_confirmed({}, fingerprint)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "failed")
+        assert result.error is not None
         self.assertIn("启动失败", result.error)
-        self.assertFalse(self.scheduler._run_lock.locked())
+        self.assertTrue(self.scheduler._run_lock.acquire(blocking=False))
+        self.scheduler._run_lock.release()
         self.assertIsNone(self.scheduler._worker)
         self.assertFalse(self.scheduler._running)
 
@@ -124,6 +130,7 @@ class STRMAgentReceiptAuditTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertNotIn("已在运行", result.summary)
                 if reason.startswith("synthetic"):
+                    assert result.error is not None
                     self.assertNotIn(reason, result.error)
                 else:
                     self.assertEqual(result.error, reason)

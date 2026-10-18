@@ -1,4 +1,8 @@
 """重整真实成功后解除旧确认；所有目录删除均运行于 fake 云盘。"""
+
+from tests.support import assert_present
+
+from typing import Any
 import json
 from unittest.mock import patch
 
@@ -26,7 +30,7 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
             organize_started=1, organize_status='requires_manual', organize_error='仍有1项媒体等待确认',
             organize_task_id='task', gy_task_id='cloud', gy_task_ids='["cloud"]',
         )
-        self.payload = {
+        self.payload: dict[str, Any] = {
             'source_dir_id': 'stage', 'source_parent_id': 'stage', 'organize_task_id': 'task',
             'download_request_ids': [self.request_id],
             'files': [{'file_id': 'video', 'parent_id': 'stage', 'size': 100, 'etag': 'hash'}],
@@ -70,6 +74,7 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
     def test_successful_reorganize_closes_card_and_request_then_cleans_empty_root(self):
         self.assertEqual(queue.reconcile_reorganized_confirmations(['stage']), ['card'])
         card = db.get_organize_confirmation('card')
+        assert card is not None
         stats = json.loads(card['result_json'])
         self.assertEqual(card['status'], 'completed')
         self.assertEqual(stats['previous_confirmation']['status'], 'failed')
@@ -77,6 +82,7 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         cloud = _CloudTree()
         self.drain(cloud)
         request = db.get_download_request(self.request_id)
+        assert request is not None
         self.assertEqual(request['organize_status'], 'completed')
         self.assertEqual(request['organize_error'], '')
         self.assertEqual(request['gy_staging_cleanup_status'], 'completed')
@@ -97,13 +103,18 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
     def test_failed_request_requires_explicit_verified_recovery_not_background_discovery(self):
         recovery = self.failed_recovery()
         self.assertEqual(queue.reconcile_reorganized_confirmations(['stage']), [])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_started'], -1)
+        get_download_request_result = db.get_download_request(self.request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result['organize_started'], -1)
         self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), ['card'])
         row = db.get_download_request(self.request_id)
+        assert row is not None
         self.assertEqual((row['organize_status'], row['organize_started']), ('completed', 1))
         cloud = _CloudTree()
         self.drain(cloud)
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'completed')
+        get_download_request_result_2 = db.get_download_request(self.request_id)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2['gy_staging_cleanup_status'], 'completed')
         self.assertEqual(cloud.deleted, ['stage'])
 
     def test_failed_recovery_rejects_cancel_resubmit_rebind_hidden_and_unknown_cleanup(self):
@@ -115,14 +126,16 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 recovery = self.failed_recovery()
-                original = {key: db.get_download_request(self.request_id)[key] for key in mutation}
+                original = {key: assert_present(db.get_download_request(self.request_id))[key] for key in mutation}
                 with db.get_conn() as conn:
                     conn.execute('UPDATE download_requests SET ' + ','.join(f'{key}=?' for key in mutation)
                                  + ' WHERE id=?', (*mutation.values(), self.request_id))
                 self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
                 row = db.get_download_request(self.request_id)
+                assert row is not None
                 self.assertEqual(row['organize_started'], -1)
                 for key, value in mutation.items():
+                    assert row is not None
                     self.assertEqual(row[key], value)
                 with db.get_conn() as conn:
                     conn.execute('UPDATE download_requests SET ' + ','.join(f'{key}=?' for key in original)
@@ -132,7 +145,9 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         recovery = self.failed_recovery()
         db.update_organize_log(self.log_id, status='failed')
         self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'failed')
+        get_download_request_result_3 = db.get_download_request(self.request_id)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3['organize_status'], 'failed')
 
     def test_failed_recovery_requires_every_latest_group_not_only_last_corrected_video(self):
         recovery = self.failed_recovery()
@@ -140,7 +155,9 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         db.update_organize_log(other, status='failed')
         self.assertEqual(queue.reorganized_source_evidence('stage'), [])
         self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_started'], -1)
+        get_download_request_result_4 = db.get_download_request(self.request_id)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4['organize_started'], -1)
 
     def test_failed_recovery_rejects_missing_confirmation_member_even_when_known_logs_succeed(self):
         recovery = self.failed_recovery()
@@ -149,7 +166,9 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
             conn.execute("UPDATE organize_confirmations SET payload_json=? WHERE token='card'",
                          (json.dumps(self.payload),))
         self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'failed')
+        get_download_request_result_5 = db.get_download_request(self.request_id)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(get_download_request_result_5['organize_status'], 'failed')
 
     def test_failed_recovery_rejects_active_confirmation_and_unknown_delete(self):
         recovery = self.failed_recovery()
@@ -159,7 +178,9 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         db.add_organize_delete_audit(trigger='download_staging_cleanup', reason='lost response',
                                     file_id='stage', file_name='MF-case', parent_id='source', status='failed')
         self.assertEqual(queue.reconcile_reorganized_confirmations(['stage'], recovery=recovery), [])
-        self.assertEqual(db.get_download_request(self.request_id)['organize_started'], -1)
+        get_download_request_result_6 = db.get_download_request(self.request_id)
+        assert get_download_request_result_6 is not None
+        self.assertEqual(get_download_request_result_6['organize_started'], -1)
 
     def test_failed_recovery_and_confirmation_queue_commit_atomically(self):
         import sqlite3
@@ -173,8 +194,12 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         finally:
             with db.get_conn() as conn:
                 conn.execute('DROP TRIGGER reject_recovery')
-        self.assertEqual(db.get_download_request(self.request_id)['organize_started'], -1)
-        self.assertEqual(db.get_organize_confirmation('card')['status'], 'failed')
+        get_download_request_result_7 = db.get_download_request(self.request_id)
+        assert get_download_request_result_7 is not None
+        self.assertEqual(get_download_request_result_7['organize_started'], -1)
+        get_organize_confirmation_result = db.get_organize_confirmation('card')
+        assert get_organize_confirmation_result is not None
+        self.assertEqual(get_organize_confirmation_result['status'], 'failed')
 
     def test_successful_manual_organize_also_supersedes_old_expired_card(self):
         db.update_organize_log(self.log_id, operation_type='organize')
@@ -234,14 +259,20 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
 
     def test_history_discovery_repairs_old_reorganized_records_without_redownload(self):
         self.assertEqual(queue.discover_legacy_confirmation_cleanup(), 1)
-        self.assertEqual(db.get_organize_confirmation('card')['status'], 'completed')
+        get_organize_confirmation_result_2 = db.get_organize_confirmation('card')
+        assert get_organize_confirmation_result_2 is not None
+        self.assertEqual(get_organize_confirmation_result_2['status'], 'completed')
         self.assertEqual(len(queue.list_due_cleanup_intents()), 1)
 
     def test_only_latest_card_is_closed_and_terminal_history_is_preserved(self):
         self.confirm('retry', 'pending')
         self.assertEqual(queue.reconcile_reorganized_confirmations(['stage']), ['retry'])
-        self.assertEqual(db.get_organize_confirmation('card')['status'], 'failed')
-        self.assertEqual(db.get_organize_confirmation('retry')['status'], 'completed')
+        get_organize_confirmation_result_3 = db.get_organize_confirmation('card')
+        assert get_organize_confirmation_result_3 is not None
+        self.assertEqual(get_organize_confirmation_result_3['status'], 'failed')
+        get_organize_confirmation_result_4 = db.get_organize_confirmation('retry')
+        assert get_organize_confirmation_result_4 is not None
+        self.assertEqual(get_organize_confirmation_result_4['status'], 'completed')
 
     def test_expired_and_cancelled_cards_can_be_resolved_but_active_execution_cannot(self):
         for status in ('expired', 'cancelled', 'queued', 'running'):
@@ -291,7 +322,9 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         try:
             with self.assertRaisesRegex(sqlite3.IntegrityError, 'queue-failure'):
                 queue.reconcile_reorganized_confirmations(['stage'])
-            self.assertEqual(db.get_organize_confirmation('card')['status'], 'failed')
+            get_organize_confirmation_result_5 = db.get_organize_confirmation('card')
+            assert get_organize_confirmation_result_5 is not None
+            self.assertEqual(get_organize_confirmation_result_5['status'], 'failed')
             self.assertEqual(queue.list_due_cleanup_intents(), [])
         finally:
             with db.get_conn() as conn:
@@ -304,7 +337,9 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         queue.reconcile_reorganized_confirmations(['stage'])
         cloud = _CloudTree()
         self.drain(cloud)
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'completed')
+        get_download_request_result_8 = db.get_download_request(self.request_id)
+        assert get_download_request_result_8 is not None
+        self.assertEqual(get_download_request_result_8['organize_status'], 'completed')
         self.assertEqual(cloud.deleted, [])
 
     def test_remaining_file_keeps_attention_even_after_old_confirmation_is_resolved(self):
@@ -312,7 +347,11 @@ class ReorganizedDownloadReconciliationTests(IsolatedDatabaseTestCase):
         cloud = _CloudTree()
         cloud.add_file('unrelated.mkv', 'stage')
         self.drain(cloud)
-        self.assertEqual(db.get_download_request(self.request_id)['organize_status'], 'completed')
-        self.assertEqual(db.get_download_request(self.request_id)['gy_staging_cleanup_status'], 'retained')
+        get_download_request_result_9 = db.get_download_request(self.request_id)
+        assert get_download_request_result_9 is not None
+        self.assertEqual(get_download_request_result_9['organize_status'], 'completed')
+        get_download_request_result_10 = db.get_download_request(self.request_id)
+        assert get_download_request_result_10 is not None
+        self.assertEqual(get_download_request_result_10['gy_staging_cleanup_status'], 'retained')
         self.assertEqual(db.count_download_requests_requiring_attention(), 1)
         self.assertEqual(cloud.deleted, [])

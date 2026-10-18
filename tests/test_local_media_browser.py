@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -15,7 +16,9 @@ class LocalMediaBrowserTests(IsolatedDatabaseTestCase):
         self.enterContext(initialized_web_runtime())
         with TestClient(create_app(start_background=False)) as client:
             login = client.get("/login")
-            token = re.search(r'name="csrf_token"\s+value="([^"]+)"', login.text).group(1)
+            search_result = re.search(r'name="csrf_token"\s+value="([^"]+)"', login.text)
+            assert search_result is not None
+            token = search_result.group(1)
             response = client.post(
                 "/login", data={"username": "admin", "password": "123456", "csrf_token": token},
                 follow_redirects=False,

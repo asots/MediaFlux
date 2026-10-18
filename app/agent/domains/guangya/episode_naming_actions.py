@@ -27,7 +27,7 @@ from app.modules.guangya_workspace import (
 def _integer(value: object, *, field: str, minimum: int, maximum: int) -> int:
     if type(value) is not int or not minimum <= value <= maximum:
         raise AgentToolError(f"{field} 必须在 {minimum} 到 {maximum} 之间")
-    return int(value)
+    return value
 
 
 def _path(value: object, *, field: str, allow_empty: bool = False) -> str:

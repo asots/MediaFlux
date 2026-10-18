@@ -475,7 +475,7 @@ def get_rule(rule_id: int) -> dict[str, Any] | None:
     ensure_builtin_rules()
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM recognition_preprocess_rules WHERE id=?", (int(rule_id),)
+            "SELECT * FROM recognition_preprocess_rules WHERE id=?", (rule_id,)
         ).fetchone()
     return _row(row) if row else None
 
@@ -499,7 +499,8 @@ def create_rule(data: dict[str, Any]) -> dict[str, Any]:
                 timestamp, timestamp,
             ),
         )
-        rule_id = int(cursor.lastrowid)
+        assert cursor.lastrowid is not None
+        rule_id = cursor.lastrowid
     _invalidate_cache()
     return get_rule(rule_id) or {}
 
@@ -518,7 +519,7 @@ def update_rule(rule_id: int, data: dict[str, Any]) -> dict[str, Any]:
                 normalized["name"], normalized["matcher_type"], normalized["pattern"],
                 normalized["scope"], normalized["action"], normalized["replacement"],
                 normalized["numeric_value"], normalized["priority"], int(normalized["disabled"]),
-                timestamp, int(rule_id),
+                timestamp, rule_id,
             ),
         )
     _invalidate_cache()
@@ -533,7 +534,7 @@ def delete_rule(rule_id: int) -> bool:
         raise ValueError("推荐规则不能删除，可停用或恢复推荐值")
     with get_conn() as conn:
         cursor = conn.execute(
-            "DELETE FROM recognition_preprocess_rules WHERE id=?", (int(rule_id),)
+            "DELETE FROM recognition_preprocess_rules WHERE id=?", (rule_id,)
         )
     deleted = cursor.rowcount > 0
     if deleted:
@@ -563,8 +564,8 @@ def apply_rules(
     episode: int | None = None,
     rules: list[dict[str, Any]] | None = None,
 ) -> PreprocessResult:
-    current_filename = str(filename or "")
-    current_parent = str(parent_path or "")
+    current_filename = (filename or "")
+    current_parent = (parent_path or "")
     current_season = season
     current_episode = episode
     trace: list[dict[str, Any]] = []

@@ -1,6 +1,9 @@
 """A 域取消/配置有效性：只使用临时文件数据库和内存 provider。"""
 from __future__ import annotations
 
+from typing import cast
+from app.indexers.providers.base import IndexerAdapter
+
 import asyncio
 import threading
 import unittest
@@ -54,7 +57,7 @@ class AdmissionCancellationTests(unittest.IsolatedAsyncioTestCase):
             async def resolve(self, stored):
                 entered.set()
                 await asyncio.Future()
-        indexer = IndexerService(registry=IndexerRegistry({"memory": Provider()}), result_store=self.store)
+        indexer = IndexerService(registry=IndexerRegistry({"memory": cast(IndexerAdapter, Provider())}), result_store=self.store)
         self.enterContext(patch("app.modules.media_subscriptions.get_indexer_service", return_value=indexer))
         service = MediaSubscriptionService()
         task = asyncio.create_task(service.download_candidate(self.cid))
@@ -89,7 +92,9 @@ class AdmissionCancellationTests(unittest.IsolatedAsyncioTestCase):
         active = db.list_active_media_download_admissions(self.sid)
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0]["request_id"], request_ids[0])
-        self.assertEqual(db.get_download_request(request_ids[0])["status"], "manual_review")
+        get_download_request_result = db.get_download_request(request_ids[0])
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["status"], "manual_review")
 
     async def test_cancel_before_late_thread_bind_rolls_back_request(self):
         entered = threading.Event()

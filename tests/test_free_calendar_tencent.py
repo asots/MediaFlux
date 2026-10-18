@@ -493,7 +493,7 @@ class TencentWeeklyFixtureTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(field, data)
         for name in ("schedule", "image_sample"):
             evidence = provenance[name]
-            self.assertIsNotNone(datetime.fromisoformat(evidence["started_at"]).tzinfo)
+            assert (datetime.fromisoformat(evidence["started_at"]).tzinfo) is not None
             self.assertEqual((evidence["status"], evidence["retries"], evidence["max_redirects"]), (200, 0, 0))
             self.assertLess(evidence["bytes"], 2 * 1024 * 1024)
             self.assertEqual(len(evidence["sha256"]), 64)

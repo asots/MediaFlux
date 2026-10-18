@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+from app.clients.tmdb import TMDBClient
+
 import hashlib
 import tempfile
 import threading
@@ -201,7 +205,7 @@ class OrganizeP0PerformanceTests(IsolatedDatabaseTestCase):
         for endpoint, invoke in cases:
             with self.subTest(endpoint=endpoint):
                 client = _SingleFlightClient(endpoint)
-                scraper = TMDBScraper(client=client)
+                scraper = TMDBScraper(client=cast(TMDBClient, client))
                 with ThreadPoolExecutor(max_workers=4) as pool:
                     futures = [pool.submit(invoke, scraper) for _ in range(4)]
                     self.assertTrue(client.started.wait(timeout=1))
@@ -218,7 +222,7 @@ class OrganizeP0PerformanceTests(IsolatedDatabaseTestCase):
 
     def test_tmdb_different_detail_keys_remain_parallel(self):
         client = _ParallelDetailClient()
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(scraper.get_detail, "100", "tv")
@@ -233,7 +237,7 @@ class OrganizeP0PerformanceTests(IsolatedDatabaseTestCase):
 
     def test_tmdb_failed_flight_releases_waiters_and_allows_retry(self):
         client = _FailOnceDetailClient()
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
 
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures = [pool.submit(scraper.get_detail, "100", "tv") for _ in range(3)]
@@ -252,7 +256,7 @@ class OrganizeP0PerformanceTests(IsolatedDatabaseTestCase):
 
     def test_tmdb_search_cache_reuses_equivalent_query_within_ttl(self):
         client = _SearchClient()
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
 
         first = scraper.search(" Example   Show ", "2026", "tv")
         second = scraper.search("example show", "2026", "tv")
@@ -266,7 +270,7 @@ class OrganizeP0PerformanceTests(IsolatedDatabaseTestCase):
 
     def test_tmdb_detail_cache_reuses_successful_result_without_shared_mutation(self):
         client = _DetailClient()
-        scraper = TMDBScraper(client=client)
+        scraper = TMDBScraper(client=cast(TMDBClient, client))
 
         first = scraper.get_detail("100", "tv")
         second = scraper.get_detail("100", "tv")
@@ -282,7 +286,7 @@ class OrganizeP0PerformanceTests(IsolatedDatabaseTestCase):
 
     def test_organize_exposes_stable_stage_timings_and_metric_deltas(self):
         scraper = _MetricScraper()
-        organizer = Organizer(client=_EmptyOrganizerClient(), scraper=scraper)
+        organizer = Organizer(client=cast(GuangYaClient, _EmptyOrganizerClient()), scraper=cast(TMDBScraper, scraper))
 
         _plans, stats = organizer.organize(
             "source",
@@ -322,7 +326,7 @@ class OrganizeP0PerformanceTests(IsolatedDatabaseTestCase):
         ):
             stats = sync_strm(
                 source_id, "http://example", root,
-                client=client, clean_invalid=False,
+                client=cast(GuangYaClient, client), clean_invalid=False,
             )
 
         self.assertEqual(stats["generated"], 2)
@@ -355,7 +359,7 @@ class OrganizeP0PerformanceTests(IsolatedDatabaseTestCase):
                     [{"file_id": "file-2", "role": "video", "status": "success"}],
                 )
         row = db.get_organize_log(raised.exception.log_id)
-        self.assertIsNotNone(row)
+        assert (row) is not None
         self.assertEqual(int(row["legacy_incomplete"]), 1)
         self.assertIn("明细写入失败", str(row["error"]))
 
@@ -411,7 +415,7 @@ class StrmBatchPerformanceTests(IsolatedDatabaseTestCase):
         ):
             stats = sync_strm(
                 source_id, "http://example", root,
-                client=client, clean_invalid=False,
+                client=cast(GuangYaClient, client), clean_invalid=False,
             )
 
         self.assertEqual(stats["generated"], 2)
@@ -435,7 +439,7 @@ class StrmBatchPerformanceTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             sync_strm(
                 source_id, "http://example", root,
-                client=_TreeClient(source_id, [original]), clean_invalid=False,
+                client=cast(GuangYaClient, _TreeClient(source_id, [original])), clean_invalid=False,
             )
             with patch(
                 "app.modules.strm._read_strm_state",
@@ -443,7 +447,7 @@ class StrmBatchPerformanceTests(IsolatedDatabaseTestCase):
             ):
                 stats = sync_strm(
                     source_id, "http://example", root,
-                    client=_TreeClient(source_id, [changed]),
+                    client=cast(GuangYaClient, _TreeClient(source_id, [changed])),
                     clean_invalid=False,
                 )
 
@@ -468,7 +472,7 @@ class StrmBatchPerformanceTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             first = sync_strm(
                 source_id, "http://example", root,
-                client=_TreeClient(source_id, files), clean_invalid=False,
+                client=cast(GuangYaClient, _TreeClient(source_id, files)), clean_invalid=False,
             )
             from app.modules import strm as strm_module
             original_read = strm_module._read_strm_state
@@ -490,7 +494,7 @@ class StrmBatchPerformanceTests(IsolatedDatabaseTestCase):
             ) as read_state:
                 second = sync_strm(
                     source_id, "http://example", root,
-                    client=_TreeClient(source_id, files), clean_invalid=False,
+                    client=cast(GuangYaClient, _TreeClient(source_id, files)), clean_invalid=False,
                     verify_workers=4,
                 )
 
@@ -552,7 +556,7 @@ class StrmBatchPerformanceTests(IsolatedDatabaseTestCase):
         with tempfile.TemporaryDirectory() as root:
             stats = sync_strm(
                 source_id, "http://example", root,
-                client=client, clean_invalid=True,
+                client=cast(GuangYaClient, client), clean_invalid=True,
             )
 
         for key in (

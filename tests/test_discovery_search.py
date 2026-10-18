@@ -6,17 +6,18 @@ import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from tests.support import InitializedWebTestCase
-
 from app import config as app_config
+from app.clients.tmdb import TMDBClient
 from app.discovery.models import MediaCard, ProviderUnavailable
 from app.main import create_app
+from tests.support import InitializedWebTestCase
 
 
 class FakeResponse:
@@ -142,7 +143,7 @@ class DiscoverySearchUnitTests(unittest.TestCase):
         second = BlockingProvider("douban")
         executor = PartialExecutor()
         service = DiscoverySearchService(
-            providers={"tmdb": first, "douban": second}, executor=executor,
+            providers={"tmdb": first, "douban": second}, executor=cast(ThreadPoolExecutor, executor),
         )
         try:
             with self.assertRaisesRegex(RuntimeError, "submit failed"):
@@ -229,7 +230,7 @@ class DiscoverySearchUnitTests(unittest.TestCase):
                 }
 
         client = Client()
-        cards, has_more = TMDBSearchProvider(client=client).search("测试", 2)
+        cards, has_more = TMDBSearchProvider(client=cast(TMDBClient, client)).search("测试", 2)
         self.assertEqual(client.call, ("/search/multi", {"query": "测试", "page": 2, "include_adult": "false"}))
         self.assertEqual([(card.provider, card.media_type, card.title) for card in cards], [
             ("tmdb", "movie", "电影"), ("tmdb", "tv", "剧集")
@@ -312,6 +313,7 @@ class DiscoverySearchUnitTests(unittest.TestCase):
 
     def test_service_returns_after_total_timeout_and_marks_slow_provider(self):
         import time
+
         from app.discovery.search import DiscoverySearchService
 
         class SlowProvider(FakeSearchProvider):
@@ -350,7 +352,10 @@ class DiscoverySearchUnitTests(unittest.TestCase):
             service.shutdown()
 
     def test_global_service_is_reused_and_shutdown_closes_provider_sessions(self):
-        from app.discovery.search import get_discovery_search_service, shutdown_discovery_search_service
+        from app.discovery.search import (
+            get_discovery_search_service,
+            shutdown_discovery_search_service,
+        )
 
         shutdown_discovery_search_service()
         first = get_discovery_search_service()
@@ -425,8 +430,9 @@ class DiscoverySearchAPITests(InitializedWebTestCase):
             clear=False,
         )
         self.os_patch.start()
-        from tests.support import initialized_web_runtime
         from contextlib import ExitStack
+
+        from tests.support import initialized_web_runtime
         self._installed_runtime = ExitStack()
         self.addCleanup(self._installed_runtime.close)
         self._installed_runtime.enter_context(initialized_web_runtime())

@@ -95,6 +95,7 @@ def test_ingest_followup_explanation(unresolved, foreign):
              patch("app.agent.domains.resources.ingest_actions.db.get_download_request", return_value=None):
             actions.inspect({"source_type": "direct_url", "input": "magnet:?xt=urn:btih:" + "a" * 40}, context)
             preview = await consume_events(session.run(AgentInput(message="提交下载并核验进度", owner="o", session_id="s")))
+            assert preview.approval is not None
             final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
             create.assert_called_once()
             dispatch.assert_called_once_with(42, "qb")

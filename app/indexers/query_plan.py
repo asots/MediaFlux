@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 import re
+from collections.abc import Iterable
 
 from .errors import IndexerQueryRejected
 from .models import MAX_SEARCH_TEXT_LENGTH, IndexerMediaSearchRequest
@@ -34,7 +34,7 @@ def _unique(values: Iterable[str], *, limit: int = 3) -> tuple[str, ...]:
     output: list[str] = []
     seen: set[str] = set()
     for value in values:
-        normalized = " ".join(str(value or "").split())
+        normalized = " ".join((value or "").split())
         key = normalized.casefold()
         if not normalized or key in seen:
             continue
@@ -87,7 +87,7 @@ def _append_position_suffix(title: str, suffix: str) -> str:
 
 
 def _with_position(title: str, request: IndexerMediaSearchRequest) -> str:
-    normalized = " ".join(str(title or "").split())
+    normalized = " ".join((title or "").split())
     suffix = _position_suffix(request)
     if not normalized or not suffix or _POSITION_MARKER.search(normalized):
         return normalized
@@ -101,7 +101,7 @@ def build_site_queries(site_id: str, request: IndexerMediaSearchRequest) -> tupl
     and rank resources against the unchanged season/episode context before pagination.
     """
 
-    site_id = str(site_id or "").strip().lower()
+    site_id = (site_id or "").strip().lower()
     aliases = list(request.aliases)
     latin_aliases = [value for value in aliases if _is_latin(value)]
     other_aliases = [value for value in aliases if value not in latin_aliases]

@@ -90,6 +90,7 @@ def test_stale_reobservation_keeps_original_goal_and_reply():
         first = await consume_events(runtime.session.run(AgentInput(
             message=GOAL, owner=owner, session_id=sid, reply_context=REPLY,
         )))
+        assert first.approval is not None
         await consume_events(runtime.session.explain(
             owner=owner, session_id=sid, plan_id=first.approval.plan_id,
             message="只解释第一张卡的影响",
@@ -131,6 +132,7 @@ def test_ordinary_new_request_uses_its_own_goal_and_reply():
         first = await consume_events(runtime.session.run(AgentInput(
             message=GOAL, owner=owner, session_id=sid, reply_context=REPLY,
         )))
+        assert first.approval is not None
         await consume_events(runtime.session.explain(
             owner=owner, session_id=sid, plan_id=first.approval.plan_id,
             message="只解释第一张卡的影响",

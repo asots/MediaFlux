@@ -79,6 +79,7 @@ MOCK_FETCH = r"""(fixture) => {
 class DoubanDbcl2SettingsBrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert sync_playwright is not None
         cls.playwright = sync_playwright().start()
         candidates = [
             Path(os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or cls.playwright.chromium.executable_path),

@@ -174,7 +174,7 @@ def _snapshot(row: Any, *, operation: str, entry_count: int = 0) -> dict[str, An
         "revision": rss_subscription_refresh_revision(row),
         "enabled": bool(row["enabled"]),
         "refresh_interval_minutes": max(0, int(row["refresh_interval_minutes"] or 0)),
-        "entry_count": max(0, int(entry_count or 0)),
+        "entry_count": max(0, (entry_count or 0)),
     }
 
 
@@ -304,7 +304,7 @@ def _prepare_update(arguments: dict[str, Any]) -> tuple[ToolResult, str]:
     try:
         fields = normalize_rss_subscription_update(
             payload,
-            current=current,
+            current=dict(current),
             allow_target_paths=False,
         )
     except RSSSubscriptionConfigError as exc:
@@ -364,7 +364,7 @@ def _prepare_update(arguments: dict[str, Any]) -> tuple[ToolResult, str]:
 def _confirmed_create(arguments: dict[str, Any], expected_context: str) -> ToolResult:
     fields = dict(arguments)
     actual_context = _fingerprint({"operation": "create", "fields": fields})
-    if not secrets.compare_digest(actual_context, str(expected_context or "")):
+    if not secrets.compare_digest(actual_context, (expected_context or "")):
         raise AgentToolError("确认上下文与订阅配置不一致", code="confirmation_invalid")
     try:
         subscription_id = db.add_rss_subscription(**fields)
@@ -394,6 +394,7 @@ def _confirmed_create(arguments: dict[str, Any], expected_context: str) -> ToolR
             error="数据库写入已返回编号，但读取结果与确认配置不一致；请刷新 RSS 页面核对后再决定是否重试。",
             suggestions=["先查看 RSS 订阅列表，避免重复创建。"],
         )
+    assert persisted_summary is not None
     runtime_refreshed = _reload_scheduler()
     return ToolResult(
         ok=True,
@@ -445,7 +446,7 @@ def _confirmed_config_update(
         try:
             fields = normalize_rss_subscription_update(
                 payload,
-                current=current,
+                current=dict(current),
                 allow_target_paths=False,
             )
         except RSSSubscriptionConfigError as exc:
@@ -460,7 +461,7 @@ def _confirmed_config_update(
             "fields": fields,
         }
         if not secrets.compare_digest(
-            _fingerprint(context), str(expected_context or "")
+            _fingerprint(context), (expected_context or "")
         ):
             return ToolResult(
                 ok=False,
@@ -532,7 +533,7 @@ def _reload_scheduler() -> bool:
 
 
 def _confirmed_delete(arguments: dict[str, int], expected_context: str) -> ToolResult:
-    subscription_id = int(arguments["subscription_id"])
+    subscription_id = (arguments["subscription_id"])
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -545,7 +546,7 @@ def _confirmed_delete(arguments: dict[str, int], expected_context: str) -> ToolR
         entry_count = int((count_row["total"] if count_row else 0) or 0)
         state = _snapshot(row, operation="delete", entry_count=entry_count)
         if not state["exists"] or not secrets.compare_digest(
-            _fingerprint(state), str(expected_context or "")
+            _fingerprint(state), (expected_context or "")
         ):
             return ToolResult(
                 ok=False,

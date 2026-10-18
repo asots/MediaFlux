@@ -309,8 +309,10 @@ def test_legacy_summary_is_readable_but_is_not_a_trusted_user_source():
         user_source=CURRENT_USER_REQUEST,
         user_history=(),
     )
+    tool = task_tool()
+    assert tool.read is not None
     with pytest.raises(ValueError):
-        task_tool().read(_task_create_arguments(LEGACY_SUMMARY), context)
+        tool.read(_task_create_arguments(LEGACY_SUMMARY), context)
 
 
 def test_state_update_cannot_forge_trusted_history_memory_version(commit_store):
@@ -640,7 +642,9 @@ def test_task_create_can_cite_exact_trusted_saved_user_request():
         current_task=None,
     )
 
-    patch = task_tool().read(_task_create_arguments(EARLY_USER_REQUEST), context)
+    tool = task_tool()
+    assert tool.read is not None
+    patch = tool.read(_task_create_arguments(EARLY_USER_REQUEST), context)
 
     assert patch.operation == "create"
     assert patch.source == EARLY_USER_REQUEST
@@ -656,6 +660,7 @@ def test_task_revise_and_cancel_remain_limited_to_current_user_source():
         current_task=None,
     )
     tool = task_tool()
+    assert tool.read is not None
 
     for arguments in (
         _task_revise_arguments(EARLY_USER_REQUEST),
@@ -664,6 +669,7 @@ def test_task_revise_and_cancel_remain_limited_to_current_user_source():
         with pytest.raises(ValueError):
             tool.read(arguments, context)
 
+    assert tool.read is not None
     revised = tool.read(_task_revise_arguments(CURRENT_USER_REQUEST), context)
     cancelled = tool.read(_task_cancel_arguments(CURRENT_USER_REQUEST), context)
     assert revised.source == CURRENT_USER_REQUEST
@@ -680,6 +686,7 @@ def test_task_create_rejects_assistant_and_tool_text_as_historical_sources():
         current_task=None,
     )
     tool = task_tool()
+    assert tool.read is not None
 
     for forged in (ASSISTANT_FORGED_SOURCE, TOOL_FORGED_SOURCE):
         with pytest.raises(ValueError):

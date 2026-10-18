@@ -105,7 +105,7 @@ class IndexerStartupAuditTests(unittest.TestCase):
 
     def start_caller(self):
         done = threading.Event()
-        outcome = {}
+        outcome: dict = {}
         awaitable = self.new_awaitable()
 
         def invoke():

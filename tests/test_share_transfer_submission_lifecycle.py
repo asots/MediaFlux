@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import unittest
+from typing import cast
 from unittest.mock import Mock, patch
 
 from app import database as db
+from app.clients.guangya import GuangYaClient
 from app.modules.share_transfer import ShareTransferPreviewStore, create_share_request
 from tests.support import isolated_test_database
 from tests.test_telegram_guangya_share import FakeShareClient
@@ -27,7 +29,6 @@ class ShareTransferSubmissionLifecycleTests(unittest.TestCase):
         ).return_value
 
     def submit(self, *, injected=True):
-        kwargs = {"client": self.client} if injected else {}
         return create_share_request(
             self.preview,
             ["file-1"],
@@ -35,7 +36,7 @@ class ShareTransferSubmissionLifecycleTests(unittest.TestCase):
             "chat",
             user_id="user",
             store=self.store,
-            **kwargs,
+            client=cast(GuangYaClient, self.client) if injected else None,
         )
 
     @staticmethod
@@ -49,10 +50,10 @@ class ShareTransferSubmissionLifecycleTests(unittest.TestCase):
         observed = []
         actual = self.client.create_dir
 
-        def create(name, parent):
+        def create(name, parent_id="0"):
             row = self.request()
             observed.append((row["status"], row["gy_status"], row["targets"]))
-            return actual(name, parent)
+            return actual(name, parent_id)
 
         self.client.create_dir = create
         result = self.submit()
@@ -137,8 +138,8 @@ class ShareTransferSubmissionLifecycleTests(unittest.TestCase):
     def test_cancel_during_directory_creation_stops_before_restore(self):
         actual = self.client.create_dir
 
-        def create_after_cancel(*args):
-            target = actual(*args)
+        def create_after_cancel(*args, **kwargs):
+            target = actual(*args, **kwargs)
             db.update_download_request(
                 self.request()["id"], status="cancelled", gy_status="cancelled"
             )
@@ -152,17 +153,17 @@ class ShareTransferSubmissionLifecycleTests(unittest.TestCase):
         self.tracker.reload.assert_not_called()
 
     def test_concurrent_repeat_does_not_acquire_or_finish_first_submission(self):
-        from concurrent.futures import ThreadPoolExecutor
         import threading
+        from concurrent.futures import ThreadPoolExecutor
 
         entered, release = threading.Event(), threading.Event()
         actual = self.client.restore_share
 
-        def blocked_restore(*args):
+        def blocked_restore(*args, **kwargs):
             entered.set()
             if not release.wait(5):
                 raise RuntimeError("test release timeout")
-            return actual(*args)
+            return actual(*args, **kwargs)
 
         self.client.restore_share = blocked_restore
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -220,7 +221,9 @@ class ShareTransferSubmissionLifecycleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(sqlite3.IntegrityError, "injected log failure"):
             db.finish_share_transfer_request(request_id, **fields)
-        self.assertEqual(db.get_download_request(request_id)["status"], "submitting")
+        get_download_request_result = db.get_download_request(request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["status"], "submitting")
         with db.get_conn() as conn:
             conn.execute("DROP TRIGGER reject_share_log")
         self.assertTrue(db.finish_share_transfer_request(request_id, **fields))
@@ -237,10 +240,16 @@ class ShareTransferSubmissionLifecycleTests(unittest.TestCase):
         self.assertEqual(self.client.restore_calls, [])
         db.init_db()
         self.assertEqual(self.submit()["status"], "manual_review")
-        self.assertEqual(db.get_download_request(regular)["status"], "pending")
-        recovered = dict(db.get_download_request(legacy))
+        get_download_request_result_2 = db.get_download_request(regular)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["status"], "pending")
+        get_download_request_result_4 = db.get_download_request(legacy)
+        assert get_download_request_result_4 is not None
+        recovered = dict(get_download_request_result_4)
         db.init_db()
-        self.assertEqual(dict(db.get_download_request(legacy)), recovered)
+        get_download_request_result_5 = db.get_download_request(legacy)
+        assert get_download_request_result_5 is not None
+        self.assertEqual(dict(get_download_request_result_5), recovered)
         self.assertEqual(self.client.restore_calls, [])
 
 
@@ -249,6 +258,7 @@ class ShareTransferProcessRestoreTests(unittest.TestCase):
         import subprocess
         import sys
         from pathlib import Path
+
         from app.modules import backup
         from tests.test_ten_pass_process_restore_audit import runtime_paths
 
@@ -296,15 +306,19 @@ raise AssertionError("provider window not reached")
             archive = backup.create_backup(paths, reason="share-interrupted")
             backup.verify_backup(archive)
             db.init_db()
+            get_download_request_result_3 = db.get_download_request(request_id)
+            assert get_download_request_result_3 is not None
             self.assertEqual(
-                db.get_download_request(request_id)["status"], "manual_review"
+                get_download_request_result_3["status"], "manual_review"
             )
             db.update_download_request(
                 request_id, status="cancelled", gy_status="cancelled"
             )
             backup.restore_backup(paths, archive)
             db.init_db()
-            recovered = dict(db.get_download_request(request_id))
+            recovered_row = db.get_download_request(request_id)
+            assert recovered_row is not None
+            recovered = dict(recovered_row)
             self.assertEqual(recovered["status"], "manual_review")
             self.assertEqual(recovered["gy_target_dir"], "staging-target")
             self.assertFalse(db.claim_failed_share_transfer_request(request_id))
@@ -327,10 +341,12 @@ raise AssertionError("provider window not reached")
                 "chat",
                 user_id="user",
                 store=store,
-                client=client,
+                client=cast(GuangYaClient, client),
             )
             self.assertFalse(result["success"])
             self.assertEqual(result["status"], "manual_review")
             self.assertEqual(client.restore_calls, [])
             db.init_db()
-            self.assertEqual(dict(db.get_download_request(request_id)), recovered)
+            current = db.get_download_request(request_id)
+            assert current is not None
+            self.assertEqual(dict(current), recovered)

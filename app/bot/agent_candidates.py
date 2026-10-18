@@ -122,7 +122,7 @@ def render(
         markup.add(button(label, f"t{target['value']}"))
     markup.add(button(f"预览下载 {len(selected)} 项", "p"))
     labels = {target["value"]: target["label"] for target in view.get("targets", [])}
-    lines += [f"\n已选 {len(selected)} 项 · 目标：{html.escape(labels.get(draft['target'], draft['target']))}",
+    lines += [f"\n已选 {len(selected)} 项 · 目标：{html.escape(str(labels.get(draft['target'], draft['target'])))}",
               "选择不会下载，预检后仍需确认一次。也可回复：把 1 和 3 下载到光鸭。"]
     return "\n".join(lines), markup
 

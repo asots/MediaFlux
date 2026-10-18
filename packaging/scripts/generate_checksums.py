@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """为发布目录生成稳定排序的 SHA256SUMS。"""
 from __future__ import annotations
-import argparse, hashlib
+
+import argparse
+import hashlib
 from pathlib import Path
 from typing import Sequence
+
 EXCLUDED={'SHA256SUMS','SHA256SUMS.sig'}
 def generate_checksums(directory:Path,output:Path|None=None)->Path:
  directory=directory.resolve(); output=(output or directory/'SHA256SUMS').resolve(); lines=[]

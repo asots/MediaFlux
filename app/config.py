@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
+import json
 import logging
 import os
 import re
@@ -12,17 +14,15 @@ import stat
 import subprocess
 import sys
 import threading
-import hashlib
-import json
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from types import MappingProxyType
-from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
-from app.env_file import read_env_bytes as _read_env_bytes
 from app.defaults import DEFAULT_BOOL_CONFIG_VALUES, DEFAULT_WEB_PORT
+from app.env_file import read_env_bytes as _read_env_bytes
 from app.runtime_paths import get_runtime_paths
 
 # 程序目录仅供读取；运行数据统一由 RuntimePaths 指定。
@@ -103,8 +103,8 @@ def _validate_env_item(key: str, value: str) -> None:
 def _serialize_env(values: Mapping[str, str]) -> bytes:
     lines: list[str] = []
     for raw_key, raw_value in values.items():
-        key = str(raw_key)
-        value = str(raw_value)
+        key = raw_key
+        value = raw_value
         _validate_env_item(key, value)
         # 应用写入值使用显式 literal 标记；读取时不执行 shell/dotenv 插值。
         escaped = value.replace("'", "\\'")
@@ -159,8 +159,8 @@ def get_many(
     defaults: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """在同一运行时配置快照中读取多个键，避免热更新期间混用新旧值。"""
-    normalized = tuple(dict.fromkeys(str(key) for key in keys))
-    fallback = {str(key): str(value) for key, value in dict(defaults or {}).items()}
+    normalized = tuple(dict.fromkeys(key for key in keys))
+    fallback = {key: value for key, value in dict(defaults or {}).items()}
     with _lock:
         # 复用单键读取语义，避免两套优先级规则随时间漂移；外层 RLock
         # 保证由 MediaFlux 发起的热更新不能插入多键读取中间。
@@ -178,7 +178,7 @@ def get_bool(key: str, default: bool | None = None) -> bool:
     """读取布尔配置；已登记键在未显式配置时使用唯一权威默认值。"""
     if default is None:
         default = DEFAULT_BOOL_CONFIG_VALUES.get(key, False)
-    v = get(key, str(bool(default))).strip().lower()
+    v = get(key, str(default)).strip().lower()
     return v in ("1", "true", "yes", "on", "y")
 
 
@@ -248,7 +248,9 @@ def runtime_config_publication(updates: Mapping[str, str]):
     """Revoke before file publication; only the outer successful owner stabilizes."""
     from app import database as db
     from app.agent.feature_gate import (
-        RuntimeFenceError, begin_runtime_change, finish_runtime_change,
+        RuntimeFenceError,
+        begin_runtime_change,
+        finish_runtime_change,
         read_runtime_fence,
     )
     with runtime_config_read_guard():
@@ -363,8 +365,8 @@ def _windows_current_user_sid() -> str:
     class TokenUser(ctypes.Structure):
         _fields_ = [("user", SidAndAttributes)]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    advapi32 = getattr(ctypes, "WinDLL")("advapi32", use_last_error=True)
 
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     advapi32.OpenProcessToken.argtypes = [
@@ -415,7 +417,7 @@ def _windows_current_user_sid() -> str:
         ):
             raise AtomicPublishError("无法序列化 Windows 当前服务账户 SID")
         try:
-            value = str(sid_text.value or "").strip()
+            value = (sid_text.value or "").strip()
         finally:
             if sid_text:
                 kernel32.LocalFree(ctypes.cast(sid_text, wintypes.HLOCAL))
@@ -552,7 +554,7 @@ def _read_verified_file_bytes(path: Path, *, max_bytes: int | None = None) -> by
     with os.fdopen(descriptor, "rb") as source:
         if max_bytes is None:
             return source.read()
-        limit = max(0, int(max_bytes))
+        limit = max(0, max_bytes)
         if os.fstat(source.fileno()).st_size > limit:
             raise ConfigFileTooLargeError(f"配置文件超过安全读取上限: {path}")
         payload = source.read(limit + 1)
@@ -802,16 +804,16 @@ def _windows_rename_noreplace(temporary: Path, target: Path) -> None:
     if os.name != "nt":  # 仅供跨平台契约测试；真实 Windows 始终走 Win32 API。
         os.rename(temporary, target)
         return
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
     move_file = kernel32.MoveFileExW
     move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
     move_file.restype = ctypes.c_int
     if move_file(str(temporary), str(target), 0):
         return
-    error = ctypes.get_last_error()
+    error = getattr(ctypes, "get_last_error")()
     if error in {80, 183}:
         raise FileExistsError(error, "目标配置已存在", str(target))
-    raise OSError(error, ctypes.FormatError(error), str(target))
+    raise OSError(error, getattr(ctypes, "FormatError")(error), str(target))
 
 
 def _publish_noreplace(temporary: Path, target: Path) -> None:
@@ -948,7 +950,7 @@ def update_env_file(
         else:
             current = {}
         merged = dict(current)
-        merged.update({str(key): str(value) for key, value in updates.items()})
+        merged.update({key: value for key, value in updates.items()})
         if expected is None:
             try:
                 payload = write_env_file(target, merged, replace=False)
@@ -963,7 +965,7 @@ def update_env_file(
 
 def _apply_runtime_values(values: Mapping[str, str], *, path: Path) -> None:
     global _cache
-    normalized = {str(key): str(value) for key, value in values.items()}
+    normalized = {key: value for key, value in values.items()}
     with _lock:
         for key, value in normalized.items():
             os.environ[key] = value
@@ -973,7 +975,7 @@ def _apply_runtime_values(values: Mapping[str, str], *, path: Path) -> None:
 
 def has_external_override(key: str) -> bool:
     """判断配置项是否由进程启动环境显式覆盖；不返回覆盖值。"""
-    normalized = str(key or "")
+    normalized = (key or "")
     return normalized in _STARTUP_ENV_OVERRIDES and bool(os.environ.get(normalized))
 
 
@@ -985,7 +987,7 @@ def update_runtime_env_file(
 ) -> EnvUpdateResult:
     """CAS 发布配置，并只把本次非部署覆盖项应用到当前进程。"""
     global _cache
-    normalized = {str(key): str(value) for key, value in updates.items()}
+    normalized = {key: value for key, value in updates.items()}
     target = Path(path)
 
     def publish() -> EnvUpdateResult:
@@ -1024,7 +1026,7 @@ def reload_after_restore() -> None:
 
 def set_and_save(updates: dict[str, str]) -> None:
     """基于读取快照 CAS 更新当前 user.env，拒绝覆盖并发写入。"""
-    normalized = {str(key): str(value) for key, value in updates.items()}
+    normalized = {key: value for key, value in updates.items()}
     with _lock:
         externally_managed = sorted(
             key for key in normalized if has_external_override(key)

@@ -622,7 +622,7 @@ def action_history_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _safe_details(tool_name: str, data: dict[str, Any] | None) -> dict[str, Any]:
-    allowed = _SAFE_FIELDS.get(str(tool_name or "").strip(), set())
+    allowed = _SAFE_FIELDS.get((tool_name or "").strip(), set())
     if not allowed or not isinstance(data, dict):
         return {}
     projected: dict[str, Any] = {}
@@ -736,7 +736,7 @@ def _safe_summary(tool_name: str, status: str) -> str:
 
 def _timestamps(elapsed_ms: int) -> tuple[str, str]:
     finished = datetime.now().astimezone()
-    started = finished - timedelta(milliseconds=max(0, int(elapsed_ms or 0)))
+    started = finished - timedelta(milliseconds=max(0, (elapsed_ms or 0)))
     return (
         started.isoformat(timespec="milliseconds"),
         finished.isoformat(timespec="milliseconds"),
@@ -745,7 +745,7 @@ def _timestamps(elapsed_ms: int) -> tuple[str, str]:
 
 def action_history_owner_digest(owner: str) -> str:
     """将服务端 owner 派生为不可逆、部署绑定的审计分区键。"""
-    normalized = str(owner or "").strip()
+    normalized = (owner or "").strip()
     if not normalized:
         raise AgentToolError("无法确认当前 Agent 身份", code="identity_required")
     return hmac.new(
@@ -759,8 +759,8 @@ def _confirmation_execution_id(
     confirmation_id: str,
     owner_generation: int,
 ) -> str:
-    ticket_id = str(confirmation_id or "").strip()
-    generation = max(0, int(owner_generation or 0))
+    ticket_id = (confirmation_id or "").strip()
+    generation = max(0, (owner_generation or 0))
     return f"{ticket_id}-{generation}"
 
 
@@ -863,7 +863,7 @@ def record_confirmed_result(
             tool_name=safe_tool,
             risk=risk.value,
             status=safe_status,
-            ok=bool(result.ok),
+            ok=(result.ok),
             summary=_safe_summary(safe_tool, safe_status),
             safe_details=_audit_details(tool_name, result.data, confirmation_contract),
             elapsed_ms=elapsed_ms,
@@ -933,7 +933,7 @@ def list_action_history(arguments: dict[str, Any], context: ToolContext) -> Tool
     for row in rows:
         try:
             details = json.loads(str(row["safe_details"] or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             details = {}
         if not isinstance(details, dict):
             details = {}

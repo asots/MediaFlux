@@ -71,9 +71,9 @@ class RecentDownloadSubmissionStore:
         wall_clock: Callable[[], float] = time.time,
         repository: AgentSessionContextRepository | None = None,
     ) -> None:
-        self.ttl_seconds = max(1, int(ttl_seconds))
-        self.max_owners = max(1, int(max_owners))
-        self.max_items_per_owner = max(1, int(max_items_per_owner))
+        self.ttl_seconds = max(1, ttl_seconds)
+        self.max_owners = max(1, max_owners)
+        self.max_items_per_owner = max(1, max_items_per_owner)
         self._clock = clock
         self._wall_clock = wall_clock
         self._repository = repository
@@ -88,7 +88,7 @@ class RecentDownloadSubmissionStore:
         result: ToolResult,
         verification_context: dict[str, Any] | None = None,
     ) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         captured_at = datetime.now().astimezone().isoformat(timespec="seconds")
         record = _safe_submission(
             result,
@@ -124,7 +124,7 @@ class RecentDownloadSubmissionStore:
         return True
 
     def get(self, *, owner: str) -> tuple[RecentDownloadSubmission, ...]:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return ()
         with self._owner_lock(owner_key):
@@ -142,7 +142,7 @@ class RecentDownloadSubmissionStore:
             self._entries.clear()
 
     def clear_owner(self, *, owner: str) -> bool:
-        owner_key = str(owner or "").strip()
+        owner_key = (owner or "").strip()
         if not owner_key:
             return False
         removed = False
@@ -215,7 +215,7 @@ def _safe_submission(
     captured_at: str,
     verification_context: dict[str, Any] | None = None,
 ) -> RecentDownloadSubmission | None:
-    if str(result.status or "") not in _ALLOWED_RESULT_STATUSES:
+    if (result.status or "") not in _ALLOWED_RESULT_STATUSES:
         return None
     data = result.data if isinstance(result.data, dict) else {}
     target = str(data.get("target") or "").strip().lower()
@@ -234,7 +234,7 @@ def _safe_submission(
         failed=_safe_backend_tuple(data.get("failed")),
         created=bool(data.get("created")),
         duplicate=duplicate,
-        result_status=str(result.status),
+        result_status=(result.status),
         captured_at=_safe_timestamp(captured_at),
         verification=_safe_verification(verification_context),
     )
@@ -376,7 +376,7 @@ def enqueue_recent_download_library_verification(
     ):
         return False
     verification = record.verification
-    owner_key = str(owner or "")[:512]
+    owner_key = (owner or "")[:512]
     telegram_route = parse_telegram_owner_route(owner_key)
     enqueued = db.enqueue_agent_download_verification(
         record.request_id,
@@ -471,7 +471,7 @@ def sanitize_submission_confirmation_result(result: ToolResult) -> ToolResult:
     target = str(data.get("target") or "").strip().lower()
     dispatch_status = str(data.get("status") or "").strip().lower()
     duplicate = bool(data.get("duplicate"))
-    result_status = str(result.status or "").strip().lower()
+    result_status = (result.status or "").strip().lower()
 
     public_data: dict[str, Any] = {
         "target": target if target in _ALLOWED_TARGETS else "unknown",
@@ -635,7 +635,7 @@ def explain_recent_download_status(
 ) -> ToolResult:
     """基于安全状态投影解释最近任务；不读取原始错误或访问后端。"""
     status_result = build_recent_download_status(record, position=position)
-    data = dict(status_result.data) if isinstance(status_result.data, dict) else {
+    data: dict[str, Any] = dict(status_result.data) if isinstance(status_result.data, dict) else {
         "position": position,
         "target": record.target,
         "phase": "unknown",
@@ -837,7 +837,7 @@ def build_recent_download_library_verification(
         "season": verification.season,
         "episode": verification.episode,
         "as_of": verification.as_of,
-        "audit_status": str(audit.status or "")[:40],
+        "audit_status": (audit.status or "")[:40],
     }
     if verification.library_name:
         data["library_name"] = verification.library_name
@@ -1029,7 +1029,7 @@ def _safe_progress(value: Any) -> int | None:
         return None
     if not math.isfinite(progress):
         return None
-    return int(round(max(0.0, min(progress, 1.0)) * 100))
+    return (round(max(0.0, min(progress, 1.0)) * 100))
 
 
 def _safe_timestamp(value: Any) -> str:

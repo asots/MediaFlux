@@ -16,10 +16,14 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Iterator
+from typing import Generator, IO, TYPE_CHECKING, Any, TypedDict
 
 from app.runtime_paths import RuntimePaths, protected_runtime_output_target
 from app.version import BuildInfo
+
+if TYPE_CHECKING:
+    from app.modules.process_lock import CrossProcessLock
+
 
 BACKUP_FORMAT_VERSION = 2
 _ALLOWED_PAYLOADS = {
@@ -115,7 +119,7 @@ def _entry(name: str, path: Path) -> dict[str, Any]:
     return {"name": name, **fingerprint}
 
 
-def _copy_stream(source: BinaryIO, target: BinaryIO) -> dict[str, Any]:
+def _copy_stream(source: IO[bytes], target: IO[bytes]) -> dict[str, Any]:
     """复制与哈希共享同一批有界字节，供校验暂存和事务恢复使用。"""
     digest = hashlib.sha256()
     size = 0
@@ -173,14 +177,14 @@ def _create_backup_unlocked(
             "scope": "full" if full_snapshot else "partial",
             "absent_entries": sorted(_ALLOWED_PAYLOADS - payloads.keys()) if full_snapshot else [],
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "reason": str(reason or "manual")[:100],
+            "reason": (reason or "manual")[:100],
             "build": build.as_dict(),
             "database_schema_version": _database_schema_version(payloads.get("database/mediaflux.db")),
             "entries": [_entry(name, payloads[name]) for name in sorted(payloads)],
         }
         manifest_payload = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
-        temporary_name = ""
+        temporary_name: str = ""
         try:
             with tempfile.NamedTemporaryFile(
                 prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent, delete=False
@@ -266,7 +270,7 @@ def _verify_sqlite(path: Path) -> int:
 
 
 @contextmanager
-def _verified_backup(archive_path: Path) -> Iterator[tuple[BackupManifest, dict[str, Path]]]:
+def _verified_backup(archive_path: Path) -> Generator[tuple[BackupManifest, dict[str, Path]], None, None]:
     """只打开归档一次，流式验证并暂存；恢复消费同一批已验证文件。"""
     path = Path(archive_path).expanduser().resolve()
     with tempfile.TemporaryDirectory(prefix="mediaflux-backup-verify-") as temporary:
@@ -281,7 +285,7 @@ def _verified_backup(archive_path: Path) -> Iterator[tuple[BackupManifest, dict[
                     raise BackupError("备份缺少 manifest.json")
                 try:
                     manifest = json.loads(archive.read("manifest.json"))
-                except (ValueError, UnicodeError, KeyError) as exc:
+                except (ValueError, KeyError) as exc:
                     raise BackupError("备份 manifest 无效") from exc
                 if not isinstance(manifest, dict) or manifest.get("format_version") not in {1, BACKUP_FORMAT_VERSION}:
                     raise BackupError("不支持的备份格式版本")
@@ -707,8 +711,13 @@ def config_snapshot_guard(paths: RuntimePaths):
             lock.release()
 
 
+class _RuntimeLifecycleEntry(TypedDict):
+    lock: CrossProcessLock
+    references: int
+
+
 _RUNTIME_LIFECYCLE_REGISTRY_LOCK = threading.RLock()
-_RUNTIME_LIFECYCLE_REGISTRY: dict[tuple[int, str], dict[str, Any]] = {}
+_RUNTIME_LIFECYCLE_REGISTRY: dict[tuple[int, str], _RuntimeLifecycleEntry] = {}
 
 
 def _runtime_lifecycle_key(paths: RuntimePaths) -> tuple[int, str]:
@@ -739,9 +748,9 @@ def runtime_lifecycle_guard(paths: RuntimePaths):
             except BaseException:
                 lock.release()
                 raise
-            entry = {"lock": lock, "references": 0}
+            entry = _RuntimeLifecycleEntry(lock=lock, references=0)
             _RUNTIME_LIFECYCLE_REGISTRY[key] = entry
-        entry["references"] = int(entry["references"]) + 1
+        entry["references"] = entry["references"] + 1
 
     release_lock = None
     try:
@@ -751,7 +760,7 @@ def runtime_lifecycle_guard(paths: RuntimePaths):
             current = _RUNTIME_LIFECYCLE_REGISTRY.get(key)
             if current is not entry:  # pragma: no cover - internal invariant
                 raise RuntimeError("runtime lifecycle registry corrupted")
-            current["references"] = int(current["references"]) - 1
+            current["references"] = current["references"] - 1
             if current["references"] == 0:
                 _RUNTIME_LIFECYCLE_REGISTRY.pop(key, None)
                 release_lock = current["lock"]
@@ -938,7 +947,7 @@ def restore_backup(paths: RuntimePaths, archive_path: Path) -> BackupManifest:
                         (json.dumps(rebound, sort_keys=True), RUNTIME_FENCE_KEY),
                     )
             mapping = _restore_mapping(paths)
-            files = {
+            files: dict[str, tuple[Path, Path | None]] = {
                 str(entry["name"]): (
                     mapping[str(entry["name"])],
                     verified_payloads[str(entry["name"])],

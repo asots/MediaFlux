@@ -108,6 +108,7 @@ def test_same_wait_id_repark_preserves_current_authority(mode, tmp_path):
                 outcome = await asyncio.to_thread(scheduler._run_due_continuation_once)
             assert factories == []
         elif mode == 'stale_binding_control':
+            assert fresh.session.continuation_binding is not None
             binding = replace(fresh.session.continuation_binding, effective_digest='stale-snapshot')
             outcome = await fresh.store.claim_continuation(stale, binding)
         else:

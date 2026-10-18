@@ -9,15 +9,14 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from typing import cast
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
-from app.modules.download_dispatcher import DownloadInput
 from app import config as app_config
+from app.indexers import downloads as indexer_download
 from app.indexers.errors import IndexerChallengeRequired, IndexerQueryRejected
-from app.indexers.providers.base import IndexerAdapter
-from app.indexers.providers.empire import EmpireAdapter
 from app.indexers.models import (
     AggregatedIndexerResult,
     IndexerCapabilities,
@@ -26,8 +25,10 @@ from app.indexers.models import (
     IndexerProviderError,
     ResolvedDownload,
 )
+from app.indexers.providers.base import IndexerAdapter
+from app.indexers.providers.empire import EmpireAdapter
 from app.main import create_app
-from app.indexers import downloads as indexer_download
+from app.modules.download_dispatcher import DownloadInput
 from app.routes import indexers_api
 
 
@@ -58,8 +59,8 @@ class FakeAdapter(IndexerAdapter):
     async def search(self, request):
         raise AssertionError("search belongs to FakeIndexerService in these tests")
 
-    async def resolve(self, item):
-        self.resolve_calls.append(item)
+    async def resolve(self, stored_result):
+        self.resolve_calls.append(stored_result)
         return self.resolved
 
 
@@ -91,6 +92,7 @@ class FakeIndexerService:
             magnet="magnet:?xt=urn:btih:" + "a" * 40,
         )
         self.result_store = FakeResultStore(item)
+        assert item.magnet is not None
         self.adapter = FakeAdapter(resolved or ResolvedDownload(kind="magnet", value=item.magnet))
         self.registry = FakeRegistry(self.adapter)
         self.search_calls = []
@@ -322,6 +324,7 @@ class IndexerAPITests(unittest.TestCase):
 
     def test_agent_only_source_cannot_be_requested_from_manual_http_api(self):
         import json
+
         from app.indexers.providers.aipan import AipanAdapter
         from app.indexers.registry import IndexerRegistry
         from app.indexers.result_store import IndexerResultStore
@@ -347,6 +350,7 @@ class IndexerAPITests(unittest.TestCase):
 
     def test_source_links_require_the_matching_independent_site_owner(self):
         from dataclasses import replace
+
         from app.indexers.registry import build_default_registry
         registry = build_default_registry()
         service = SimpleNamespace(registry=registry)
@@ -446,7 +450,7 @@ class IndexerAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         request, site_ids = service.media_search_calls[0]
-        self.assertIsInstance(request, IndexerMediaSearchRequest)
+        assert isinstance(request, IndexerMediaSearchRequest)
         self.assertEqual(request.title, "奇招百出的维多利亚")
         self.assertEqual(request.year, 2026)
         self.assertEqual(request.sort_mode, "published_desc")
@@ -1099,7 +1103,7 @@ class IndexerAPITests(unittest.TestCase):
         headers = self.authenticate()
         resolved = ResolvedDownload(kind="torrent", value="https://nyaa.si/download/1.torrent", filename="demo.torrent")
         service = FakeIndexerService(resolved)
-        service.adapter.http.get.return_value = SimpleNamespace(
+        cast(Mock, service.adapter.http.get).return_value = SimpleNamespace(
             status_code=200,
             headers={"content-type": "application/x-bittorrent"},
             body=b"torrent-bytes",

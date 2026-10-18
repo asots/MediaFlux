@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.support import assert_present
+
 import unittest
 from unittest.mock import patch
 
@@ -64,7 +66,7 @@ class RSSSchedulerFairnessAuditTests(unittest.TestCase):
         self.assertEqual(set(observed), set(self.ids))
         self.assertEqual(observed[:10], self.ids)
         self.assertTrue(
-            all(not db.get_rss_subscription(i)["last_refreshed_at"] for i in self.ids)
+            all(not assert_present(db.get_rss_subscription(i))["last_refreshed_at"] for i in self.ids)
         )
 
     def test_new_scheduler_resumes_after_persisted_last_admission(self):

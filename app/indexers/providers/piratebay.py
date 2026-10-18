@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime, timezone
+from enum import Enum, auto
 
 from app.clients.http import HttpInvalidResponse
 
@@ -25,7 +26,11 @@ _CATEGORIES = {
     "4": "Games",
     "5": "Porn",
 }
-_INVALID_NUMBER = object()
+class _InvalidNumber(Enum):
+    VALUE = auto()
+
+
+_INVALID_NUMBER = _InvalidNumber.VALUE
 _TOKEN_SEPARATORS = re.compile(r"[^0-9a-z\u3400-\u9fff\u3040-\u30ff]+", re.IGNORECASE)
 
 
@@ -101,7 +106,8 @@ class PirateBayAdapter(DirectResultAdapter):
         seeders = _integer(entry.get("seeders"))
         leechers = _integer(entry.get("leechers"))
         added = _integer(entry.get("added"))
-        if any(value is _INVALID_NUMBER for value in (size_bytes, seeders, leechers, added)):
+        if (size_bytes is _INVALID_NUMBER or seeders is _INVALID_NUMBER
+                or leechers is _INVALID_NUMBER or added is _INVALID_NUMBER):
             return None
         normalized_hash = info_hash.lower()
         magnet = augment_public_magnet(
@@ -152,7 +158,7 @@ def _search_tokens(value: object) -> tuple[str, ...]:
     return tuple(token for token in _TOKEN_SEPARATORS.sub(" ", normalized).split() if token)
 
 
-def _integer(value) -> int | None | object:
+def _integer(value) -> int | None | _InvalidNumber:
     if value is None:
         return None
     if isinstance(value, bool):

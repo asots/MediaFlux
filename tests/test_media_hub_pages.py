@@ -97,7 +97,7 @@ class MediaHubPageContractTests(InitializedWebTestCase):
         dashboard_page = re.search(r"\.dashboard-page\s*\{(?P<body>[^}]*)\}", dashboard_styles, re.S)
         dashboard_topbars = re.findall(r"\.dashboard-page \.dashboard-topbar\s*\{(?P<body>[^}]*)\}", dashboard_styles, re.S)
 
-        self.assertIsNotNone(dashboard_page)
+        assert (dashboard_page) is not None
         self.assertTrue(dashboard_topbars)
         self.assertNotIn("font-family: inherit", dashboard_page.group("body"))
         self.assertTrue(all("background:" not in rule for rule in dashboard_topbars))
@@ -140,14 +140,14 @@ class MediaHubPageContractTests(InitializedWebTestCase):
             r"\.media-hub-page \.global-top-hit\s*\{([^}]*)\}",
             styles,
         )
-        self.assertIsNotNone(top_hit)
+        assert (top_hit) is not None
         self.assertIn("display: flex", top_hit.group(1))
         self.assertIn("justify-content: space-between", top_hit.group(1))
         mobile_search = re.search(
             r"\.media-hub-page\.global-search-page \.media-hub-search\s*\{([^}]*)\}",
             styles,
         )
-        self.assertIsNotNone(mobile_search)
+        assert (mobile_search) is not None
         self.assertTrue(
             "display: block" in mobile_search.group(1)
             or "display: flex" in mobile_search.group(1)
@@ -308,7 +308,7 @@ class MediaHubPageContractTests(InitializedWebTestCase):
                 response = self.client.get("/")
             self.assertEqual(response.status_code, 200)
             indicator = re.search(r'<a[^>]*data-dashboard-issues-link[^>]*>.*?</a>', response.text, re.S)
-            self.assertIsNotNone(indicator)
+            assert (indicator) is not None
             self.assertIn('href="/logs?origin=guangya&amp;status=issues#organize"', indicator.group())
             self.assertIn('data-count-target="23"', indicator.group())
             self.assertIn('<small>整理异常</small>', indicator.group())
@@ -317,7 +317,7 @@ class MediaHubPageContractTests(InitializedWebTestCase):
                 r'<a class="dashboard-fact-item"[^>]*>[^<]*<span[^>]*>.*?'
                 r'<strong>光鸭整理异常 23 项</strong>.*?</a>', response.text, re.S,
             )
-            self.assertIsNotNone(fact)
+            assert (fact) is not None
             self.assertIn('href="/logs?origin=guangya&amp;status=issues#organize"', fact.group())
             self.assertIn('历史异常日志，不代表待确认队列', fact.group())
             self.assertNotIn('href="/organize"', indicator.group() + fact.group())
@@ -358,7 +358,7 @@ class MediaHubPageContractTests(InitializedWebTestCase):
 
     def test_global_search_page_renders_grouped_real_sources(self):
         self._login()
-        result = {
+        result: dict = {
             "query": "沙丘",
             "sections": [
                 {
@@ -411,6 +411,7 @@ class MediaHubPageContractTests(InitializedWebTestCase):
             ],
         }
         result["section_map"] = {section["key"]: section for section in result["sections"]}
+        assert isinstance(result['section_map'], dict)
         result["media_items"] = result["section_map"]["local"]["items"]
         result["top_match"] = result["media_items"][0]
         result["counts"] = {"media": 2, "rss": 1, "downloads": 0, "logs": 0}
@@ -474,7 +475,7 @@ class MediaHubPageContractTests(InitializedWebTestCase):
             "overview": "保罗继续他的旅程。", "original_title": "Dune: Part Two",
             "rating": 8.4, "rating_source": "tmdb",
         }
-        result = {
+        result: dict = {
             "query": "沙丘",
             "sections": [{
                 "key": "discovery", "title": "影视探索",

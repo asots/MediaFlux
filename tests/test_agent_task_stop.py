@@ -209,7 +209,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         active = await self.session.coordinator.describe(
             owner="owner", session_id="protect-race"
         )
-        self.assertIsNotNone(active)
+        assert (active) is not None
         self.assertEqual(active["request_id"], "request:protect-race")
         marker_update_started = asyncio.Event()
         allow_marker_update = asyncio.Event()
@@ -290,7 +290,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
             old_active = await self.session.coordinator.describe(
                 owner="owner", session_id="generation-race"
             )
-            self.assertIsNotNone(old_active)
+            assert (old_active) is not None
             old_lease = PublicationLease(
                 owner="owner",
                 session_id="generation-race",
@@ -639,7 +639,7 @@ class SQLiteAgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
             "tool": "test.effect", "tracker": {"kind": "guangya_task", "value": {"task_id": plan_id}},
             "origin": origin,
         }
-        row = {
+        row: dict[str, Any] = {
             "sealed": self.cipher.encrypt(json.dumps(seed).encode()).decode(),
             "state": "terminal" if finished else "pending",
             "last_status": "completed" if finished else "running",
@@ -838,6 +838,7 @@ class SQLiteAgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "superseded")
         self.assertFalse(result["stopped"])
         self.assertEqual(result["stop_requested_generation"], lease.generation)
+        assert newer_token is not None
         self.assertFalse(newer_token.cancelled)
         self.assertEqual(state.pending_effect_plan_id, "new-card")
         self.assertNotEqual(state.metadata["stop_requested_generation"], state.generation)
@@ -935,7 +936,9 @@ def test_native_completed_effect_stop_prevents_original_goal_resume(tmp_path):
             with db.get_conn() as conn:
                 operations = conn.execute("SELECT * FROM organize_operation_jobs").fetchall()
             assert len(operations) == 1
-            assert jobs.get_organize_operation_job(operations[0]["job_id"])["status"] == "completed"
+            get_organize_operation_job_result = jobs.get_organize_operation_job(operations[0]["job_id"])
+            assert get_organize_operation_job_result is not None
+            assert get_organize_operation_job_result["status"] == "completed"
     asyncio.run(run())
 
 

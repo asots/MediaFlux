@@ -61,7 +61,7 @@ def _now() -> str:
 
 
 def _owner_digest(context: ToolContext) -> str:
-    owner = str(context.owner or "").strip()
+    owner = (context.owner or "").strip()
     if not owner:
         raise AgentToolError("当前会话无法读取媒体偏好", code="precondition_failed")
     return action_history_owner_digest(owner)
@@ -183,7 +183,7 @@ def notification_rule_update_arguments(arguments: dict[str, Any]) -> dict[str, A
 
 def explicit_preferred_download_target(owner: str) -> str:
     """只返回 owner 显式保存的下载目标；没有显式记录时保持原有澄清行为。"""
-    normalized_owner = str(owner or "").strip()
+    normalized_owner = (owner or "").strip()
     if not normalized_owner:
         return ""
     preferences = get_media_preferences(action_history_owner_digest(normalized_owner))
@@ -346,7 +346,7 @@ def set_preferences_confirmed(
     current = get_media_preferences(digest)
     proposed = {key: arguments.get(key, current[key]) for key in PREFERENCE_FIELDS}
     snapshot = {"current": current, "proposed": proposed}
-    if not secrets.compare_digest(_fingerprint(snapshot), str(expected_context or "")):
+    if not secrets.compare_digest(_fingerprint(snapshot), (expected_context or "")):
         raise AgentToolError("媒体偏好已变化，请重新预检", code="confirmation_stale")
     updated = set_media_preferences(
         digest,
@@ -391,7 +391,7 @@ def clear_preferences_confirmed(
 ) -> ToolResult:
     digest = _owner_digest(context)
     current = get_media_preferences(digest)
-    if not secrets.compare_digest(_fingerprint(current), str(expected_context or "")):
+    if not secrets.compare_digest(_fingerprint(current), (expected_context or "")):
         raise AgentToolError("媒体偏好已变化，请重新预检", code="confirmation_stale")
     if not clear_media_preferences(
         digest,
@@ -484,7 +484,7 @@ def set_subscription_notification_rule_confirmed(
     proposed = {key: arguments.get(key, current[key]) for key in _RULE_FIELDS}
     if not secrets.compare_digest(
         _fingerprint({"current": current, "proposed": proposed}),
-        str(expected_context or ""),
+        (expected_context or ""),
     ):
         raise AgentToolError(
             "通知规则或订阅已变化，请重新预检", code="confirmation_stale"
@@ -539,7 +539,7 @@ def reset_subscription_notification_rule_confirmed(
     number = int(arguments["subscription_number"])
     current = get_notification_rule(number)
     if current is None or not secrets.compare_digest(
-        _fingerprint(current), str(expected_context or "")
+        _fingerprint(current), (expected_context or "")
     ):
         raise AgentToolError(
             "通知规则或订阅已变化，请重新预检", code="confirmation_stale"

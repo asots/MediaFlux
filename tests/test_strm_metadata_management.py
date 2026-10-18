@@ -177,7 +177,7 @@ class MetadataManagementTests(IsolatedDatabaseTestCase):
         self._enqueue()
         snapshot = repository.capture_strm_metadata_backlog()
         barrier = threading.Barrier(2)
-        results = []
+        results: list[int | str] = []
 
         def run():
             barrier.wait()

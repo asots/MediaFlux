@@ -1,3 +1,6 @@
+
+from typing import cast
+from starlette.requests import Request
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -13,7 +16,7 @@ def _request():
 
 def _payload(response):
     assert isinstance(response, JSONResponse)
-    return json.loads(response.body)
+    return json.loads(bytes(response.body))
 
 
 def _config(values):
@@ -31,7 +34,7 @@ def test_tmdb_test_uses_current_draft_and_rejects_redirects():
         tools_api.requests, "get", return_value=success
     ) as request_get:
         response = tools_api.tmdb_test(
-            _request(),
+            cast(Request, _request()),
             {"api_key": "draft-key", "api_url": "https://api.tmdb.org/3/"},
         )
 
@@ -51,7 +54,7 @@ def test_tmdb_test_uses_current_draft_and_rejects_redirects():
         tools_api.requests, "get", return_value=redirect
     ):
         rejected = tools_api.tmdb_test(
-            _request(),
+            cast(Request, _request()),
             {"api_key": "draft-key", "api_url": "https://api.tmdb.org/3"},
         )
     assert rejected.status_code == 502
@@ -70,7 +73,7 @@ def test_tmdb_test_reuses_saved_key_only_for_saved_url():
         tools_api.requests, "get", return_value=response_mock
     ) as request_get:
         response = tools_api.tmdb_test(
-            _request(),
+            cast(Request, _request()),
             {"api_key": "********", "api_url": "http://tmdb-gateway.local:8080/api/3/"},
         )
     assert response.status_code == 200
@@ -81,7 +84,7 @@ def test_tmdb_test_reuses_saved_key_only_for_saved_url():
 def test_tmdb_test_requires_authenticated_session():
     anonymous = SimpleNamespace(session={})
     try:
-        tools_api.tmdb_test(anonymous, {})
+        tools_api.tmdb_test(cast(Request, anonymous), {})
     except Exception as exc:
         assert getattr(exc, "status_code", None) == 401
     else:
@@ -96,7 +99,7 @@ def test_tmdb_test_never_combines_saved_key_with_unsaved_url():
         tools_api.requests, "get"
     ) as request_get:
         response = tools_api.tmdb_test(
-            _request(),
+            cast(Request, _request()),
             {"api_key": "********", "api_url": "http://127.0.0.1:8096/tmdb"},
         )
     assert response.status_code == 400
@@ -115,7 +118,7 @@ def test_tmdb_test_validates_url_proxy_and_unknown_fields_before_network():
         with patch.object(tools_api.agent_rate_limiter, "allow", return_value=True), _config({}), patch.object(
             tools_api.requests, "get"
         ) as request_get:
-            response = tools_api.tmdb_test(_request(), data)
+            response = tools_api.tmdb_test(cast(Request, _request()), data)
         assert response.status_code == 400
         request_get.assert_not_called()
 
@@ -123,7 +126,7 @@ def test_tmdb_test_validates_url_proxy_and_unknown_fields_before_network():
         tools_api.requests, "get"
     ) as request_get:
         response = tools_api.tmdb_test(
-            _request(), {"api_key": "explicit-key", "api_url": "http://127.0.0.1:8096/tmdb"}
+            cast(Request, _request()), {"api_key": "explicit-key", "api_url": "http://127.0.0.1:8096/tmdb"}
         )
     assert response.status_code == 400
     assert "请先保存" in _payload(response)["error"]
@@ -133,7 +136,7 @@ def test_tmdb_test_validates_url_proxy_and_unknown_fields_before_network():
         tools_api.requests, "get"
     ) as request_get:
         response = tools_api.tmdb_test(
-            _request(), {"api_key": "key", "api_url": "https://tmdb.example/3"}
+            cast(Request, _request()), {"api_key": "key", "api_url": "https://tmdb.example/3"}
         )
     assert response.status_code == 400
     assert _payload(response)["error"] == "代理地址无效"
@@ -144,7 +147,7 @@ def test_tmdb_test_returns_stable_safe_errors_and_rate_limits():
     with patch.object(tools_api.agent_rate_limiter, "allow", return_value=False), patch.object(
         tools_api.requests, "get"
     ) as request_get:
-        limited = tools_api.tmdb_test(_request(), {})
+        limited = tools_api.tmdb_test(cast(Request, _request()), {})
     assert limited.status_code == 429
     assert "过于频繁" in _payload(limited)["error"]
     request_get.assert_not_called()
@@ -157,7 +160,7 @@ def test_tmdb_test_returns_stable_safe_errors_and_rate_limits():
         tools_api.requests, "get", side_effect=failure
     ):
         response = tools_api.tmdb_test(
-            _request(), {"api_key": secret, "api_url": "https://tmdb.example/3"}
+            cast(Request, _request()), {"api_key": secret, "api_url": "https://tmdb.example/3"}
         )
     assert response.status_code == 502
     body = json.dumps(_payload(response), ensure_ascii=False)

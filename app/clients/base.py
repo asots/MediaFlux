@@ -10,6 +10,7 @@ import math
 import re
 import time
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Optional
@@ -248,7 +249,7 @@ class DashboardData:
     refresh_error: str = ""
 
 
-def _dedupe_texts(values: object) -> list[str]:
+def _dedupe_texts(values: Iterable[object] | None) -> list[str]:
     return list(dict.fromkeys(
         str(item or "").strip()
         for item in (values or ())
@@ -307,7 +308,7 @@ class MediaServerClient:
         self.token = token
         self.timeout = timeout
         self.path_mappings = tuple(path_mappings or ())
-        self.allow_global_refresh_fallback = bool(allow_global_refresh_fallback)
+        self.allow_global_refresh_fallback = allow_global_refresh_fallback
         self._session = requests.Session()
 
     def close(self) -> None:
@@ -362,7 +363,7 @@ class MediaServerClient:
                 continue
             raw_locations = item.get("Locations")
             locations = [
-                str(value).strip() for value in raw_locations
+                value.strip() for value in raw_locations
                 if isinstance(value, str) and value.strip()
             ] if isinstance(raw_locations, list) else []
             folders.append({
@@ -377,7 +378,7 @@ class MediaServerClient:
     def get_media_counts(self) -> dict[str, int]:
         """读取最小媒体计数；供 Agent 等只需要统计的调用复用。"""
         return {
-            "total_items": max(0, int(self._total_items() or 0)),
+            "total_items": max(0, (self._total_items() or 0)),
             "movie_count": 0,
             "series_count": 0,
             "episode_count": 0,
@@ -385,7 +386,7 @@ class MediaServerClient:
 
     def get_library_media_counts(self, library_id: str) -> dict[str, int]:
         """按媒体库读取用户可见的电影、剧集、单集与可播放项数量。"""
-        normalized_library_id = str(library_id or "").strip()
+        normalized_library_id = (library_id or "").strip()
         if (
             not normalized_library_id
             or len(normalized_library_id) > 256
@@ -482,7 +483,7 @@ class MediaServerClient:
 
     def media_web_url(self, item_id: str) -> str:
         """返回媒体服务器自身的条目页面，不附加任何访问凭据。"""
-        return self._web_url(str(item_id or "").strip())
+        return self._web_url((item_id or "").strip())
 
     def _web_url(self, item_id: str) -> str:
         raise NotImplementedError
@@ -493,7 +494,7 @@ class MediaServerClient:
     def recent_media(self, limit: int = 60, *, parent_id: str = "", media_type: str = "all") -> list[MediaItem]:
         """按实际库查询最近入库；episode 按单集 ID 去重，其余类型按作品去重。"""
         return self._recent_added(
-            limit=max(1, min(int(limit or 60), 200)), parent_id=parent_id, media_type=media_type,
+            limit=max(1, min((limit or 60), 200)), parent_id=parent_id, media_type=media_type,
         )
 
     def _media_item(self, item: dict) -> MediaItem:
@@ -503,7 +504,7 @@ class MediaServerClient:
     def continue_watching(self, user_id: str, *, limit: int = 12) -> list[MediaItem]:
         """共用 Emby/Jellyfin Resume 合同，条目投影仍由各服务器适配器负责。"""
         selected = normalize_explicit_media_user_id(user_id)
-        normalized_limit = max(1, min(int(limit or 12), 20))
+        normalized_limit = max(1, min((limit or 12), 20))
         data = self._request(
             f"/Users/{selected}/Items/Resume",
             params={
@@ -559,7 +560,7 @@ class MediaServerClient:
             raise ValueError("offset 必须是非负整数")
         if type(count_only) is not bool:
             raise ValueError("count_only 必须是布尔值")
-        normalized_limit = max(1, min(int(limit or 12), 50))
+        normalized_limit = max(1, min((limit or 12), 50))
         result = MediaSearchResult(
             offset=offset, limit=normalized_limit, count_only=count_only,
             search_by=search_by, media_type=media_type,
@@ -582,7 +583,7 @@ class MediaServerClient:
             people_data = self._request(
                 "/Persons",
                 params={
-                    "UserId": user_id, "SearchTerm": str(query or "").strip(),
+                    "UserId": user_id, "SearchTerm": (query or "").strip(),
                     "PersonTypes": "Actor", "StartIndex": 0, "Limit": 50,
                     "EnableImages": "false", "EnableTotalRecordCount": "true",
                 },
@@ -612,7 +613,7 @@ class MediaServerClient:
                 "PersonTypes": "Actor",
             })
         else:
-            params["SearchTerm"] = str(query or "").strip()
+            params["SearchTerm"] = (query or "").strip()
         data = self._request(f"/Users/{user_id}/Items", params=params)
         raw_items, _ = self._items_payload(data)
         page_size = len(data.get("Items", [])) if isinstance(data, dict) else len(data)
@@ -706,7 +707,7 @@ class MediaServerClient:
     ) -> bool:
         """按 ProviderIds.Tmdb 精确判断电影或剧集是否存在，可限定媒体库。"""
         normalized_id = self._provider_tmdb_id({"Tmdb": tmdb_id})
-        normalized_type = "Series" if str(media_type).strip().lower() == "tv" else "Movie"
+        normalized_type = "Series" if media_type.strip().lower() == "tv" else "Movie"
         if not normalized_id:
             raise ValueError("TMDB ID 无效")
         params = {
@@ -716,8 +717,8 @@ class MediaServerClient:
             "Fields": "ProviderIds",
             "AnyProviderIdEquals": f"Tmdb.{normalized_id}",
         }
-        if str(parent_id or "").strip():
-            params["ParentId"] = str(parent_id).strip()
+        if (parent_id or "").strip():
+            params["ParentId"] = parent_id.strip()
         data = self._request(
             f"/Users/{self._user_id()}/Items",
             params=params,
@@ -733,7 +734,7 @@ class MediaServerClient:
     ) -> SeriesSearchResult:
         """按 ProviderIds.Tmdb 精确返回剧集候选，避免标题别名导致漏判。"""
         normalized_id = self._provider_tmdb_id({"Tmdb": tmdb_id})
-        normalized_limit = max(1, min(int(limit or 20), 20))
+        normalized_limit = max(1, min((limit or 20), 20))
         if not normalized_id:
             raise ValueError("TMDB ID 无效")
         params = {
@@ -743,8 +744,8 @@ class MediaServerClient:
             "Fields": "ProviderIds,ProductionYear",
             "AnyProviderIdEquals": f"Tmdb.{normalized_id}",
         }
-        if str(parent_id or "").strip():
-            params["ParentId"] = str(parent_id).strip()
+        if (parent_id or "").strip():
+            params["ParentId"] = parent_id.strip()
         data = self._request(
             f"/Users/{self._user_id()}/Items",
             params=params,
@@ -766,7 +767,7 @@ class MediaServerClient:
             ))
         return SeriesSearchResult(
             candidates=candidates,
-            total=max(len(candidates), int(total or 0)),
+            total=max(len(candidates), (total or 0)),
             truncated=total > len(items) if total is not None else len(items) >= normalized_limit,
         )
 
@@ -774,9 +775,9 @@ class MediaServerClient:
         self, query: str, limit: int = 6, *, parent_id: str = ""
     ) -> SeriesSearchResult:
         """返回剧集候选及可靠的 ProviderIds.Tmdb 映射。"""
-        normalized_limit = max(1, min(int(limit or 6), 10))
+        normalized_limit = max(1, min((limit or 6), 10))
         params = {
-            "SearchTerm": str(query or "").strip(),
+            "SearchTerm": (query or "").strip(),
             "Recursive": "true",
             "Limit": normalized_limit,
             "IncludeItemTypes": "Series",
@@ -784,8 +785,8 @@ class MediaServerClient:
             "SortBy": "SortName",
             "SortOrder": "Ascending",
         }
-        if str(parent_id or "").strip():
-            params["ParentId"] = str(parent_id).strip()
+        if (parent_id or "").strip():
+            params["ParentId"] = parent_id.strip()
         data = self._request(
             f"/Users/{self._user_id()}/Items",
             params=params,
@@ -818,8 +819,8 @@ class MediaServerClient:
         """分页枚举媒体库剧集；内部 ID 仅供后续服务端读取清单。"""
         # 后台全库巡检需要先以轻量元数据分页建立稳定目录，再按批次读取
         # 每部剧的集号。常规调用仍由上层传入的小上限约束。
-        cap = max(1, min(int(max_series or 50), 5000))
-        page = max(1, min(int(page_size or 100), 100))
+        cap = max(1, min((max_series or 50), 5000))
+        page = max(1, min((page_size or 100), 100))
         candidates: list[SeriesCandidate] = []
         user_id = self._user_id(deadline_at=deadline_at)
 
@@ -857,12 +858,12 @@ class MediaServerClient:
         deadline_at: float | None = None,
     ) -> MediaIdentityInventory:
         """分页枚举电影或剧集的标题、年份与 TMDB 身份，不加载媒体内容。"""
-        normalized_type = str(media_type or "").strip().casefold()
+        normalized_type = (media_type or "").strip().casefold()
         if normalized_type not in {"movie", "tv"}:
             raise ValueError("媒体类型仅支持 movie 或 tv")
         include_item_type = "Movie" if normalized_type == "movie" else "Series"
-        cap = max(1, min(int(max_items or 5_000), 10_000))
-        page = max(1, min(int(page_size or 200), 500))
+        cap = max(1, min((max_items or 5_000), 10_000))
+        page = max(1, min((page_size or 200), 500))
         candidates: list[MediaIdentityCandidate] = []
         unmapped = 0
         user_id = self._user_id(deadline_at=deadline_at)
@@ -908,7 +909,7 @@ class MediaServerClient:
     ) -> MediaRecommendationInventory:
         """分页读取可推荐的电影/剧集元数据与用户观看状态。"""
         selected_user = normalize_explicit_media_user_id(user_id)
-        normalized_type = str(media_type or "any").strip().casefold()
+        normalized_type = (media_type or "any").strip().casefold()
         if normalized_type not in {"any", "movie", "tv"}:
             raise ValueError("媒体类型仅支持 any、movie 或 tv")
         include_types = {
@@ -916,11 +917,11 @@ class MediaServerClient:
             "movie": "Movie",
             "tv": "Series",
         }[normalized_type]
-        cap = max(1, min(int(max_items or 5_000), 10_000))
-        page = max(1, min(int(page_size or 200), 500))
+        cap = max(1, min((max_items or 5_000), 10_000))
+        page = max(1, min((page_size or 200), 500))
         candidates: list[MediaRecommendationCandidate] = []
 
-        def score(value: object, *, maximum: float) -> float:
+        def score(value: Any, *, maximum: float) -> float:
             if isinstance(value, bool):
                 return 0.0
             try:
@@ -1021,8 +1022,8 @@ class MediaServerClient:
         include_specials: bool = False,
     ) -> SeriesEpisodeInventory:
         """分页枚举剧集集号；默认忽略 Season 0，显式开启时纳入特典。"""
-        cap = max(1, min(int(max_episodes or 2000), 2000))
-        page = max(1, min(int(page_size or 200), 200))
+        cap = max(1, min((max_episodes or 2000), 2000))
+        page = max(1, min((page_size or 200), 200))
         seen: set[tuple[int, int]] = set()
         ignored_specials = 0
         ignored_unknown = 0
@@ -1031,7 +1032,7 @@ class MediaServerClient:
         items, total, truncated = self._inventory_items(
             user_id, cap=cap, page_size=page, deadline_at=deadline_at,
             params={
-                "ParentId": str(series_id or "").strip(),
+                "ParentId": (series_id or "").strip(),
                 "IncludeItemTypes": "Episode",
                 "Fields": (
                     "SeriesId,SeriesName,SeasonId,ParentIndexNumber,"
@@ -1041,9 +1042,14 @@ class MediaServerClient:
             },
         )
         for item in items:
+            season_value = item.get("ParentIndexNumber")
+            episode_value = item.get("IndexNumber")
+            if season_value is None or episode_value is None:
+                ignored_unknown += 1
+                continue
             try:
-                season = int(item.get("ParentIndexNumber"))
-                episode = int(item.get("IndexNumber"))
+                season = int(season_value)
+                episode = int(episode_value)
             except (TypeError, ValueError):
                 ignored_unknown += 1
                 continue
@@ -1067,7 +1073,7 @@ class MediaServerClient:
 
     def _recent_added(self, limit: int = 8, *, parent_id: str = "", media_type: str = "all") -> list[MediaItem]:
         uid = self._user_id()
-        normalized_limit = max(1, min(int(limit or 8), 200))
+        normalized_limit = max(1, min((limit or 8), 200))
         item_types = {"all": "Movie,Series,Episode", "movie": "Movie", "tv": "Series,Episode", "episode": "Episode"}
         if media_type not in item_types:
             raise ValueError("媒体类型仅支持all、movie、tv或episode")
@@ -1083,13 +1089,13 @@ class MediaServerClient:
             "SortOrder": "Descending",
             "EnableTotalRecordCount": "false",
         }
-        if str(parent_id or "").strip():
-            params["ParentId"] = str(parent_id).strip()
+        if (parent_id or "").strip():
+            params["ParentId"] = parent_id.strip()
         # episode 保留同剧多集，其余按作品 ID 去重再补页；不为最近入库遍历整库。
         recent: dict[str, dict[str, Any]] = {}
         offset = 0
         while offset < 2000 and len(recent) < normalized_limit:
-            page_size = min(int(params["Limit"]), 2000 - offset)
+            page_size = min(params["Limit"], 2000 - offset)
             data = self._request(f"/Users/{uid}/Items", params={**params, "StartIndex": offset, "Limit": page_size})
             raw_items, _total = self._items_payload(data)
             for raw in sorted(raw_items, key=lambda row: str(row.get("DateCreated") or ""), reverse=True):
@@ -1103,7 +1109,7 @@ class MediaServerClient:
             if len(raw_items) < page_size:
                 break
             offset += len(raw_items)
-            params["Limit"] = max(int(params["Limit"]), 200)
+            params["Limit"] = max(params["Limit"], 200)
         return [self._media_item(raw) for raw in recent.values()]
 
     def _recent_played(self, limit: int = 12) -> list[MediaItem]:
@@ -1156,7 +1162,7 @@ class MediaServerClient:
             data = self._request(
                 "/Items",
                 params={
-                    "ParentId": str(library_id),
+                    "ParentId": library_id,
                     "Recursive": "true",
                     "IncludeItemTypes": "Folder",
                     "Fields": "Path",
@@ -1198,7 +1204,7 @@ class MediaServerClient:
             data = self._request(
                 "/Items",
                 params={
-                    "ParentId": str(library_id),
+                    "ParentId": library_id,
                     "Recursive": "true",
                     "IncludeItemTypes": "Series,Season,Movie,Folder,BoxSet",
                     "Fields": "Path,SeriesId",
@@ -1209,6 +1215,8 @@ class MediaServerClient:
             if not isinstance(data, dict) or not isinstance(data.get("Items"), list):
                 raise RuntimeError("媒体库条目响应格式异常，已停止精准刷新")
             total_raw = data.get("TotalRecordCount")
+            if total_raw is None:
+                raise RuntimeError("媒体库条目总数无效，已停止精准刷新")
             if isinstance(total_raw, bool):
                 raise RuntimeError("媒体库条目总数无效，已停止精准刷新")
             try:
@@ -1267,7 +1275,7 @@ class MediaServerClient:
 
     @staticmethod
     def _media_path_parent(path: str) -> str:
-        normalized = str(path or "").rstrip("/")
+        normalized = (path or "").rstrip("/")
         if not normalized:
             return ""
         parent = str(PurePosixPath(normalized).parent)
@@ -1292,11 +1300,9 @@ class MediaServerClient:
                 continue
             item_type = str(item.get("Type") or "").strip().casefold()
             covers = media_server_path_is_within(target, item_path)
-            movie_child = bool(
-                item_type == "movie"
+            movie_child = (item_type == "movie"
                 and self._media_path_key(self._media_path_parent(item_path))
-                == self._media_path_key(target)
-            )
+                == self._media_path_key(target))
             if covers or movie_child:
                 candidates.append((len(item_path), item))
         if not candidates:
@@ -1338,7 +1344,7 @@ class MediaServerClient:
     ) -> dict[str, Any]:
         """定位失败时默认安全跳过；自动链路绝不隐式全局扫描。"""
         result["fallback"] = reason
-        result["retryable"] = bool(retryable)
+        result["retryable"] = retryable
         if (
             allow_global
             and permit_global_fallback
@@ -1375,22 +1381,22 @@ class MediaServerClient:
         ``/Library/Refresh``。
         """
         allowed_ids = {
-            str(item or "").strip() for item in allowed_library_ids or ()
-            if str(item or "").strip()
+            (item or "").strip() for item in allowed_library_ids or ()
+            if (item or "").strip()
         }
         skipped_ids = {
-            str(item or "").strip() for item in skip_item_ids or ()
-            if str(item or "").strip()
+            (item or "").strip() for item in skip_item_ids or ()
+            if (item or "").strip()
         }
         permit_global_fallback = (
             self.allow_global_refresh_fallback
             if allow_global_fallback is None
-            else bool(allow_global_fallback)
+            else allow_global_fallback
         )
         mapping_rows: list[dict[str, Any]] = []
         mapped_targets: list[str] = []
         for raw_path in paths or []:
-            raw = str(raw_path or "").strip()
+            raw = (raw_path or "").strip()
             if not raw:
                 continue
             try:
@@ -1620,6 +1626,7 @@ class MediaServerClient:
                     else:
                         library_targets.add(library_id)
                     continue
+                assert matched_item is not None
                 item_path = self._normalize_media_path(matched_item.get("Path"))
                 item_type = str(matched_item.get("Type") or "").strip().casefold()
                 if (
@@ -1709,7 +1716,7 @@ class MediaServerClient:
         outcomes: list[bool] = []
         succeeded_ids: list[str] = []
         for item_id in ordered_ids:
-            ok = bool(self.refresh_library(item_id))
+            ok = self.refresh_library(item_id)
             outcomes.append(ok)
             if ok:
                 succeeded_ids.append(item_id)

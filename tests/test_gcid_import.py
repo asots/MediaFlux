@@ -51,7 +51,7 @@ class GCIDManifestV2Tests(unittest.TestCase):
     def test_canonical_sha256_normalizes_to_immutable_domain_objects(self):
         manifest = normalize_manifest_v2(_manifest())
 
-        self.assertIsInstance(manifest, GCIDManifest)
+        assert isinstance(manifest, GCIDManifest)
         self.assertEqual(FORMAT_VERSION, 2)
         self.assertEqual(manifest.file_count, 2)
         self.assertEqual(manifest.total_size, 30)
@@ -185,6 +185,7 @@ class GCIDImportDatabaseTests(IsolatedDatabaseTestCase):
 
         task = db.get_gcid_import_task(task_id)
         items = db.list_gcid_import_items(task_id)
+        assert task is not None
         self.assertEqual(task["status"], "previewed")
         self.assertEqual(task["manifest_digest"], manifest.digest)
         self.assertEqual([row["path"] for row in items], ["Movies/A.mkv", "Movies/B.mkv"])
@@ -205,7 +206,9 @@ class GCIDImportDatabaseTests(IsolatedDatabaseTestCase):
         )
         for status in ("running", "success", "partial_success", "failed"):
             db.update_gcid_import_task(task_id, status=status)
-            self.assertEqual(db.get_gcid_import_task(task_id)["status"], status)
+            get_gcid_import_task_result = db.get_gcid_import_task(task_id)
+            assert get_gcid_import_task_result is not None
+            self.assertEqual(get_gcid_import_task_result["status"], status)
         with self.assertRaises(ValueError):
             db.update_gcid_import_task(task_id, status="unknown")
 

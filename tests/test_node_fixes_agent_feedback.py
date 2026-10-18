@@ -1,6 +1,13 @@
 """真实确认结果在事件聚合、Telegram 和浏览器中的一致性。"""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser
+
+from tests.support import assert_present
+
 import unittest
 from unittest.mock import patch
 
@@ -90,8 +97,18 @@ class AgentBrowserDependencyTests(unittest.TestCase):
 @unittest.skipIf(browser_tests.sync_playwright is None, '系统环境未安装 Playwright')
 class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
     # 复用已有浏览器夹具而不继承其测试，避免重复计算回归数量。
-    setUpClass = classmethod(browser_tests.AgentKernelBrowserTests.setUpClass.__func__)
-    tearDownClass = classmethod(browser_tests.AgentKernelBrowserTests.tearDownClass.__func__)
+    browser: Browser
+    source: str
+    styles: str
+
+    @classmethod
+    def setUpClass(cls):
+        browser_tests.AgentKernelBrowserTests.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        browser_tests.AgentKernelBrowserTests.tearDownClass.__func__(cls)
+
     make_page = browser_tests.AgentKernelBrowserTests.make_page
 
     def confirm(self, events, *, malformed_tail="", http_error=None):
@@ -188,7 +205,7 @@ class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
         self.assertIn('连接中断，后续结果尚未确认', text)
         self.assertIn('不要重复提交', text)
         self.assertNotIn('通过写后校验', text)
-        self.assertNotIn('is-interrupted', result.locator('.agent-result-card').filter(has_text='任务已暂停').get_attribute('class'))
+        self.assertNotIn('is-interrupted', assert_present(result.locator('.agent-result-card').filter(has_text='任务已暂停').get_attribute('class')))
 
     def test_explicit_effect_completed_turn_terminal_renders_without_model_followup(self):
         cases = (
@@ -206,7 +223,7 @@ class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
                 text = result.inner_text()
                 self.assertIn(expected, text)
                 self.assertNotIn('连接中断', text)
-                self.assertNotIn('is-interrupted', result.get_attribute('class'))
+                self.assertNotIn('is-interrupted', assert_present(result.get_attribute('class')))
 
     def test_failed_effect_without_dto_keeps_specific_cause(self):
         result = self.confirm([_event(1, 'turn.started', {}),
@@ -229,7 +246,7 @@ class AgentConfirmationBoundaryBrowserTests(unittest.TestCase):
                 if kind == 'effect.completed':
                     self.assertIn('任务已暂停', text)
                     self.assertIn('连接中断，后续结果尚未确认', text)
-                    self.assertNotIn('is-interrupted', result.locator('.agent-result-card').filter(has_text='任务已暂停').get_attribute('class'))
+                    self.assertNotIn('is-interrupted', assert_present(result.locator('.agent-result-card').filter(has_text='任务已暂停').get_attribute('class')))
                 else:
                     self.assertIn(WARNING.replace('，', ','), text)
                     self.assertIn('提交结果未知', text)

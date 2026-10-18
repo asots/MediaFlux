@@ -1,6 +1,9 @@
 """本地媒体调度器去重、稳定等待和生命周期测试。"""
 from __future__ import annotations
 
+from threading import Thread
+from typing import cast
+
 import tempfile
 import threading
 import time
@@ -20,7 +23,15 @@ from app.modules.local_media_scheduler import (
     LocalMediaSourceMigrationRequired,
 )
 from app.modules.local_storage import LocalFilesystemAdapter, LocalScanLimitExceeded
+from app.modules.local_media_models import LocalMediaTask
+
 from tests.support import IsolatedDatabaseTestCase
+
+
+def _require_task(task_id: int, *, owner: str = "admin") -> LocalMediaTask:
+    task = db.get_local_media_task(task_id, owner=owner)
+    assert task is not None
+    return task
 
 
 class FakeService:
@@ -64,7 +75,10 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             first = scheduler.enqueue_completed_torrent(self.torrent("/downloads/1/Movie.mkv"))
             second = scheduler.enqueue_completed_torrent(self.torrent("/downloads/1/Movie.mkv"))
             self.assertEqual(first, second)
-            self.assertEqual(db.get_local_media_task(first, owner="admin").source_id, fast_id)
+            assert first is not None
+            get_local_media_task_result = db.get_local_media_task(first, owner="admin")
+            assert get_local_media_task_result is not None
+            self.assertEqual(get_local_media_task_result.source_id, fast_id)
             self.assertEqual(scheduler.run_once(), 1)
             self.assertEqual(service.calls, [("admin", first, qb)])
             qb.close.assert_called_once_with()
@@ -103,8 +117,10 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 0)
 
             qb.close.assert_called_once_with()
+            get_local_media_task_result_2 = db.get_local_media_task(task_id, owner="admin")
+            assert get_local_media_task_result_2 is not None
             self.assertEqual(
-                db.get_local_media_task(task_id, owner="admin").status, "failed"
+                get_local_media_task_result_2.status, "failed"
             )
 
     def test_post_move_error_falls_back_to_requires_manual(self):
@@ -143,8 +159,10 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 0)
 
             qb.close.assert_called_once_with()
+            get_local_media_task_result_3 = db.get_local_media_task(task_id, owner="admin")
+            assert get_local_media_task_result_3 is not None
             self.assertEqual(
-                db.get_local_media_task(task_id, owner="admin").status,
+                get_local_media_task_result_3.status,
                 "requires_manual",
             )
 
@@ -167,6 +185,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             )
 
             request = db.get_download_request(request_id)
+            assert request is not None
             self.assertEqual(request["local_import_status"], "pending")
             self.assertEqual(request["local_import_target"], f"local-media-task:{task_id}")
             self.assertEqual(request["qb_content_path"], str(movie))
@@ -230,10 +249,14 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 self.torrent(r"\\nas\media\Show.mkv", hash_value="unc-prefix")
             )
 
+            assert drive_task is not None
             stored_drive = db.get_local_media_task(drive_task, owner="admin")
+            assert unc_task is not None
             stored_unc = db.get_local_media_task(unc_task, owner="admin")
+            assert stored_drive is not None
             self.assertEqual(stored_drive.source_id, drive_id)
             self.assertEqual(Path(stored_drive.content_path), drive_root / "Movie.mkv")
+            assert stored_unc is not None
             self.assertEqual(stored_unc.source_id, unc_id)
             self.assertEqual(Path(stored_unc.content_path), unc_root / "Show.mkv")
 
@@ -259,7 +282,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 self.torrent(r"d:\downloads\Movie.mkv", hash_value="migrated-source")
             )
 
+            assert task_id is not None
             task = db.get_local_media_task(task_id, owner="admin")
+            assert task is not None
             self.assertEqual(task.source_id, migrated_id)
             self.assertEqual(Path(task.content_path), migrated_root / "Movie.mkv")
 
@@ -285,7 +310,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 self.torrent("/downloads/Movie.mkv", hash_value="equal-prefix")
             )
 
+            assert task_id is not None
             task = db.get_local_media_task(task_id, owner="admin")
+            assert task is not None
             self.assertEqual(task.source_id, actual_id)
             self.assertEqual(Path(task.content_path), actual_root / "Movie.mkv")
 
@@ -356,7 +383,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 )
             )
 
+            assert task_id is not None
             task = db.get_local_media_task(task_id, owner="admin")
+            assert task is not None
             self.assertEqual(task.source_id, source_id)
             self.assertEqual(Path(task.content_path), media)
 
@@ -473,6 +502,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(scheduler.run_once(), 0)
         task = db.get_local_media_task(task_id, owner="admin")
+        assert task is not None
         self.assertEqual(task.status, "failed")
         self.assertIn("Windows/UNC", task.error)
         self.assertIn("Docker 容器路径", task.error)
@@ -496,6 +526,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 0)
         scan.assert_not_called()
         task = db.get_local_media_task(task_id, owner="admin")
+        assert task is not None
         self.assertEqual(task.status, "failed")
         self.assertIn("Docker 容器内绝对路径", task.error)
 
@@ -516,7 +547,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             with patch("app.modules.local_media_scheduler.LocalFilesystemAdapter.scan") as scan:
                 self.assertEqual(scheduler.run_once(), 1)
             scan.assert_not_called()
-            self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "completed")
+            get_local_media_task_result_4 = db.get_local_media_task(task_id, owner="admin")
+            assert get_local_media_task_result_4 is not None
+            self.assertEqual(get_local_media_task_result_4.status, "completed")
             self.assertEqual(service.calls, [("admin", task_id, None)])
 
     def test_qb_completed_task_uses_no_scheduler_prescan(self):
@@ -532,7 +565,10 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             with patch("app.modules.local_media_scheduler.LocalFilesystemAdapter.scan") as scan:
                 self.assertEqual(scheduler.run_once(), 1)
             scan.assert_not_called()
-            self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "completed")
+            assert task_id is not None
+            get_local_media_task_result_5 = db.get_local_media_task(task_id, owner="admin")
+            assert get_local_media_task_result_5 is not None
+            self.assertEqual(get_local_media_task_result_5.status, "completed")
 
     def test_notification_failure_does_not_overwrite_completed_task(self):
         with tempfile.TemporaryDirectory() as root_raw:
@@ -559,7 +595,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
 
             task = db.get_local_media_task(task_id, owner="admin")
             request = db.get_download_request(request_id)
+            assert task is not None
             self.assertEqual(task.status, "completed")
+            assert request is not None
             self.assertEqual(request["local_import_status"], "completed")
 
     def test_notification_failure_does_not_overwrite_manual_review_task(self):
@@ -599,7 +637,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
 
             task = db.get_local_media_task(task_id, owner="admin")
             request = db.get_download_request(request_id)
+            assert task is not None
             self.assertEqual(task.status, "requires_manual")
+            assert request is not None
             self.assertEqual(request["local_import_status"], "requires_manual")
 
     def test_legacy_stable_wait_executes_once_without_repeated_scan(self):
@@ -619,7 +659,9 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 self.assertEqual(scheduler.run_once(), 1)
                 self.assertEqual(scheduler.run_once(), 0)
             scan.assert_not_called()
-            self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "completed")
+            get_local_media_task_result_6 = db.get_local_media_task(task_id, owner="admin")
+            assert get_local_media_task_result_6 is not None
+            self.assertEqual(get_local_media_task_result_6.status, "completed")
 
     def test_preview_only_source_is_manual_only_and_not_auto_enqueued(self):
         with tempfile.TemporaryDirectory() as root_raw:
@@ -641,12 +683,14 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             )
             task_id = db.create_local_media_task(source_id, "hash-interrupted", str(source), owner="admin")
             task = db.get_local_media_task(task_id, owner="admin")
+            assert task is not None
             step_id = db.add_local_media_operation_step(task_id, task.operation_token, 0, "move", owner="admin")
             db.update_local_media_task(task_id, owner="admin", status="moving")
             db.update_local_media_operation_step(step_id, "running")
             db.init_db()
             recovered = db.get_local_media_task(task_id, owner="admin")
             steps = db.list_local_media_operation_steps(task_id, owner="admin")
+            assert recovered is not None
             self.assertEqual(recovered.status, "requires_manual")
             self.assertFalse(recovered.completed_at)
             self.assertIn("人工核验", recovered.error)
@@ -680,6 +724,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
 
             self.assertEqual(LocalMediaScheduler(service=FakeService()).run_once(), 0)
             task = db.get_local_media_task(task_id, owner="admin")
+            assert task is not None
             self.assertEqual(task.status, "failed")
             self.assertIn("定时扫描已移除", task.error)
 
@@ -712,14 +757,17 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 self.assertEqual(result["candidate_count"], 1)
                 self.assertEqual(result["queued_count"], 1)
                 task = db.get_local_media_task(result["task_ids"][0], owner="admin")
+                assert task is not None
                 self.assertEqual(task.trigger, "scan")
                 self.assertTrue(task.operation_token.startswith("silent-manual-scan:"))
                 self.assertEqual(scheduler.run_once(), 1)
 
             notify.assert_not_called()
             self.assertEqual(len(service.calls), 1)
+            get_local_media_task_result_7 = db.get_local_media_task(result["task_ids"][0], owner="admin")
+            assert get_local_media_task_result_7 is not None
             self.assertEqual(
-                db.get_local_media_task(result["task_ids"][0], owner="admin").status,
+                get_local_media_task_result_7.status,
                 "completed",
             )
 
@@ -769,6 +817,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(scheduler.run_once(), 1)
             captured = scheduler.take_captured_task_result(task_id)
 
+        assert captured is not None
         self.assertEqual(captured["status"], "requires_manual")
         self.assertEqual(captured["preview"]["candidate"]["tmdb_id"], "1")
         self.assertIsNone(scheduler.take_captured_task_result(task_id))
@@ -835,6 +884,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             captured = scheduler.take_captured_task_result(task_id)
 
         self.assertEqual(batch["task_ids"], [task_id])
+        assert captured is not None
         self.assertEqual(captured["status"], "requires_manual")
         self.assertEqual(captured["preview"]["candidate"]["tmdb_id"], "1")
         self.assertIsNone(scheduler.take_captured_task_result(task_id))
@@ -867,6 +917,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(result["candidate_count"], 1)
             self.assertEqual(result["queued_count"], 1)
             task = db.get_local_media_task(result["task_ids"][0], owner="admin")
+            assert task is not None
             self.assertEqual(Path(task.content_path), media_dir / "Movie.2026.mkv")
 
     def test_manual_scan_queues_good_candidates_and_reports_partial_error(self):
@@ -958,7 +1009,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 wrapped_show / "Season 01" / "Show.C.S01E04.mkv",
             }
             tasks = [
-                db.get_local_media_task(task_id, owner="admin")
+                _require_task(task_id, owner="admin")
                 for task_id in result["task_ids"]
             ]
             self.assertEqual(result["candidate_count"], len(expected))
@@ -1095,7 +1146,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
         self.assertEqual(service.commit_order, task_ids)
         self.assertEqual(service.closed_workers, 2)
         self.assertTrue(all(
-            db.get_local_media_task(task_id, owner="admin").status == "completed"
+            _require_task(task_id, owner="admin").status == "completed"
             for task_id in task_ids
         ))
 
@@ -1160,7 +1211,8 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                         "legacy-overlap-child", timestamp, timestamp,
                     ),
                 )
-                child_task = int(cursor.lastrowid)
+                assert cursor.lastrowid is not None
+                child_task = cursor.lastrowid
             service = PlanningService()
             scheduler = LocalMediaScheduler(service=service)
 
@@ -1171,8 +1223,10 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 "app.modules.local_media_scheduler.notify_local_media_task",
             ):
                 self.assertEqual(scheduler.run_once(), 1)
+                get_local_media_task_result_8 = db.get_local_media_task(child_task, owner="admin")
+                assert get_local_media_task_result_8 is not None
                 self.assertEqual(
-                    db.get_local_media_task(child_task, owner="admin").status,
+                    get_local_media_task_result_8.status,
                     "waiting_stable",
                 )
                 self.assertEqual(scheduler.run_once(), 1)
@@ -1230,8 +1284,10 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
         self.assertEqual(service.prepared, [task_id])
         self.assertEqual(service.calls[0][1], task_id)
         self.assertEqual(service.closed_workers, 1)
+        get_local_media_task_result_9 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_9 is not None
         self.assertEqual(
-            db.get_local_media_task(task_id, owner="admin").status,
+            get_local_media_task_result_9.status,
             "completed",
         )
         self.assertEqual(scheduler._path_locks, set())
@@ -1294,8 +1350,10 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
         self.assertTrue(qb_created.is_set())
         self.assertIs(service.calls[0][2], qb_client)
         qb_client.close.assert_called_once_with()
+        get_local_media_task_result_10 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_10 is not None
         self.assertEqual(
-            db.get_local_media_task(task_id, owner="admin").status,
+            get_local_media_task_result_10.status,
             "completed",
         )
 
@@ -1374,10 +1432,11 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             ):
                 self.assertEqual(scheduler.run_once(), 3)
 
-            captured = {
-                task_id: scheduler.take_captured_task_result(task_id)
-                for task_id in task_ids
-            }
+            captured: dict[int, dict] = {}
+            for task_id in task_ids:
+                captured_result = scheduler.take_captured_task_result(task_id)
+                assert captured_result is not None
+                captured[task_id] = captured_result
 
         self.assertNotEqual(service.completed_prepares[0], task_ids[0])
         self.assertEqual(
@@ -1534,7 +1593,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
         self.assertEqual(service.closed_workers, 2)
         self.assertIsNone(scheduler._thread)
         self.assertTrue(all(
-            db.get_local_media_task(task_id, owner="admin").status == "completed"
+            _require_task(task_id, owner="admin").status == "completed"
             for task_id in task_ids
         ))
 
@@ -1563,7 +1622,7 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
                 scheduler.start()
 
         old_thread = OldThread()
-        scheduler._thread = old_thread
+        scheduler._thread = cast(Thread, old_thread)
 
         self.assertTrue(scheduler.shutdown())
         self.assertIsNone(scheduler._thread)

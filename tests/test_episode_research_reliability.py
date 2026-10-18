@@ -372,17 +372,19 @@ class EpisodeResearchCloseReliabilityTests(_OfflineCase):
 
         def factory(case, **kwargs):
             reader = core.EpisodeEvidenceReader(case, client=EvidenceClient(), **kwargs)
-            reader.close = Mock(wraps=reader.close)
-            readers.append(reader)
+            close = Mock(wraps=reader.close)
+            reader.close = close
+            readers.append((reader, close))
             return reader
 
         current = service.revalidate_episode_research_receipt(
             self.payload, service.proposal_receipt(proposal), reader_factory=factory)
         self.assertEqual(current["status"], "verified")
         self.assertEqual(len(readers), 1)
-        readers[0].close.assert_called_once()
+        reader, close = readers[0]
+        close.assert_called_once()
         with self.assertRaises(core.EpisodeResearchError) as raised:
-            readers[0].inspect_candidate(0)
+            reader.inspect_candidate(0)
         self.assertEqual(raised.exception.code, "reader_closed")
 
 

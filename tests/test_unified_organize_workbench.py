@@ -23,7 +23,9 @@ class UnifiedOrganizeWorkbenchTests(IsolatedDatabaseTestCase):
             conn.execute("DELETE FROM organize_log")
         self.client = TestClient(create_app(start_background=False))
         login = self.client.get("/login")
-        token = re.search(r'name="csrf_token"\s+value="([^"]+)"', login.text).group(1)
+        search_result = re.search(r'name="csrf_token"\s+value="([^"]+)"', login.text)
+        assert search_result is not None
+        token = search_result.group(1)
         response = self.client.post(
             "/login",
             data={"username": "admin", "password": "123456", "csrf_token": token},
@@ -255,7 +257,9 @@ for(const [search,origin,status] of [
  assert.deepEqual([fields.orgOrigin.value,fields.orgStatus.value],[origin,status]);
 }
 """
-        result = subprocess.run([shutil.which("node"), "-e", program], capture_output=True, text=True, timeout=10)
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_guangya_manual_record_is_not_counted_as_skipped(self):

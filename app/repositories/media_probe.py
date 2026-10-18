@@ -45,7 +45,7 @@ _MEDIA_PROFILE_FIELDS = frozenset({
 
 def _decode_payload(payload: str) -> dict | None:
     try:
-        data = json.loads(str(payload or ""))
+        data = json.loads(payload or "")
     except (TypeError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -65,7 +65,7 @@ def get_media_probe_cache(
     file_id: str, etag: str, size: int, *, allow_fingerprint_fallback: bool = False
 ) -> str:
     """单条 API 是批量读取器的薄适配，统一历史缓存与内容指纹判定。"""
-    key = (str(file_id), str(etag or ""), int(size or 0))
+    key = (file_id, (etag or ""), (size or 0))
     return get_media_probe_cache_many(
         [key], allow_fingerprint_fallback=allow_fingerprint_fallback,
     ).get(key, "")
@@ -78,9 +78,9 @@ def get_media_probe_cache_many(
 ) -> dict[tuple[str, str, int], str]:
     """批量读取缓存；云盘调用方可显式按内容指纹复用成功结果。"""
     requested = {
-        (str(file_id), str(etag or ""), int(size or 0))
+        (file_id, (etag or ""), (size or 0))
         for file_id, etag, size in versions
-        if str(file_id or "").strip()
+        if (file_id or "").strip()
     }
     if not requested:
         return {}
@@ -151,10 +151,10 @@ def prune_media_probe_cache(
 ) -> int:
     """分批清理长期未更新和最旧探测缓存，保留近期内容指纹复用价值。"""
     if expired_before is None:
-        cutoff = datetime.now(UTC) - timedelta(days=max(1, int(retention_days)))
+        cutoff = datetime.now(UTC) - timedelta(days=max(1, retention_days))
         expired_before = cutoff.strftime("%Y-%m-%d %H:%M:%S")
-    row_limit = max(1, int(max_rows))
-    delete_limit = max(1, int(batch_size))
+    row_limit = max(1, max_rows)
+    delete_limit = max(1, batch_size)
     deleted = 0
     with _database().get_conn() as conn:
         cursor = conn.execute(
@@ -162,7 +162,7 @@ def prune_media_probe_cache(
             "SELECT file_id FROM media_probe_cache WHERE updated_at < ? "
             "ORDER BY updated_at, file_id LIMIT ?"
             ")",
-            (str(expired_before), delete_limit),
+            (expired_before, delete_limit),
         )
         deleted += max(0, int(cursor.rowcount or 0))
         total = int(conn.execute(
@@ -212,7 +212,7 @@ def upsert_media_probe_cache(file_id: str, etag: str, size: int, payload: str) -
             "ON CONFLICT(file_id) DO UPDATE SET etag=excluded.etag,size=excluded.size,"
             "payload=excluded.payload,updated_at=excluded.updated_at",
             (
-                str(file_id), str(etag or ""), int(size or 0), str(payload), database.now(),
+                file_id, (etag or ""), (size or 0), payload, database.now(),
             ),
         )
     _maybe_prune_media_probe_cache()
@@ -223,10 +223,10 @@ def upsert_media_probe_failure_cache(
 ) -> bool:
     """原子写入失败缓存；同一文件版本的成功结果拥有永久优先级。"""
     database = _database()
-    normalized_file_id = str(file_id)
-    normalized_etag = str(etag or "")
-    normalized_size = int(size or 0)
-    normalized_payload = str(payload)
+    normalized_file_id = file_id
+    normalized_etag = (etag or "")
+    normalized_size = (size or 0)
+    normalized_payload = payload
     with database.get_conn() as conn:
         # 锁住 read-check-write 窗口，防止迟到失败覆盖刚完成的成功探测。
         conn.execute("BEGIN IMMEDIATE")

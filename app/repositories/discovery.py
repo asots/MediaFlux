@@ -19,13 +19,13 @@ def _database() -> "ModuleType":
 def get_discovery_cache(cache_key: str) -> sqlite3.Row | None:
     with _database().get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM discovery_cache WHERE cache_key=?", (str(cache_key),)
+            "SELECT * FROM discovery_cache WHERE cache_key=?", (cache_key,)
         ).fetchone()
 
 
 def get_discovery_cache_many(cache_keys: list[str]) -> dict[str, sqlite3.Row]:
     """一次批量读取列表页需要的探索缓存行。"""
-    keys = list(dict.fromkeys(str(key) for key in cache_keys if str(key)))
+    keys = list(dict.fromkeys(key for key in cache_keys if key))
     if not keys:
         return {}
     result: dict[str, sqlite3.Row] = {}
@@ -60,8 +60,8 @@ def upsert_discovery_cache(
             "expires_at=excluded.expires_at,stale_until=excluded.stale_until,"
             "last_error=excluded.last_error,status=excluded.status",
             (
-                str(cache_key), str(provider), str(payload), fetched_at, expires_at,
-                stale_until, str(last_error or "")[:500], normalized_status,
+                cache_key, provider, payload, fetched_at, expires_at,
+                stale_until, (last_error or "")[:500], normalized_status,
             ),
         )
 
@@ -70,7 +70,7 @@ def update_discovery_cache_error(cache_key: str, last_error: str) -> None:
     with _database().get_conn() as conn:
         conn.execute(
             "UPDATE discovery_cache SET last_error=? WHERE cache_key=?",
-            (str(last_error or "")[:500], str(cache_key)),
+            ((last_error or "")[:500], cache_key),
         )
 
 
@@ -81,8 +81,8 @@ def purge_discovery_cache(
     batch_size: int = 5_000,
 ) -> int:
     """分批清理过期和最旧探索缓存，避免持久缓存无界增长。"""
-    row_limit = max(1, int(max_rows))
-    delete_limit = max(1, int(batch_size))
+    row_limit = max(1, max_rows)
+    delete_limit = max(1, batch_size)
     deleted = 0
     with _database().get_conn() as conn:
         cursor = conn.execute(
@@ -90,7 +90,7 @@ def purge_discovery_cache(
             "SELECT cache_key FROM discovery_cache WHERE stale_until < ? "
             "ORDER BY stale_until, cache_key LIMIT ?"
             ")",
-            (str(expired_before), delete_limit),
+            (expired_before, delete_limit),
         )
         deleted += max(0, int(cursor.rowcount or 0))
         total = int(conn.execute(
@@ -115,7 +115,7 @@ def get_media_external_id(
     with _database().get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_external_ids WHERE provider=? AND external_id=? AND media_type=?",
-            (str(provider), str(external_id), str(media_type)),
+            (provider, external_id, media_type),
         ).fetchone()
 
 
@@ -124,9 +124,9 @@ def list_media_external_ids(
 ) -> dict[tuple[str, str, str], sqlite3.Row]:
     """在单个连接内批量读取跨来源映射，避免收藏列表逐条建连。"""
     keys = list(dict.fromkeys(
-        (str(provider), str(external_id), str(media_type))
+        (provider, external_id, media_type)
         for provider, external_id, media_type in identities
-        if str(provider) and str(external_id) and str(media_type)
+        if provider and external_id and media_type
     ))
     if not keys:
         return {}
@@ -175,8 +175,8 @@ def upsert_media_external_id(
             "version=media_external_ids.version+1,updated_at=excluded.updated_at "
             "WHERE media_external_ids.confirmed=0 OR excluded.confirmed=1",
             (
-                str(provider), str(external_id), str(media_type), str(tmdb_id),
-                str(title or ""), str(year or ""),
+                provider, external_id, media_type, tmdb_id,
+                (title or ""), (year or ""),
                 max(0.0, min(float(confidence or 0), 1.0)),
                 1 if confirmed else 0, database.now(),
             ),
@@ -194,11 +194,11 @@ def confirm_media_external_id_if_unchanged(
 ) -> bool:
     """仅当来源映射仍与确认预检快照一致时写入 confirmed 映射。"""
     database = _database()
-    identity = (str(provider), str(external_id), str(media_type))
+    identity = (provider, external_id, media_type)
     values = (
-        str(tmdb_id),
-        str(title or ""),
-        str(year or ""),
+        tmdb_id,
+        (title or ""),
+        (year or ""),
         1.0,
         1,
         database.now(),
@@ -230,12 +230,12 @@ def confirm_media_external_id_if_unchanged(
 
 
 def _watchlist_key(provider: str, external_id: str, media_type: str) -> str:
-    return f"{str(provider).lower()}:{str(media_type).lower()}:{str(external_id)}"
+    return f"{provider.lower()}:{media_type.lower()}:{external_id}"
 
 
 def list_media_watchlist_keys(identities: list[tuple[str, str, str]]) -> set[str]:
     """先去重再有界分批；一个读事务保持整页收藏状态的一致快照。"""
-    normalized = list(dict.fromkeys((str(p), str(e), str(m)) for p, e, m in identities))
+    normalized = list(dict.fromkeys((p, e, m) for p, e, m in identities))
     if not normalized:
         return set()
     watched: set[str] = set()
@@ -273,8 +273,8 @@ def add_media_watchlist(
             "VALUES(?,?,?,?,?,?,?) ON CONFLICT(provider,external_id,media_type) DO UPDATE SET "
             "title=excluded.title,year=excluded.year,poster_key=excluded.poster_key",
             (
-                str(provider), str(external_id), str(media_type), str(title or ""),
-                str(year or ""), str(poster_key or ""), database.now(),
+                provider, external_id, media_type, (title or ""),
+                (year or ""), (poster_key or ""), database.now(),
             ),
         )
 
@@ -285,7 +285,7 @@ def get_media_watchlist(
     with _database().get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_watchlist WHERE provider=? AND external_id=? AND media_type=?",
-            (str(provider), str(external_id), str(media_type)),
+            (provider, external_id, media_type),
         ).fetchone()
 
 
@@ -294,7 +294,7 @@ def get_media_watchlist_by_id(watchlist_id: int) -> sqlite3.Row | None:
     with _database().get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_watchlist WHERE id=?",
-            (int(watchlist_id),),
+            (watchlist_id,),
         ).fetchone()
 
 
@@ -302,7 +302,7 @@ def delete_media_watchlist(provider: str, external_id: str, media_type: str) -> 
     with _database().get_conn() as conn:
         cur = conn.execute(
             "DELETE FROM media_watchlist WHERE provider=? AND external_id=? AND media_type=?",
-            (str(provider), str(external_id), str(media_type)),
+            (provider, external_id, media_type),
         )
         return bool(cur.rowcount)
 
@@ -312,8 +312,8 @@ def list_media_watchlist(
 ) -> list[sqlite3.Row]:
     """按编号倒序读取共享收藏；续页不受新收藏插入或前页删除影响。"""
     where = " WHERE id < ?" if before_number is not None else ""
-    parameters = (() if before_number is None else (int(before_number),)) + (
-        max(1, min(int(limit), 1000)),
+    parameters = (() if before_number is None else (before_number,)) + (
+        max(1, min(limit, 1000)),
     )
     with _database().get_conn() as conn:
         return conn.execute(

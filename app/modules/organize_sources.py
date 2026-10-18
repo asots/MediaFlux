@@ -94,9 +94,9 @@ def normalize_organize_source_ids(
 
     if configured_sources is not None:
         allowed = {
-            str(item.get("id") or "").strip()
+            (item.get("id") or "").strip()
             for item in configured_sources
-            if str(item.get("id") or "").strip()
+            if (item.get("id") or "").strip()
         }
         unknown = [source_id for source_id in source_ids if source_id not in allowed]
         if unknown:
@@ -109,7 +109,7 @@ def normalize_organize_source_ids(
 def encode_organize_source_ids(source_ids: list[str]) -> str:
     """输出稳定、紧凑的来源 ID 数组。"""
     return json.dumps(
-        list(dict.fromkeys(str(item).strip() for item in source_ids if str(item).strip())),
+        list(dict.fromkeys(item.strip() for item in source_ids if item.strip())),
         ensure_ascii=False,
         separators=(",", ":"),
     )

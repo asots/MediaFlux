@@ -257,7 +257,7 @@ def _filter_search_result(
         card
         for card in result.items
         if (not media_type or card.media_type == media_type)
-        and (not year or str(card.year or "").strip() == year)
+        and (not year or (card.year or "").strip() == year)
     )
     return DiscoverySearchResult(
         query=result.query,
@@ -444,12 +444,12 @@ def _result_payload(
         for card in result.items[:limit]
         if isinstance(card, MediaCard)
     ]
-    payload = {
+    payload: dict[str, Any] = {
         "query": _visible_text(result.query, limit=120),
         "page": result.page,
         "total": len(result.items),
         "returned": len(items),
-        "has_more": bool(result.has_more),
+        "has_more": (result.has_more),
         "providers_attempted": [
             _public_identifier(name, limit=20) for name in result.providers_attempted
         ],
@@ -578,7 +578,7 @@ def recommend_discovery(
     arguments: dict[str, Any], context: ToolContext | None = None,
 ) -> ToolResult:
     normalized = recommend_arguments(arguments)
-    payload = {
+    payload: dict[str, Any] = {
         "provider": normalized["provider"],
         "category": "discover" if normalized["provider"] == "tmdb" else "recommend",
         "media_type": normalized["media_type"],
@@ -701,8 +701,8 @@ def _calendar_payload(
         "total": len(cards),
         "returned": len(items),
         "has_more": bool(page.has_more or len(cards) > limit),
-        "cached": bool(page.cached),
-        "stale": bool(page.stale),
+        "cached": (page.cached),
+        "stale": (page.stale),
         "provider_status": health_status,
         "retry_after": _safe_retry_after(getattr(health, "retry_after", 0)),
         "items": items,

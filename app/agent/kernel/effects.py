@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import re
+import time
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import re
-import time
 from typing import Any, Protocol
 
 from app.agent.confirmation import ConfirmationExpiredError, ConfirmationStore
@@ -15,7 +15,6 @@ from app.agent.public_safety import sanitize_public_text
 from app.sensitive_data import contains_sensitive_credential, is_sensitive_key
 
 from .capabilities import KernelToolSpec, ToolEffect
-
 
 _PRIVATE_EDIT_KEY = re.compile(
     r"(?:^|_)(?:id|ids|ref|refs|handle|fingerprint|token|secret|password|cookie|"
@@ -106,7 +105,7 @@ class EffectPlan:
             if self.expires_at >= 946_684_800
             else ""
         )
-        result = {
+        result: dict[str, Any] = {
             "plan_id": self.plan_id,
             "tool_name": self.tool_name,
             "effect": self.effect.value,
@@ -198,12 +197,12 @@ class ConfirmationEffectPlanStore:
         record_actions: bool = False,
     ) -> None:
         self.store = store or ConfirmationStore()
-        self.record_actions = bool(record_actions)
+        self.record_actions = record_actions
 
     @staticmethod
     def _scoped_owner(owner: str, session_id: str) -> str:
-        owner_key = str(owner or "").strip()
-        session_key = str(session_id or "").strip()
+        owner_key = (owner or "").strip()
+        session_key = (session_id or "").strip()
         if not owner_key or not session_key:
             raise EffectPlanError("effect owner and session are required")
         return f"kernel:{owner_key}\x1f{session_key}"
@@ -227,7 +226,7 @@ class ConfirmationEffectPlanStore:
         effective_arguments = dict(prepared.arguments or arguments)
         normalized_public_result = dict(public_result or {})
         edit_deadline = prepared.metadata.get("confirmation_deadline")
-        if type(edit_deadline) in (int, float):
+        if (type(edit_deadline) is int or type(edit_deadline) is float):
             remaining = edit_deadline - self.store._clock()
             if remaining <= 0:
                 raise EffectPlanError("effect plan expired during edit")
@@ -235,7 +234,7 @@ class ConfirmationEffectPlanStore:
         contract = {
             "kernel_effect_version": self.CONTRACT_VERSION,
             "session_id": session_id,
-            "generation": int(generation),
+            "generation": generation,
             "effect": effect.value,
             "preview": deepcopy(dict(prepared.preview)),
             "public_result": deepcopy(normalized_public_result),
@@ -249,7 +248,7 @@ class ConfirmationEffectPlanStore:
             owner=scoped_owner,
             tool_name=tool_name,
             arguments=effective_arguments,
-            context_fingerprint=str(prepared.snapshot_fingerprint or ""),
+            context_fingerprint=(prepared.snapshot_fingerprint or ""),
             confirmation_contract=contract,
             replace_active_ticket=True,
             deadline=deadline,
@@ -258,7 +257,7 @@ class ConfirmationEffectPlanStore:
             plan_id=ticket.confirmation_id,
             owner=owner,
             session_id=session_id,
-            generation=int(generation),
+            generation=generation,
             tool_name=tool_name,
             effect=effect,
             arguments=deepcopy(ticket.arguments),
@@ -295,7 +294,7 @@ class ConfirmationEffectPlanStore:
             or stored_session != session_id
         ):
             raise EffectPlanError("effect plan scope is invalid")
-        if stored_generation != int(generation):
+        if stored_generation != generation:
             raise EffectPlanError("effect plan is stale")
         if (
             not isinstance(preview, dict)
@@ -370,10 +369,10 @@ class ConfirmationEffectPlanStore:
             now = self.store._clock()
             recovery_until = plan.confirmation_contract.get("reference_recovery_until")
             edit_deadline = plan.metadata.get("confirmation_deadline")
-            if type(edit_deadline) in (int, float) and edit_deadline <= now:
+            if (type(edit_deadline) is int or type(edit_deadline) is float) and edit_deadline <= now:
                 return None
             return plan if plan.expires_at > now or (
-                type(recovery_until) in (int, float) and recovery_until > now
+                (type(recovery_until) is int or type(recovery_until) is float) and recovery_until > now
             ) else None
         except EffectPlanError:
             return None

@@ -70,7 +70,7 @@ def _int_config(name: str, default: int, *, minimum: int, maximum: int) -> int:
 
 
 def _enabled() -> bool:
-    return str(get("WEB_SEARCH_ENABLED", "0") or "").strip().lower() in {
+    return (get("WEB_SEARCH_ENABLED", "0") or "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -97,7 +97,7 @@ def _normalize_public_url(value: Any) -> str:
         raise AgentToolError("网页读取仅支持公开 HTTPS 地址")
     if parsed.username or parsed.password:
         raise AgentToolError("网页地址不得包含用户名或密码")
-    host = str(parsed.host or "").strip().rstrip(".").casefold()
+    host = (parsed.host or "").strip().rstrip(".").casefold()
     if not host:
         raise AgentToolError("网页地址缺少主机名")
     if host in {"localhost", "localhost.localdomain"} or host.endswith(
@@ -264,7 +264,7 @@ def _map_extract_response(
         result_url = _normalize_public_url(selected.get("url") or requested_url)
     except AgentToolError:
         result_url = requested_url
-    host = str(httpx.URL(result_url).host or "").casefold()
+    host = (httpx.URL(result_url).host or "").casefold()
     original_chars = len(content)
     limited = redact_sensitive_text(content[: arguments["max_chars"]])
     truncated = original_chars > arguments["max_chars"]
@@ -278,7 +278,7 @@ def _map_extract_response(
         "content_chars": len(limited),
         "original_content_chars": original_chars,
         "truncated": truncated,
-        "elapsed_ms": max(0, int(elapsed_ms)),
+        "elapsed_ms": max(0, elapsed_ms),
     }
     model_data = {
         "url": result_url,
@@ -378,7 +378,7 @@ def read_web(arguments: dict[str, Any]) -> ToolResult:
             "通用网页读取尚未启用",
             suggestions=["请在设置中启用 Web Search，并配置 Tavily API Key。"],
         )
-    api_key = str(get("TAVILY_API_KEY", "") or "").strip()
+    api_key = (get("TAVILY_API_KEY", "") or "").strip()
     if not api_key:
         return ToolResult(
             False,

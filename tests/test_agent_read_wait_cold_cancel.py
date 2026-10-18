@@ -38,6 +38,7 @@ def test_cold_cancel_revokes_live_request_and_late_output():
             assert not await cold.session.cancel(owner=request.owner, session_id=request.session_id, request_id='wrong')
             assert (await cold.store.load(owner=request.owner, session_id=request.session_id)) == before
             assert await cold.session.cancel(owner=request.owner, session_id=request.session_id, request_id=request.request_id)
+            assert active is not None
             lease = PublicationLease(request.owner, request.session_id, active['generation'], active['turn_id'], request.request_id)
             assert not await cold.store.is_current(lease)
             after = await cold.store.load(owner=request.owner, session_id=request.session_id)

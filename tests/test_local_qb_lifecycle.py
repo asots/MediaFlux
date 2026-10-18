@@ -1,6 +1,9 @@
 """qB 任务与本地媒体移动的安全调用顺序。"""
 from __future__ import annotations
 
+from typing import cast
+from app.modules.scraper import TMDBScraper
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,7 +48,7 @@ class LocalQBLifecycleTests(IsolatedDatabaseTestCase):
         task_id = db.create_local_media_task(source_id, "hash-1", str(source), owner="admin")
         db.claim_local_media_task(task_id, expected="waiting_stable", owner="admin")
         scraper = FakeScraper(MatchResult(tmdb_id="1", title="Movie", year="2025", media_type="movie", confidence=1))
-        return root, source, target, task_id, LocalMediaService(scraper=scraper)
+        return root, source, target, task_id, LocalMediaService(scraper=cast(TMDBScraper, scraper))
 
     def test_qb_task_is_removed_only_after_verified_move(self):
         root, source, target, task_id, service = self._fixture()
@@ -68,7 +71,9 @@ class LocalQBLifecycleTests(IsolatedDatabaseTestCase):
             with self.assertRaisesRegex(OSError, "move failed"):
                 service.execute_task("admin", task_id, qb_client=qb)
         self.assertEqual(qb.calls, [("pause", "hash-1"), ("resume", "hash-1")])
-        self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "failed")
+        get_local_media_task_result = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result is not None
+        self.assertEqual(get_local_media_task_result.status, "failed")
 
     def test_qb_delete_failure_keeps_junk_files(self):
         root, source, _target, task_id, service = self._fixture()
@@ -106,6 +111,7 @@ class LocalQBLifecycleTests(IsolatedDatabaseTestCase):
         moved = list(target.rglob("*.mkv"))
         self.assertEqual(len(moved), 1)
         task = db.get_local_media_task(task_id, owner="admin")
+        assert task is not None
         self.assertEqual(task.status, "requires_manual")
         self.assertIn(str(moved[0]), task.error)
 
@@ -127,8 +133,10 @@ class LocalQBLifecycleTests(IsolatedDatabaseTestCase):
         )
         self.assertFalse((source / "Movie.2025.mkv").exists())
         self.assertTrue(any(target.rglob("*.mkv")))
+        get_local_media_task_result_2 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_2 is not None
         self.assertEqual(
-            db.get_local_media_task(task_id, owner="admin").status,
+            get_local_media_task_result_2.status,
             "requires_manual",
         )
 
@@ -176,6 +184,7 @@ class LocalQBLifecycleTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue(source_file.exists())
         task = db.get_local_media_task(task_id, owner="admin")
+        assert task is not None
         self.assertEqual(task.status, "requires_manual")
         self.assertIn("qB 任务已完成移除", task.error)
 
@@ -185,7 +194,9 @@ class LocalQBLifecycleTests(IsolatedDatabaseTestCase):
         with self.assertRaisesRegex(Exception, "缺少可用客户端"):
             service.execute_task("admin", task_id, qb_client=None)
         self.assertTrue((source / "Movie.2025.mkv").exists())
-        self.assertEqual(db.get_local_media_task(task_id, owner="admin").status, "failed")
+        get_local_media_task_result_3 = db.get_local_media_task(task_id, owner="admin")
+        assert get_local_media_task_result_3 is not None
+        self.assertEqual(get_local_media_task_result_3.status, "failed")
 
 
 if __name__ == "__main__":

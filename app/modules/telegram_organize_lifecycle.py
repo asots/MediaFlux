@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Mapping
+from typing import Any, Sequence
 
 from app.modules.telegram_media_projection import (
     attach_bounded_media_details,
@@ -55,7 +56,7 @@ def _field_value(event: NotificationEvent, label: str) -> str:
 
 def organize_lifecycle_downstream_settled(event: NotificationEvent) -> bool:
     """按持久机器状态判断终态；仅为升级前 outbox 保留文案兼容。"""
-    state = str(event.state or "").strip().lower()
+    state = (event.state or "").strip().lower()
     if state:
         return state in _TERMINAL_LIFECYCLE_STATES
     # 兼容升级前已经持久化、尚未送达且没有 state 字段的事件。新事件不得
@@ -78,7 +79,7 @@ def wait_for_organize_lifecycle_delivery(
     生命周期卡片写入 STRM/媒体库终态，且 outbox 确认最新 revision 已投递，
     才允许调用方结束输入状态。
     """
-    thread_key = f"organize:{str(task_id or '').strip()}"
+    thread_key = f"organize:{(task_id or '').strip()}"
     if thread_key == "organize:":
         return False
     timeout = max(0.0, float(timeout_seconds or 0.0))
@@ -108,7 +109,7 @@ def wait_for_organize_lifecycle_delivery(
             time.sleep(wait_seconds)
 
 
-def _counts(stats: Mapping[str, object]) -> dict[str, int]:
+def _counts(stats: Mapping[str, Any]) -> dict[str, int]:
     keys = {
         "total": "total",
         "moved": "moved",
@@ -134,7 +135,7 @@ def _counts(stats: Mapping[str, object]) -> dict[str, int]:
     return counts
 
 
-def _scan_incomplete(stats: Mapping[str, object]) -> bool:
+def _scan_incomplete(stats: Mapping[str, Any]) -> bool:
     return bool(
         stats.get("scan_errors")
         or stats.get("scan_limited")
@@ -161,8 +162,8 @@ def _summary_label(counts: Mapping[str, int], *, expired: int = 0) -> str:
 
 
 def build_organize_confirmation_rollup(
-    stats: Mapping[str, object],
-) -> dict[str, object]:
+    stats: Mapping[str, Any],
+) -> dict[str, Any]:
     """生成可随候选卡持久化的最小任务基线，不复制媒体详情。"""
     counts = _counts(stats)
     return {
@@ -188,8 +189,8 @@ def _event_downstream_failed(event: NotificationEvent) -> bool:
         _field_value(event, "STRM"),
         _field_value(event, "媒体库"),
     )
-    return bool(
-        event.title.startswith("⚠️ 光鸭整理链路")
+    return (
+        str(event.title).startswith("⚠️ 光鸭整理链路")
         or any(
             marker in value
             for value in values
@@ -235,7 +236,7 @@ def _confirmation_inventory_status(
 
 
 def _confirmation_media_lines(
-    lines: tuple[str, ...], *, inventory_status: str,
+    lines: Sequence[object], *, inventory_status: str,
 ) -> tuple[str, ...]:
     """刷新媒体详情中的整理状态，移除已失效的待确认原因。
 
@@ -263,7 +264,7 @@ def _confirmation_media_lines(
 
 
 def _replace_field(
-    fields: tuple[tuple[object, object], ...], label: str, value: str,
+    fields: Sequence[tuple[object, object]], label: str, value: str,
 ) -> tuple[tuple[object, object], ...]:
     result: list[tuple[object, object]] = []
     replaced = False
@@ -280,7 +281,7 @@ def _replace_field(
 
 
 def build_organize_lifecycle_event(
-    stats: Mapping[str, object],
+    stats: Mapping[str, Any],
     *,
     source_name: str,
     strm_status: str = "已排队",
@@ -378,9 +379,9 @@ def build_organize_lifecycle_event(
     fields.extend((("STRM", strm_status), ("媒体库", media_refresh)))
     if stopped:
         lifecycle_state = "stopped"
-    elif str(strm_status or "").strip() in _PENDING_STRM_STATES:
+    elif (strm_status or "").strip() in _PENDING_STRM_STATES:
         lifecycle_state = "queued"
-    elif counts["failed"] and str(strm_status or "").strip() == "未执行":
+    elif counts["failed"] and (strm_status or "").strip() == "未执行":
         lifecycle_state = "failed"
     elif attention:
         lifecycle_state = "partial"
@@ -397,7 +398,7 @@ def build_organize_lifecycle_event(
         event,
         build_media_detail_blocks(
             tuple(stats.get("media_items") or ()),
-            inventory_final=not bool(attention or stopped),
+            inventory_final=not (attention or stopped),
         ),
     )
 
@@ -406,8 +407,8 @@ def update_organize_lifecycle_confirmations(
     task_id: str,
     *,
     chat_id: str = "",
-    baseline: Mapping[str, object],
-    outcomes: Mapping[str, object],
+    baseline: Mapping[str, Any],
+    outcomes: Mapping[str, Any],
     topic_enabled: bool = True,
 ) -> NotificationPublishResult:
     """全部 Telegram 候选收口后，一次性回写原整理汇总。"""
@@ -539,7 +540,7 @@ def update_organize_lifecycle_confirmations(
     )
 
 
-def _importance(stats: Mapping[str, object]) -> NotificationImportance:
+def _importance(stats: Mapping[str, Any]) -> NotificationImportance:
     counts = _counts(stats)
     if counts["confirm"]:
         return NotificationImportance.ACTION
@@ -556,7 +557,7 @@ def _importance(stats: Mapping[str, object]) -> NotificationImportance:
 
 def publish_organize_lifecycle(
     task_id: str,
-    stats: Mapping[str, object],
+    stats: Mapping[str, Any],
     *,
     source_name: str,
     chat_id: str = "",
@@ -595,21 +596,21 @@ def update_organize_lifecycle_downstream(
     )
     if previous is None:
         return NotificationPublishResult(False, status="missing_thread")
-    fields = _replace_field(previous.fields, "STRM", str(strm_status or ""))
-    fields = _replace_field(fields, "媒体库", str(media_refresh or ""))
-    title = previous.title
+    fields = _replace_field(previous.fields, "STRM", (strm_status or ""))
+    fields = _replace_field(fields, "媒体库", (media_refresh or ""))
+    title = str(previous.title)
     footer = previous.footer
     importance = NotificationImportance.RESULT
     if partial or error:
         title = "⚠️ 光鸭整理链路部分完成"
         importance = NotificationImportance.ERROR
         if error:
-            footer = str(error)[:260]
+            footer = error[:260]
     elif title.startswith("⏳"):
         importance = NotificationImportance.ACTION
     if title.startswith("⏹️"):
         lifecycle_state = "stopped"
-    elif str(strm_status or "").strip() in _PENDING_STRM_STATES:
+    elif (strm_status or "").strip() in _PENDING_STRM_STATES:
         lifecycle_state = "queued"
     elif partial or error or title.startswith(("⚠️", "⏳")):
         lifecycle_state = "partial"

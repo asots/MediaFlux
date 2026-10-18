@@ -1,6 +1,9 @@
 """深审：重命名计划确认、替换预览和清理的跨进程状态边界。"""
 from __future__ import annotations
 
+from typing import cast
+from app.clients.guangya import GuangYaClient
+
 import json
 import multiprocessing
 import tempfile
@@ -51,7 +54,7 @@ class RenamePlanLifecycleTests(unittest.TestCase):
         self.enterContext(mock.patch.object(plans, "_plan_directory", return_value=self.directory))
         self.enterContext(mock.patch.object(plans, "get_web_secret", return_value=SECRET))
         self.plan = plans.build_rename_plan(
-            FakeGuangYaClient(), owner=OWNER, targets=["/整理/动漫"], mode="remove_bitrate",
+            cast(GuangYaClient, FakeGuangYaClient()), owner=OWNER, targets=["/整理/动漫"], mode="remove_bitrate",
         )
 
     def test_unconfirmed_preview_is_still_removable(self):
@@ -190,12 +193,12 @@ class RenameQueueRecoveryPlanProjectionTests(IsolatedDatabaseTestCase):
         running_owner = "rename-recovery-running"
         running = self._write_plan("1" * 32, running_owner, "running")
         running_row = self._enqueue(running, running_owner)
-        self.assertIsNotNone(claim_organize_operation_job(str(running_row["job_id"])))
+        assert (claim_organize_operation_job(str(running_row["job_id"]))) is not None
 
         cancel_owner = "rename-recovery-cancel"
         cancel = self._write_plan("2" * 32, cancel_owner, "confirmed")
         cancel_row = self._enqueue(cancel, cancel_owner)
-        self.assertIsNotNone(claim_organize_operation_job(str(cancel_row["job_id"])))
+        assert (claim_organize_operation_job(str(cancel_row["job_id"]))) is not None
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE organize_operation_jobs SET cancel_requested=1 WHERE job_id=?",
@@ -214,7 +217,7 @@ class RenameQueueRecoveryPlanProjectionTests(IsolatedDatabaseTestCase):
         tampered_owner = "rename-recovery-tampered"
         tampered = self._write_plan("4" * 32, tampered_owner, "running")
         tampered_row = self._enqueue(tampered, tampered_owner)
-        self.assertIsNotNone(claim_organize_operation_job(str(tampered_row["job_id"])))
+        assert (claim_organize_operation_job(str(tampered_row["job_id"]))) is not None
         tampered_path = plans._plan_path(tampered["plan_id"])
         tampered_json = json.loads(tampered_path.read_text(encoding="utf-8"))
         tampered_json["status"] = "completed"
@@ -226,9 +229,7 @@ class RenameQueueRecoveryPlanProjectionTests(IsolatedDatabaseTestCase):
         queue_tampered_owner = "rename-recovery-queue-tampered"
         queue_tampered = self._write_plan("7" * 32, queue_tampered_owner, "running")
         queue_tampered_row = self._enqueue(queue_tampered, queue_tampered_owner)
-        self.assertIsNotNone(
-            claim_organize_operation_job(str(queue_tampered_row["job_id"]))
-        )
+        assert (claim_organize_operation_job(str(queue_tampered_row["job_id"]))) is not None
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE organize_operation_jobs SET payload_json=? WHERE job_id=?",
@@ -251,12 +252,12 @@ class RenameQueueRecoveryPlanProjectionTests(IsolatedDatabaseTestCase):
         completed_owner = "rename-recovery-completed"
         completed = self._write_plan("5" * 32, completed_owner, "completed")
         completed_row = self._enqueue(completed, completed_owner)
-        self.assertIsNotNone(claim_organize_operation_job(str(completed_row["job_id"])))
+        assert (claim_organize_operation_job(str(completed_row["job_id"]))) is not None
 
         manual_owner = "rename-recovery-manual"
         manual = self._write_plan("6" * 32, manual_owner, "manual_review")
         manual_row = self._enqueue(manual, manual_owner)
-        self.assertIsNotNone(claim_organize_operation_job(str(manual_row["job_id"])))
+        assert (claim_organize_operation_job(str(manual_row["job_id"]))) is not None
 
         self.assertEqual(recover_orphaned_organize_operation_jobs(), 6)
         count_pending_organize_operation_jobs()
@@ -279,7 +280,7 @@ class RenameQueueRecoveryPlanProjectionTests(IsolatedDatabaseTestCase):
         plan = self._write_plan("8" * 32, owner, "confirmed")
         row = self._enqueue(plan, owner)
         claimed = claim_organize_operation_job(str(row["job_id"]))
-        self.assertIsNotNone(claimed)
+        assert (claimed) is not None
         self.assertTrue(
             finish_organize_operation_job(
                 str(row["job_id"]),

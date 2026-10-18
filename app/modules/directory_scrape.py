@@ -7,10 +7,12 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from functools import wraps
+from sqlite3 import Row
 from time import monotonic
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, Mapping
 
-from app import config, database as db
+from app import config
+from app import database as db
 from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.logger import get_logger
 from app.modules.directory_media import DirectoryInspection, DirectoryMediaInspector
@@ -19,31 +21,37 @@ from app.modules.directory_scrape_errors import (
     DirectoryScrapeGoneError,
     DirectoryScrapeRequestError,
 )
+from app.modules.episode_mapping import (
+    NUMBERING_MODES,
+    EpisodeMappingPlan,
+    build_directory_episode_evidence,
+    infer_episode_mapping,
+    infer_merged_season_cour_mapping,
+    infer_overflow_tmdb_special_mapping,
+    normalize_numbering_mode,
+    season_episode_counts,
+)
 from app.modules.organize import (
     OrganizePlan,
-    OrganizeRules,
     Organizer,
+    OrganizeRules,
     enforce_fixed_organize_rules,
     organize_rules_snapshot,
     organize_rules_snapshot_matches,
 )
-from app.modules.organize_sources import normalize_organize_sources
-from app.repositories.organize_operation_jobs import OrganizeOperationCancelled
-from app.modules.episode_mapping import (
-    EpisodeMappingPlan,
-    NUMBERING_MODES,
-    build_directory_episode_evidence,
-    infer_episode_mapping,
-    infer_overflow_tmdb_special_mapping,
-    infer_merged_season_cour_mapping,
-    normalize_numbering_mode,
-    season_episode_counts,
+from app.modules.organize_delete_audit import (
+    DeleteCandidate,
+    execute_recycle_bin_delete,
 )
-from app.modules.organize_delete_audit import DeleteCandidate, execute_recycle_bin_delete
 from app.modules.organize_postprocess import companion_target_name, media_role
+from app.modules.organize_sources import normalize_organize_sources
 from app.modules.scraper import Candidate, MatchResult, ReleaseParseResult, TMDBScraper
-from app.modules.subtitle_identity import plan_subtitle_companions
 from app.modules.special_media import is_special_media_name, is_special_path
+from app.modules.subtitle_identity import plan_subtitle_companions
+from app.repositories.organize_operation_jobs import OrganizeOperationCancelled
+
+if TYPE_CHECKING:
+    from app.modules.nsfw import NsfwRecognizer
 
 
 logger = get_logger(__name__)
@@ -101,7 +109,7 @@ class PreviewRecord:
     season_override: int | None
     episode_override: int | None
     numbering_mode: str
-    position_overrides: dict[object, tuple[int | None, int | None]]
+    position_overrides: dict[str | tuple[str, str], tuple[int | None, int | None]]
     created_at: float
     claimed: bool = False
 
@@ -116,7 +124,7 @@ class DirectoryScrapeStore:
     ) -> None:
         self._clock = clock
         self._ttl = max(1.0, float(ttl_seconds))
-        self._max_records = max(1, int(max_records))
+        self._max_records = max(1, max_records)
         self._lock = threading.RLock()
         self._inspections: dict[str, InspectionRecord] = {}
         self._previews: dict[str, PreviewRecord] = {}
@@ -157,11 +165,11 @@ class DirectoryScrapeStore:
             self._prune()
             record_id = uuid.uuid4().hex
             self._inspections[record_id] = InspectionRecord(
-                owner=str(owner),
+                owner=owner,
                 inspection=inspection,
                 rules=self._rules_copy(rules),
-                scope_type=str(scope_type),
-                scope_id=str(scope_id or inspection.directory_id),
+                scope_type=scope_type,
+                scope_id=(scope_id or inspection.directory_id),
                 created_at=self._clock(),
             )
             self._prune()
@@ -170,8 +178,8 @@ class DirectoryScrapeStore:
     def get_inspection(self, owner: str, inspection_id: str) -> InspectionRecord:
         with self._lock:
             self._prune()
-            record = self._inspections.get(str(inspection_id))
-            if record is None or record.owner != str(owner):
+            record = self._inspections.get(inspection_id)
+            if record is None or record.owner != owner:
                 raise DirectoryScrapeGoneError("检查记录不存在或已过期")
             return record
 
@@ -195,18 +203,18 @@ class DirectoryScrapeStore:
         season_override: int | None = None,
         episode_override: int | None = None,
         numbering_mode: str = "auto",
-        position_overrides: dict[object, tuple[int | None, int | None]] | None = None,
+        position_overrides: Mapping[str | tuple[str, str], tuple[int | None, int | None]] | None = None,
     ) -> str:
         with self._lock:
             self._prune()
             preview_id = uuid.uuid4().hex
             self._previews[preview_id] = PreviewRecord(
-                owner=str(owner),
-                inspection_id=str(inspection_id),
+                owner=owner,
+                inspection_id=inspection_id,
                 inspection=inspection,
                 rules=self._rules_copy(rules),
-                scope_type=str(scope_type),
-                scope_id=str(scope_id or inspection.directory_id),
+                scope_type=scope_type,
+                scope_id=(scope_id or inspection.directory_id),
                 match=dataclasses.replace(match),
                 detail=dict(detail),
                 plans=list(plans),
@@ -227,8 +235,8 @@ class DirectoryScrapeStore:
     def get_preview(self, owner: str, preview_id: str) -> PreviewRecord:
         with self._lock:
             self._prune()
-            record = self._previews.get(str(preview_id))
-            if record is None or record.owner != str(owner):
+            record = self._previews.get(preview_id)
+            if record is None or record.owner != owner:
                 raise DirectoryScrapeGoneError("预览记录不存在或已过期")
             return record
 
@@ -242,15 +250,15 @@ class DirectoryScrapeStore:
 
     def release_preview(self, owner: str, preview_id: str) -> None:
         with self._lock:
-            record = self._previews.get(str(preview_id))
-            if record is not None and record.owner == str(owner):
+            record = self._previews.get(preview_id)
+            if record is not None and record.owner == owner:
                 record.claimed = False
 
     def consume_preview(self, owner: str, preview_id: str) -> None:
         with self._lock:
-            record = self._previews.get(str(preview_id))
-            if record is not None and record.owner == str(owner):
-                self._previews.pop(str(preview_id), None)
+            record = self._previews.get(preview_id)
+            if record is not None and record.owner == owner:
+                self._previews.pop(preview_id, None)
 
 
 class FixedMatchScraper:
@@ -267,8 +275,8 @@ class FixedMatchScraper:
         season_override: int | None = None,
         episode_override: int | None = None,
         preserve_specials: bool = False,
-        position_overrides: dict[object, tuple[int | None, int | None]] | None = None,
-        multipart_overrides: dict[object, int] | None = None,
+        position_overrides: Mapping[str | tuple[str, str], tuple[int | None, int | None]] | None = None,
+        multipart_overrides: Mapping[object, int | str | float] | None = None,
         map_source_positions: bool = False,
     ) -> None:
         self.delegate = delegate
@@ -276,14 +284,14 @@ class FixedMatchScraper:
         self.detail = dict(detail or {})
         self.season_override = season_override
         self.episode_override = episode_override
-        self.preserve_specials = bool(preserve_specials)
+        self.preserve_specials = preserve_specials
         self.position_overrides = dict(position_overrides or {})
         self.multipart_overrides = dict(multipart_overrides or {})
         # 普通 Web / 本地预览传入的 position_overrides 已由统一映射器计算完成；
         # Telegram 候选确认保存的是原始源位置，需要 Organizer 在取得所选
         # TMDB 详情后重新执行同一套安全映射。是否“重新映射”和是否“最终
         # 校验”是两个独立能力：所有真实 TMDB 委托都必须复核最终季集位置。
-        self.map_source_positions = bool(map_source_positions)
+        self.map_source_positions = map_source_positions
         from inspect import getattr_static
 
         def declared_callable(name: str) -> bool:
@@ -293,7 +301,7 @@ class FixedMatchScraper:
                 return False
             return callable(getattr(delegate, name, None))
 
-        self.supports_tmdb_position_validation = bool(
+        self.supports_tmdb_position_validation = (
             declared_callable("validate_position")
             and declared_callable("position_validation_error")
         )
@@ -304,18 +312,18 @@ class FixedMatchScraper:
     def _position_override(
         self, filename: str, parent_path: str = ""
     ) -> tuple[int | None, int | None] | None:
-        normalized_parent = str(parent_path or "").replace("\\", "/").strip("/")
-        normalized_filename = str(filename)
-        position = self.position_overrides.get((str(parent_path or ""), normalized_filename))
+        normalized_parent = (parent_path or "").replace("\\", "/").strip("/")
+        normalized_filename = filename
+        position = self.position_overrides.get(((parent_path or ""), normalized_filename))
         if position is None and normalized_parent:
             suffix_matches: list[tuple[int | None, int | None]] = []
             for key, candidate in self.position_overrides.items():
                 if not isinstance(key, tuple) or len(key) != 2:
                     continue
                 relative_parent, override_filename = key
-                if str(override_filename) != normalized_filename:
+                if override_filename != normalized_filename:
                     continue
-                normalized_relative = str(relative_parent or "").replace("\\", "/").strip("/")
+                normalized_relative = (relative_parent or "").replace("\\", "/").strip("/")
                 if normalized_relative and (
                     normalized_parent == normalized_relative
                     or normalized_parent.endswith(f"/{normalized_relative}")
@@ -331,9 +339,9 @@ class FixedMatchScraper:
         self, filename: str, parent_path: str = ""
     ) -> int | None:
         """读取人工确认后的成人媒体分段序号。"""
-        normalized_parent = str(parent_path or "").replace("\\", "/").strip("/")
-        normalized_filename = str(filename)
-        value = self.multipart_overrides.get((str(parent_path or ""), normalized_filename))
+        normalized_parent = (parent_path or "").replace("\\", "/").strip("/")
+        normalized_filename = filename
+        value = self.multipart_overrides.get(((parent_path or ""), normalized_filename))
         if value is None and normalized_parent:
             matches: list[int] = []
             for key, candidate in self.multipart_overrides.items():
@@ -403,10 +411,10 @@ class FixedMatchScraper:
         return self.delegate.parse_media(filename)
 
     def get_detail(
-        self, tmdb_id: str, media_type: str, *, force_refresh: bool = False,
+        self, tmdb_id: str | int, media_type: str, *, force_refresh: bool = False,
     ) -> dict:
         requested_id = str(tmdb_id)
-        fixed_id = str(self.fixed_match.tmdb_id)
+        fixed_id = self.fixed_match.tmdb_id
         if requested_id == fixed_id and not force_refresh:
             return dict(self.detail)
 
@@ -451,39 +459,39 @@ class PreviewSnapshotGuangYaClient:
     def __init__(self, client, inspection: DirectoryInspection) -> None:
         self._client = client
         self._listings: dict[str, list[GuangYaFile]] = {
-            str(inspection.directory_id): []
+            inspection.directory_id: []
         }
         self._infos: dict[str, GuangYaFile] = {}
         for item in inspection.directories:
             cloud = GuangYaFile(
-                str(item.file_id), str(item.name), True, 0,
-                str(item.etag or ""), str(item.parent_id or "0"),
+                item.file_id, item.name, True, 0,
+                (item.etag or ""), (item.parent_id or "0"),
             )
             self._infos[cloud.file_id] = cloud
             self._listings.setdefault(cloud.file_id, [])
         for item in inspection.directories:
-            file_id = str(item.file_id)
-            if file_id == str(inspection.directory_id):
+            file_id = item.file_id
+            if file_id == inspection.directory_id:
                 continue
-            parent_id = str(item.parent_id or "0")
+            parent_id = (item.parent_id or "0")
             if parent_id in self._listings:
                 self._listings[parent_id].append(self._infos[file_id])
         for item in (*inspection.videos, *inspection.companions):
             cloud = GuangYaFile(
-                str(item.file_id), str(item.name), False, int(item.size or 0),
-                str(item.etag or ""), str(item.parent_id or "0"),
+                item.file_id, item.name, False, (item.size or 0),
+                (item.etag or ""), (item.parent_id or "0"),
             )
             self._infos[cloud.file_id] = cloud
             self._listings.setdefault(cloud.parent_id, []).append(cloud)
 
     def list_dir(self, parent_id: str):
-        key = str(parent_id)
+        key = parent_id
         if key in self._listings:
             return list(self._listings[key])
         return self._client.list_dir(parent_id)
 
     def file_info(self, file_id: str):
-        return self._infos.get(str(file_id)) or self._client.file_info(file_id)
+        return self._infos.get(file_id) or self._client.file_info(file_id)
 
     def __getattr__(self, name):
         return getattr(self._client, name)
@@ -543,7 +551,7 @@ class DirectoryScrapeService:
         self._operation_depth = threading.local()
         self._nsfw_lock = threading.RLock()
         self._nsfw_active_leases: dict[int, int] = {}
-        self._retired_nsfw_recognizers: dict[int, object] = {}
+        self._retired_nsfw_recognizers: dict[int, NsfwRecognizer] = {}
 
     @contextmanager
     def _lifecycle_operation(self):
@@ -652,9 +660,9 @@ class DirectoryScrapeService:
             return resources_closed
 
     @staticmethod
-    def _close_nsfw_recognizers(recognizers: list[object]) -> list[object]:
+    def _close_nsfw_recognizers(recognizers: list[NsfwRecognizer]) -> list[NsfwRecognizer]:
         seen: set[int] = set()
-        failed: list[object] = []
+        failed: list[NsfwRecognizer] = []
         for recognizer in recognizers:
             identity = id(recognizer)
             if recognizer is None or identity in seen:
@@ -678,7 +686,7 @@ class DirectoryScrapeService:
                     failed.append(recognizer)
         return failed
 
-    def _retire_nsfw_recognizer_locked(self, recognizer) -> list[object]:
+    def _retire_nsfw_recognizer_locked(self, recognizer) -> list[NsfwRecognizer]:
         if recognizer is None:
             return []
         identity = id(recognizer)
@@ -704,17 +712,17 @@ class DirectoryScrapeService:
     def _resolve_nsfw_recognizer_locked(
         self,
         rules: OrganizeRules,
-    ) -> tuple[object | None, list[object]]:
+    ) -> tuple[NsfwRecognizer | None, list[NsfwRecognizer]]:
         operation_depth = int(getattr(self._operation_depth, "value", 0) or 0)
         if self._closed or (self._closing and operation_depth <= 0):
             return None, []
-        if not rules.nsfw_enabled or not str(rules.nsfw_metatube_endpoint or "").strip():
+        if not rules.nsfw_enabled or not (rules.nsfw_metatube_endpoint or "").strip():
             return None, []
         key = (
-            str(rules.nsfw_metatube_endpoint or "").strip(),
-            str(rules.nsfw_metatube_token or ""),
-            str(rules.nsfw_strip_domains or ""),
-            int(rules.nsfw_timeout_seconds or 8),
+            (rules.nsfw_metatube_endpoint or "").strip(),
+            (rules.nsfw_metatube_token or ""),
+            (rules.nsfw_strip_domains or ""),
+            (rules.nsfw_timeout_seconds or 8),
         )
         if self._cached_nsfw_key == key and self._cached_nsfw_recognizer is not None:
             return self._cached_nsfw_recognizer, []
@@ -820,7 +828,7 @@ class DirectoryScrapeService:
             inspection,
             rules,
             scope_type="directory",
-            scope_id=str(directory_id),
+            scope_id=directory_id,
         )
         return self._inspection_payload(inspection_id, inspection, rules)
 
@@ -836,7 +844,7 @@ class DirectoryScrapeService:
             inspection,
             rules,
             scope_type="file",
-            scope_id=str(file_id),
+            scope_id=file_id,
         )
         return self._inspection_payload(inspection_id, inspection, rules)
 
@@ -900,10 +908,10 @@ class DirectoryScrapeService:
             "episode": inspection.episode,
             "season_inferred": inspection.season_inferred,
             "requires_manual_match": inspection.requires_manual_match,
-            "nsfw_only": bool(rules.nsfw_exclusive),
-            "tmdb_enabled": not bool(rules.nsfw_exclusive),
+            "nsfw_only": rules.nsfw_exclusive,
+            "tmdb_enabled": not rules.nsfw_exclusive,
             "metatube_configured": bool(
-                rules.nsfw_enabled and str(rules.nsfw_metatube_endpoint or "").strip()
+                rules.nsfw_enabled and (rules.nsfw_metatube_endpoint or "").strip()
             ),
             "manual_match_reason": inspection.manual_match_reason,
             "counts": dict(inspection.counts),
@@ -939,12 +947,12 @@ class DirectoryScrapeService:
         year: str = "",
     ) -> list[dict]:
         record = self.store.get_inspection(owner, inspection_id)
-        search_query = str(query or record.inspection.suggested_query).strip()
+        search_query = (query or record.inspection.suggested_query).strip()
         if not search_query:
             raise DirectoryScrapeRequestError(
                 "请输入番号或文件名" if record.rules.nsfw_exclusive else "请输入 TMDB 搜索词"
             )
-        normalized_type = str(media_type or "auto").strip().lower()
+        normalized_type = (media_type or "auto").strip().lower()
         if normalized_type not in {"auto", "movie", "tv"}:
             raise DirectoryScrapeRequestError("媒体类型只能是自动、电影或剧集")
         types = (
@@ -958,10 +966,10 @@ class DirectoryScrapeService:
             for current_type in types:
                 for candidate in self.scraper.search_candidates(
                     search_query,
-                    str(year or "").strip(),
+                    (year or "").strip(),
                     current_type,
                 ):
-                    key = ("tmdb", str(candidate.tmdb_id), current_type)
+                    key = ("tmdb", candidate.tmdb_id, current_type)
                     if not candidate.tmdb_id or key in seen:
                         continue
                     seen.add(key)
@@ -971,8 +979,8 @@ class DirectoryScrapeService:
                 if recognizer is not None:
                     for candidate in recognizer.candidates(search_query):
                         key = (
-                            str(candidate.provider or "metatube"),
-                            str(candidate.external_id or ""),
+                            (candidate.provider or "metatube"),
+                            (candidate.external_id or ""),
                             "movie",
                         )
                         if not candidate.external_id or key in seen:
@@ -1003,10 +1011,10 @@ class DirectoryScrapeService:
             raise DirectoryScrapeRequestError(
                 "成人番号专用来源不使用豆瓣、Bangumi 或普通 TMDB 线索"
             )
-        search_query = str(query or record.inspection.suggested_query).strip()
+        search_query = (query or record.inspection.suggested_query).strip()
         if not search_query:
             raise DirectoryScrapeRequestError("请输入外部资料搜索词")
-        normalized_type = str(media_type or "auto").strip().lower()
+        normalized_type = (media_type or "auto").strip().lower()
         if normalized_type not in {"auto", "movie", "tv"}:
             raise DirectoryScrapeRequestError("媒体类型只能是自动、电影或剧集")
         resolved_type = (
@@ -1093,7 +1101,7 @@ class DirectoryScrapeService:
         if media_type not in {"movie", "tv"}:
             raise DirectoryScrapeRequestError("媒体类型只能是电影或剧集")
         normalized_type = media_type
-        raw_numbering_mode = str(numbering_mode or "auto").strip().lower()
+        raw_numbering_mode = (numbering_mode or "auto").strip().lower()
         if raw_numbering_mode not in NUMBERING_MODES:
             raise DirectoryScrapeRequestError("剧集编号模式无效")
         normalized_numbering_mode = normalize_numbering_mode(raw_numbering_mode)
@@ -1113,18 +1121,18 @@ class DirectoryScrapeService:
             raise DirectoryScrapeConflictError("目录内容已变化，请重新检查") from exc
         if current.fingerprint != record.inspection.fingerprint:
             raise DirectoryScrapeConflictError("目录内容已变化，请重新检查")
-        resolved_provider = str(provider or "tmdb").strip().lower()
+        resolved_provider = (provider or "tmdb").strip().lower()
         if record.rules.nsfw_exclusive and resolved_provider != "metatube":
             raise DirectoryScrapeRequestError(
                 "成人番号专用来源只接受 MetaTube 精确番号候选"
             )
-        requested_tmdb_id = str(tmdb_id or "").strip()
+        requested_tmdb_id = (tmdb_id or "").strip()
         if resolved_provider == "metatube":
             with self._nsfw_recognizer_lease(record.rules) as recognizer:
                 if recognizer is None:
                     raise DirectoryScrapeRequestError("MetaTube 成人内容识别未启用或配置无效")
                 try:
-                    match, detail = recognizer.resolve(str(external_id or ""))
+                    match, detail = recognizer.resolve(external_id or "")
                 except Exception as exc:
                     raise DirectoryScrapeRequestError(
                         str(exc) or "MetaTube 详情不存在或无法确认"
@@ -1140,7 +1148,7 @@ class DirectoryScrapeService:
             match = self.scraper.match_from_tmdb(requested_tmdb_id, normalized_type)
             if not match.tmdb_id or match.need_confirm:
                 raise DirectoryScrapeRequestError("TMDB 详情不存在或无法确认")
-        season_detail_loader = getattr(self.scraper, "get_tv_season_detail", None)
+        season_detail_loader = Organizer._declared_callable(self.scraper, "get_tv_season_detail")
         position_overrides, episode_mappings = self._mapped_position_overrides(
             current,
             detail,
@@ -1307,7 +1315,7 @@ class DirectoryScrapeService:
         cancel_event = _CallbackCancelEvent(cancel_check) if cancel_check else None
 
         def cancellation_requested() -> bool:
-            return bool(cancel_event is not None and cancel_event.is_set())
+            return (cancel_event is not None and cancel_event.is_set())
 
         def check_cancel() -> None:
             if cancellation_requested():
@@ -1336,7 +1344,9 @@ class DirectoryScrapeService:
                 raise DirectoryScrapeConflictError("目录内容已变化，请重新检查并生成预览")
             check_cancel()
             operation_token = f"manual-{uuid.uuid4().hex}"
-            from app.modules.organize_probe_notifications import build_notification_context
+            from app.modules.organize_probe_notifications import (
+                build_notification_context,
+            )
 
             notification_context = build_notification_context(
                 operation_token=operation_token,
@@ -1437,14 +1447,14 @@ class DirectoryScrapeService:
     def _record_successful_manual_confirmations(
         self,
         record: PreviewRecord,
-        rows: list[object],
+        rows: list[Row],
     ) -> None:
         """仅把真正写入成功的人工预览结果沉淀为后续稳定知识。"""
-        selected_id = str(record.match.tmdb_id or "").strip()
+        selected_id = (record.match.tmdb_id or "").strip()
         if (
             not selected_id
             or record.match.media_type not in {"movie", "tv"}
-            or str(record.match.provider or "tmdb").strip().lower() not in {"", "tmdb"}
+            or (record.match.provider or "tmdb").strip().lower() not in {"", "tmdb"}
         ):
             return
         confirm = getattr(self.scraper, "confirm", None)
@@ -1458,13 +1468,13 @@ class DirectoryScrapeService:
         if not successful_ids:
             return
         rejected_ids = sorted({
-            str(candidate.tmdb_id or "").strip()
+            (candidate.tmdb_id or "").strip()
             for candidate in record.match.candidates or []
-            if str(candidate.tmdb_id or "").strip()
-            and str(candidate.tmdb_id or "").strip() != selected_id
+            if (candidate.tmdb_id or "").strip()
+            and (candidate.tmdb_id or "").strip() != selected_id
         })
         for item in record.inspection.videos:
-            if str(item.file_id) not in successful_ids:
+            if item.file_id not in successful_ids:
                 continue
             parent_path = "/".join(
                 value
@@ -1519,14 +1529,14 @@ class DirectoryScrapeService:
             )
             logger.warning("目录刮削存在失败或审计异常，已保留所选源目录用于核对")
             return
-        source_id = str(record.scope_id or current.directory_id)
+        source_id = (record.scope_id or current.directory_id)
         configured_sources, config_error = normalize_organize_sources(
             config.get("GY_ORGANIZE_SOURCE_DIRS", "")
         )
         protected_ids = {
             "0",
-            str(record.rules.target_dir_id or "").strip(),
-            *(str(item.get("id") or "").strip() for item in configured_sources),
+            (record.rules.target_dir_id or "").strip(),
+            *((item.get("id") or "").strip() for item in configured_sources),
         }
         protected_ids.discard("")
         if config_error:
@@ -1612,7 +1622,7 @@ class DirectoryScrapeService:
                 candidate=DeleteCandidate(
                     file_id=source_id,
                     name=source.name or current.directory_name,
-                    parent_id=str(source.parent_id or "0"),
+                    parent_id=(source.parent_id or "0"),
                 ),
                 delete_operation=delete_operation,
             )
@@ -1681,11 +1691,11 @@ class DirectoryScrapeService:
             release_date = str(detail.get("release_date") or candidate.release_date or "")
             return {
                 "provider": "metatube",
-                "external_id": str(candidate.external_id or ""),
+                "external_id": (candidate.external_id or ""),
                 "tmdb_id": "",
                 "title": str(candidate.title or detail.get("title") or ""),
                 "original_title": str(candidate.original_title or detail.get("title") or ""),
-                "year": release_date[:4] or str(candidate.year or ""),
+                "year": release_date[:4] or (candidate.year or ""),
                 "release_date": release_date,
                 "media_type": "movie",
                 "score": float(candidate.score or 0),
@@ -1702,18 +1712,18 @@ class DirectoryScrapeService:
             }
         # 搜索列表只使用 TMDB 搜索响应已有字段；完整详情在用户选中候选后
         # 由 preview() 获取，避免 Top 3 候选各自追加 credits 请求。
-        release_date = str(candidate.release_date or "")
+        release_date = (candidate.release_date or "")
         return {
             "provider": "tmdb",
-            "external_id": str(candidate.tmdb_id),
-            "tmdb_id": str(candidate.tmdb_id),
-            "title": str(candidate.title or ""),
-            "original_title": str(candidate.original_title or ""),
-            "year": release_date[:4] or str(candidate.year or ""),
+            "external_id": candidate.tmdb_id,
+            "tmdb_id": candidate.tmdb_id,
+            "title": (candidate.title or ""),
+            "original_title": (candidate.original_title or ""),
+            "year": release_date[:4] or (candidate.year or ""),
             "release_date": release_date,
             "media_type": media_type,
             "score": float(candidate.score or 0),
-            "overview": str(candidate.overview or ""),
+            "overview": (candidate.overview or ""),
             "poster_url": _tmdb_image_url(candidate.poster_path, "w342"),
             "backdrop_url": _tmdb_image_url(candidate.backdrop_path, "w780"),
             "vote_average": None,
@@ -1727,16 +1737,16 @@ class DirectoryScrapeService:
     @staticmethod
     def _position_overrides(
         inspection: DirectoryInspection,
-    ) -> dict[object, tuple[int | None, int | None]]:
+    ) -> dict[str | tuple[str, str], tuple[int | None, int | None]]:
         counts: dict[str, int] = {}
         for item in inspection.videos:
             counts[item.name] = counts.get(item.name, 0) + 1
-        result: dict[object, tuple[int | None, int | None]] = {}
+        result: dict[str | tuple[str, str], tuple[int | None, int | None]] = {}
         for item in inspection.videos:
             if item.season is None and item.episode is None:
                 continue
             position = (item.season, item.episode)
-            relative_parent = str(item.relative_dir or "").replace("\\", "/").strip("/")
+            relative_parent = (item.relative_dir or "").replace("\\", "/").strip("/")
             full_parent = "/".join(
                 value for value in (inspection.directory_name, relative_parent) if value
             )
@@ -1757,13 +1767,13 @@ class DirectoryScrapeService:
         episode_override: int | None = None,
         season_detail_loader: Callable[[str, int], dict] | None = None,
     ) -> tuple[
-        dict[object, tuple[int | None, int | None]],
+        dict[str | tuple[str, str], tuple[int | None, int | None]],
         dict[str, EpisodeMappingPlan],
     ]:
         counts: dict[str, int] = {}
         for item in inspection.videos:
             counts[item.name] = counts.get(item.name, 0) + 1
-        overrides: dict[object, tuple[int | None, int | None]] = {}
+        overrides: dict[str | tuple[str, str], tuple[int | None, int | None]] = {}
         mappings: dict[str, EpisodeMappingPlan] = {}
         mode = normalize_numbering_mode(numbering_mode)
         season_detail_cache: dict[tuple[str, int], dict] = {}
@@ -1799,7 +1809,7 @@ class DirectoryScrapeService:
 
         for item in inspection.videos:
             source_season, source_episode = item.season, item.episode
-            special = bool(
+            special = (
                 source_season == 0
                 or is_special_media_name(item.name)
                 or is_special_path(item.relative_dir)
@@ -1827,7 +1837,7 @@ class DirectoryScrapeService:
                 mode=mode,
                 directory_evidence=directory_evidence,
             )
-            current_count = season_episode_counts(detail).get(source_season)
+            current_count = season_episode_counts(detail).get(source_season) if source_season is not None else None
             if (
                 mode == "auto" and not special and episode_override is None
                 and source_season is not None and source_episode is not None
@@ -1856,7 +1866,7 @@ class DirectoryScrapeService:
                 if len(counts_by_season) == 1
                 else None
             )
-            merged_cour_directory_evidence = bool(
+            merged_cour_directory_evidence = (
                 directory_evidence is not None
                 and directory_evidence.contiguous
                 and directory_evidence.source_season == effective_season
@@ -1929,7 +1939,7 @@ class DirectoryScrapeService:
             if defer_special_position:
                 continue
             position = (target_season, target_episode)
-            relative_parent = str(item.relative_dir or "").replace("\\", "/").strip("/")
+            relative_parent = (item.relative_dir or "").replace("\\", "/").strip("/")
             full_parent = "/".join(
                 value for value in (inspection.directory_name, relative_parent) if value
             )
@@ -1937,7 +1947,7 @@ class DirectoryScrapeService:
             overrides[(full_parent, item.name)] = position
             if counts.get(item.name) == 1:
                 overrides[item.name] = position
-            mappings[str(item.file_id)] = dataclasses.replace(
+            mappings[item.file_id] = dataclasses.replace(
                 mapping,
                 source_season=source_season,
                 source_episode=source_episode,
@@ -1950,12 +1960,12 @@ class DirectoryScrapeService:
             detail.get("first_air_date") or detail.get("release_date") or ""
         )
         return {
-            "tmdb_id": str(match.tmdb_id),
+            "tmdb_id": match.tmdb_id,
             "title": str(detail.get("name") or detail.get("title") or match.title or ""),
             "original_title": str(
                 detail.get("original_name") or detail.get("original_title") or ""
             ),
-            "year": release_date[:4] or str(match.year or ""),
+            "year": release_date[:4] or (match.year or ""),
             "release_date": release_date,
             "media_type": "tv" if match.media_type == "tv" else "movie",
             "overview": str(detail.get("overview") or ""),
@@ -2095,7 +2105,7 @@ class DirectoryScrapeService:
         rules: OrganizeRules,
         organizer: Organizer,
     ) -> tuple:
-        snapshot = []
+        snapshot: list[tuple[str, str, tuple[tuple[str, str, str, bool, int, str], ...]]] = []
         for path in sorted({plan.target_path for plan in plans if plan.target_path}):
             target_id = organizer._find_existing_dir_chain(rules.target_dir_id, path)
             if not target_id:
@@ -2103,12 +2113,12 @@ class DirectoryScrapeService:
                 continue
             files = tuple(sorted(
                 (
-                    str(item.file_id), str(item.parent_id or target_id), str(item.name),
-                    bool(item.is_dir), int(item.size or 0), str(item.etag or ""),
+                    item.file_id, (item.parent_id or target_id), item.name,
+                    item.is_dir, (item.size or 0), (item.etag or ""),
                 )
                 for item in self.client.list_dir(target_id)
             ))
-            snapshot.append((path, str(target_id), files))
+            snapshot.append((path, target_id, files))
         return tuple(snapshot)
 
 

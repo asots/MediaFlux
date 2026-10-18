@@ -124,6 +124,7 @@ class AgentGeneralistOperationTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["candidate_count"], 1)
         self.assertEqual(result["queued_count"], 1)
         task = db.get_local_media_task(result["task_ids"][0], owner="admin")
+        assert task is not None
         self.assertIn("Alpha.Show", task.content_path)
 
     def test_real_scan_receipt_drives_completion_and_empty_candidates_need_no_wait(self):

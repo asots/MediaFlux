@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable, TypedDict, cast
+
 import heapq
 import random
 import tempfile
@@ -18,6 +20,11 @@ from app.modules.strm import sync_strm
 from tests.support import isolated_test_database
 
 
+class _ReadOptions(TypedDict, total=False):
+    deadline: float
+    should_stop: Callable[[], bool]
+
+
 class _ConcurrentTreeClient:
     def __init__(self, workers: int = 15):
         self.workers = workers
@@ -29,7 +36,7 @@ class _ConcurrentTreeClient:
 
     def iter_dir(self, dir_id: str, *, should_stop=None, max_items=None):
         with self.lock:
-            self.calls.append(str(dir_id))
+            self.calls.append(dir_id)
         if dir_id == "root":
             return iter([
                 GuangYaFile(f"dir-{index}", f"目录 {index}", True)
@@ -93,7 +100,7 @@ class StrmDirectoryConcurrencyTests(unittest.TestCase):
                 "root",
                 "http://media.invalid",
                 "/tmp/mediaflux-strm-concurrency",
-                client=client,
+                client=cast(GuangYaClient, client),
                 clean_invalid=False,
                 scan_workers=15,
             )
@@ -114,7 +121,7 @@ class StrmDirectoryConcurrencyTests(unittest.TestCase):
                 "root",
                 "http://media.invalid",
                 "/tmp/mediaflux-strm-concurrency-failure",
-                client=client,
+                client=cast(GuangYaClient, client),
                 clean_invalid=True,
                 scan_workers=15,
             )
@@ -141,7 +148,7 @@ class StrmDirectoryConcurrencyTests(unittest.TestCase):
                 "root",
                 "http://media.invalid",
                 "/tmp/mediaflux-strm-deadline",
-                client=DeadlineClient(),
+                client=cast(GuangYaClient, DeadlineClient()),
                 clean_invalid=True,
                 scan_workers=15,
             )
@@ -160,7 +167,7 @@ class StrmDirectoryConcurrencyTests(unittest.TestCase):
                 "root",
                 "http://media.invalid",
                 "/tmp/mediaflux-strm-budget",
-                client=client,
+                client=cast(GuangYaClient, client),
                 clean_invalid=False,
                 scan_workers=4,
             )
@@ -482,8 +489,11 @@ class GuangYaAdaptiveReadTests(unittest.TestCase):
         self.assertEqual(self.now, 130)
 
     def test_retry_after_deadline_and_cancel_never_send_early_retry(self):
-        for options, exception in (({"deadline": 101}, guangya_module.httpx.TimeoutException),
-                                   ({"should_stop": lambda: self.now >= 100.1}, guangya_module._ReadCancelled)):
+        cases: tuple[tuple[_ReadOptions, type[Exception]], ...] = (
+            ({"deadline": 101}, guangya_module.httpx.TimeoutException),
+            ({"should_stop": lambda: self.now >= 100.1}, guangya_module._ReadCancelled),
+        )
+        for options, exception in cases:
             with self.subTest(options=options), patch.dict(guangya_module._READ_CONGESTION, {}, clear=True):
                 self.now = 100.0
                 callback = Mock(side_effect=self._http_error(429, "15"))
@@ -933,7 +943,7 @@ class GuangYaAdaptiveScanIntegrationTests(unittest.TestCase):
             patch("app.modules.strm.db.list_strm_index", return_value=[]),
             patch("app.modules.strm.clean_invalid_strm") as cleanup,
         ):
-            stats = sync_strm("root", "http://media.invalid", root, client=Client(),
+            stats = sync_strm("root", "http://media.invalid", root, client=cast(GuangYaClient, Client()),
                               should_stop=stopped.is_set)
         self.assertTrue(stats["stopped"])
         self.assertTrue(stats["clean_skipped"])

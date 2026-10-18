@@ -23,11 +23,11 @@ class ProviderGatewayError(RuntimeError):
         argument_schemas: Mapping[str, Mapping[str, Any]] | None = None,
     ):
         super().__init__(message)
-        self.safe_message = str(message or "Provider 当前不可用")
-        self.code = str(code or "provider_unavailable")
+        self.safe_message = (message or "Provider 当前不可用")
+        self.code = (code or "provider_unavailable")
         # Transport 只有在真实外部写请求可能已发出时才设置该标记。
         # Gateway 据此区分可安全失败与必须人工核对的结果未知。
-        self.external_write_possible = bool(external_write_possible)
+        self.external_write_possible = external_write_possible
         self.argument_schemas = argument_schemas
 
 

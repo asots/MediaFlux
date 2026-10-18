@@ -16,22 +16,24 @@ def test_concurrent_web_requests_publish_once_and_preserve_the_winner(tmp_path):
         entered, second_entered, release = threading.Event(), threading.Event(), threading.Event()
         original_sync, original_needs, original_publish = backup._fsync_directory, first_run.needs_initialization, config._publish_noreplace
         publications, results = [], []
-        def sync(path):
-            if path == tmp_path / 'db' and (path / 'mediaflux.db').exists():
+        def sync(directory):
+            if directory == tmp_path / 'db' and (directory / 'mediaflux.db').exists():
                 entered.set()
                 assert release.wait(8), 'owner release deadline'
-            original_sync(path)
+            original_sync(directory)
         def needs_initialization():
             if entered.is_set() and not release.is_set():
                 second_entered.set()
             return original_needs()
-        def publish(stage, target):
+        def publish(temporary, target):
             publications.append(str(target))
-            return original_publish(stage, target)
+            return original_publish(temporary, target)
         backup._fsync_directory, first_run.needs_initialization, config._publish_noreplace = sync, needs_initialization, publish
         with TestClient(create_app()) as client:
             page = client.get('/setup')
-            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            search_result = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+            assert search_result is not None
+            token = search_result.group(1)
             fields = {'username':'operator', 'password':'test-bootstrap-password', 'password_confirm':'test-bootstrap-password', 'csrf_token':token}
             def post(username):
                 try:
@@ -83,7 +85,9 @@ def test_web_installation_starts_and_stops_real_background_services_once(tmp_pat
         app = main.create_app(start_background=True)
         with TestClient(app) as client:
             page = client.get('/setup')
-            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            search_result_2 = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+            assert search_result_2 is not None
+            token = search_result_2.group(1)
             assert events == []
             assert client.get('/readyz').status_code == 503
             fields = {'username':'operator', 'password':'test-bootstrap-password', 'password_confirm':'test-bootstrap-password', 'csrf_token':token}
@@ -91,10 +95,13 @@ def test_web_installation_starts_and_stops_real_background_services_once(tmp_pat
             assert response.status_code == 303 and response.headers['location'] == '/login'
             assert events == ['start']
             assert app.state.ready and client.get('/readyz').status_code == 200
+            assert client.portal is not None
             client.portal.call(app.state.activate_runtime)
             assert events == ['start']
             page = client.get('/login')
-            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            search_result_3 = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+            assert search_result_3 is not None
+            token = search_result_3.group(1)
             response = client.post('/login', data={'username':'operator', 'password':'test-bootstrap-password', 'csrf_token':token}, follow_redirects=False)
             assert response.status_code == 302
             assert client.get('/').status_code == 200
@@ -122,11 +129,11 @@ def test_cancelled_request_does_not_cancel_the_storage_transaction_or_allow_rein
         from app.modules import backup, first_run
         entered, release, completed = threading.Event(), threading.Event(), threading.Event()
         original_sync, original_initialize = backup._fsync_directory, first_run.initialize_admin
-        def sync(path):
-            if path == tmp_path / 'db' and (path / 'mediaflux.db').exists():
+        def sync(directory):
+            if directory == tmp_path / 'db' and (directory / 'mediaflux.db').exists():
                 entered.set()
                 assert release.wait(8), 'owner release deadline'
-            original_sync(path)
+            original_sync(directory)
         def initialize(*args, **kwargs):
             try:
                 return original_initialize(*args, **kwargs)
@@ -136,7 +143,9 @@ def test_cancelled_request_does_not_cancel_the_storage_transaction_or_allow_rein
         app = create_app()
         with TestClient(app) as client:
             page = client.get('/setup')
-            token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+            search_result_4 = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+            assert search_result_4 is not None
+            token = search_result_4.group(1)
             fields = {'username':'operator', 'password':'test-bootstrap-password', 'password_confirm':'test-bootstrap-password', 'csrf_token':token}
             async def disconnect():
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=str(client.base_url), cookies=dict(client.cookies)) as browser:
@@ -153,6 +162,7 @@ def test_cancelled_request_does_not_cancel_the_storage_transaction_or_allow_rein
                     finally:
                         release.set()
                     assert await asyncio.to_thread(completed.wait, 8), 'storage completion deadline'
+            assert client.portal is not None
             client.portal.call(disconnect)
             with database.get_conn() as conn:
                 assert read_runtime_fence(conn).phase == 'stable'

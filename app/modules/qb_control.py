@@ -1,7 +1,7 @@
 """qBittorrent 控制入口共用的本地整理写入边界。"""
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 
 from app import database as db
@@ -25,7 +25,7 @@ class QBControlSafetyUnavailable(QBControlConflict):
 
 
 @contextmanager
-def qb_control_write_lease() -> Iterator[None]:
+def qb_control_write_lease() -> Generator[None, None, None]:
     """串行化所有会改变 qB 任务状态的入口。
 
     调用方必须在 lease 内完成安全检查和真实 qB 请求，不能只保护其中一段。
@@ -48,7 +48,7 @@ def assert_qb_control_allowed(hashes: Iterable[str], *, operation: str) -> None:
     ``pause`` 是单向收紧状态，即使本地安全表暂时不可读也允许执行；
     ``resume``/``delete`` 会重新激活或移除任务，安全状态不可读时必须拒绝。
     """
-    normalized_operation = str(operation or "").strip().casefold()
+    normalized_operation = (operation or "").strip().casefold()
     if normalized_operation == "pause":
         return
     if normalized_operation not in {"resume", "delete"}:
@@ -80,7 +80,7 @@ def remove_qb_tasks(client, hashes: Iterable[str]) -> bool:
     本地入库完成后的自动删种不能走此入口：那是成功收尾，不是用户取消。
     先落盘停止跟踪意图，防止远端成功、回包丢失或重启后旧请求再次告警。
     """
-    normalized = list(dict.fromkeys(str(value or "").strip().lower() for value in hashes))
+    normalized = list(dict.fromkeys((value or "").strip().lower() for value in hashes))
     try:
         changed = db.cancel_qb_download_tracking(normalized)
     except Exception as exc:

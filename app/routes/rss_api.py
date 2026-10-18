@@ -71,7 +71,7 @@ def update_sub(sid: int, request: Request, data: dict = Body(...)):
         return api_error("订阅项不存在", 404)
     try:
         fields = normalize_rss_subscription_update(
-            data, current=current, allow_target_paths=True
+            data, current=dict(current), allow_target_paths=True
         )
     except (TypeError, ValueError) as exc:
         return api_error(str(exc), 400)

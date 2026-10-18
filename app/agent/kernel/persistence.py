@@ -84,11 +84,11 @@ class SQLiteKernelStore:
     ) -> None:
         self._secret_provider = secret_provider
         self._clock = clock
-        self.max_state_bytes = max(16 * 1024, int(max_state_bytes))
-        self.max_ref_bytes = max(4 * 1024, int(max_ref_bytes))
-        self.max_event_bytes = max(4 * 1024, int(max_event_bytes))
-        self.max_events_per_session = max(10, int(max_events_per_session))
-        self.event_retention_seconds = max(3_600, int(event_retention_seconds))
+        self.max_state_bytes = max(16 * 1024, max_state_bytes)
+        self.max_ref_bytes = max(4 * 1024, max_ref_bytes)
+        self.max_event_bytes = max(4 * 1024, max_event_bytes)
+        self.max_events_per_session = max(10, max_events_per_session)
+        self.event_retention_seconds = max(3_600, event_retention_seconds)
         self._event_maintenance_lock = threading.Lock()
         self._events_since_global_prune = 0
 
@@ -395,13 +395,13 @@ class SQLiteKernelStore:
         return await guarded_state_call(owner, session_id, self._delete_session_sync, owner, session_id)
 
     def _secret(self) -> bytes:
-        secret = str(self._secret_provider() or "")
+        secret = (self._secret_provider() or "")
         if not secret:
             raise ValueError("Agent Kernel 持久化密钥不可用")
         return secret.encode("utf-8")
 
     def _digest(self, value: str, *, domain: bytes) -> str:
-        normalized = str(value or "").strip()
+        normalized = (value or "").strip()
         if not normalized or len(normalized) > 512:
             raise ValueError("Agent Kernel scope 无效")
         return hmac.new(
@@ -431,7 +431,6 @@ class SQLiteKernelStore:
             ValueError,
             OverflowError,
             RecursionError,
-            UnicodeError,
         ) as exc:
             raise ValueError(f"Agent Kernel {label}无法序列化") from exc
         return encoded, payload
@@ -601,7 +600,7 @@ class SQLiteKernelStore:
             "ON CONFLICT(owner_digest,session_digest) DO UPDATE SET "
             "generation=MAX(agent_kernel_session_epochs.generation,excluded.generation),"
             "updated_at=excluded.updated_at",
-            (owner_digest, session_digest, max(0, int(generation)), self._clock()),
+            (owner_digest, session_digest, max(0, generation), self._clock()),
         )
 
     @staticmethod
@@ -680,7 +679,7 @@ class SQLiteKernelStore:
                 "FROM agent_kernel_sessions WHERE owner_digest=? AND session_digest=?",
                 (owner_digest, session_digest),
             ).fetchone()
-        return bool(row is not None and publication_matches(
+        return (row is not None and publication_matches(
             lease, generation=int(row["generation"]),
             confirmed={"generation": row["confirmed_generation"], "turn_id": row["confirmed_turn"]},
         ))
@@ -740,7 +739,7 @@ class SQLiteKernelStore:
         return result
 
     def _due_effect_waits_sync(self, limit: int = 16) -> list[dict[str, Any]]:
-        maximum = max(0, int(limit))
+        maximum = max(0, limit)
         if not maximum:
             return []
         now = self._clock()
@@ -758,7 +757,7 @@ class SQLiteKernelStore:
                         domain=f"state:v1:{owner_digest}:{session_digest}:{generation}".encode(),
                         expected_type=dict,
                     )
-                except (TypeError, ValueError, json.JSONDecodeError):
+                except (TypeError, ValueError):
                     continue
                 metadata = payload.get("metadata")
                 if not isinstance(metadata, Mapping) or not _effect_time_is_due(
@@ -824,7 +823,7 @@ class SQLiteKernelStore:
 
     def _list_sessions_sync(self, owner: str, limit: int) -> list[dict[str, Any]]:
         owner_digest = self._digest(owner, domain=b"owner:v1")
-        maximum = max(1, min(int(limit), 100))
+        maximum = max(1, min(limit, 100))
         result: list[dict[str, Any]] = []
         with db.get_conn() as conn:
             # 排序与按键读取共用一个读快照，避免并发 PATCH/新回合混入旧排序。
@@ -860,7 +859,7 @@ class SQLiteKernelStore:
                     state = self._state_from_payload(
                         owner=owner, session_id=session_id, generation=generation, payload=payload,
                     )
-                except (TypeError, ValueError, json.JSONDecodeError):
+                except (TypeError, ValueError):
                     continue
                 result.append(session_summary(state, updated_at=float(row["updated_at"])))
                 # 未通过 HMAC 的记录不能占用有限列表的名额。
@@ -936,11 +935,11 @@ class SQLiteKernelStore:
         lease: PublicationLease | None = None,
     ) -> OpaqueReference:
         owner_digest, session_digest = self._scope(owner, session_id)
-        normalized_kind = str(kind or "").strip().casefold()
+        normalized_kind = (kind or "").strip().casefold()
         if not normalized_kind:
             raise ReferenceError("reference kind is required")
         now = self._clock()
-        expires_at = now + max(1, min(int(ttl_seconds), 86_400))
+        expires_at = now + max(1, min(ttl_seconds, 86_400))
         ref_id = "ref_" + secrets.token_urlsafe(18)
         encoded, signature = self._encode_reference(
             value,
@@ -978,7 +977,7 @@ class SQLiteKernelStore:
         session_id: str,
         expected_kind: str,
     ) -> tuple[Any, float]:
-        ref_id = str(ref or "").strip()
+        ref_id = (ref or "").strip()
         if not ref_id.startswith("ref_") or len(ref_id) > 200:
             raise ReferenceError("reference is invalid")
         owner_digest, session_digest = self._scope(owner, session_id)
@@ -997,7 +996,7 @@ class SQLiteKernelStore:
         ) or not secrets.compare_digest(str(row["session_digest"]), session_digest):
             raise ReferenceError("reference scope mismatch")
         kind = str(row["kind"] or "")
-        expected = str(expected_kind or "").strip().casefold()
+        expected = (expected_kind or "").strip().casefold()
         if expected and expected != kind:
             raise ReferenceError("reference type mismatch")
         expires_at = float(row["expires_at"])
@@ -1007,7 +1006,7 @@ class SQLiteKernelStore:
                 row["value_hmac"],
                 domain=f"ref:v1:{ref_id}:{owner_digest}:{session_digest}:{kind}:{expires_at}".encode(),
             )
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ReferenceError("reference payload is invalid") from exc
         return value, observed_at + (expires_at - now)
 
@@ -1077,7 +1076,7 @@ class SQLiteKernelStore:
         self, owner: str, session_id: str, limit: int
     ) -> list[dict[str, Any]]:
         owner_digest, session_digest = self._scope(owner, session_id)
-        bounded = max(1, min(int(limit), 500))
+        bounded = max(1, min(limit, 500))
         with db.get_conn() as conn:
             rows = conn.execute(
                 "SELECT event_id,event_json,event_hmac FROM agent_kernel_events WHERE owner_digest=? AND session_digest=? "
@@ -1093,7 +1092,7 @@ class SQLiteKernelStore:
                     domain=f"event:v1:{row['event_id']}:{owner_digest}:{session_digest}".encode(),
                     expected_type=dict,
                 )
-            except (ValueError, json.JSONDecodeError):
+            except ValueError:
                 continue
             result.append(value)
         return result

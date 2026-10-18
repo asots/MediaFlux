@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app import database as db
@@ -48,9 +48,13 @@ class TelegramPendingCancellationTests(unittest.TestCase):
             side_effect=OSError("second commit unavailable"),
         ):
             self.invoke(request)
-        self.assertEqual(db.get_download_request(request)["status"], "cancelled")
+        get_download_request_result = db.get_download_request(request)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["status"], "cancelled")
         db.init_db()
-        self.assertEqual(db.get_download_request(request)["status"], "cancelled")
+        get_download_request_result_2 = db.get_download_request(request)
+        assert get_download_request_result_2 is not None
+        self.assertEqual(get_download_request_result_2["status"], "cancelled")
         self.assertEqual(db.count_download_requests_requiring_attention(), 0)
 
     def test_webpage_rejection_does_not_leave_a_submitting_orphan(self):
@@ -68,14 +72,17 @@ class TelegramPendingCancellationTests(unittest.TestCase):
         ):
             self.invoke(request, "confirm")
         row = db.get_download_request(request)
+        assert row is not None
         self.assertEqual(row["status"], "cancelled")
         self.assertIn("普通网页", row["error"])
         db.init_db()
-        self.assertEqual(db.get_download_request(request)["status"], "cancelled")
+        get_download_request_result_3 = db.get_download_request(request)
+        assert get_download_request_result_3 is not None
+        self.assertEqual(get_download_request_result_3["status"], "cancelled")
 
     def test_atomic_cancel_and_submission_are_mutually_exclusive(self):
-        from concurrent.futures import ThreadPoolExecutor
         import threading
+        from concurrent.futures import ThreadPoolExecutor
 
         for index in range(8):
             request, _ = db.create_download_request(f"cancel-race-{index}", "magnet")
@@ -94,6 +101,7 @@ class TelegramPendingCancellationTests(unittest.TestCase):
                 cancelled, submitted = first.result(timeout=5), second.result(timeout=5)
             self.assertNotEqual(cancelled, submitted)
             row = db.get_download_request(request)
+            assert row is not None
             self.assertEqual(row["status"], "cancelled" if cancelled else "submitting")
             self.assertEqual(row["qb_status"], "" if cancelled else "submitting")
             self.assertFalse(db.cancel_pending_download_request(request))
@@ -101,7 +109,9 @@ class TelegramPendingCancellationTests(unittest.TestCase):
     def test_cancel_is_not_an_alternate_submission_target(self):
         request, _ = db.create_download_request("reject-cancel-target", "magnet")
         self.assertFalse(db.claim_download_request(request, "cancelled"))
-        self.assertEqual(db.get_download_request(request)["status"], "pending")
+        get_download_request_result_4 = db.get_download_request(request)
+        assert get_download_request_result_4 is not None
+        self.assertEqual(get_download_request_result_4["status"], "pending")
         self.assertTrue(db.cancel_pending_download_request(request))
         self.assertFalse(db.claim_download_request(request, "qb"))
 
@@ -110,9 +120,10 @@ class TelegramCancellationProcessRestoreTests(unittest.TestCase):
     def test_process_exit_after_cancel_commit_keeps_terminal_intent_through_zip_restore(
         self,
     ):
-        from pathlib import Path
         import subprocess
         import sys
+        from pathlib import Path
+
         from app.modules import backup
         from tests.test_ten_pass_process_restore_audit import runtime_paths
 
@@ -156,7 +167,7 @@ raise AssertionError("cancel commit window not reached")
                 row = conn.execute("SELECT * FROM download_requests").fetchone()
                 request = row["id"]
                 self.assertEqual(row["status"], "cancelled")
-                self.assertIsNotNone(row["completed_at"])
+                assert (row["completed_at"]) is not None
             archive = backup.create_backup(paths, reason="committed-cancel")
             backup.verify_backup(archive)
             db.update_download_request(
@@ -164,13 +175,17 @@ raise AssertionError("cancel commit window not reached")
             )
             backup.restore_backup(paths, archive)
             db.init_db()
-            restored = dict(db.get_download_request(request))
+            restored_row = db.get_download_request(request)
+            assert restored_row is not None
+            restored = dict(restored_row)
             self.assertEqual(restored["status"], "cancelled")
             self.assertFalse(db.cancel_pending_download_request(request))
             self.assertFalse(db.claim_download_request(request, "qb"))
             self.assertEqual(db.count_download_requests_requiring_attention(), 0)
             db.init_db()
-            self.assertEqual(dict(db.get_download_request(request)), restored)
+            current = db.get_download_request(request)
+            assert current is not None
+            self.assertEqual(dict(current), restored)
             self.assertTrue(Path(path).exists())
 
 
@@ -222,16 +237,26 @@ class LegacyPendingCancellationRecoveryTests(unittest.TestCase):
                     db.init_db()
                 else:
                     self.assertEqual(db.recover_stale_submitting_download_requests(), 2)
+                get_download_request_result_5 = db.get_download_request(cancelled)
+                assert get_download_request_result_5 is not None
                 self.assertEqual(
-                    db.get_download_request(cancelled)["status"], "cancelled"
+                    get_download_request_result_5["status"], "cancelled"
                 )
-                self.assertIsNotNone(db.get_download_request(cancelled)["completed_at"])
-                self.assertEqual(db.get_download_request(ordinary)["status"], "pending")
+                get_download_request_result_6 = db.get_download_request(cancelled)
+                assert get_download_request_result_6 is not None
+                assert (get_download_request_result_6["completed_at"]) is not None
+                get_download_request_result_7 = db.get_download_request(ordinary)
+                assert get_download_request_result_7 is not None
+                self.assertEqual(get_download_request_result_7["status"], "pending")
+                get_download_request_result_8 = db.get_download_request(unknown)
+                assert get_download_request_result_8 is not None
                 self.assertEqual(
-                    db.get_download_request(unknown)["status"], "manual_review"
+                    get_download_request_result_8["status"], "manual_review"
                 )
+                get_download_request_result_9 = db.get_download_request(identity_only)
+                assert get_download_request_result_9 is not None
                 self.assertEqual(
-                    db.get_download_request(identity_only)["status"], "manual_review"
+                    get_download_request_result_9["status"], "manual_review"
                 )
                 self.assertEqual(db.count_download_requests_requiring_attention(), 2)
                 self.assertEqual(db.recover_stale_submitting_download_requests(), 0)

@@ -54,7 +54,7 @@ def get_media_preferences(owner_digest: str) -> dict[str, Any]:
             row = conn.execute(
                 "SELECT * "
                 "FROM agent_media_preferences WHERE owner_digest=?",
-                (str(owner_digest),),
+                (owner_digest,),
             ).fetchone()
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc).casefold():
@@ -94,13 +94,13 @@ def set_media_preferences(
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM agent_media_preferences WHERE owner_digest=?",
-            (str(owner_digest),),
+            (owner_digest,),
         ).fetchone()
         current = _preferences_from_row(row)
-        if int(current["revision"]) != int(expected_revision):
+        if int(current["revision"]) != expected_revision:
             return None
         if expected_revision_token is not None and not secrets.compare_digest(
-            str(current["revision_token"]), str(expected_revision_token)
+            str(current["revision_token"]), expected_revision_token
         ):
             return None
         merged = {key: updates.get(key, current[key]) for key in _DEFAULT_PREFERENCES}
@@ -116,7 +116,7 @@ def set_media_preferences(
                 "owner_digest,preferred_server,preferred_download_target,profile_json,revision_token,"
                 "revision,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)",
                 (
-                    str(owner_digest), merged["preferred_server"],
+                    owner_digest, merged["preferred_server"],
                     merged["preferred_download_target"], profile_json, revision_token, stamp, stamp,
                 ),
             )
@@ -127,12 +127,12 @@ def set_media_preferences(
                 "WHERE owner_digest=? AND revision=?",
                 (
                     merged["preferred_server"], merged["preferred_download_target"],
-                    profile_json, revision_token, stamp, str(owner_digest), int(expected_revision),
+                    profile_json, revision_token, stamp, owner_digest, expected_revision,
                 ),
             )
         committed = _preferences_from_row(conn.execute(
             "SELECT * FROM agent_media_preferences WHERE owner_digest=?",
-            (str(owner_digest),),
+            (owner_digest,),
         ).fetchone())
     # 离开 with 后本次事务已成功提交；直接返回锁内读取的自身版本，避免把后来写入 C 当作 B。
     return committed
@@ -141,12 +141,12 @@ def set_media_preferences(
 def clear_media_preferences(
     owner_digest: str, *, expected_revision: int, expected_revision_token: str | None = None,
 ) -> bool:
-    if int(expected_revision) <= 0:
+    if expected_revision <= 0:
         return False
     where_token = " AND revision_token=?" if expected_revision_token is not None else ""
-    parameters: tuple[Any, ...] = (str(owner_digest), int(expected_revision))
+    parameters: tuple[Any, ...] = (owner_digest, expected_revision)
     if expected_revision_token is not None:
-        parameters += (str(expected_revision_token),)
+        parameters += (expected_revision_token,)
     with db.get_conn() as conn:
         cur = conn.execute(
             "DELETE FROM agent_media_preferences WHERE owner_digest=? AND revision=?" + where_token,
@@ -164,7 +164,7 @@ def _read_notification_rule(conn, subscription_id: int) -> dict[str, Any] | None
         "r.revision AS rule_revision FROM media_subscriptions AS s "
         "LEFT JOIN media_subscription_notification_rules AS r ON r.subscription_id=s.id "
         "WHERE s.id=? AND s.deleted_at IS NULL",
-        (int(subscription_id),),
+        (subscription_id,),
     ).fetchone()
     if row is None:
         return None
@@ -194,8 +194,8 @@ def _read_rule_for_update(
     current = _read_notification_rule(conn, subscription_id)
     if (
         current is None
-        or current["subscription_revision"] != int(expected_subscription_revision)
-        or current["revision"] != int(expected_rule_revision)
+        or current["subscription_revision"] != expected_subscription_revision
+        or current["revision"] != expected_rule_revision
         # reset 后整数版本可复用；确认链路同时核对实际预检的完整业务状态。
         or (expected_rule is not None and current != expected_rule)
     ):
@@ -228,7 +228,7 @@ def set_notification_rule(
                 "notify_on_error,revision,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,1,?,?)",
                 (
-                    int(subscription_id), int(merged["enabled"]),
+                    subscription_id, int(merged["enabled"]),
                     int(merged["notify_on_missing"]), int(merged["notify_on_satisfied"]),
                     int(merged["notify_on_error"]), stamp, stamp,
                 ),
@@ -242,8 +242,8 @@ def set_notification_rule(
                 (
                     int(merged["enabled"]), int(merged["notify_on_missing"]),
                     int(merged["notify_on_satisfied"]), int(merged["notify_on_error"]),
-                    stamp, int(subscription_id),
-                    int(expected_rule_revision),
+                    stamp, subscription_id,
+                    expected_rule_revision,
                 ),
             )
             if cur.rowcount != 1:
@@ -267,7 +267,7 @@ def reset_notification_rule(
         cur = conn.execute(
             "DELETE FROM media_subscription_notification_rules "
             "WHERE subscription_id=? AND revision=?",
-            (int(subscription_id), int(expected_rule_revision)),
+            (subscription_id, expected_rule_revision),
         )
         return cur.rowcount == 1
 
@@ -289,7 +289,7 @@ def claim_due_notifications(*, limit: int = 20) -> list[dict[str, Any]]:
             "SELECT * FROM media_subscription_notification_outbox "
             "WHERE status IN ('pending','retry_wait') AND next_attempt_at<=? "
             "ORDER BY next_attempt_at,id LIMIT ?",
-            (stamp, max(1, min(int(limit), 50))),
+            (stamp, max(1, min(limit, 50))),
         ).fetchall()
         for row in rows:
             generation = int(row["lease_generation"] or 0)
@@ -306,7 +306,7 @@ def claim_due_notifications(*, limit: int = 20) -> list[dict[str, Any]]:
                 continue
             try:
                 payload = json.loads(str(row["payload_json"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 payload = {}
             claimed.append({
                 "id": int(row["id"]),
@@ -326,7 +326,7 @@ def mark_notification_sent(notification_id: int, *, lease_generation: int) -> bo
             "UPDATE media_subscription_notification_outbox SET status='sent',sent_at=?,"
             "last_error='',lease_until='',updated_at=? WHERE id=? AND status='sending' "
             "AND lease_generation=?",
-            (stamp, stamp, int(notification_id), int(lease_generation)),
+            (stamp, stamp, notification_id, lease_generation),
         )
         return cur.rowcount == 1
 
@@ -353,14 +353,14 @@ def retry_notification(
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT attempts,status,lease_generation FROM media_subscription_notification_outbox "
-            "WHERE id=?", (int(notification_id),),
+            "WHERE id=?", (notification_id,),
         ).fetchone()
-        if row is None or str(row["status"]) != "sending" or int(row["lease_generation"]) != int(lease_generation):
+        if row is None or str(row["status"]) != "sending" or int(row["lease_generation"]) != lease_generation:
             return "stale"
         attempts = int(row["attempts"] or 0) + 1
         exhausted = attempts >= _MAX_ATTEMPTS
         status = "failed" if exhausted else "retry_wait"
-        requested_delay = max(0, min(int(retry_after_seconds or 0), 86_400))
+        requested_delay = max(0, min((retry_after_seconds or 0), 86_400))
         delay = 0 if exhausted else max(
             30 * (2 ** min(attempts - 1, 5)), requested_delay
         )
@@ -372,7 +372,7 @@ def retry_notification(
             "AND lease_generation=?",
             (
                 status, attempts, _delivery_error_code(error),
-                next_attempt, stamp, int(notification_id), int(lease_generation),
+                next_attempt, stamp, notification_id, lease_generation,
             ),
         )
         return status if cur.rowcount == 1 else "stale"
@@ -387,14 +387,14 @@ def recover_notifications() -> int:
             "WHERE status='sending' AND (lease_until='' OR lease_until<=?)",
             (stamp, stamp, stamp),
         )
-        return int(cur.rowcount or 0)
+        return (cur.rowcount or 0)
 
 
 def list_notification_outbox(*, limit: int = 50) -> list[sqlite3.Row]:
     with db.get_conn() as conn:
         return conn.execute(
             "SELECT * FROM media_subscription_notification_outbox "
-            "ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 100)),),
+            "ORDER BY id DESC LIMIT ?", (max(1, min(limit, 100)),),
         ).fetchall()
 
 

@@ -1,6 +1,8 @@
 """Media Agent 外部影视默认推荐列表测试。"""
 
 from __future__ import annotations
+from typing import Any, Callable, Mapping
+from typing import cast
 
 import json
 import unittest
@@ -58,7 +60,7 @@ class FakeDiscoveryService:
 
 
 class PagedDiscoveryService(FakeDiscoveryService):
-    def __init__(self, pages, after_page=None):
+    def __init__(self, pages: Mapping[int, DiscoveryPage | Exception] | Callable[[int], DiscoveryPage | Exception], after_page=None):
         self.pages, self.after_page, self.calls = pages, after_page, []
 
     def list_items(self, provider, category, media_type, page, filters):
@@ -316,6 +318,7 @@ class AgentRecommendationCompletionTests(unittest.TestCase):
                 after_page=lambda _, cancelled=cancelled: cancelled.__setitem__(0, True))
             context = ToolContext(owner="test", session_id="test", cancelled=lambda cancelled=cancelled: cancelled[0])
             with self.subTest(initial=initially_cancelled), _recommend_fixture(service):
+                assert spec.context_handler is not None
                 result = spec.context_handler({"limit": 3}, context)
             self.assertEqual(len(service.calls), 0 if initially_cancelled else 1)
             self.assertEqual(result.status, "cancelled")
@@ -486,7 +489,7 @@ class AgentDiscoveryRecommendTests(unittest.TestCase):
         )
         for arguments in invalid:
             with self.subTest(arguments=arguments), self.assertRaises(AgentToolError):
-                recommend_arguments(arguments)
+                recommend_arguments(cast(dict[str, Any], arguments))
 
     def test_year_range_contract_and_provider_filters(self):
         for provider, media_type in (("tmdb", "movie"), ("tmdb", "tv"), ("douban", "tv")):

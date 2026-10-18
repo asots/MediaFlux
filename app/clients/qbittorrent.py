@@ -49,7 +49,7 @@ def is_qb_torrent_complete(state: str, progress: float) -> bool:
         normalized_progress = 0.0
     return (
         normalized_progress >= 1.0
-        and str(state or "").strip().casefold() in _QB_COMPLETE_STATES
+        and (state or "").strip().casefold() in _QB_COMPLETE_STATES
     )
 
 
@@ -58,7 +58,7 @@ class QBConnectionTestError(RuntimeError):
 
     def __init__(self, code: str):
         super().__init__(code)
-        self.code = str(code or "connection")
+        self.code = (code or "connection")
 
 
 class QBTorrentExportError(RuntimeError):
@@ -66,7 +66,7 @@ class QBTorrentExportError(RuntimeError):
 
     def __init__(self, code: str):
         super().__init__(code)
-        self.code = str(code or "export_failed")
+        self.code = (code or "export_failed")
 
 
 @dataclass(frozen=True)
@@ -225,7 +225,7 @@ class QBittorrentClient:
             logger.warning("qB 添加任务结果未知: 请求异常")
             return TorrentAddResult(False, "qb_outcome_unknown", False)
 
-        status = int(resp.status_code or 0)
+        status = (resp.status_code or 0)
         if status in (401, 403):
             logger.warning("qB 添加任务失败: 鉴权失败")
             return TorrentAddResult(False, "qb_auth_failed", False)
@@ -263,7 +263,7 @@ class QBittorrentClient:
             logger.warning("qB 登录结果未知: 请求异常")
             return TorrentAddResult(False, "qb_outcome_unknown", False)
 
-        status = int(resp.status_code or 0)
+        status = (resp.status_code or 0)
         if status == 429:
             return TorrentAddResult(False, "qb_rate_limited", True)
         if status >= 500:
@@ -366,7 +366,7 @@ class QBittorrentClient:
 
     def export_torrent(self, torrent_hash: str) -> bytes:
         """通过 qB 5.x Web API 导出现有任务的原始 ``.torrent`` 数据。"""
-        normalized_hash = str(torrent_hash or "").strip().lower()
+        normalized_hash = (torrent_hash or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]{40}", normalized_hash):
             raise QBTorrentExportError("invalid_hash")
         if not self.api_key and not self.login():
@@ -385,7 +385,7 @@ class QBittorrentClient:
         except requests.RequestException as exc:
             raise QBTorrentExportError("connection") from exc
 
-        status = int(response.status_code or 0)
+        status = (response.status_code or 0)
         if status in {401, 403}:
             raise QBTorrentExportError("authentication")
         if status == 404:
@@ -422,7 +422,7 @@ class QBittorrentClient:
 
     @staticmethod
     def _connection_test_response(response: requests.Response) -> str:
-        status = int(response.status_code or 0)
+        status = (response.status_code or 0)
         if status in {401, 403}:
             raise QBConnectionTestError("authentication")
         if status == 404:
@@ -451,13 +451,13 @@ class QBittorrentClient:
                     timeout=self.timeout,
                     allow_redirects=False,
                 )
-                if int(login_response.status_code or 0) in {401, 403}:
+                if (login_response.status_code or 0) in {401, 403}:
                     raise QBConnectionTestError("authentication")
-                if int(login_response.status_code or 0) == 404:
+                if (login_response.status_code or 0) == 404:
                     raise QBConnectionTestError("not_qb_api")
-                if int(login_response.status_code or 0) == 429:
+                if (login_response.status_code or 0) == 429:
                     raise QBConnectionTestError("rate_limited")
-                if int(login_response.status_code or 0) >= 500:
+                if (login_response.status_code or 0) >= 500:
                     raise QBConnectionTestError("server_error")
                 if login_response.text.strip() != "Ok.":
                     raise QBConnectionTestError("authentication")

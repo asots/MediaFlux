@@ -49,7 +49,8 @@ class NotificationHandoffIsolationAuditTests(unittest.TestCase):
                     db.now(),
                 ),
             )
-            return int(cur.lastrowid)
+            assert cur.lastrowid is not None
+            return cur.lastrowid
 
     @staticmethod
     def row(notification_id):

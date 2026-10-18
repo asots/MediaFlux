@@ -8,26 +8,28 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.responses import JSONResponse
+from starlette.requests import Request
 
 from app.routes.api import get_config, save_config
 
 
 class DiscoveryConfigTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.request = SimpleNamespace(
-            session={"logged_in": True},
-            app=SimpleNamespace(
+        self.request = Request({
+            "type": "http",
+            "session": {"logged_in": True},
+            "app": SimpleNamespace(
                 state=SimpleNamespace(background_services_enabled=False)
             ),
-        )
+        })
 
     @staticmethod
     def _payload(response):
         if isinstance(response, JSONResponse):
-            return json.loads(response.body)
+            return json.loads(bytes(response.body))
         return response
 
-    def _save(self, data, *, existing=None, return_shutdown=False):
+    def _save(self, data, *, existing=None):
         existing = existing or {}
 
         def get_value(key, default=""):
@@ -39,9 +41,7 @@ class DiscoveryConfigTests(unittest.TestCase):
             "app.modules.scheduler.get_scheduler"
         ), patch("app.discovery.service.shutdown_discovery_service") as shutdown:
             response = save_config(self.request, data)
-        if return_shutdown:
-            return response, persist, shutdown
-        return response, persist
+        return response, persist, shutdown
 
     def test_accepts_all_discovery_configuration_keys_and_normalizes_dbcl2(self):
         values = {
@@ -56,7 +56,7 @@ class DiscoveryConfigTests(unittest.TestCase):
             "BANGUMI_USER_AGENT": "MediaFlux/1.0 (contact: admin@example.invalid)",
         }
 
-        response, persist = self._save(values)
+        response, persist, _shutdown = self._save(values)
 
         self.assertEqual(response, {"success": True})
         expected = dict(values)
@@ -82,16 +82,16 @@ class DiscoveryConfigTests(unittest.TestCase):
         for key, value in values.items():
             with self.subTest(key=key):
                 response, persist, shutdown = self._save(
-                    {key: value}, return_shutdown=True
+                    {key: value}
                 )
                 self.assertEqual(response, {"success": True})
                 persist.assert_called_once()
                 shutdown.assert_called_once_with()
 
     def test_rejects_removed_tmdb_preview_confirm_key(self):
-        response, persist = self._save({"TMDB_PREVIEW_CONFIRM": "1"})
+        response, persist, _shutdown = self._save({"TMDB_PREVIEW_CONFIRM": "1"})
 
-        self.assertIsInstance(response, JSONResponse)
+        assert isinstance(response, JSONResponse)
         self.assertEqual(response.status_code, 400)
         persist.assert_not_called()
 
@@ -138,7 +138,7 @@ class DiscoveryConfigTests(unittest.TestCase):
 
     def test_unrelated_config_save_does_not_shutdown_discovery_service(self):
         response, persist, shutdown = self._save(
-            {"RSS_QB_CATEGORY": "mediaflux"}, return_shutdown=True
+            {"RSS_QB_CATEGORY": "mediaflux"}
         )
 
         self.assertEqual(response, {"success": True})
@@ -146,8 +146,9 @@ class DiscoveryConfigTests(unittest.TestCase):
         shutdown.assert_not_called()
 
     def test_unknown_configuration_key_remains_rejected(self):
-        response, persist = self._save({"DISCOVERY_UNKNOWN_OPTION": "1"})
+        response, persist, _shutdown = self._save({"DISCOVERY_UNKNOWN_OPTION": "1"})
 
+        assert isinstance(response, JSONResponse)
         self.assertEqual(response.status_code, 400)
         self.assertIn("不允许", self._payload(response)["error"])
         persist.assert_not_called()
@@ -161,10 +162,12 @@ class DiscoveryConfigTests(unittest.TestCase):
         self.assertEqual(response["INDEXER_ENABLED_SITES"], "nyaa")
         for key, value in retired.items():
             with self.subTest(key=key):
-                result, persist = self._save({key: value})
+                result, persist, _shutdown = self._save({key: value})
+                assert isinstance(result, JSONResponse)
                 self.assertEqual(result.status_code, 400)
                 persist.assert_not_called()
-        result, persist = self._save({"INDEXER_ENABLED_SITES": "1lou"})
+        result, persist, _shutdown = self._save({"INDEXER_ENABLED_SITES": "1lou"})
+        assert isinstance(result, JSONResponse)
         self.assertEqual(result.status_code, 400)
         persist.assert_not_called()
 
@@ -186,7 +189,7 @@ class DiscoveryConfigTests(unittest.TestCase):
         self.assertEqual(response["BANGUMI_USER_AGENT"], "MediaFlux/1.0")
 
     def test_masked_dbcl2_preserves_existing_value(self):
-        response, persist = self._save(
+        response, persist, _shutdown = self._save(
             {"DISCOVERY_DOUBAN_ENABLED": "1", "DOUBAN_DBCL2": "  ********  "}
         )
 
@@ -196,7 +199,8 @@ class DiscoveryConfigTests(unittest.TestCase):
     def test_frodo_credentials_are_no_longer_accepted_by_config_api(self):
         for key in ("DOUBAN_FRODO_API_KEY", "DOUBAN_FRODO_API_SECRET"):
             with self.subTest(key=key):
-                response, persist = self._save({key: "must-stay-server-only"})
+                response, persist, _shutdown = self._save({key: "must-stay-server-only"})
+                assert isinstance(response, JSONResponse)
                 self.assertEqual(response.status_code, 400)
                 self.assertIn("不允许", self._payload(response)["error"])
                 persist.assert_not_called()
@@ -208,7 +212,8 @@ class DiscoveryConfigTests(unittest.TestCase):
             "x" * 513,
         ):
             with self.subTest(value=value[:40]):
-                response, persist = self._save({"DOUBAN_DBCL2": value})
+                response, persist, _shutdown = self._save({"DOUBAN_DBCL2": value})
+                assert isinstance(response, JSONResponse)
                 self.assertEqual(response.status_code, 400)
                 self.assertIn("DOUBAN_DBCL2", self._payload(response)["error"])
                 persist.assert_not_called()
@@ -220,13 +225,14 @@ class DiscoveryConfigTests(unittest.TestCase):
             "DISCOVERY_RESOURCE_RESULTS_ENABLED",
         ):
             with self.subTest(key=key):
-                response, persist = self._save({key: "sometimes"})
+                response, persist, _shutdown = self._save({key: "sometimes"})
+                assert isinstance(response, JSONResponse)
                 self.assertEqual(response.status_code, 400)
                 self.assertIn(key, self._payload(response)["error"])
                 persist.assert_not_called()
 
     def test_resource_results_switch_is_validated_and_persisted(self):
-        response, persist = self._save(
+        response, persist, _shutdown = self._save(
             {"DISCOVERY_RESOURCE_RESULTS_ENABLED": "false"}
         )
 
@@ -244,19 +250,21 @@ class DiscoveryConfigTests(unittest.TestCase):
         for key, values in invalid_values.items():
             for value in values:
                 with self.subTest(key=key, value=value):
-                    response, persist = self._save({key: value})
+                    response, persist, _shutdown = self._save({key: value})
+                    assert isinstance(response, JSONResponse)
                     self.assertEqual(response.status_code, 400)
                     self.assertIn(key, self._payload(response)["error"])
                     persist.assert_not_called()
 
     def test_stale_ttl_cannot_be_shorter_than_fresh_cache_ttl(self):
-        response, persist = self._save(
+        response, persist, _shutdown = self._save(
             {
                 "DISCOVERY_CACHE_TTL_SECONDS": "7200",
                 "DISCOVERY_STALE_TTL_SECONDS": "3600",
             }
         )
 
+        assert isinstance(response, JSONResponse)
         self.assertEqual(response.status_code, 400)
         self.assertIn("DISCOVERY_STALE_TTL_SECONDS", self._payload(response)["error"])
         persist.assert_not_called()
@@ -264,7 +272,6 @@ class DiscoveryConfigTests(unittest.TestCase):
     def test_public_douban_config_save_restarts_discovery_service(self):
         response, persist, shutdown = self._save(
             {"DISCOVERY_DOUBAN_ENABLED": "1", "DOUBAN_DBCL2": ""},
-            return_shutdown=True,
         )
 
         self.assertEqual(response, {"success": True})
@@ -275,7 +282,8 @@ class DiscoveryConfigTests(unittest.TestCase):
     def test_bangumi_user_agent_rejects_blank_or_header_injection(self):
         for value in ("   ", "MediaFlux/1.0\r\nX-Test: injected"):
             with self.subTest(value=value):
-                response, persist = self._save({"BANGUMI_USER_AGENT": value})
+                response, persist, _shutdown = self._save({"BANGUMI_USER_AGENT": value})
+                assert isinstance(response, JSONResponse)
                 self.assertEqual(response.status_code, 400)
                 self.assertIn("BANGUMI_USER_AGENT", self._payload(response)["error"])
                 persist.assert_not_called()
@@ -283,20 +291,21 @@ class DiscoveryConfigTests(unittest.TestCase):
     def test_bangumi_user_agent_accepts_256_characters(self):
         user_agent = "M" * 256
 
-        response, persist = self._save({"BANGUMI_USER_AGENT": user_agent})
+        response, persist, _shutdown = self._save({"BANGUMI_USER_AGENT": user_agent})
 
         self.assertEqual(response, {"success": True})
         persist.assert_called_once_with({"BANGUMI_USER_AGENT": user_agent})
 
     def test_bangumi_user_agent_rejects_257_characters(self):
-        response, persist = self._save({"BANGUMI_USER_AGENT": "M" * 257})
+        response, persist, _shutdown = self._save({"BANGUMI_USER_AGENT": "M" * 257})
 
+        assert isinstance(response, JSONResponse)
         self.assertEqual(response.status_code, 400)
         self.assertIn("256", self._payload(response)["error"])
         persist.assert_not_called()
 
     def test_bangumi_user_agent_trims_surrounding_whitespace(self):
-        response, persist = self._save(
+        response, persist, _shutdown = self._save(
             {"BANGUMI_USER_AGENT": "  MediaFlux/1.0  "}
         )
 
@@ -304,7 +313,7 @@ class DiscoveryConfigTests(unittest.TestCase):
         persist.assert_called_once_with({"BANGUMI_USER_AGENT": "MediaFlux/1.0"})
 
     def test_indexer_switch_and_site_intervals_are_validated(self):
-        response, persist = self._save({
+        response, persist, _shutdown = self._save({
             "INDEXER_SEARCH_ENABLED": "false",
             "INDEXER_BTBTLA_MIN_INTERVAL_SECONDS": "8",
         })
@@ -319,12 +328,13 @@ class DiscoveryConfigTests(unittest.TestCase):
         for key, values in invalid_values.items():
             for value in values:
                 with self.subTest(key=key, value=value):
-                    response, persist = self._save({key: value})
+                    response, persist, _shutdown = self._save({key: value})
+                    assert isinstance(response, JSONResponse)
                     self.assertEqual(response.status_code, 400)
                     persist.assert_not_called()
 
     def test_indexer_site_selection_is_ordered_deduplicated_and_syncs_sukebei(self):
-        response, persist = self._save({
+        response, persist, _shutdown = self._save({
             "DISCOVERY_RESOURCE_RESULTS_ENABLED": "1",
             "INDEXER_ENABLED_SITES": "tpb, nyaa, sukebei, tpb",
         })
@@ -340,18 +350,19 @@ class DiscoveryConfigTests(unittest.TestCase):
     def test_indexer_site_selection_rejects_unknown_or_empty_enabled_selection(self):
         for value, message in (("nyaa,evil", "未知资源站点"), ("", "至少选择一个资源站点")):
             with self.subTest(value=value):
-                response, persist = self._save(
+                response, persist, _shutdown = self._save(
                     {
                         "DISCOVERY_RESOURCE_RESULTS_ENABLED": "1",
                         "INDEXER_ENABLED_SITES": value,
                     },
                 )
+                assert isinstance(response, JSONResponse)
                 self.assertEqual(response.status_code, 400)
                 self.assertIn(message, self._payload(response)["error"])
                 persist.assert_not_called()
 
     def test_indexer_site_selection_clears_legacy_sukebei_toggle(self):
-        response, persist = self._save({
+        response, persist, _shutdown = self._save({
             "DISCOVERY_RESOURCE_RESULTS_ENABLED": "1",
             "INDEXER_ENABLED_SITES": "nyaa,mikan",
         })
@@ -373,7 +384,7 @@ class DiscoveryConfigTests(unittest.TestCase):
 
     def test_saved_independent_selection_stays_disabled_after_reload(self):
         old={"INDEXER_ENABLED_SITES":"btbtla,sukebei", "INDEXER_SUKEBEI_ENABLED":"1"}
-        response,persist=self._save({"INDEXER_ENABLED_SITES":"btbtla"},existing=old)
+        response,persist,_shutdown=self._save({"INDEXER_ENABLED_SITES":"btbtla"},existing=old)
         self.assertEqual(response,{"success":True})
         saved={**old,**persist.call_args.args[0]}
         self.assertEqual(saved["INDEXER_SITE_CONFIG_VERSION"],"3")

@@ -50,8 +50,8 @@ def clear_provider_session_state(
     session_id: str = "",
 ) -> dict[str, int]:
     """统一撤销 owner 或其指定会话的 Provider artifacts 与短期写计划。"""
-    owner_key = str(owner or "").strip()
-    session_key = str(session_id or "").strip()
+    owner_key = (owner or "").strip()
+    session_key = (session_id or "").strip()
     if not owner_key:
         return {"artifacts": 0, "plans": 0}
     with _LOCK:
@@ -77,7 +77,7 @@ def clear_provider_session_state(
     )
     return {
         "artifacts": artifacts,
-        "plans": int(plans["scrubbed_running"]) + int(plans["deleted"]),
+        "plans": plans["scrubbed_running"] + plans["deleted"],
     }
 
 

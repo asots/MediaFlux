@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ def _read_state(conn) -> dict[str, Any]:
         return _empty_state()
     try:
         state = json.loads(str(row["value"]))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise RuntimeError("媒体库刷新队列状态损坏，已拒绝覆盖") from exc
     if not isinstance(state, dict) or int(state.get("version") or 0) != _STATE_VERSION:
         raise RuntimeError("媒体库刷新队列版本无效，已拒绝覆盖")
@@ -68,7 +69,7 @@ def _normalized_provider(value: object) -> str:
     return provider
 
 
-def _normalized_library_ids(values: object) -> tuple[str, ...]:
+def _normalized_library_ids(values: Iterable[object] | None) -> tuple[str, ...]:
     return tuple(sorted(dict.fromkeys(
         str(item or "").strip()
         for item in (values or ())
@@ -76,7 +77,7 @@ def _normalized_library_ids(values: object) -> tuple[str, ...]:
     )))
 
 
-def _normalized_paths(values: object) -> list[str]:
+def _normalized_paths(values: Iterable[object] | None) -> list[str]:
     return list(dict.fromkeys(
         str(item or "").strip()
         for item in (values or ())
@@ -87,7 +88,7 @@ def _normalized_paths(values: object) -> list[str]:
 def _normalized_binding(value: dict[str, str] | None) -> dict[str, str]:
     if not value:
         return {}
-    binding = {key: str(value.get(key) or "").strip() for key in ("id", "name")}
+    binding = {key: (value.get(key) or "").strip() for key in ("id", "name")}
     if not any(binding.values()):
         raise ValueError("媒体库绑定不能为空")
     return binding
@@ -107,7 +108,7 @@ def _group_key(
     return hashlib.sha256(payload).hexdigest()[:32]
 
 
-def _merge_paths(*groups: object) -> list[str]:
+def _merge_paths(*groups: Iterable[object] | None) -> list[str]:
     merged: list[str] = []
     seen: set[str] = set()
     for group in groups:
@@ -171,9 +172,9 @@ def _recover_running_groups(
 
 def enqueue_media_refresh(
     provider: str,
-    paths: object,
+    paths: Iterable[object] | None,
     *,
-    allowed_library_ids: object = (),
+    allowed_library_ids: Iterable[object] | None = (),
     library_binding: dict[str, str] | None = None,
     debounce_seconds: float = 20.0,
     now_epoch: float | None = None,
@@ -197,7 +198,7 @@ def enqueue_media_refresh(
         _prune_recent(state, now_value)
         group = state["groups"].get(key)
         if not isinstance(group, dict):
-            group = {
+            group: dict[str, Any] = {
                 "provider": normalized_provider,
                 "allowed_library_ids": list(normalized_ids),
                 "library_binding": binding,
@@ -247,11 +248,11 @@ def claim_due_media_refreshes(
     force: bool = False,
     now_epoch: float | None = None,
 ) -> list[dict[str, Any]]:
-    safe_owner = str(owner or "").strip()
+    safe_owner = (owner or "").strip()
     if not safe_owner:
         raise ValueError("媒体库刷新 worker owner 不能为空")
     now_value = float(time.time() if now_epoch is None else now_epoch)
-    safe_limit = max(1, min(int(limit or 1), 64))
+    safe_limit = max(1, min((limit or 1), 64))
     database = _database()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -283,7 +284,7 @@ def claim_due_media_refreshes(
             group["inflight_paths"] = pending
             group["status"] = "running"
             group["lease_owner"] = safe_owner
-            group["lease_until"] = now_value + max(30, int(lease_seconds or 300))
+            group["lease_until"] = now_value + max(30, (lease_seconds or 300))
             group["lease_generation"] = generation
             group["updated_at"] = now_value
             claimed.append({
@@ -308,7 +309,7 @@ def settle_media_refresh(
     outcome: Literal["completed", "deferred", "failed"],
     delay_seconds: int = 0,
     error: object = "",
-    refreshed_target_ids: object = (),
+    refreshed_target_ids: Iterable[object] | None = (),
     recent_ttl_seconds: int = 90,
     now_epoch: float | None = None,
 ) -> bool:
@@ -320,24 +321,24 @@ def settle_media_refresh(
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         state = _read_state(conn)
-        group = state["groups"].get(str(group_key or ""))
+        group = state["groups"].get(group_key or "")
         if not isinstance(group, dict):
             return False
         if (
             str(group.get("status") or "") != "running"
-            or str(group.get("lease_owner") or "") != str(owner or "")
-            or int(group.get("lease_generation") or 0) != int(lease_generation)
+            or str(group.get("lease_owner") or "") != (owner or "")
+            or int(group.get("lease_generation") or 0) != lease_generation
         ):
             return False
         provider = str(group.get("provider") or "")
-        ttl = max(0, int(recent_ttl_seconds or 0))
+        ttl = max(0, (recent_ttl_seconds or 0))
         if ttl:
             expiry = now_value + ttl
             for item_id in _normalized_paths(refreshed_target_ids):
                 state["recent"][f"{provider}:{item_id}"] = expiry
         completed = outcome == "completed"
         if completed and not _normalized_paths(group.get("pending_paths")):
-            state["groups"].pop(str(group_key), None)
+            state["groups"].pop(group_key, None)
         else:
             if completed:
                 group["attempts"] = 0
@@ -348,7 +349,7 @@ def settle_media_refresh(
                 if outcome == "failed":
                     group["attempts"] = max(0, int(group.get("attempts") or 0)) + 1
                 minimum = 5 if outcome == "failed" else 1
-                group["due_at"] = now_value + max(minimum, int(delay_seconds or minimum))
+                group["due_at"] = now_value + max(minimum, (delay_seconds or minimum))
             group.update(
                 inflight_paths=[],
                 status="queued" if completed else "retry_wait",

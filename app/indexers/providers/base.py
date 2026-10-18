@@ -84,7 +84,7 @@ class IndexerAdapter(ABC):
         """外围读取来源链接/种子时，使用该冻结结果所属的客户端。"""
         if stored_result.site_id != self.site_id:
             raise HttpSecurityError("result provider mismatch")
-        return self.http
+        return getattr(self, "http")
 
     def iter_http_clients(self) -> tuple[object, ...]:
         client = getattr(self, "http", None)
@@ -139,7 +139,7 @@ class DirectResultAdapter(IndexerAdapter):
 
 
 def fixed_host_join(base_url: str, candidate: str) -> str:
-    absolute = urljoin(base_url, str(candidate or "").strip())
+    absolute = urljoin(base_url, (candidate or "").strip())
     base = urlsplit(base_url)
     parsed = urlsplit(absolute)
     if parsed.scheme != "https" or parsed.hostname != base.hostname or parsed.port not in (None, 443):
@@ -215,7 +215,7 @@ def is_likely_challenge_page(
     if isinstance(body, bytes):
         text = body[:256 * 1024].decode("utf-8", errors="replace")
     else:
-        text = str(body or "")[:256 * 1024]
+        text = (body or "")[:256 * 1024]
     normalized = text.casefold()
     if any(marker.casefold() in normalized for marker in usable_markers):
         return False
@@ -229,7 +229,7 @@ def require_html_response(response) -> None:
 
 
 def parse_size_bytes(value: str | None) -> int | None:
-    text = str(value or "").strip()
+    text = (value or "").strip()
     match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?i?B)", text, re.IGNORECASE)
     if not match:
         return None

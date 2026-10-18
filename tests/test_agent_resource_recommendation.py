@@ -1,5 +1,6 @@
 """缺集资源确定性排序与只读推荐测试。"""
 from __future__ import annotations
+from typing import Any
 
 import copy
 import unittest
@@ -16,7 +17,7 @@ def _item(
     state: str = "ready",
     seeders=None,
     downloads=None,
-):
+) -> dict[str, Any]:
     return {
         "result_id": result_id,
         "site_id": site_id,
@@ -61,7 +62,7 @@ class ResourceRecommendationTests(unittest.TestCase):
         )
         self.assertEqual(finished["items"][0]["quality"]["match"], "episode_pack")
         self.assertTrue(finished["items"][0]["quality"]["eligible"])
-        self.assertIsNotNone(finished["recommendation"]["selected"])
+        assert (finished["recommendation"]["selected"]) is not None
 
     def test_pack_with_unknown_dates_is_not_confirmed_coverage(self):
         context = {"as_of": "2026-10-16", "detail": {"seasons": [{"season_number": 4, "episode_count": 26}]},

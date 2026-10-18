@@ -8,6 +8,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from time import perf_counter
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -286,7 +287,7 @@ def scrape_preview(request: Request, data: dict | None = Body(default=None)):
     try:
         result = scraper.match(filename, parent_path) if parent_path else scraper.match(filename)
         release_parse = scraper.parse_media(filename, parent_path, result)
-        parsed: dict[str, object] = {
+        parsed: dict[str, Any] = {
             "title": release_parse.title,
             "year": release_parse.year,
             "type": release_parse.media_type,
@@ -359,13 +360,13 @@ def _build_naming_preview(
     from app.modules.scraper import MatchResult
 
     match = MatchResult(
-        tmdb_id=str(tmdb_id or ""),
-        title=str(title or ""),
-        year=str(year or ""),
-        media_type=str(media_type or ""),
+        tmdb_id=(tmdb_id or ""),
+        title=(title or ""),
+        year=(year or ""),
+        media_type=(media_type or ""),
     )
     rules = OrganizeRules.from_config()
-    organizer = Organizer(client=object(), scraper=object())
+    organizer = Organizer(client=None, scraper=None, local_only=True, recognition_enabled=False)
     parsed = {"season": season, "episode": episode}
     file = GuangYaFile("preview", filename, False)
     file_name = organizer.build_new_name(match, file, parsed, rules) if tmdb_id else ""
@@ -398,7 +399,7 @@ def scrape_confirm(request: Request, data: dict | None = Body(default=None)):
         return api_error("缺少文件名或 tmdb_id", 400)
     scraper = TMDBScraper()
     try:
-        confirm_kwargs = {"parent_path": parent_path}
+        confirm_kwargs: dict = {"parent_path": parent_path}
         if rejected_tmdb_ids:
             confirm_kwargs["rejected_tmdb_ids"] = rejected_tmdb_ids
         scraper.confirm(
@@ -453,7 +454,7 @@ def _validate_tmdb_regex_target(
     else:
         if not filename:
             raise ValueError("媒体类型选择“按样例识别”时必须填写样例文件名")
-        resolved_type = str(media_type_hint or "").strip().lower()
+        resolved_type = (media_type_hint or "").strip().lower()
         if resolved_type not in {"movie", "tv"}:
             resolved_type = extract_recognition_context(filename, parent_path).media_type
     scraper = TMDBScraper()
@@ -780,8 +781,9 @@ def preview_gcid_import(request: Request, data: dict | None = Body(default=None)
     if not target_dir_id or len(target_dir_id) > 256:
         return api_error("请选择有效的目标目录", 400)
     try:
+        manifest: Any = data.get("manifest")
         return api_response(gcid_import.create_preview(
-            data.get("manifest"),
+            manifest,
             target_dir_id=target_dir_id,
             owner_id=_gcid_owner_id(request),
         ))
@@ -866,7 +868,7 @@ def gcid_capabilities(request: Request):
 
 
 def _configured_test_url(base_url: str, suffix: str) -> str:
-    base = str(base_url or "").strip().rstrip("/")
+    base = (base_url or "").strip().rstrip("/")
     if not base:
         return ""
     parsed = urlparse(base)
@@ -973,7 +975,7 @@ class _AIProviderTestFailure(RuntimeError):
         super().__init__(kind)
         self.kind = kind
         self.protocol = protocol
-        self.status_code = int(status_code or 0)
+        self.status_code = (status_code or 0)
 
 
 def _ai_model_test_rate_key(request: Request) -> str:
@@ -1017,7 +1019,7 @@ def _normalize_tmdb_api_url(raw_value: object) -> str:
     ).geturl().rstrip("/")
 
 
-def _ai_model_test_timeout(raw_value: object) -> int:
+def _ai_model_test_timeout(raw_value: Any) -> int:
     if isinstance(raw_value, bool):
         raise ValueError("请求超时必须是 2–120 秒的整数")
     if isinstance(raw_value, float) and not raw_value.is_integer():
@@ -1056,7 +1058,7 @@ async def _test_ai_provider(
     protocol: str,
     model: str,
     timeout_seconds: int,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """验证结构化输出，并独立探测工具调用与流式输出能力。"""
     profiles_json = config.get("AGENT_LLM_GENERATION_PROFILES", "")
     parse_generation_profiles(profiles_json)
@@ -1139,14 +1141,14 @@ async def _test_ai_provider(
         ) as response:
             if response.status_code != 200:
                 return False
-            content_type = str(response.headers.get("content-type") or "").lower()
+            content_type = (response.headers.get("content-type") or "").lower()
             if "text/event-stream" not in content_type:
                 return False
             received_text = False
             async for delta in iter_provider_text_deltas(
                 response.aiter_bytes(), protocol=attempted_protocol
             ):
-                received_text = received_text or bool(str(delta).strip())
+                received_text = received_text or bool(delta.strip())
             return received_text
 
     async def _safe_capability_probe(probe) -> bool:
@@ -1163,7 +1165,7 @@ async def _test_ai_provider(
         ):
             return False
 
-    async def _request_protocols() -> dict[str, object]:
+    async def _request_protocols() -> dict[str, Any]:
         for index, attempted_protocol in enumerate(protocols):
             attempt_started = perf_counter()
             body = structured_request_body(

@@ -65,7 +65,9 @@ class ProbeParentProjectionTests(IsolatedDatabaseTestCase):
         self.assertIn("⚠️", self.snapshot()["event"]["title"])
         with db.get_conn() as conn:
             self.assertEqual(conn.execute("SELECT status FROM organize_probe_queue WHERE id=?", (job_id,)).fetchone()[0], "failed")
-        self.assertEqual(db.get_download_request(self.request_id)["strm_status"], "completed")
+        get_download_request_result = db.get_download_request(self.request_id)
+        assert get_download_request_result is not None
+        self.assertEqual(get_download_request_result["strm_status"], "completed")
         self.assertNotIn("private-provider-error", self.snapshot()["event_json"])
         self.assertEqual(self.send.call_count, 1)
 
@@ -173,5 +175,6 @@ class ProbeParentProjectionTests(IsolatedDatabaseTestCase):
         center.publish_notification_thread("organize:synthetic-parent", NotificationEvent("✅ 目录刮削完成", fields=(("STRM", "完成"), ("媒体库", "完成")), state="completed"), topic="organize", importance="result", chat_id="chat-a")
         update_organize_lifecycle_downstream("synthetic-parent", chat_id="chat-a", strm_status="后台规格补全进行中", media_refresh="完成")
         snapshot = center.get_notification_thread_snapshot("organize:synthetic-parent", topic="organize", chat_id="chat-a")
+        assert snapshot is not None
         self.assertEqual(snapshot.event.state, "queued")
         self.assertFalse(organize_lifecycle_downstream_settled(snapshot.event))

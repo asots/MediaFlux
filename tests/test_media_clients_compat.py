@@ -176,7 +176,7 @@ class DashboardMediaCountTests(unittest.TestCase):
                 client._cached_user_id = "user-id"
                 calls: list[tuple[str, dict]] = []
 
-                def request(path, params=None, *, _calls=calls):
+                def request(path, params=None, *, timeout=None, _calls=calls):
                     normalized = dict(params or {})
                     _calls.append((path, normalized))
                     return {
@@ -287,7 +287,7 @@ class LegacyMediaClientTests(unittest.TestCase):
         client = EmbyClient("http://legacy.local", "token")
         calls: list[str] = []
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             calls.append(path)
             if path == "/Users":
                 raise RuntimeError("legacy endpoint unavailable")
@@ -304,7 +304,7 @@ class LegacyMediaClientTests(unittest.TestCase):
         client._cached_user_id = "user-id"
         calls: list[tuple[str, dict]] = []
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             calls.append((path, params or {}))
             if (params or {}).get("Limit") == 0:
                 return {"TotalRecordCount": 9}
@@ -456,7 +456,7 @@ class JellyfinPlaybackHistoryTests(unittest.TestCase):
         client._cached_user_id = "user-id"
         calls: list[tuple[str, dict]] = []
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             calls.append((path, params or {}))
             if path == "/System/ActivityLog/Entries":
                 raise RuntimeError("activity log unavailable")
@@ -515,7 +515,7 @@ class JellyfinPlaybackHistoryTests(unittest.TestCase):
         client._cached_user_id = "user-id"
         calls: list[tuple[str, dict]] = []
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             calls.append((path, params or {}))
             if path == "/System/ActivityLog/Entries":
                 return {
@@ -659,7 +659,7 @@ class ExplicitContinueWatchingTests(unittest.TestCase):
     def _assert_explicit_resume_contract(self, client) -> None:
         calls = []
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             calls.append((path, dict(params or {})))
             return {
                 "Items": [{
@@ -703,10 +703,10 @@ class ExplicitContinueWatchingTests(unittest.TestCase):
 
 
 class ExplicitPlaybackHistoryTests(unittest.TestCase):
-    def _assert_explicit_history_contract(self, client) -> None:
+    def _assert_explicit_history_contract(self, client):
         calls = []
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             calls.append((path, dict(params or {})))
             if path == "/System/ActivityLog/Entries":
                 return {
@@ -745,6 +745,7 @@ class ExplicitPlaybackHistoryTests(unittest.TestCase):
         calls = self._assert_explicit_history_contract(
             JellyfinClient("http://jellyfin.local", "key")
         )
+        assert calls is not None
         self.assertEqual(calls[0][0], "/System/ActivityLog/Entries")
         self.assertEqual(calls[1][1]["UserId"], "explicit-user")
 
@@ -752,6 +753,7 @@ class ExplicitPlaybackHistoryTests(unittest.TestCase):
         calls = self._assert_explicit_history_contract(
             EmbyClient("http://emby.local", "token")
         )
+        assert calls is not None
         self.assertEqual(calls[0][0], "/Users/explicit-user/Items")
         self.assertEqual(calls[0][1]["SortBy"], "DatePlayed")
         self.assertNotIn("Resume", calls[0][0])
@@ -770,7 +772,7 @@ class PlaybackHistoryGenreEnrichmentTests(unittest.TestCase):
     def _assert_series_genres_are_enriched(self, client, expected_path: str) -> None:
         calls: list[tuple[str, dict]] = []
 
-        def request(path, params=None):
+        def request(path, params=None, *, timeout=None):
             calls.append((path, dict(params or {})))
             return {
                 "Items": [

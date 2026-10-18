@@ -129,7 +129,7 @@ def diagnose_indexer_readiness(_arguments: dict[str, Any]) -> ToolResult:
     enabled_count = 0
 
     for raw_site_id in registered_ids:
-        site_id = str(raw_site_id or "").strip().lower()
+        site_id = (raw_site_id or "").strip().lower()
         if not _SITE_ID_RE.fullmatch(site_id):
             attention += 1
             continue

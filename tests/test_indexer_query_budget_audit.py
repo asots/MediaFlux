@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import cast
 
 from app.indexers.errors import IndexerValidationError
 from app.indexers.models import (
@@ -10,6 +11,7 @@ from app.indexers.models import (
     IndexerPage,
     IndexerSearchRequest,
 )
+from app.indexers.providers.base import IndexerAdapter
 from app.indexers.query_plan import build_site_queries
 from app.indexers.registry import IndexerRegistry
 from app.indexers.result_store import IndexerResultStore
@@ -96,7 +98,7 @@ class IndexerQueryBudgetServiceAuditTests(unittest.IsolatedAsyncioTestCase):
 
         provider = Provider()
         service = IndexerService(
-            registry=IndexerRegistry({"nyaa": provider}),
+            registry=IndexerRegistry(cast(dict[str, IndexerAdapter], {"nyaa": provider})),
             result_store=IndexerResultStore(),
         )
         try:

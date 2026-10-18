@@ -50,7 +50,7 @@ class ToolResult:
     data: dict[str, Any] = field(default_factory=dict)
     evidence: list[Evidence] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
-    error: str = ""
+    error: str | None = ""
     model_data: dict[str, Any] | None = None
     references: list[ToolReference] = field(default_factory=list, repr=False)
     effect_metadata: dict[str, Any] = field(default_factory=dict, repr=False)

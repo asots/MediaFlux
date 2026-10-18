@@ -3,30 +3,33 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
-import uuid
 import re
+import threading
 import unicodedata
+import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from app import database as db
 from app.clients.qbittorrent import QBittorrentClient, TorrentTask
 from app.config import get
 from app.logger import get_logger, log_throttled
-from app.modules.local_media_service import (
-    LocalMediaPostMoveError,
-    LocalMediaService,
-)
 from app.modules.local_media_candidates import discover_local_media_candidates
 from app.modules.local_media_models import (
     MANUAL_SCAN_TOKEN_PREFIX,
     SILENT_MANUAL_SCAN_TOKEN_PREFIX,
+    LocalMediaSource,
+    LocalMediaTask,
     canonical_local_media_content_path,
     local_media_paths_overlap,
 )
 from app.modules.local_media_notifications import notify_local_media_task
+from app.modules.local_media_service import (
+    LocalMediaPostMoveError,
+    LocalMediaService,
+)
 from app.modules.local_path_mapping import (
     PathMapping,
     PathMappingError,
@@ -45,7 +48,7 @@ _MAX_LOCAL_MEDIA_ORGANIZE_WORKERS = 3
 
 def resolve_local_media_organize_workers() -> int:
     """本地媒体只读规划 Worker 数；正式环境默认 2，测试默认串行。"""
-    configured = str(get("LOCAL_MEDIA_ORGANIZE_WORKERS", "") or "").strip()
+    configured = (get("LOCAL_MEDIA_ORGANIZE_WORKERS", "") or "").strip()
     if configured:
         try:
             requested = int(configured)
@@ -116,7 +119,7 @@ class LocalMediaScheduler:
         self._thread: threading.Thread | None = None
         self._path_locks: set[str] = set()
         self._capture_result_task_ids: set[int] = set()
-        self._captured_task_results: dict[int, dict[str, object]] = {}
+        self._captured_task_results: dict[int, dict[str, Any]] = {}
         self._guard = threading.RLock()
         self._stopping = False
         self._shutdown_requested = False
@@ -206,10 +209,10 @@ class LocalMediaScheduler:
         wake: bool = True,
         request_id: int | None = None,
     ) -> int | None:
-        raw_path = str(task.content_path or "").strip()
+        raw_path = (task.content_path or "").strip()
         if not raw_path:
             return None
-        task_save_path = str(task.save_path or "").strip()
+        task_save_path = (task.save_path or "").strip()
         matches = []
         eligible_sources = []
         for source in db.list_local_media_sources(owner=self.owner, enabled_only=True):
@@ -217,14 +220,14 @@ class LocalMediaScheduler:
                 continue
             eligible_sources.append(source)
             source_error = _source_path_error(source)
-            explicit_prefix = str(source.qb_path_prefix or "").strip()
+            explicit_prefix = (source.qb_path_prefix or "").strip()
             # 空前缀既支持两端绝对路径相同，也支持 qB 默认保存路径与
             # MediaFlux 容器挂载路径不同。任务级 save_path 只提供映射前缀，
             # 最终候选仍必须在来源根目录内真实存在并包含视频。
             mapping_prefixes = (
                 (explicit_prefix,)
                 if explicit_prefix
-                else (str(source.local_root or "").strip(), task_save_path)
+                else ((source.local_root or "").strip(), task_save_path)
             )
             seen_prefixes: set[str] = set()
             for qb_prefix in mapping_prefixes:
@@ -258,7 +261,7 @@ class LocalMediaScheduler:
         valid_matches = [item for item in strongest_matches if not item[3]]
         if not valid_matches:
             raise LocalMediaSourceMigrationRequired(strongest_matches[0][3])
-        actual_matches: list[tuple[object, PathMapping, Path]] = []
+        actual_matches: list[tuple[LocalMediaSource, PathMapping, Path]] = []
         probe_errors: list[str] = []
         for _, candidate_source, candidate_mapping, _ in valid_matches:
             candidate_path = assert_within(
@@ -302,7 +305,7 @@ class LocalMediaScheduler:
             )
         else:
             task_id, _restarted = db.create_and_link_qb_local_media_task(
-                int(request_id), source.id, task.hash, str(local_path), owner=self.owner,
+                request_id, source.id, task.hash, str(local_path), owner=self.owner,
             )
         if wake:
             self.reload()
@@ -317,7 +320,7 @@ class LocalMediaScheduler:
         capture_results: bool = False,
         source_ids: set[int] | frozenset[int] | None = None,
         candidate_query: str = "",
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         """显式扫描全部本地来源，把已存在媒体作为手动任务加入队列。
 
         本入口用于 Web/TG 的一次性用户操作，不依赖已废弃的目录轮询配置；
@@ -325,12 +328,12 @@ class LocalMediaScheduler:
         """
         scan_started_at = db.now()
         task_ids: list[int] = []
-        source_results: list[dict[str, object]] = []
+        source_results: list[dict[str, Any]] = []
         selected_source_ids = (
-            {int(item) for item in source_ids} if source_ids is not None else None
+            {item for item in source_ids} if source_ids is not None else None
         )
         for source in db.list_local_media_sources(owner=self.owner):
-            if selected_source_ids is not None and int(source.id) not in selected_source_ids:
+            if selected_source_ids is not None and source.id not in selected_source_ids:
                 continue
             source_error = _source_path_error(source)
             if source_error:
@@ -381,7 +384,7 @@ class LocalMediaScheduler:
                         trigger="scan",
                         operation_token=f"{prefix}{uuid.uuid4().hex}",
                     )
-                    source_task_ids.append(int(task_id))
+                    source_task_ids.append(task_id)
                 except Exception as exc:
                     logger.warning("本地媒体手动扫描入队失败 %s: %s", candidate.name, exc)
             task_ids.extend(source_task_ids)
@@ -427,9 +430,9 @@ class LocalMediaScheduler:
     def _complete_captured_task_result(
         self,
         task_id: int,
-        result: dict[str, object] | None,
+        result: dict[str, Any] | None,
     ) -> None:
-        normalized_id = int(task_id)
+        normalized_id = task_id
         with self._guard:
             if normalized_id not in self._capture_result_task_ids:
                 return
@@ -442,7 +445,7 @@ class LocalMediaScheduler:
                 oldest_id = next(iter(self._captured_task_results))
                 self._captured_task_results.pop(oldest_id, None)
 
-    def _rebuild_manual_review_result(self, task) -> dict[str, object] | None:
+    def _rebuild_manual_review_result(self, task) -> dict[str, Any] | None:
         """为已存在的待确认任务重建只读预览，供 TG 再次生成候选卡。"""
         try:
             inspection = self.service.inspect_task(self.owner, int(task.id))
@@ -470,7 +473,7 @@ class LocalMediaScheduler:
                 dict(item) for item in (review_preview.get("matches") or [])
                 if isinstance(item, dict)
             ]
-            candidates: list[dict[str, object]] = []
+            candidates: list[dict[str, Any]] = []
             seen: set[tuple[str, str]] = set()
             for match in matches:
                 tmdb_id = str(match.get("tmdb_id") or "").strip()
@@ -501,9 +504,9 @@ class LocalMediaScheduler:
             "preview": review_preview,
         }
 
-    def take_captured_task_result(self, task_id: int) -> dict[str, object] | None:
+    def take_captured_task_result(self, task_id: int) -> dict[str, Any] | None:
         """消费 TG 手动批次结果；复用待确认任务时按需恢复候选预览。"""
-        normalized_id = int(task_id)
+        normalized_id = task_id
         with self._guard:
             was_captured = normalized_id in self._capture_result_task_ids
             self._capture_result_task_ids.discard(normalized_id)
@@ -706,7 +709,7 @@ class LocalMediaScheduler:
 
     def _task_supports_parallel_planning(self, task) -> bool:
         source = db.get_local_media_source(task.source_id, owner=self.owner)
-        return source is not None and str(source.media_type or "") != "nsfw"
+        return source is not None and (source.media_type or "") != "nsfw"
 
     def _run_parallel_planning_batch(self, tasks: list, workers: int) -> int:
         """支持并行的注入服务同样须提供 operation_lease 与 create_planning_worker。"""
@@ -716,7 +719,7 @@ class LocalMediaScheduler:
         with self.service.operation_lease():
             planner_local = threading.local()
             planner_guard = threading.Lock()
-            planners: list[object] = []
+            planners: list[LocalMediaService] = []
 
             def planner_for_thread():
                 planner = getattr(planner_local, "service", None)
@@ -730,7 +733,7 @@ class LocalMediaScheduler:
             def prepare(task):
                 return planner_for_thread().prepare_task(self.owner, task.id)
 
-            pending: deque[tuple[object, str, Future]] = deque()
+            pending: deque[tuple[LocalMediaTask, str, Future]] = deque()
             iterator = iter(tasks)
             window = min(len(tasks), max(workers, workers * 2))
             processed = 0

@@ -178,7 +178,7 @@ def _open_directory_fd(path: Path) -> int:
 
 
 def _tail_redacted_log(path: Path, limit: int) -> str:
-    count = max(1, min(int(limit), 1000))
+    count = max(1, min(limit, 1000))
     if os.name != "posix":
         return "[当前平台为避免目录链接竞态，未收录应用日志]\n"
 
@@ -208,9 +208,9 @@ def _tail_redacted_log(path: Path, limit: int) -> str:
         ):
             return "[应用日志读取期间发生变化，已跳过]\n"
 
-        start = max(0, int(opened_metadata.st_size) - _MAX_LOG_BYTES)
+        start = max(0, opened_metadata.st_size - _MAX_LOG_BYTES)
         os.lseek(file_fd, start, os.SEEK_SET)
-        remaining = min(int(opened_metadata.st_size), _MAX_LOG_BYTES)
+        remaining = min(opened_metadata.st_size, _MAX_LOG_BYTES)
         while remaining > 0:
             chunk = os.read(file_fd, min(remaining, 64 * 1024))
             if not chunk:
@@ -281,7 +281,7 @@ def _validate_destination(destination: Path) -> None:
 
 def _write_private_archive_posix(destination: Path, files: dict[str, bytes]) -> None:
     directory_fd = -1
-    temporary_name = ""
+    temporary_name: str = ""
     try:
         directory_fd = _open_directory_fd(destination.parent)
         for _ in range(16):
@@ -365,7 +365,7 @@ def _write_private_archive_posix(destination: Path, files: dict[str, bytes]) -> 
 
 def _write_private_archive_path(destination: Path, files: dict[str, bytes]) -> None:
     """Windows 回退：托盘默认写入当前用户 LOCALAPPDATA 私有目录。"""
-    temporary_name = ""
+    temporary_name: str = ""
     try:
         parent_metadata = _validate_directory_chain(destination.parent)
         with tempfile.NamedTemporaryFile(
@@ -474,7 +474,7 @@ def create_support_bundle(
             "strm_dir": _display_path(paths.strm_dir),
             "trash_dir": _display_path(paths.trash_dir),
         },
-        "service_endpoint": {"host": host, "port": int(port)},
+        "service_endpoint": {"host": host, "port": port},
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "privacy": {
             "local_only": True,

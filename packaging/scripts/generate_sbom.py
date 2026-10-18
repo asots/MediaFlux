@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """从锁定的 Python 依赖清单生成范围明确的 SPDX 2.3 JSON SBOM。"""
 from __future__ import annotations
-import argparse, json, os, re
-from datetime import datetime,timezone
+
+import argparse
+import json
+import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
+
 REQ=re.compile(r'^([A-Za-z0-9_.-]+)\s*([<>=!~]{1,2})?\s*([^;\s#]+)?')
 def dependencies(files:list[Path])->list[dict[str,str]]:
  result={}
