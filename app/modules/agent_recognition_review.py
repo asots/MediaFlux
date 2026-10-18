@@ -15,6 +15,7 @@ from pathlib import PurePath
 from typing import Any
 
 from app import config
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel import (
     AgentEventType,
     AgentInput,
@@ -26,7 +27,6 @@ from app.agent.kernel import (
     ToolEffect,
     ToolPipeline,
 )
-from app.agent.kernel.pipeline import ToolPipelineError
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.provider_model import (
     OpenAICompatibleModelAdapter,

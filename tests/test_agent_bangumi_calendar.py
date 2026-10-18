@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
-from app.agent.discovery_actions import bangumi_calendar, calendar_arguments
+from app.agent.domains.discovery.actions import bangumi_calendar, calendar_arguments
 from app.agent.errors import AgentToolError
 from app.discovery.models import (
     DiscoveryPage,
@@ -83,9 +83,9 @@ class AgentBangumiCalendarTests(unittest.TestCase):
     def test_disabled_feature_does_not_create_service(self):
         service = Mock()
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=False),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=False),
             patch(
-                "app.agent.discovery_actions.get_discovery_service",
+                "app.agent.domains.discovery.actions.get_discovery_service",
                 return_value=service,
             ) as getter,
         ):
@@ -106,9 +106,9 @@ class AgentBangumiCalendarTests(unittest.TestCase):
         )
         service = FakeDiscoveryService(page)
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.discovery_actions.get_discovery_service",
+                "app.agent.domains.discovery.actions.get_discovery_service",
                 return_value=service,
             ),
         ):
@@ -141,9 +141,9 @@ class AgentBangumiCalendarTests(unittest.TestCase):
     def test_all_week_uses_empty_filters_and_empty_status(self):
         service = FakeDiscoveryService(DiscoveryPage(items=(), page=1))
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.discovery_actions.get_discovery_service",
+                "app.agent.domains.discovery.actions.get_discovery_service",
                 return_value=service,
             ),
         ):
@@ -173,9 +173,9 @@ class AgentBangumiCalendarTests(unittest.TestCase):
         ):
             with (
                 self.subTest(error=type(error).__name__),
-                patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
                 patch(
-                    "app.agent.discovery_actions.get_discovery_service",
+                    "app.agent.domains.discovery.actions.get_discovery_service",
                     return_value=FailingService(error),
                 ),
             ):

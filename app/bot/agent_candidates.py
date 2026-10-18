@@ -8,9 +8,13 @@ import time
 from copy import deepcopy
 from typing import Any
 
+from app.agent.domains.resources.selection import current_candidate_view
 from app.agent.kernel.references import ReferenceError
-from app.agent.kernel.state import PublicationLease, SelectionInvalidError, StateUpdate
-from app.agent.kernel.ux_selection import current_candidate_view
+from app.agent.kernel.state_types import (
+    PublicationLease,
+    SelectionInvalidError,
+    StateUpdate,
+)
 
 CALLBACK_RE = re.compile(
     r"^agk:s:(?:(?P<route>[A-Za-z0-9_-]{8,16}):)?"
@@ -155,14 +159,14 @@ def handle_callback(
     message_thread_id: object = None,
 ) -> None:
     from app.agent.kernel.bootstrap import get_agent_kernel_runtime
-    from app.agent.kernel.transports import QueryEnvelope
+    from app.agent.transports import QueryEnvelope
     from app.bot.agent_adapter import (
+        AGENT_CANCELLATION,
         _approval_markup,
         _delivery_route,
         _edit_final,
         _preview_lines,
         _render_turn,
-        AGENT_CANCELLATION,
     )
 
     match = CALLBACK_RE.fullmatch(str(call.data or ""))

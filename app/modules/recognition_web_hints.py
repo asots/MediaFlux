@@ -155,7 +155,7 @@ async def _request_titles(
 ) -> RecognitionWebHintResult:
     # 延迟导入，避免 indexers 包初始化反向导入 scraper。
     if client_factory is None:
-        from app.indexers.http import FixedHostHttpClient
+        from app.clients.http import FixedHostHttpClient
 
         client_factory = FixedHostHttpClient
     client = client_factory(

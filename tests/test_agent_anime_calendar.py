@@ -2,21 +2,27 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, datetime, timedelta
-from pathlib import Path
 import json
 import unittest
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import tests  # noqa: F401 -- 必须先隔离环境/数据库，再导入应用。
-from tests.support import isolated_test_database
-from app.agent.calendar_actions import anime_calendar, anime_calendar_arguments
+from app.agent.domains.discovery.calendar_actions import (
+    anime_calendar,
+    anime_calendar_arguments,
+)
 from app.agent.errors import AgentToolError
 from app.agent.kernel.projection import DefaultProjector
 from app.discovery.cache import DiscoveryCache
 from app.discovery.calendar.models import SOURCE_NAMES, SourceUnavailable
-from app.discovery.calendar.providers.youku import _dynamic_calendar_data, _parse_calendar_data
+from app.discovery.calendar.providers.youku import (
+    _dynamic_calendar_data,
+    _parse_calendar_data,
+)
 from app.discovery.calendar.service import CalendarService
+from tests.support import isolated_test_database
 
 FIXTURES = Path(__file__).with_name("fixtures") / "calendar" / "youku"
 
@@ -52,8 +58,8 @@ class AgentAnimeCalendarTests(unittest.TestCase):
     def setUp(self):
         self.data = snapshot()
         self.service = Mock(get_week=Mock(side_effect=lambda **kwargs: copy.deepcopy(self.data)))
-        self.getter = self.enterContext(patch("app.agent.calendar_actions.get_calendar_service", return_value=self.service))
-        self.enabled = self.enterContext(patch("app.agent.calendar_actions.config.get_bool", return_value=True))
+        self.getter = self.enterContext(patch("app.agent.domains.discovery.calendar_actions.get_calendar_service", return_value=self.service))
+        self.enabled = self.enterContext(patch("app.agent.domains.discovery.calendar_actions.config.get_bool", return_value=True))
         self.network_attempts = []
         def forbidden(*args, **kwargs):
             self.network_attempts.append(True)

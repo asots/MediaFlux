@@ -55,7 +55,7 @@ def decode_tool_content(content: str) -> dict[str, Any]:
 
 
 def _invalid_result() -> NoReturn:
-    from app.agent.kernel.pipeline import ToolPipelineError
+    from app.agent.errors import ToolPipelineError
 
     raise ToolPipelineError("结果续取元数据无效，不能将不完整证据当作完整结果；请重新观察。", code="invalid_tool_result")
 
@@ -229,7 +229,7 @@ def compact_tool_content(
         omitted["/" + key] = record("/" + key, 0, subtree=True)
 
     def fail_budget() -> NoReturn:
-        from app.agent.kernel.pipeline import ToolPipelineError
+        from app.agent.errors import ToolPipelineError
 
         raise ToolPipelineError("结果的原子键或续取元数据超过上下文预算，无法安全分页；请缩小原查询。", code="context_budget_exceeded")
 
@@ -373,7 +373,7 @@ def protocol_history_groups(messages: Sequence[Any], *, history_end: int):
     current_native_ids = {call.call_id for message in current if message.provider_state is not None
                           for call in message.tool_calls}
     if any(current_counts[identifier] > 1 for identifier in current_native_ids):
-        from app.agent.kernel.pipeline import ToolPipelineError
+        from app.agent.errors import ToolPipelineError
 
         raise ToolPipelineError(
             "模型复用了原生状态关联标识，无法安全续传；已保留真实工具结果，请重新发起查询",
@@ -439,7 +439,7 @@ def bounded_model_messages(
         current = _compact_chain(current, max_tool_chars=maximum)
         current_cost = cost(current)
     if current_cost > message_budget:
-        from app.agent.kernel.pipeline import ToolPipelineError
+        from app.agent.errors import ToolPipelineError
 
         raise ToolPipelineError(
             "当前工具链超过模型上下文上限，请缩小查询范围后重试",
@@ -456,7 +456,7 @@ def bounded_model_messages(
         for maximum in (1_200, 400):
             if candidate_cost <= remaining or kept:
                 break
-            from app.agent.kernel.pipeline import ToolPipelineError
+            from app.agent.errors import ToolPipelineError
 
             try:
                 candidate = _compact_chain(group, max_tool_chars=maximum)

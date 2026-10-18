@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from app.agent.domain_catalog import shared
+from app.agent.domains import shared_arguments as shared
+from app.agent.domains.workspace import actions as workspace_actions
 from app.agent.errors import AgentToolError
-from app.agent import workspace_actions
 
 
 class AgentSearchNormalizationTests(unittest.TestCase):

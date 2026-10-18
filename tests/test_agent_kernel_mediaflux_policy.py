@@ -4,14 +4,15 @@ import unittest
 import uuid
 from unittest.mock import patch
 
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import KernelToolSpec, ToolEffect
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
 from app.agent.kernel.ports.mediaflux_policy import (
     MediaFluxAuthorizationPolicy,
     MediaFluxToolRateLimiter,
     MediaFluxTurnAdmission,
 )
-from app.agent.kernel.state import AgentInput, CancellationToken, PublicationLease
+from app.agent.kernel.state_types import AgentInput, CancellationToken, PublicationLease
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.rate_limit import RateLimitDecision
 from tests.support import isolated_test_database
 

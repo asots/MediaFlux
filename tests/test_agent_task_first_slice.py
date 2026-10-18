@@ -3,26 +3,26 @@
 import asyncio
 import json
 import socket
-from dataclasses import asdict
+from contextlib import contextmanager
+from dataclasses import asdict, replace
 from unittest.mock import patch
-from starlette.requests import Request
 
 import httpx
 import pytest
-from dataclasses import replace
-from contextlib import contextmanager
+from starlette.requests import Request
 
 from app import database as db
-from app.agent.owner_routes import web_kernel_owner
+from app.agent.kernel.adapters import TurnViewBuilder
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
+from app.agent.kernel.conversation_state import retain_conversation
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.provider_model import (
     OpenAICompatibleModelAdapter,
     ProviderSettings,
 )
-from app.agent.kernel.state import AgentInput, retain_conversation
-from app.agent.kernel.adapters import TurnViewBuilder
-from app.indexers.http import FixedHostHttpClient
+from app.agent.kernel.state_types import AgentInput
+from app.agent.owner_routes import web_kernel_owner
+from app.clients.http import FixedHostHttpClient
 from app.routes import agent_api
 
 GOAL = "观察 TMDB 和 qBittorrent 当前配置状态，仅观察、不修改。"
@@ -361,7 +361,7 @@ def test_no_task_qa_transaction_trace(tmp_path):
 
 @pytest.mark.parametrize("failure", ["invalid", "exception", "commit"])
 def test_native_failed_observation_is_atomic_and_object_scoped(tmp_path, failure):
-    from app.agent import config_explain_actions as domain
+    from app.agent.domains.configuration import explanations as domain
 
     previous = db.DB_PATH, bool(getattr(db, "_configured_test_mode", False))
     db.configure_database(tmp_path / "failure.db", test_mode=True)
@@ -456,7 +456,7 @@ def test_native_failed_observation_is_atomic_and_object_scoped(tmp_path, failure
 
 @pytest.mark.parametrize("checkpoint", [False, True])
 def test_native_snapshot_capacity_failure_and_cold_recovery(tmp_path, checkpoint):
-    from app.agent import config_explain_actions as domain
+    from app.agent.domains.configuration import explanations as domain
     from app.agent.rate_limit import AgentRateLimiter
 
     previous = db.DB_PATH, bool(getattr(db, "_configured_test_mode", False))
@@ -526,8 +526,8 @@ def test_native_snapshot_capacity_failure_and_cold_recovery(tmp_path, checkpoint
 
 @pytest.mark.parametrize("qb_state", ["ready", "incomplete", "invalid", "error"])
 def test_native_diagnose_batch_attention_to_explicit_checkpoint_and_sqlite(tmp_path, qb_state):
-    from app.agent import config_diagnosis_actions as diagnosis
-    from app.agent import config_explain_actions as explain
+    from app.agent.domains.configuration import diagnosis
+    from app.agent.domains.configuration import explanations as explain
 
     previous = db.DB_PATH, bool(getattr(db, "_configured_test_mode", False))
     db.configure_database(tmp_path / "diagnose-task.db", test_mode=True)

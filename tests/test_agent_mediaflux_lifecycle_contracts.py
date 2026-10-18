@@ -9,7 +9,10 @@ from unittest.mock import patch
 import pytest
 
 from app import database as db
-from app.agent.action_history import action_history_owner_digest, record_confirmation_claimed
+from app.agent.action_history import (
+    action_history_owner_digest,
+    record_confirmation_claimed,
+)
 from app.agent.kernel.capabilities import ToolEffect
 from app.agent.kernel.effects import EffectPlan, PreparedEffect
 from app.agent.kernel.ports import mediaflux_effects as target
@@ -237,12 +240,13 @@ def test_completion_failure_boundaries(fault):
 
 def test_plain_qa_keeps_one_model_zero_tool_eight_write_transactions():
     from contextlib import contextmanager
+
     from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
     from app.agent.kernel.model import ModelEvent, ModelEventType
     from app.agent.kernel.persistence import SQLiteKernelStore
     from app.agent.kernel.pipeline import ToolPipeline
     from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.state import AgentInput
+    from app.agent.kernel.state_types import AgentInput
 
     async def check():
         writes = []

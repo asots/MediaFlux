@@ -6,9 +6,12 @@ from contextlib import ExitStack
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent import web_read_actions as read, web_search_actions as search
+from app.agent.domains.discovery import web_read_actions as read
+from app.agent.domains.discovery import web_search_actions as search
+from app.agent.domains.discovery.web_request_singleflight import (
+    web_request_singleflight,
+)
 from app.agent.models import ToolResult
-from app.agent.web_request_singleflight import web_request_singleflight
 from app.modules import recognition_web_hints as hints
 from tests.support import IsolatedDatabaseTestCase
 

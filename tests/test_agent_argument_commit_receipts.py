@@ -1,15 +1,31 @@
 """Positive current-execution retention at the real receipt merge boundary."""
-import asyncio, json
+import asyncio
+import json
 from copy import deepcopy
 from dataclasses import replace
+
 import pytest
+
 from app.agent.kernel.capabilities import ToolCatalog
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.projection import ToolOutcome
-from app.agent.kernel.state import StateUpdate, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import StateUpdate
 from tests.support import isolated_test_database
-from tests.test_agent_capacity_recovery import (PROTOCOLS,OWNER,SESSION,spec,batch,make_wire,session,collect,reopened,result_rows)
+from tests.test_agent_capacity_recovery import (
+    OWNER,
+    PROTOCOLS,
+    SESSION,
+    batch,
+    collect,
+    make_wire,
+    reopened,
+    result_rows,
+    session,
+    spec,
+)
 from tests.test_agent_provider_text_authority import native_reply
+
 
 def ids(state):
     return [c['call_id'] for r in state.conversation for c in r.get('tool_calls',[])]

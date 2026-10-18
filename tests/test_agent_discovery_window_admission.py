@@ -10,7 +10,7 @@ import pytest
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
 from app.agent.kernel.discovery import CapabilityDiscovery
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.test_agent_kernel_capability_discovery import capability_tool
 from tests.test_agent_kernel_core import read_tool
 from tests.test_agent_task_entry import (
@@ -89,7 +89,9 @@ def test_native_small_window_loaded_is_in_next_request(
     script = WindowScript(has_task, requested)
     runtime = build_agent_kernel_runtime(model=script.adapter, store=store())
     runtime.session.retriever = CapabilityRetriever(minimum=1, maximum=2)
-    runtime.session.limits = SessionLimits(context_window_tokens=16_384)
+    runtime.session.limits = SessionLimits(
+        context_window_tokens=16_384, capability_window=2
+    )
 
     async def run():
         return [

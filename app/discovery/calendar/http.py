@@ -10,10 +10,10 @@ import time
 
 import httpx
 
-from app.indexers.http import FixedHostHttpClient
+from app.clients.http import FixedHostHttpClient
 from app.indexers.providers.base import is_likely_challenge_page
-from .models import SourceUnavailable
 
+from .models import SourceUnavailable
 
 CALENDAR_USER_AGENT = "Mozilla/5.0 (compatible; MediaFluxCalendar/1.0)"
 _PUBLIC_SESSION_ENDPOINT = "https://acs.youku.com/h5/mtop.youku.columbus.home.query/1.0/"

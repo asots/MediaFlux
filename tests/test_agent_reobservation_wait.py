@@ -20,12 +20,12 @@ import requests
 
 from app import database as db
 from app.agent import effect_completion as effects
+from app.agent.errors import ToolRateLimitError
 from app.agent.kernel.bootstrap import _capture_creation_binding
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.ports import existing_actions
-from app.agent.kernel.pipeline import ToolRateLimitError
 from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolContext
 from app.agent.rate_limit import RateLimitDecision
 from app.agent.task_stop import stop_agent_session
@@ -33,14 +33,14 @@ from app.modules import organize_tasks
 from app.repositories import organize_operation_jobs as jobs
 from tests.support import initialized_web_runtime
 from tests.test_agent_effect_admission import (
-    _OfflineClient,
-    _offline_runtime,
-    _paused_manager,
     _domain_arguments,
+    _offline_runtime,
+    _OfflineClient,
+    _paused_manager,
     _run_real_worker,
     _spec,
 )
-from tests.test_agent_failed_effect_followup import A, GOAL, READ, NativeCase
+from tests.test_agent_failed_effect_followup import GOAL, READ, A, NativeCase
 from tests.test_agent_task_first_slice import NativeScript
 
 WRITE = "guangya.fs.change.execute"
@@ -247,7 +247,6 @@ def background_case(native_case):
     observed = []
     prepared = []
     inspect = case.media.inspect
-    real = existing_actions.adapt_tool_spec(_spec("fs"))
 
     def freeze(arguments, context):
         # 只给真实领域预检附加本次私有来源，不伪造确认/受理/完成状态。
@@ -288,6 +287,7 @@ def background_case(native_case):
         existing_actions, "wait_for_effect_completion",
         partial(effects.wait_for_effect_completion, timeout_seconds=0),
     ):
+        real = existing_actions.adapt_tool_spec(_spec("fs", actions=stack.domain_actions))
         case.change_arguments = _domain_arguments(
             "fs", client, ToolContext(owner=case.owner, session_id=case.sid), stack,
         )

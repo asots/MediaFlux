@@ -1,19 +1,23 @@
 """Explicit generation profiles at the real, offline HTTP boundary."""
 import asyncio
-from contextlib import contextmanager
 import json
 import socket
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import httpx
 import pytest
 
-from app import config, database as db
+from app import config
+from app import database as db
 from app.agent.kernel.model import ModelMessage, ModelRequest
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.provider_model import (
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
+from app.agent.kernel.state_types import CancellationToken
 from app.clients.ai_recognition import AIRecognitionClient
-from app.indexers.http import FixedHostHttpClient
+from app.clients.http import FixedHostHttpClient
 
 BASE = 'https://api.example.com/v1'
 KEY = 'AGENT_LLM_GENERATION_PROFILES'
@@ -85,7 +89,7 @@ def structured(model, protocol, profile=''):
     # tests bootstrap points this to its disposable scratch database.
     db.init_db()
     wire = Wire('{"ok":true}')
-    with settings(model, protocol, profile), patch('app.indexers.http.FixedHostHttpClient', wire.factory):
+    with settings(model, protocol, profile), patch('app.clients.ai_recognition.FixedHostHttpClient', wire.factory):
         client = AIRecognitionClient(api_url=BASE, model=model, api_key='offline-fixture-only', protocol=protocol)
         result = client._request_structured(system_prompt='offline', payload={'probe': 'hello'},
             schema_name='offline', schema={'type': 'object', 'properties': {'ok': {'type': 'boolean'}}, 'required': ['ok'], 'additionalProperties': False})
@@ -165,6 +169,7 @@ def test_invalid_profiles_are_safe_local_failures(bad):
 @pytest.fixture
 def local_config(tmp_path, monkeypatch):
     import os
+
     from app.agent.kernel import bootstrap
 
     for key in list(os.environ):
@@ -175,8 +180,8 @@ def local_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config, '_STARTUP_ENV_OVERRIDES', frozenset())
     monkeypatch.setattr(bootstrap, '_runtime', None)
     # Restore environment mutations made by the real atomic config publisher.
-    from tests.support import isolated_test_database
     from app.agent import feature_gate
+    from tests.support import isolated_test_database
     with patch.dict(os.environ), isolated_test_database():
         config.write_env_file(config.ENV_FILE, {}, replace=False)
         feature_gate.initialize_runtime_fence()
@@ -210,6 +215,7 @@ def no_external_io(monkeypatch):
 def config_api(local_config):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
     from app.routes.api import router
 
     application = FastAPI()
@@ -242,7 +248,7 @@ def test_config_save_read_rebuild_to_wire(local_config, config_api):
         rebuilt = bootstrap.get_agent_kernel_runtime()
         assert rebuilt is not before
         async def run():
-            from app.agent.kernel.state import AgentInput
+            from app.agent.kernel.state_types import AgentInput
             return [e async for e in rebuilt.session.run(AgentInput(
                 message='hello', owner='webk:v1:' + 'a' * 64, session_id='profile-api', channel='api'))]
         events = asyncio.run(run())
@@ -404,7 +410,7 @@ def test_invalid_configuration_no_save_no_post(bad, local_config, caplog):
     assert b'secret-sentinel' not in result.body
     assert local_config.read_bytes() == before
     wire = Wire()
-    with settings('alias', profile=bad), patch('app.indexers.http.FixedHostHttpClient', wire.factory), patch.object(tools_api, 'FixedHostHttpClient', wire.factory):
+    with settings('alias', profile=bad), patch('app.clients.ai_recognition.FixedHostHttpClient', wire.factory), patch.object(tools_api, 'FixedHostHttpClient', wire.factory):
         with pytest.raises(ValueError) as caught:
             ProviderSettings.from_config()
         assert_safe_error(caught.value)
@@ -421,8 +427,9 @@ def test_invalid_configuration_no_save_no_post(bad, local_config, caplog):
 
 
 def test_profile_limits_and_empty_defaults(local_config, config_api):
-    from app.clients.openai_compatible import parse_generation_profiles
     from dataclasses import FrozenInstanceError
+
+    from app.clients.openai_compatible import parse_generation_profiles
 
     for raw in ('', '[]', ' \n\t ', '[]' + ' ' * 65_534):
         assert parse_generation_profiles(raw) == ()
@@ -470,7 +477,7 @@ def test_cached_shared_client_refreshes_only_at_logical_request_start():
                 return httpx.Response(404, text='responses api is not supported')
             return success
         wire.handler = changing_handler
-        with patch('app.indexers.http.FixedHostHttpClient', wire.factory):
+        with patch('app.clients.ai_recognition.FixedHostHttpClient', wire.factory):
             client = AIRecognitionClient(api_url=BASE, model='alias', api_key='fixture', protocol='auto')
             for _ in range(2):
                 assert client._request_structured(system_prompt='offline', payload={},
@@ -514,18 +521,21 @@ def test_native_retry_and_fallback_match_attempt_protocol_with_fixed_snapshot():
 
 
 def test_telegram_callback_real_kv_next_turn_title_and_web_isolation():
-    import telebot
     from types import SimpleNamespace
     from unittest.mock import Mock
-    from tests.support import isolated_test_database
-    from app.bot import agent_adapter
-    from app.modules import telegram_model_preferences as prefs
-    from app.modules.telegram_topic_routing import _generate_private_topic_title
+
+    import telebot
+
     from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
     from app.agent.kernel.pipeline import ToolPipeline
     from app.agent.kernel.ports.mediaflux_policy import select_channel_model
     from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import AgentInput
+    from app.bot import agent_adapter
+    from app.modules import telegram_model_preferences as prefs
+    from app.modules.telegram_topic_routing import _generate_private_topic_title
+    from tests.support import isolated_test_database
 
     wire = Wire('Topic')
     owner = agent_adapter.telegram_agent_owner('-100123', '7')
@@ -579,7 +589,12 @@ def test_telegram_callback_real_kv_next_turn_title_and_web_isolation():
 @pytest.mark.parametrize('protocol', PROTOCOLS)
 @pytest.mark.parametrize('unsupported', [False, True])
 def test_explicit_profile_preserves_bound_native_auto(protocol, unsupported):
-    from tests.test_agent_protocol_fallback import wire, native_messages, assert_native_payload, http_error
+    from tests.test_agent_protocol_fallback import (
+        assert_native_payload,
+        http_error,
+        native_messages,
+        wire,
+    )
 
     messages = native_messages(protocol)
     original = messages[0].provider_state.layout_json
@@ -603,7 +618,7 @@ def test_explicit_profile_preserves_bound_native_auto(protocol, unsupported):
     (503, 'temporary', 2),
 ])
 def test_profiles_do_not_grant_business_or_exhausted_fallback(status, text, attempts):
-    from tests.test_agent_protocol_fallback import wire, http_error
+    from tests.test_agent_protocol_fallback import http_error, wire
 
     raw = json.dumps([json.loads(profiles('fixture', p))[0] for p in PROTOCOLS])
     result = wire([http_error(status, text)], generation_profiles_json=raw)
@@ -617,7 +632,7 @@ def test_profiles_do_not_grant_business_or_exhausted_fallback(status, text, atte
 @pytest.mark.parametrize('close_fault', [None, httpx.ReadError, ValueError])
 def test_profile_cancel_deadline_with_real_cleanup(mode, fallback, close_fault):
     from app.agent.kernel.provider_model import ModelProviderError
-    from tests.test_agent_protocol_fallback import wire, http_error, error_chain, SECRET
+    from tests.test_agent_protocol_fallback import SECRET, error_chain, http_error, wire
 
     action = dict(status=200, data=b'', headers={'content-type': 'text/event-stream'},
                   task_cancel=mode == 'cancel', hanging=mode == 'deadline', close_fault=close_fault)
@@ -662,7 +677,7 @@ def configured_route_wire(entry='native'):
         assert asyncio.run(run())[-1].type.value == 'finish'
     elif entry == 'shared':
         from tests.support import isolated_test_database
-        with isolated_test_database(), patch('app.indexers.http.FixedHostHttpClient', wire.factory):
+        with isolated_test_database(), patch('app.clients.ai_recognition.FixedHostHttpClient', wire.factory):
             client = AIRecognitionClient(api_url=config.get('AGENT_LLM_API_URL'),
                 api_key=config.get('AGENT_LLM_API_KEY'), model=config.get('AGENT_LLM_MODEL'),
                 protocol=config.get('AGENT_LLM_PROTOCOL'))
@@ -697,7 +712,10 @@ def assert_route_generation(calls, protocol, path, matched, entry='native'):
 @pytest.mark.parametrize('protocol', PROTOCOLS)
 @pytest.mark.parametrize('mode', ['matched', 'different-route', 'legacy'])
 def test_repeated_endpoint_route_identity_on_wire(entry, protocol, mode):
-    from app.clients.openai_compatible import normalize_provider_location, parse_generation_profiles
+    from app.clients.openai_compatible import (
+        normalize_provider_location,
+        parse_generation_profiles,
+    )
 
     suffix = PATHS[protocol].removeprefix('/v1')
     raw_url = BASE + suffix + suffix
@@ -717,7 +735,10 @@ def test_repeated_endpoint_route_identity_on_wire(entry, protocol, mode):
 
 @pytest.mark.parametrize('protocol', PROTOCOLS)
 def test_repeated_endpoint_equivalent_identity_duplicate_rejected(protocol, local_config, config_api):
-    from app.clients.openai_compatible import normalize_provider_location, parse_generation_profiles
+    from app.clients.openai_compatible import (
+        normalize_provider_location,
+        parse_generation_profiles,
+    )
 
     suffix = PATHS[protocol].removeprefix('/v1')
     row = json.loads(profiles('tenant/opaque-alias', protocol))[0]
@@ -736,7 +757,10 @@ def test_repeated_endpoint_equivalent_identity_duplicate_rejected(protocol, loca
 
 @pytest.mark.parametrize('protocol', PROTOCOLS)
 def test_api_saved_profile_does_not_cross_normalized_route(protocol, local_config, config_api):
-    from app.clients.openai_compatible import normalize_provider_location, parse_generation_profiles
+    from app.clients.openai_compatible import (
+        normalize_provider_location,
+        parse_generation_profiles,
+    )
 
     config.set_and_save({'AGENT_LLM_PROTOCOL': protocol})
     row = json.loads(profiles('tenant/opaque-alias', protocol))[0]
@@ -802,9 +826,10 @@ if __name__ == '__main__':
 @pytest.mark.parametrize('protocol', PROTOCOLS)
 @pytest.mark.parametrize('matched', [True, False])
 def test_profile_identity_survives_repeated_save_get_post_cold_load(protocol, matched, local_config, config_api):
-    from pathlib import Path
     import subprocess
     import sys
+    from pathlib import Path
+
     from app.clients.openai_compatible import parse_generation_profiles
 
     suffix = PATHS[protocol].removeprefix('/v1')

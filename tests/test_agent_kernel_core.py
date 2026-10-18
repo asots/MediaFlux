@@ -7,12 +7,22 @@ import time
 import unittest
 from collections.abc import AsyncIterator
 
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.adapters import consume_events
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     KernelToolSpec,
     ToolCatalog,
     ToolEffect,
+)
+from app.agent.kernel.conversation_context import (
+    persisted_conversation,
+    restore_messages,
+    tool_error_message,
+)
+from app.agent.kernel.conversation_state import (
+    merge_effect_receipts,
+    retain_conversation,
 )
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.events import AgentEventType
@@ -23,26 +33,21 @@ from app.agent.kernel.model import (
     ModelRequest,
     ModelToolCall,
 )
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import ReferenceValue, ToolOutcome
 from app.agent.kernel.provider_model import ModelProviderError
-from app.agent.kernel.session import (
-    AgentSession,
-    SessionLimits,
-    _provider_failure_message,
-)
-from app.agent.kernel.state import (
+from app.agent.kernel.session import AgentSession, SessionLimits
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import InMemorySessionStateStore, TurnCoordinator
+from app.agent.kernel.state_types import (
     AgentInput,
     CancellationToken,
-    InMemorySessionStateStore,
-    SessionState,
     PublicationLease,
     StalePublicationError,
     StateUpdate,
-    TurnCoordinator,
-    merge_effect_receipts,
-    retain_conversation,
 )
+from app.agent.kernel.tool_calls import ToolCallContext
+from app.agent.kernel.turn import _provider_failure_message
 from app.agent.model_context_budget import bounded_model_messages, compact_tool_content
 from app.agent.models import ToolReference, ToolResult
 
@@ -555,7 +560,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         call = ModelToolCall("failed", "cloud.change", {"wrong_field": "do-not-echo-this"})
         for code in ("tool_not_found", "precondition_failed", "rate_limited"):
             with self.subTest(code=code):
-                message = AgentSession._tool_error_message(
+                message = tool_error_message(
                     call, ToolPipelineError("无法执行", code=code), input_schema={"type": "object"}
                 )
                 self.assertNotIn("expected_input_schema", json.loads(message.content))
@@ -591,7 +596,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(retained), len(history))
         self.assertEqual(retained[:3], [request, *receipts])
         self.assertEqual(retained[-1], history[-1])
-        restored = AgentSession._restore_messages(
+        restored = restore_messages(
             SessionState(
                 owner="owner", session_id="session", conversation=retained,
             )
@@ -607,7 +612,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retain_conversation([]), [])
 
     def test_history_storage_budget_preserves_turns_and_marks_eviction(self):
-        from app.agent.kernel.state import retain_conversation
+        from app.agent.kernel.conversation_state import retain_conversation
 
         original = {"role": "user", "content": "只推荐2015年之后且媒体库中没有的国漫"}
         short = [original, *({"role": "assistant", "content": "观察"} for _ in range(79)),
@@ -624,9 +629,9 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(retained[0]["history_before_truncated"])
         self.assertEqual(retained[1:3], [call, result])
         self.assertNotIn("history_before_truncated", request)
-        restored = AgentSession._restore_messages(SessionState(owner="o", session_id="s", conversation=retained))
+        restored = restore_messages(SessionState(owner="o", session_id="s", conversation=retained))
         self.assertIn("历史因存储预算已省略", restored[0].content)
-        saved = AgentSession._persisted_conversation(restored, current_user_index=None, original_message="", prior_conversation=retained)
+        saved = persisted_conversation(restored, current_user_index=None, original_message="", prior_conversation=retained)
         self.assertEqual(saved[0]["content"], request["content"])
         self.assertTrue(saved[0]["history_before_truncated"])
 
@@ -764,7 +769,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))
         self.assertEqual(final.status, "success")
         self.assertEqual(writes, [1])
-        for rows in (model.requests[-1].messages, session._restore_messages(await state.load(owner="o", session_id="s"))):
+        for rows in (model.requests[-1].messages, restore_messages(await state.load(owner="o", session_id="s"))):
             by_id = {row.tool_call_id: row for row in rows if row.role == "tool"}
             self.assertIn("已完成1", by_id["call-1"].content)
             self.assertIn("not_executed_after_approval", by_id["call-2"].content)
@@ -843,7 +848,10 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(
             event.type is AgentEventType.MODEL_DELTA for event in events
         ))
-        from app.agent.public_view import format_public_result, public_conversation_messages
+        from app.agent.public_view import (
+            format_public_result,
+            public_conversation_messages,
+        )
         effect = next(event for event in events if event.type is AgentEventType.EFFECT_COMPLETED)
         self.assertEqual(effect.payload["receipt"], format_public_result(effect.payload["result"]))
         self.assertEqual(final.answer.count("本地媒体任务 1"), 1)
@@ -1588,7 +1596,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
     def test_persisted_history_keeps_safe_filters_without_exposing_credentials(self):
         arguments = {"must_match": ["动画", "中国"], "year_min": 2016, "exclude_owned": True,
                      "cookie": "private-cookie", "path": "/home/private/library", "item_ref": "ref_safe"}
-        stored = AgentSession._persisted_conversation([
+        stored = persisted_conversation([
             ModelMessage(role="user", content="推荐库内没有的国漫"),
             ModelMessage(role="assistant", tool_calls=(ModelToolCall("call", "discovery.recommend", arguments),)),
             ModelMessage(role="tool", tool_call_id="call", tool_name="discovery.recommend", content='{"ok":true}'),
@@ -1600,7 +1608,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["item_ref"], "ref_safe")
         self.assertNotIn("private-cookie", str(saved))
         self.assertEqual(saved["path"], "/home/private/library")  # 已提交输入不套用返回 DTO 的路径隐藏
-        restored = AgentSession._restore_messages(SessionState(owner="o", session_id="s", conversation=stored))
+        restored = restore_messages(SessionState(owner="o", session_id="s", conversation=stored))
         bounded = bounded_model_messages(restored + [ModelMessage(role="user", content="继续")], history_end=3,
                                          tool_definitions=(), system_prompt="", context_window_tokens=16384, output_tokens=1024)
         self.assertEqual(bounded[1].tool_calls[0].arguments["must_match"], ["动画", "中国"])
@@ -1926,6 +1934,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_telegram_model_preference_is_scoped_and_web_metadata_cannot_override(self):
         from unittest.mock import patch
+
         from app.agent.kernel.ports.mediaflux_policy import select_channel_model
 
         model = ScriptedModel([
@@ -4131,8 +4140,9 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(writes, [1, 2])
 
     async def test_late_pending_cleanup_is_atomic_and_never_grants_publication(self):
-        from app.agent.kernel.state import StateUpdate, _PendingEffectTransition
         from unittest.mock import patch
+
+        from app.agent.kernel.state_types import StateUpdate, _PendingEffectTransition
 
         for persistent in (False, True):
             with self.subTest(persistent=persistent):
@@ -4232,8 +4242,9 @@ class ConfirmationPendingOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(writes, [])
 
     async def test_cancel_cannot_revoke_ticket_while_confirmation_is_claiming_it(self):
-        from app.agent.kernel.state import SessionBusyError
         from unittest.mock import patch
+
+        from app.agent.kernel.state_types import SessionBusyError
 
         for persistent in (False, True):
             with self.subTest(persistent=persistent):

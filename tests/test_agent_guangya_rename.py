@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest import mock
 
 from app import database_migrations
-from app.agent import guangya_rename_actions as actions
+from app.agent.domain_catalog import DomainActions
+from app.agent.domains.guangya import rename_actions as actions
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile, GuangYaWriteRejected
 from app.modules import guangya_rename
@@ -84,7 +85,7 @@ class FakeGuangYaClient:
 
 class GuangYaRenameTests(unittest.TestCase):
     def setUp(self):
-        actions.reset_guangya_rename_context_for_tests()
+        self._domain_actions = DomainActions()
         self.temp = tempfile.TemporaryDirectory()
         self.plan_dir = Path(self.temp.name) / "plans"
         self.patches = [
@@ -107,7 +108,6 @@ class GuangYaRenameTests(unittest.TestCase):
     def tearDown(self):
         for patcher in reversed(self.patches):
             patcher.stop()
-        actions.reset_guangya_rename_context_for_tests()
         self.temp.cleanup()
 
     def test_preview_and_persisted_flow_keep_distinct_real_filenames(self):
@@ -324,7 +324,7 @@ class GuangYaRenameTests(unittest.TestCase):
         client = FakeGuangYaClient()
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            preview = actions.preview_guangya_rename(
+            preview = self._domain_actions.rename.preview_guangya_rename(
                 {
                     "paths": ["/整理/动漫"],
                     "mode": "remove_bitrate",
@@ -335,7 +335,7 @@ class GuangYaRenameTests(unittest.TestCase):
             )
             self.assertEqual(preview.status, "ready")
             self.assertEqual(preview.data["rename_count"], 2)
-            confirmation, fingerprint = actions.prepare_guangya_rename_confirmation(
+            confirmation, fingerprint = self._domain_actions.rename.prepare_guangya_rename_confirmation(
                 {}, context
             )
             self.assertEqual(confirmation.status, "confirmation_required")
@@ -349,7 +349,7 @@ class GuangYaRenameTests(unittest.TestCase):
             with mock.patch(
                 "app.modules.organize_tasks.get_organize_manager", return_value=manager
             ):
-                accepted = actions.execute_guangya_rename_confirmed(
+                accepted = self._domain_actions.rename.execute_guangya_rename_confirmed(
                     {}, fingerprint, context
                 )
         self.assertEqual(accepted.status, "accepted")
@@ -369,8 +369,8 @@ class GuangYaRenameTests(unittest.TestCase):
             "limit": 100,
         }
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            actions.preview_guangya_rename(arguments, context)
-        previous = actions._flow("owner")
+            self._domain_actions.rename.preview_guangya_rename(arguments, context)
+        previous = self._domain_actions.rename._flow("owner")
         self.assertIsNotNone(previous)
         previous_path = guangya_rename._plan_path(previous.plan_id)
         self.assertTrue(previous_path.is_file())
@@ -383,8 +383,8 @@ class GuangYaRenameTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(Exception, "临时读取失败"),
         ):
-            actions.preview_guangya_rename(arguments, context)
-        self.assertEqual(actions._flow("owner").plan_id, previous.plan_id)
+            self._domain_actions.rename.preview_guangya_rename(arguments, context)
+        self.assertEqual(self._domain_actions.rename._flow("owner").plan_id, previous.plan_id)
         self.assertTrue(previous_path.is_file())
 
     def test_successful_repreview_discards_replaced_private_plan(self):
@@ -397,10 +397,10 @@ class GuangYaRenameTests(unittest.TestCase):
             "limit": 100,
         }
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            actions.preview_guangya_rename(arguments, context)
-            first = actions._flow("owner")
-            actions.preview_guangya_rename(arguments, context)
-            second = actions._flow("owner")
+            self._domain_actions.rename.preview_guangya_rename(arguments, context)
+            first = self._domain_actions.rename._flow("owner")
+            self._domain_actions.rename.preview_guangya_rename(arguments, context)
+            second = self._domain_actions.rename._flow("owner")
         self.assertNotEqual(first.plan_id, second.plan_id)
         self.assertFalse(guangya_rename._plan_path(first.plan_id).exists())
         self.assertTrue(guangya_rename._plan_path(second.plan_id).is_file())

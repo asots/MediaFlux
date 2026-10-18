@@ -8,13 +8,13 @@ import pytest
 
 from app import database as db
 from app.agent.domain_catalog.catalog import ToolSpecCollector
-from app.agent.domain_catalog.library_quality import register_specs
-from app.agent.errors import AgentToolError
-from app.agent.media_user_actions import (
+from app.agent.domains.library.quality_tools import register_specs
+from app.agent.domains.playback.user_actions import (
     execute_media_user,
     preview_media_user,
     read_media_user,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.agent.provider_gateway import ProviderGateway
 from app.agent.provider_models import ProviderGatewayError
@@ -491,7 +491,7 @@ def test_atomic_domain_tools_have_single_confirmation_without_public_prepare(
 ):
     gateway, client, context, media_ref = gateway_env
     monkeypatch.setattr(
-        "app.agent.domain_catalog.library_quality.get_provider_gateway", lambda: gateway
+        "app.agent.domains.library.quality_tools.get_provider_gateway", lambda: gateway
     )
     collector = ToolSpecCollector()
     register_specs(collector)
@@ -513,11 +513,11 @@ def test_atomic_domain_tools_have_single_confirmation_without_public_prepare(
 
 
 def test_media_operation_budget_prevents_unbounded_playlist_preflight(monkeypatch):
-    from app.agent.media_user_actions import _BoundedMediaClient
+    from app.agent.domains.playback.user_actions import _BoundedMediaClient
 
     client = MediaClient()
     now = [100.0]
-    monkeypatch.setattr("app.agent.media_user_actions.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("app.agent.domains.playback.user_actions.time.monotonic", lambda: now[0])
     bounded = _BoundedMediaClient(client)
     bounded._request("/Users/viewer/Items/movie1")
     now[0] += 21

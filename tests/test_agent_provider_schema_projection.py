@@ -2,21 +2,24 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import json
+from copy import deepcopy
 
 import pytest
 
 from app import database as db
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolPipelineError
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.owner_routes import web_kernel_owner
 from app.agent.provider_gateway import ProviderGateway
-from app.agent.provider_operations import RECENT_MEDIA_PROPERTIES, build_provider_catalog
+from app.agent.provider_operations import (
+    RECENT_MEDIA_PROPERTIES,
+    build_provider_catalog,
+)
 from tests.test_agent_schema_composition import catalog_schema, execute
 from tests.test_agent_tool_argument_ingress import Wire, encode
 

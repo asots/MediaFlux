@@ -10,14 +10,21 @@ import pytest
 from app import database as db
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.errors import ConfirmationClaimError, ToolPipelineError
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog, ToolEffect
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
 from app.agent.kernel.events import AgentEventType as Event
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.pipeline import ConfirmationClaimError, ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports import adapt_tool_spec
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, CancellationToken, SessionBusyError, StateUpdate
+from app.agent.kernel.state_types import (
+    AgentInput,
+    CancellationToken,
+    SessionBusyError,
+    StateUpdate,
+)
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.discovery.models import MediaCard
 from tests.test_agent_kernel_core import ScriptedModel, collect
 from tests.test_agent_task_cas import task_store as isolated_store
@@ -64,7 +71,7 @@ class TrustRig:
 
     async def grant(self, context, plan, **overrides):
         selection = dict(operation="grant", plan_id=plan.plan_id, tool_name=TOOL, scope=SCOPE, max_actions=5, ttl_seconds=300)
-        return await self.pipeline.set_scoped_trust(context=context, **{**selection, **overrides})
+        return await self.pipeline.scoped_trust.set(context=context, **{**selection, **overrides})
 
     async def remaining(self):
         return (await self.store.load(owner=OWNER, session_id=SESSION)).metadata["scoped_trust"]["remaining"]
@@ -77,10 +84,10 @@ class TrustRig:
 @pytest.fixture
 def rig(task_store, monkeypatch):
     monkeypatch.setattr("app.modules.web_secret.get_web_secret", lambda: "scoped-trust-test-only")
-    monkeypatch.setattr("app.agent.discovery_watchlist_actions.config.get_bool", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("app.agent.domains.discovery.watchlist_actions.config.get_bool", lambda *_args, **_kwargs: True)
     service = SimpleNamespace(get_detail=lambda provider, media_type, external_id: MediaCard(
         provider=provider, external_id=external_id, media_type=media_type, title=f"测试收藏 {external_id}", year="2026"))
-    monkeypatch.setattr("app.agent.discovery_watchlist_actions.get_discovery_service", lambda: service)
+    monkeypatch.setattr("app.agent.domains.discovery.watchlist_actions.get_discovery_service", lambda: service)
     return TrustRig(task_store)
 
 
@@ -89,7 +96,7 @@ def test_default_off_explicit_scope_allows_different_items_and_debits_once(rig):
         context = await rig.context()
         first = await rig.preview(context)
         assert first.public_dict()["trust_scope"] == SCOPE
-        assert not await rig.pipeline.has_scoped_trust(first, context=context)
+        assert not await rig.pipeline.scoped_trust.allows(first, context=context)
         with pytest.raises(ConfirmationClaimError):
             await rig.pipeline.execute_confirmed(first.plan_id, context=context, scoped_trust=True)
         grant = await rig.grant(context, first)
@@ -97,7 +104,7 @@ def test_default_off_explicit_scope_allows_different_items_and_debits_once(rig):
         assert rig.attempts == [] and db.get_media_watchlist("tmdb", "100", "tv") is None
         for number in range(101, 106):
             plan = await rig.preview(context, arguments(number))
-            assert await rig.pipeline.has_scoped_trust(plan, context=context)
+            assert await rig.pipeline.scoped_trust.allows(plan, context=context)
             result = await rig.pipeline.execute_confirmed(plan.plan_id, context=context, scoped_trust=True)
             assert result.outcome.public_content["ok"] is True
             assert db.get_media_watchlist("tmdb", str(number), "tv") is not None
@@ -106,7 +113,7 @@ def test_default_off_explicit_scope_allows_different_items_and_debits_once(rig):
                 await rig.pipeline.execute_confirmed(plan.plan_id, context=context, scoped_trust=True)
             assert await rig.remaining() == 105 - number
         sixth = await rig.preview(context, arguments(106))
-        assert not await rig.pipeline.has_scoped_trust(sixth, context=context)
+        assert not await rig.pipeline.scoped_trust.allows(sixth, context=context)
         with pytest.raises(ConfirmationClaimError):
             await rig.pipeline.execute_confirmed(sixth.plan_id, context=context, scoped_trust=True)
         assert len(rig.attempts) == 5 and db.get_media_watchlist("tmdb", "106", "tv") is None
@@ -124,7 +131,7 @@ def test_grant_requires_explicit_tool_exact_scope_count_and_finite_ttl(rig, over
         with pytest.raises(ToolPipelineError):
             await rig.grant(context, first, **overrides)
         assert rig.attempts == []
-        assert not await rig.pipeline.has_scoped_trust(first, context=context)
+        assert not await rig.pipeline.scoped_trust.allows(first, context=context)
     asyncio.run(run())
 
 
@@ -134,7 +141,7 @@ def test_scope_change_requires_new_confirmation_and_does_not_spend(rig, args):
         context = await rig.context()
         await rig.grant(context, await rig.preview(context))
         plan = await rig.preview(context, args)
-        assert not await rig.pipeline.has_scoped_trust(plan, context=context)
+        assert not await rig.pipeline.scoped_trust.allows(plan, context=context)
         with pytest.raises(ConfirmationClaimError):
             await rig.pipeline.execute_confirmed(plan.plan_id, context=context, scoped_trust=True)
         assert await rig.remaining() == 5 and rig.attempts == []
@@ -150,7 +157,8 @@ def test_low_write_label_alone_write_and_danger_cannot_bypass(rig, name, risk, e
         await rig.grant(context, await rig.preview(context))
         changed = replace(rig.tool, name=name, model_name=name.replace(".", "__"), effect=effect,
                           metadata={**rig.tool.metadata, "risk": risk})
-        rig.pipeline.catalog = ToolCatalog([changed])
+        rig.pipeline = ToolPipeline(catalog=ToolCatalog([changed]), state_store=rig.store,
+            effect_store=rig.pipeline.effect_store)
         plan = (await rig.pipeline.execute(name, arguments(301), context=context)).effect_plan
         assert not plan.public_dict().get("trust_eligible")
         with pytest.raises(ConfirmationClaimError):
@@ -168,9 +176,9 @@ def test_other_session_and_owner_cannot_use_or_revoke_grant_or_ticket(rig, owner
         foreign = await rig.context(owner=owner, session_id=sid)
         with pytest.raises(ConfirmationClaimError):
             await rig.pipeline.execute_confirmed(plan.plan_id, context=foreign, scoped_trust=True)
-        await rig.pipeline.set_scoped_trust(context=foreign, operation="revoke")
+        await rig.pipeline.scoped_trust.set(context=foreign, operation="revoke")
         assert await rig.remaining() == 5
-        assert await rig.pipeline.has_scoped_trust(plan, context=context)
+        assert await rig.pipeline.scoped_trust.allows(plan, context=context)
         assert rig.attempts == []
     asyncio.run(run())
 
@@ -181,11 +189,11 @@ def test_expiry_and_revoke_restore_manual_confirmation(rig):
         plan = await rig.preview(context)
         await rig.grant(context, plan)
         rig.now += 300
-        assert not await rig.pipeline.has_scoped_trust(plan, context=context)
+        assert not await rig.pipeline.scoped_trust.allows(plan, context=context)
         with pytest.raises(ConfirmationClaimError):
             await rig.pipeline.execute_confirmed(plan.plan_id, context=context, scoped_trust=True)
         await rig.grant(context, plan)
-        await rig.pipeline.set_scoped_trust(context=context, operation="revoke")
+        await rig.pipeline.scoped_trust.set(context=context, operation="revoke")
         with pytest.raises(ConfirmationClaimError):
             await rig.pipeline.execute_confirmed(plan.plan_id, context=context, scoped_trust=True)
         assert rig.attempts == []
@@ -237,17 +245,18 @@ def test_execute_and_revoke_are_ordered_by_existing_session_guard(rig):
             entered.set()
             await release.wait()
             return original(*args)
-        rig.pipeline.catalog = ToolCatalog([replace(rig.tool, execute_confirmed=execute)])
+        rig.pipeline = ToolPipeline(catalog=ToolCatalog([replace(rig.tool, execute_confirmed=execute)]),
+            state_store=rig.store, effect_store=rig.pipeline.effect_store)
         executing = asyncio.create_task(rig.pipeline.execute_confirmed(plan.plan_id, context=context, scoped_trust=True))
         await asyncio.wait_for(entered.wait(), 5)
         with pytest.raises(SessionBusyError):
-            await rig.pipeline.set_scoped_trust(context=context, operation="revoke")
+            await rig.pipeline.scoped_trust.set(context=context, operation="revoke")
         release.set()
         await executing
         assert len(rig.attempts) == 1 and await rig.remaining() == 4
-        assert await rig.pipeline.set_scoped_trust(context=context, operation="revoke") == {"active": False}
+        assert await rig.pipeline.scoped_trust.set(context=context, operation="revoke") == {"active": False}
         next_plan = await rig.preview(context, arguments(402))
-        assert not await rig.pipeline.has_scoped_trust(next_plan, context=context)
+        assert not await rig.pipeline.scoped_trust.allows(next_plan, context=context)
     asyncio.run(run())
 
 
@@ -286,5 +295,5 @@ def test_full_session_different_tv_automatic_movie_and_revoked_scope_pause(rig):
         assert any(event.type is Event.EFFECT_APPROVAL_REQUIRED for event in revoked)
         assert db.get_media_watchlist("tmdb", "503", "tv") is None
         state = await rig.store.load(owner=OWNER, session_id=SESSION)
-        assert "scope_digest" not in json.dumps(rig.pipeline.scoped_trust_view(state))
+        assert "scope_digest" not in json.dumps(rig.pipeline.scoped_trust.view(state))
     asyncio.run(run())

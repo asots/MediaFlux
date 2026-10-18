@@ -13,17 +13,20 @@ import httpx
 import pytest
 import requests
 
+import app.agent.kernel.completion_receipts as completion_receipts
 from app import database as db
 from app.agent import effect_completion as effects
 from app.agent.confirmation import SQLiteConfirmationStore
+from app.agent.errors import ConfirmationClaimError, ToolPipelineError
 from app.agent.kernel.bootstrap import _capture_creation_binding
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.continuation import effect_origin, effect_payload
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ConfirmationClaimError, ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import ToolOutcome
-from app.agent.kernel.state import CancellationToken, StalePublicationError
+from app.agent.kernel.state_types import CancellationToken, StalePublicationError
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolContext, ToolReference, ToolResult
 from tests.support import initialized_web_runtime
 
@@ -98,7 +101,7 @@ class RegistrationCase:
         preview = await self.pipeline.execute(self.tool.name, args, context=self.context)
         self.plan_id = preview.effect_plan.plan_id
         state = await self.store.load(owner=OWNER, session_id=SID)
-        self.scope = effects.EffectCompletionScope(store=self.store, lease=lease, plan_id=self.plan_id, channel="web",
+        self.scope = completion_receipts.EffectCompletionScope(store=self.store, lease=lease, plan_id=self.plan_id, channel="web",
             origin=effect_origin(state, self.context, preview.effect_plan))
         # 原生调用/结果来自本次真实预检；不手造 claimed 标记或成功执行回执。
         await self.store.commit(lease, conversation=[*state.conversation,
@@ -231,7 +234,7 @@ def test_duplicate_registration_preserves_budget_deadline_and_richer_receipt(cas
         await case.store.update_effect_state(owner=OWNER, session_id=SID, change=spend)
         row = (await case.state()).metadata["effect_waits"][case.plan_id]
         message = {**row["receipt_message"], "candidate_result_ref": "ref_receipt_enrichment"}
-        assert await effects.remember_effect_receipt(case.store, owner=OWNER, session_id=SID, plan_id=case.plan_id, message=message)
+        assert await completion_receipts.remember_effect_receipt(case.store, owner=OWNER, session_id=SID, plan_id=case.plan_id, message=message)
         before = await case.state()
         case.clock[0] += 5
         assert await effects.register_terminal_failure(case.scope, tool=TOOL, result=result.outcome.public_content)
@@ -240,7 +243,7 @@ def test_duplicate_registration_preserves_budget_deadline_and_richer_receipt(cas
         assert await case.state() == before
         receipts = [r for r in before.conversation if r.get("completion_receipt_id") == case.plan_id]
         assert receipts == [message]
-        assert await effects.acknowledge_effect_receipt(case.store, owner=OWNER, session_id=SID, plan_id=case.plan_id)
+        assert await completion_receipts.acknowledge_effect_receipt(case.store, owner=OWNER, session_id=SID, plan_id=case.plan_id)
         after = await case.state()
         assert after.metadata["effect_waits"][case.plan_id]["delivered"] is True
         assert after.metadata["effect_waits"][case.plan_id]["continuation"] == row["continuation"]
@@ -362,20 +365,26 @@ def test_registration_storage_fault_keeps_original_exception_and_code(case):
 
 def test_real_admitted_tracker_cannot_be_overwritten_by_sync_failure(case):
     from app.agent.kernel.ports.existing_actions import adapt_tool_spec
-    from tests.test_agent_effect_admission import _OfflineClient, _offline_runtime, _paused_manager, _domain_arguments, _spec
+    from tests.test_agent_effect_admission import (
+        _domain_arguments,
+        _offline_runtime,
+        _OfflineClient,
+        _paused_manager,
+        _spec,
+    )
 
     async def run():
         client = _OfflineClient()
         with _offline_runtime(case.root, client) as stack, _paused_manager():
             arguments = _domain_arguments("fs", client, ToolContext(owner=OWNER, session_id=SID), stack)
-            case.tool = adapt_tool_spec(_spec("fs"))
+            case.tool = adapt_tool_spec(_spec("fs", actions=stack.domain_actions))
             case.pipeline.catalog.register(case.tool)
             await case.preview(arguments)
             accepted = await case.confirm()
             assert accepted.outcome.public_content["status"] == "accepted"
             before = await case.state()
             row = before.metadata["effect_waits"][case.plan_id]
-            payload = json.loads(effects._completion_cipher().decrypt(row["sealed"].encode()))
+            payload = json.loads(completion_receipts._completion_cipher().decrypt(row["sealed"].encode()))
             assert payload["tracker"]["kind"] == "guangya_operation"
             with db.get_conn() as conn:
                 assert conn.execute("SELECT COUNT(*) FROM organize_operation_jobs WHERE status='pending'").fetchone()[0] == 1

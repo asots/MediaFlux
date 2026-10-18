@@ -16,18 +16,20 @@ import httpx
 import pytest
 import requests
 
-from app.agent import guangya_fs_change_actions as changes
-from app.agent import guangya_workspace_actions as files
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.domain_catalog.catalog import DomainActions
+from app.agent.domains.guangya import fs_change_actions as changes
+from app.agent.domains.guangya import workspace_actions as files
 from app.agent.errors import AgentToolError
 from app.agent.kernel.capabilities import ToolCatalog, ToolEffect
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.projection import DefaultProjector
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolContext
 from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.clients.guangya import GuangYaFile
@@ -70,19 +72,13 @@ def case(monkeypatch):
         monkeypatch.setattr(fs_plans, "PATHS", paths)
         monkeypatch.setattr(files, "GuangYaClient", lambda: provider)
         monkeypatch.setattr(changes, "GuangYaClient", lambda: provider)
-        files.reset_guangya_workspace_context_for_tests()
-        changes.reset_guangya_fs_change_context_for_tests()
         repository = SQLiteAgentSessionContextRepository()
-        files.configure_guangya_workspace_context(repository)
-        changes.configure_guangya_fs_change_context(repository)
         current = SimpleNamespace(
-            root=paths.data_dir, provider=provider,
+            root=paths.data_dir, provider=provider, domain_actions=DomainActions(repository),
             context=ToolContext(owner="offline-fs-source-owner", session_id="offline-fs-source-session"))
         try:
             yield current
         finally:
-            files.reset_guangya_workspace_context_for_tests()
-            changes.reset_guangya_fs_change_context_for_tests()
             assert provider.writes == [], OFFLINE + "：诊断不能触发写入"
 
 
@@ -90,7 +86,7 @@ def read(case, arguments=None, *, source=None, context=None):
     context = context or case.context
     if source is not None:
         context = replace(context, reobservation_source=source)
-    return files.query_guangya_filesystem(
+    return case.domain_actions.workspace.query_guangya_filesystem(
         files.guangya_fs_query_arguments(arguments or {
             "operation": "list", "path": FILMS["path"], "max_items": 17}), context)
 
@@ -104,7 +100,7 @@ def prepare(case, observation, operations, *, source=None):
         "observation_ref": observation.data["observation_ref"],
         "operations": operations, "trigger_strm": False})
     context = replace(case.context, reobservation_source=source) if source is not None else case.context
-    result, fingerprint = changes.prepare_guangya_fs_change_confirmation(arguments, context)
+    result, fingerprint = case.domain_actions.fs_change.prepare_guangya_fs_change_confirmation(arguments, context)
     assert result.ok is True and result.data["total"] == len(operations)
     assert result.data["cloud_write"] is False
     assert result.ok is True and result.status == "confirmation_required"
@@ -189,7 +185,7 @@ def test_single_directory_plan_reobserves_after_original_obs_is_unusable(case, o
     previous = restore_confirmation(case) if restored_at == "before_invalidation" else None
     invalidate(case, observed.data["observation_ref"], mode)
     # 丢弃进程内缓存，必须由真实 SQLite flow + 签名冻结计划恢复，不能重载旧 OBS。
-    changes.clear_guangya_fs_change_context(owner=case.context.owner)
+    case.domain_actions.fs_change.clear_guangya_fs_change_context(owner=case.context.owner)
     stored = restore_confirmation(case)
     assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
     assert stored.metadata["reobservation_source"] == source
@@ -244,7 +240,7 @@ def test_mixed_objects_restore_each_observation_query_without_primary_scope_or_f
     assert {item["source"]["file_id"] for item in plan["operations"]} == {MOVIE, SUBTITLE}
     for observed in observations:
         invalidate(case, observed.data["observation_ref"], mode)
-    changes.clear_guangya_fs_change_context(owner=case.context.owner)
+    case.domain_actions.fs_change.clear_guangya_fs_change_context(owner=case.context.owner)
     stored = restore_confirmation(case)
     assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
     assert stored.metadata["reobservation_source"] == source
@@ -298,7 +294,7 @@ def test_create_directory_only_retains_original_diagnostic_scope_without_object_
     plan = frozen_plan(case)
     assert all("object_ref" not in item for item in plan["operations"])
     invalidate(case, observed.data["observation_ref"], mode)
-    changes.clear_guangya_fs_change_context(owner=case.context.owner)
+    case.domain_actions.fs_change.clear_guangya_fs_change_context(owner=case.context.owner)
     stored = restore_confirmation(case)
     assert stored.preview == prepared.to_dict() and stored.snapshot_fingerprint == fingerprint
     assert stored.metadata["reobservation_source"] == source
@@ -439,14 +435,14 @@ def test_hot_to_real_sqlite_cold_flow_preserves_confirmation_fingerprint_counts_
     plan = frozen_plan(case)
     assert fresh_prepared.data["observation_note"]
     # 单次准备已保存热 flow、SQLite flow 和确认卡；恢复不再调用 prepare。
-    changes.configure_guangya_fs_change_context(None)
-    hot = changes._flow(case.context.owner)
+    hot = case.domain_actions.fs_change._flows.get(case.context.owner)
     hot_card = case.confirmation_plan
     assert hot is not None
     hot_fingerprint = changes._confirmation_fingerprint(hot, plan)
-    changes.configure_guangya_fs_change_context(SQLiteAgentSessionContextRepository())
-    changes.clear_guangya_fs_change_context(owner=case.context.owner)
-    cold = changes._flow(case.context.owner)
+    case.domain_actions.fs_change = changes.GuangyaFsChangeActions(
+        SQLiteAgentSessionContextRepository(), workspace=case.domain_actions.workspace)
+    case.domain_actions.fs_change.clear_guangya_fs_change_context(owner=case.context.owner)
+    cold = case.domain_actions.fs_change._flow(case.context.owner)
     cold_card = restore_confirmation(case)
     assert cold is not None
     cold_fingerprint = changes._confirmation_fingerprint(cold, plan)
@@ -476,9 +472,9 @@ def test_credentials_changed_before_prepare_cannot_issue_a_source_from_old_obser
     })
     case.provider.credential_generation += 1
     with pytest.raises(AgentToolError) as raised:
-        changes.prepare_guangya_fs_change_confirmation(arguments, case.context)
+        case.domain_actions.fs_change.prepare_guangya_fs_change_confirmation(arguments, case.context)
     assert raised.value.code == "confirmation_stale"
-    assert changes._flow(case.context.owner) is None
+    assert case.domain_actions.fs_change._flow(case.context.owner) is None
     assert not list((case.root / "agent-guangya-fs-change").glob("*.json"))
 
 
@@ -491,7 +487,7 @@ def test_native_pipeline_persists_private_source_in_real_sqlite_without_public_d
     assert_private(observed)
 
     async def native_round_trip():
-        specs = [adapt_tool_spec(spec) for spec in build_tool_specs() if spec.name in {FS_READ, FS_EXECUTE}]
+        specs = [adapt_tool_spec(spec) for spec in build_tool_specs(domain_actions=case.domain_actions) if spec.name in {FS_READ, FS_EXECUTE}]
         assert len(specs) == 2
         state = SQLiteKernelStore(secret_provider=lambda: "offline-fs-sqlite-secret")
         pipeline = ToolPipeline(catalog=ToolCatalog(specs), state_store=state, reference_store=state,
@@ -655,7 +651,7 @@ def test_selected_id_point_reobservation_proves_original_root_without_widening_s
             "op": "rename", "object_ref": item["object_ref"], "new_name": "Planned.mkv"}], source=current.source)
         frozen_source = deepcopy(fresh_source)
         invalidate(current, result.data["observation_ref"], "deleted")
-        changes.clear_guangya_fs_change_context(owner=current.context.owner)
+        current.domain_actions.fs_change.clear_guangya_fs_change_context(owner=current.context.owner)
         cold_card = restore_confirmation(current)
         assert cold_card.preview == fresh_prepared.to_dict()
         cold_source = cold_card.metadata["reobservation_source"]

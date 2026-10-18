@@ -10,7 +10,7 @@ from unittest.mock import patch
 from app import database as db
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import StateUpdate
+from app.agent.kernel.state_types import StateUpdate
 from app.agent.rate_limit import AgentRateLimiter
 from tests.support import IsolatedDatabaseTestCase
 

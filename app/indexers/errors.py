@@ -1,16 +1,13 @@
 from __future__ import annotations
 
+from app.clients.http import HttpError
 
-class IndexerError(Exception):
+
+class IndexerError(HttpError):
     """Indexer domain error with a stable public code and safe message."""
 
     code = "indexer_error"
     default_public_message = "资源索引服务暂不可用"
-
-    def __init__(self, detail: str = "", *, public_message: str | None = None):
-        super().__init__(detail or self.default_public_message)
-        self.detail = detail
-        self.public_message = public_message or self.default_public_message
 
 
 class IndexerValidationError(IndexerError, ValueError):
@@ -26,21 +23,6 @@ class IndexerQueryRejected(IndexerError):
 class IndexerChallengeRequired(IndexerError):
     code = "challenge_required"
     default_public_message = "站点要求人机验证，本次未完成检索"
-
-
-class IndexerSecurityError(IndexerError):
-    code = "security_error"
-    default_public_message = "上游地址未通过安全校验"
-
-
-class IndexerResponseTooLarge(IndexerError):
-    code = "response_too_large"
-    default_public_message = "上游响应超过大小限制"
-
-
-class IndexerInvalidResponse(IndexerError):
-    code = "invalid_response"
-    default_public_message = "上游返回了无法识别的数据"
 
 
 class IndexerUnavailable(IndexerError):

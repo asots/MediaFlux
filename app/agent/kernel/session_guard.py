@@ -5,17 +5,17 @@ import asyncio
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import partial
-from collections.abc import Callable
 from typing import Any, Iterator
 
 from app import database as db
 from app.modules.process_lock import CrossProcessLock
 
-from .state import SessionBusyError
+from .state_types import SessionBusyError
 
 
 @dataclass(slots=True)
@@ -37,6 +37,35 @@ def _task() -> object | None:
         return None
 
 
+def _scope_key(owner: str, session_id: str) -> str:
+    owner, session_id = str(owner or "").strip(), str(session_id or "").strip()
+    if not owner or not session_id:
+        raise ValueError("Agent 会话 scope 无效")
+    return hashlib.sha256(json.dumps(
+        [str(db.resolve_db_path()), owner, session_id], ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+@contextmanager
+def continuation_execution_guard(owner: str, session_id: str) -> Iterator[bool]:
+    """续行执行持有独立 OS 锁；进程退出自动释放，不用 TTL 推断死亡。
+
+    与会话状态事务锁分开，存活续行期间仍允许冷取消和前台新请求。
+    返回 False 表示该会话已有执行者，调用方不能接管或收束其状态。
+    """
+    lock = CrossProcessLock("agent-continuation-" + _scope_key(owner, session_id))
+    try:
+        acquired = lock.acquire(blocking=False)
+    except OSError as exc:
+        raise SessionBusyError("continuation execution guard is unavailable") from exc
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
+
+
 @contextmanager
 def session_scope_guard(owner: str, session_id: str, *, kind: str = "mutation") -> Iterator[None]:
     """非阻塞互斥；不创建内存锁注册表，也不依赖 TTL 判定活跃执行者。
@@ -45,13 +74,7 @@ def session_scope_guard(owner: str, session_id: str, *, kind: str = "mutation") 
     task、进程或已退出的 context 不能继承该权利；确认体内也不能重入 reset。
     锁文件不 unlink，避免新 inode 与仍持有旧 inode 的 worker 分裂互斥域。
     """
-    owner, session_id = str(owner or "").strip(), str(session_id or "").strip()
-    if not owner or not session_id:
-        raise ValueError("Agent 会话 scope 无效")
-    key = hashlib.sha256(json.dumps(
-        [str(db.resolve_db_path()), owner, session_id], ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode()).hexdigest()
+    key = _scope_key(owner, session_id)
     inherited = _held_scope.get()
     task = _task()
     if (

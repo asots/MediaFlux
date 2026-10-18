@@ -6,19 +6,19 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolEffect
+from app.agent.kernel.conversation_context import capability_retrieval_context
 from app.agent.kernel.discovery import CapabilityDiscovery
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import (
     adapt_tool_spec,
     catalog_from_tool_specs,
 )
-from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import (
-    CancellationToken,
-    InMemorySessionStateStore,
-    SessionState,
-)
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import RiskLevel, ToolResult, ToolSpec
 from app.clients.guangya import GuangYaFile
 
@@ -47,7 +47,7 @@ async def context_for(
 
 class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
     def test_ingest_inspect_schema_separates_candidate_refs_from_link_inputs(self):
-        from app.agent.kernel.pipeline import _validate_json_schema
+        from app.agent.schema import validate_json_schema
         tool = catalog_from_tool_specs(build_tool_specs()).get("ingest.inspect")
         reference = "ref_1234567890abcdefghijkl"
         magnet = "magnet:?xt=urn:btih:" + "a" * 40
@@ -59,7 +59,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
         ]
         for arguments in valid:
             with self.subTest(arguments=arguments):
-                _validate_json_schema(arguments, tool.input_schema)
+                validate_json_schema(arguments, tool.input_schema)
                 tool.validator(arguments)
         invalid = [
             {}, {"source_type": "direct_url"},
@@ -72,7 +72,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
         ]
         for arguments in invalid:
             with self.subTest(arguments=arguments), self.assertRaises(ToolPipelineError):
-                _validate_json_schema(arguments, tool.input_schema)
+                validate_json_schema(arguments, tool.input_schema)
 
     async def test_noop_preparation_returns_without_freezing_or_execution_and_settles_repair(self):
         from unittest.mock import Mock
@@ -188,7 +188,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
         selection = CapabilityRetriever().retrieve(
             "绿灯军团呢",
             catalog,
-            context=AgentSession._capability_retrieval_context(state),
+            context=capability_retrieval_context(state),
         )
 
         self.assertIn("library.search", selection.names)
@@ -228,7 +228,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
         selection = CapabilityRetriever().retrieve(
             "推送4K版",
             catalog,
-            context=AgentSession._capability_retrieval_context(state),
+            context=capability_retrieval_context(state),
         )
 
         self.assertIn("indexer.search_resources", selection.names)
@@ -353,11 +353,11 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
             ),
             (
                 "是叫你看目录，没叫你刮削检查",
-                AgentSession._capability_retrieval_context(state),
+                capability_retrieval_context(state),
             ),
             (
                 "你看不到子目录名称吗",
-                AgentSession._capability_retrieval_context(state),
+                capability_retrieval_context(state),
             ),
         )
 
@@ -433,7 +433,7 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
         context = await context_for(state, wait_for_completion=True)
 
         with patch(
-            "app.agent.guangya_recycle_actions.GuangYaClient",
+            "app.agent.domains.guangya.recycle_actions.GuangYaClient",
             return_value=client,
         ):
             listed = await pipeline.execute(

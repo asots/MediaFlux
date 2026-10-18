@@ -1,22 +1,25 @@
 """Positive supported-route contracts; no proposed budget configuration."""
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import telebot
 
-from app import config, database as db
+from app import config
+from app import database as db
 from app.agent.kernel import bootstrap
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.provider_model import (
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
+from app.agent.kernel.state_types import AgentInput
 from app.bot import agent_adapter
 from app.modules import telegram_model_preferences as prefs
-
 from tests import test_agent_generation_profiles as profile_support
 
 # Reuse the real config publisher, isolated API and offline transport fixtures.
@@ -372,6 +375,7 @@ def test_script_adapter_without_settings_keeps_supported_selection(harness):
 
 def test_title_snapshot_is_not_live_config(harness, config_api):
     import sys
+
     from app.modules.telegram_topic_routing import _generate_private_topic_title
     owner, session_id = scope()
     previous = sys.getprofile()
@@ -412,7 +416,7 @@ def test_model_menu_current_model_uses_captured_settings(harness, config_api):
 
     harness.handler = models
     bot = Mock()
-    with patch('app.indexers.http.FixedHostHttpClient', harness.factory):
+    with patch('app.clients.http.FixedHostHttpClient', harness.factory):
         agent_adapter.handle_agent_model_command(bot, source(), telebot)
     bot.reply_to.assert_called_once()
     body = bot.reply_to.call_args.args[1]

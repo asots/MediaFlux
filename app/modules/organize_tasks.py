@@ -15,29 +15,42 @@ from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, Callable
 
-from app import config, database as db
+from app import config
+from app import database as db
 from app.clients.guangya import close_guangya_client
 from app.logger import get_logger
-from app.modules.media_probe import resolve_media_probe_workers
-from app.modules.organize import OrganizeRules, Organizer, resolve_organize_workers
-from app.modules.organize_runtime import OrganizeTaskRuntime
-from app.modules.organize_results import build_organize_result, read_organize_result
-from app.modules.organize_sources import normalize_organize_sources
-from app.modules.download_staging_cleanup import (
-    cleanup_download_staging, cleanup_report, merge_cleanup_report,
-    source_inside_protected_staging, staging_roots_in_source,
+from app.modules.directory_scrape_errors import (
+    DirectoryScrapePublicError,
+    public_error_message,
 )
+from app.modules.download_staging_cleanup import (
+    cleanup_download_staging,
+    cleanup_report,
+    merge_cleanup_report,
+    source_inside_protected_staging,
+    staging_roots_in_source,
+)
+from app.modules.media_probe import resolve_media_probe_workers
+from app.modules.organize import Organizer, OrganizeRules, resolve_organize_workers
+from app.modules.organize_results import build_organize_result, read_organize_result
+from app.modules.organize_runtime import OrganizeTaskRuntime
+from app.modules.organize_sources import normalize_organize_sources
+from app.modules.process_lock import CrossProcessLock
 from app.repositories.download_staging import (
-    complete_staging_confirmation_phase, list_staging_cleanup_requests,
+    complete_staging_confirmation_phase,
+    list_staging_cleanup_requests,
     mark_staging_waiting_confirmation,
 )
-from app.modules.process_lock import CrossProcessLock
 from app.repositories.organize_operation_jobs import (
-    claim_organize_operation_job,
-    defer_organize_operation_job,
     CLOUD_COPY_PENDING_CODE,
+    OrganizeOperationAdmissionError,
+    OrganizeOperationCancelled,
+    OrganizeOperationExpired,
+    OrganizeOperationQueueFullError,
+    claim_organize_operation_job,
     count_pending_organize_operation_jobs,
     count_running_organize_operation_jobs,
+    defer_organize_operation_job,
     enqueue_organize_operation_job,
     fail_pending_organize_operation_job,
     finish_organize_operation_job,
@@ -45,20 +58,12 @@ from app.repositories.organize_operation_jobs import (
     get_organize_operation_job_for_owner,
     is_organize_operation_cancel_requested,
     list_pending_organize_operation_jobs,
-    organize_operation_queue_position,
     organize_operation_job_id_from_public_ref,
     organize_operation_owner_digest,
+    organize_operation_queue_position,
     recover_orphaned_organize_operation_jobs,
     sanitize_organize_operation_result,
     verify_organize_operation_payload,
-    OrganizeOperationCancelled,
-    OrganizeOperationAdmissionError,
-    OrganizeOperationExpired,
-    OrganizeOperationQueueFullError,
-)
-from app.modules.directory_scrape_errors import (
-    DirectoryScrapePublicError,
-    public_error_message,
 )
 
 logger = get_logger(__name__)
@@ -1213,7 +1218,7 @@ class OrganizeTaskManager:
         cancel_check()
         kind = str(row.get("job_kind") or "")
         if kind == "agent_directory_scrape":
-            from app.agent.guangya_directory_scrape_actions import (
+            from app.agent.domains.guangya.directory_scrape_actions import (
                 execute_durable_directory_scrape_job,
             )
 
@@ -1221,7 +1226,7 @@ class OrganizeTaskManager:
                 payload, cancel_check=cancel_check
             )
         if kind == "agent_guangya_cleanup":
-            from app.agent.guangya_cleanup_actions import (
+            from app.agent.domains.guangya.cleanup_actions import (
                 execute_durable_guangya_cleanup_job,
             )
 
@@ -1235,7 +1240,7 @@ class OrganizeTaskManager:
                 payload, cancel_check=cancel_check
             )
         if kind == "agent_guangya_fs_change":
-            from app.agent.guangya_fs_change_actions import (
+            from app.agent.domains.guangya.fs_change_actions import (
                 execute_durable_guangya_fs_change_job,
             )
 
@@ -1245,7 +1250,10 @@ class OrganizeTaskManager:
         raise ValueError("不支持的持久化操作类型")
 
     def _run_durable_operation(self, row: dict[str, Any]) -> None:
-        from app.modules.guangya_fs_change import GuangYaFSCopyPending, GuangYaFSCheckpointError
+        from app.modules.guangya_fs_change import (
+            GuangYaFSCheckpointError,
+            GuangYaFSCopyPending,
+        )
 
         task_id = str(row.get("job_id") or "")
         operation = str(row.get("operation") or "操作")
@@ -1682,7 +1690,9 @@ class OrganizeTaskManager:
                 rules.for_source(str(source.get("id") or ""))
                 for source in sources
             ]
-            from app.modules.organize_probe_notifications import build_notification_context
+            from app.modules.organize_probe_notifications import (
+                build_notification_context,
+            )
 
             chat_id = str(chat_id or config.get("TG_CHAT_ID", "") or "").strip()
             request_sources: dict[int, str] = {}

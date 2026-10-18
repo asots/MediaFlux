@@ -209,11 +209,9 @@ def test_all_registered_tools_have_one_complete_kernel_lifecycle() -> None:
 
 
 def test_watchlist_reads_have_one_read_only_entry_and_no_retired_handler_or_alias() -> None:
-    from app.agent import (
-        discovery_watchlist_actions,
-        domain_tool_metadata,
-        public_safety,
-        rate_limit,
+    from app.agent import domain_tool_metadata, public_safety, rate_limit
+    from app.agent.domains.discovery import (
+        watchlist_actions as discovery_watchlist_actions,
     )
     from app.agent.kernel.capabilities import ToolEffect
     from app.agent.kernel.ports import catalog_from_tool_specs
@@ -365,7 +363,7 @@ def test_batch_updates_use_one_read_and_recheck_the_persisted_list(monkeypatch) 
     import json
     from collections import Counter
 
-    from app.agent import episode_audit
+    from app.agent.domains.library import episode_audit
     from app.agent.kernel.capabilities import CapabilityRetriever
     from app.agent.kernel.events import AgentEventType
     from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
@@ -373,7 +371,7 @@ def test_batch_updates_use_one_read_and_recheck_the_persisted_list(monkeypatch) 
     from app.agent.kernel.pipeline import ToolPipeline
     from app.agent.kernel.ports import catalog_from_tool_specs
     from app.agent.kernel.session import AgentSession, SessionLimits
-    from app.agent.kernel.state import AgentInput
+    from app.agent.kernel.state_types import AgentInput
     from tests.support import isolated_test_database
     from tests.test_agent_kernel_core import ScriptedModel
 

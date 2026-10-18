@@ -1,13 +1,26 @@
 """Narrow proposed oracle migrations, never edits to existing tests."""
-import asyncio,json
+import asyncio
+import json
 from dataclasses import replace
+
 import pytest
+
 from app.agent.kernel.capabilities import ToolCatalog
 from app.agent.kernel.session import SessionLimits
 from tests.support import isolated_test_database
-from tests.test_agent_capacity_recovery import spec,batch,make_wire,session,collect,reopened,assert_native_wire,result_rows
-from tests.test_agent_provider_text_authority import native_reply
+from tests.test_agent_capacity_recovery import (
+    assert_native_wire,
+    batch,
+    collect,
+    make_wire,
+    reopened,
+    result_rows,
+    session,
+    spec,
+)
 from tests.test_agent_provider_state import SIGNATURE
+from tests.test_agent_provider_text_authority import native_reply
+
 P='anthropic_messages'
 
 
@@ -43,7 +56,7 @@ def test_native_capacity_rejection_does_not_execute_or_erase_prefix(prefix):
 
 def test_large_native_signature_is_exact_when_admitted_and_old_group_drops_whole():
     async def run():
-        from app.agent.kernel.state import retain_conversation
+        from app.agent.kernel.conversation_state import retain_conversation
         handled=[]; cat=catalog_for(handled)
         calls=[('large-admitted','inspect_args',{'ordinal':0})]
         reply=batch(P,calls); signature=SIGNATURE*2500

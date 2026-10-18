@@ -5,7 +5,7 @@ import json
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.library_patrol_progress import empty_patrol_projection
+from app.agent.domains.library.patrol_progress import empty_patrol_projection
 from app.agent.models import ToolResult
 from app.modules.agent_jobs_scheduler import AgentJobsScheduler
 from tests.support import IsolatedDatabaseTestCase, isolated_test_database

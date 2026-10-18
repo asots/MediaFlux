@@ -10,21 +10,19 @@ from types import MappingProxyType
 import pytest
 
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.errors import AgentToolError
-from app.agent.guangya_fs_change_actions import guangya_fs_change_arguments
+from app.agent.domains.guangya.fs_change_actions import guangya_fs_change_arguments
+from app.agent.errors import AgentToolError, ToolPipelineError
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     KernelToolSpec,
     ToolCatalog,
     ToolEffect,
 )
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import (
-    AgentInput,
-    CancellationToken,
-    InMemorySessionStateStore,
-)
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from tests.test_agent_tool_argument_ingress import Wire, encode, wire
 
 
@@ -34,7 +32,7 @@ def catalog_schema(name):
 
 @pytest.mark.parametrize("fields", list(product([False, True], repeat=3)))
 def test_create_directory_schema_matches_exact_domain_shapes(fields):
-    from app.agent.kernel.pipeline import _validate_json_schema
+    from app.agent.schema import validate_json_schema
 
     values = {"path": "/parent/child", "parent_path": "/parent", "name": "child"}
     operation = {"op": "create_directory", **{
@@ -43,14 +41,14 @@ def test_create_directory_schema_matches_exact_domain_shapes(fields):
     accepted = set(operation) in ({"op", "path"}, {"op", "parent_path", "name"})
     schema = catalog_schema("guangya.fs.change.execute")
     if accepted:
-        _validate_json_schema(arguments, schema)
+        validate_json_schema(arguments, schema)
         assert guangya_fs_change_arguments(arguments)["operations"] == [
             {"op": "create_directory", "parent_path": "/parent", "name": "child"}]
     else:
         with pytest.raises(AgentToolError):
             guangya_fs_change_arguments(arguments)
         with pytest.raises(ToolPipelineError):
-            _validate_json_schema(arguments, schema)
+            validate_json_schema(arguments, schema)
 
 
 @pytest.mark.parametrize("protocol", ["responses", "chat_completions", "anthropic_messages"])

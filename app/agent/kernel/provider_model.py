@@ -6,11 +6,13 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Literal, NoReturn
 from time import monotonic
+from typing import Any, Literal, NoReturn
 
 import httpx
 
+from app.agent.model_context_budget import conservative_tokens
+from app.clients.http import FixedHostHttpClient
 from app.clients.openai_compatible import (
     PROTOCOL_FALLBACK_MAX_BYTES,
     PROTOCOL_FALLBACK_STATUS_CODES,
@@ -28,19 +30,18 @@ from app.clients.openai_compatible import (
     native_tool_request_body,
     native_tool_result,
     normalize_provider_location,
-    parse_native_tool_turn,
-    parse_native_call,
-    validate_repair_batch,
-    validate_repair_layout,
     parse_generation_profiles,
-    resolve_generation_profile,
+    parse_native_call,
+    parse_native_tool_turn,
     protocol_attempts,
     provider_finish_reason,
     provider_headers,
+    resolve_generation_profile,
     resolve_protocol,
     responses_private_layout,
+    validate_repair_batch,
+    validate_repair_layout,
 )
-from app.indexers.http import FixedHostHttpClient
 
 from .model import (
     ModelAdapter,
@@ -51,9 +52,8 @@ from .model import (
     ModelToolCall,
     ProviderState,
 )
-from .state import CancellationToken
 from .model_budget import is_window_feedback, parse_budget_profiles, reduced_output_body
-from app.agent.model_context_budget import conservative_tokens
+from .state_types import CancellationToken
 
 
 @dataclass(frozen=True, slots=True)
@@ -755,11 +755,10 @@ class OpenAICompatibleModelAdapter(ModelAdapter):
         )
         client = self.client_factory(
             allowed_hosts={location.host},
-            # FixedHostHttpClient 为普通索引 GET 预留整请求重试，会把传入
-            # 预算折半为单次网络空闲超时。模型 POST 不做整请求重放，因此
-            # 传入双倍预算。原生工具模型在首个 chunk 前可能需要较长推理，
-            # Kernel 对过低的旧配置保留 30 秒网络空闲下限。
-            timeout_seconds=min(240, network_idle_timeout * 2),
+            # 原生工具模型在首个 chunk 前可能需要较长推理，保留 30 秒
+            # 空闲下限。POST 的重试由模型层按可见输出状态统一决定。
+            timeout_seconds=network_idle_timeout,
+            get_timeout_retries=0,
             max_response_bytes=self.settings.max_response_bytes,
             max_redirects=0,
             user_agent="MediaFlux-Agent-Kernel/1.0",

@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from app.agent.telegram_test_actions import (
+from app.agent.domains.system.telegram_test_actions import (
     prepare_telegram_test_notification,
     send_telegram_test_notification_confirmed,
 )
@@ -40,7 +40,7 @@ class TelegramTestNotificationTests(unittest.TestCase):
             with (
                 self.subTest(values=values),
                 patch(
-                    "app.agent.telegram_test_actions.config.get",
+                    "app.agent.domains.system.telegram_test_actions.config.get",
                     side_effect=self._config_get(values),
                 ),
             ):
@@ -60,13 +60,13 @@ class TelegramTestNotificationTests(unittest.TestCase):
         bot = Mock()
         fake_telebot = types.SimpleNamespace(TeleBot=Mock(return_value=bot))
         with patch(
-            "app.agent.telegram_test_actions.config.get",
+            "app.agent.domains.system.telegram_test_actions.config.get",
             side_effect=self._config_get(values),
         ):
             _preview, expected = prepare_telegram_test_notification({})
             with (
                 patch.dict(sys.modules, {"telebot": fake_telebot}),
-                patch("app.agent.telegram_test_actions.configure_telebot_logging"),
+                patch("app.agent.domains.system.telegram_test_actions.configure_telebot_logging"),
             ):
                 result = send_telegram_test_notification_confirmed({}, expected)
         self.assertTrue(result.ok)
@@ -94,13 +94,13 @@ class TelegramTestNotificationTests(unittest.TestCase):
         )
         fake_telebot = types.SimpleNamespace(TeleBot=Mock(return_value=bot))
         with patch(
-            "app.agent.telegram_test_actions.config.get",
+            "app.agent.domains.system.telegram_test_actions.config.get",
             side_effect=self._config_get(values),
         ):
             _preview, expected = prepare_telegram_test_notification({})
             with (
                 patch.dict(sys.modules, {"telebot": fake_telebot}),
-                patch("app.agent.telegram_test_actions.configure_telebot_logging"),
+                patch("app.agent.domains.system.telegram_test_actions.configure_telebot_logging"),
             ):
                 result = send_telegram_test_notification_confirmed({}, expected)
         self.assertFalse(result.ok)

@@ -4,11 +4,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.agent.errors import AgentToolError
-from app.agent.library_recommendation_actions import (
+from app.agent.domains.library.recommendation_actions import (
     get_library_recommendations,
     library_recommendation_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext, ToolResult
 from app.agent.providers.media_recommendation import rank_local_recommendations
 from app.clients.base import MediaItem, MediaRecommendationCandidate
@@ -197,11 +197,11 @@ def test_library_recommendation_uses_selected_profile_and_provider_gateway():
     }
     with (
         patch(
-            "app.agent.media_consumption_actions.list_configured_profiles",
+            "app.agent.domains.subscriptions.consumption_actions.list_configured_profiles",
             return_value=[profile],
         ),
         patch(
-            "app.agent.library_recommendation_actions.get_provider_gateway",
+            "app.agent.domains.library.recommendation_actions.get_provider_gateway",
             return_value=gateway,
         ),
     ):

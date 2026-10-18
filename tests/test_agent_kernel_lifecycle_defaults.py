@@ -11,18 +11,17 @@ from unittest.mock import Mock, patch
 import pytest
 
 from app.agent.confirmation import ConfirmationStore
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
-from app.agent.kernel.effects import ConfirmationEffectPlanStore, EffectPlan, PreparedEffect
-from app.agent.kernel.pipeline import (
-    EffectLifecycle,
-    NoopEffectLifecycle,
-    ToolPipeline,
-    ToolPipelineError,
+from app.agent.kernel.effects import (
+    ConfirmationEffectPlanStore,
+    EffectPlan,
+    PreparedEffect,
 )
+from app.agent.kernel.pipeline import EffectLifecycle, NoopEffectLifecycle, ToolPipeline
 from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
 from app.agent.kernel.state import InMemorySessionStateStore
 from tests.test_agent_kernel_safety import _context
-
 
 SIGNATURES = {
     "prepared": ([('tool', 'KernelToolSpec'), ('arguments', 'Mapping[str, Any]'),

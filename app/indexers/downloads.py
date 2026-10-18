@@ -6,27 +6,19 @@ Web、Telegram、Agent 与订阅统一复用同一套解析、幂等准入、
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import threading
 import weakref
+from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
 from app import database as db
+from app.clients.http import HttpError, HttpInvalidResponse, HttpResponseTooLarge
 from app.indexers.config import SENSITIVE_INDEXER_SITE_IDS
-from app.indexers.errors import (
-    IndexerError,
-    IndexerInvalidResponse,
-    IndexerResponseTooLarge,
-    IndexerUnavailable,
-    IndexerValidationError,
-)
+from app.indexers.errors import IndexerUnavailable, IndexerValidationError
 from app.indexers.models import ResolvedDownload
 from app.logger import get_logger
-from app.repositories.download_requests import (
-    download_display_title, enrich_download_display_title, usable_download_title,
-)
 from app.modules.download_dispatcher import (
     DownloadInput,
     create_request,
@@ -34,12 +26,17 @@ from app.modules.download_dispatcher import (
     dispatch_request,
     download_resubmit_capabilities,
     normalize_download_url,
-    public_dispatch_summary,
     prepare_download_input,
+    public_dispatch_summary,
     request_keys,
     request_source_alias_key,
     resubmit_download_request,
     torrent_download_input,
+)
+from app.repositories.download_requests import (
+    download_display_title,
+    enrich_download_display_title,
+    usable_download_title,
 )
 
 logger = get_logger(__name__)
@@ -84,7 +81,7 @@ async def _resolve(
     item = service.get_result(result_id, scope=scope)
     resolved = await service.resolve(result_id, scope=scope)
     if not isinstance(resolved, ResolvedDownload):
-        raise IndexerInvalidResponse("provider returned invalid download")
+        raise HttpInvalidResponse("provider returned invalid download")
     return item, resolved
 
 
@@ -125,7 +122,7 @@ async def _resolved_download_input(service, stored, resolved: ResolvedDownload):
         if isinstance(resolved.value, bytes):
             max_bytes = int(getattr(client, "max_response_bytes", 2 * 1024 * 1024))
             if len(resolved.value) > max_bytes:
-                raise IndexerResponseTooLarge(
+                raise HttpResponseTooLarge(
                     "provider returned oversized torrent bytes"
                 )
             return torrent_download_input(_torrent_filename(resolved), resolved.value)
@@ -140,7 +137,7 @@ async def _resolved_download_input(service, stored, resolved: ResolvedDownload):
             "application/x-bittorrent",
             "application/octet-stream",
         }:
-            raise IndexerInvalidResponse("torrent content type invalid")
+            raise HttpInvalidResponse("torrent content type invalid")
         return torrent_download_input(_torrent_filename(resolved), response.body)
     except ValueError as exc:
         raise InvalidDownloadData() from exc
@@ -496,12 +493,12 @@ async def download_indexer_result(
             stored, resolved = await _resolve(service, result_id, scope=scope)
             destination = indexer_download_destination(stored, normalized_target)
             item = await _resolved_download_input(service, stored, resolved)
-        except (IndexerError, InvalidDownloadData) as exc:
+        except (HttpError, InvalidDownloadData) as exc:
             if not _public_errors:
                 raise
             # 仅解析 / 输入转换阶段能证明尚未创建请求或调用下载后端。
             # public 入口后续的兜底异常没有此标记；非 public 入口仍保留原异常契约。
-            error = exc.public_message if isinstance(exc, IndexerError) else "资源下载数据无效"
+            error = exc.public_message if isinstance(exc, HttpError) else "资源下载数据无效"
             return {
                 **_failed_download_result(result_id, normalized_target, error),
                 "pre_submission_failure": True,
@@ -572,7 +569,7 @@ async def download_indexer_result_public(
             _public_errors=True,
             **({"admission_id": admission_id} if admission_id is not None else {}),
         )
-    except IndexerError as exc:
+    except HttpError as exc:
         return _failed_download_result(result_id, target, exc.public_message)
     except InvalidDownloadData:
         return _failed_download_result(result_id, target, "资源下载数据无效")

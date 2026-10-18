@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from app import database as db
 from app.agent.action_history import action_history_owner_digest
-from app.agent.action_undo import (
+from app.agent.domains.activity.undo import (
     attach_undo_receipt,
     compensation_candidate,
     execute_undo,
     inspect_undo,
     prepare_undo,
 )
-from app.agent.media_consumption_actions import (
+from app.agent.domains.subscriptions.consumption_actions import (
     prepare_set_preferences,
     set_preferences_confirmed,
 )
@@ -145,7 +145,7 @@ class ActionUndoTests(IsolatedDatabaseTestCase):
             }
         }
         with patch(
-            "app.agent.action_undo._organize_state", return_value=(value, "version-one")
+            "app.agent.domains.activity.undo._organize_state", return_value=(value, "version-one")
         ):
             _, expected = prepare_undo(args, self.context)
         return value, args, expected
@@ -157,7 +157,7 @@ class ActionUndoTests(IsolatedDatabaseTestCase):
         second = {**first, "version": 2}
         with (
             patch(
-                "app.agent.action_undo._organize_state",
+                "app.agent.domains.activity.undo._organize_state",
                 side_effect=[(first, "version-one"), (second, "version-two")],
             ),
             patch(
@@ -177,11 +177,11 @@ class ActionUndoTests(IsolatedDatabaseTestCase):
         first, args, token = self.organize_receipt()
         with (
             patch(
-                "app.agent.action_undo._organize_state",
+                "app.agent.domains.activity.undo._organize_state",
                 return_value=(first, "version-one"),
             ),
             patch(
-                "app.agent.action_undo.receipts.claim",
+                "app.agent.domains.activity.undo.receipts.claim",
                 side_effect=sqlite3.OperationalError("busy"),
             ),
             patch(
@@ -205,7 +205,7 @@ class ActionUndoTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.action_undo._organize_state",
+                "app.agent.domains.activity.undo._organize_state",
                 return_value=(first, "version-one"),
             ),
             patch(

@@ -10,7 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from app.agent import guangya_workspace_actions as workspace_actions
+from app.agent.domain_catalog import DomainActions
+from app.agent.domains.guangya import workspace_actions
+from app.agent.domains.guangya.workspace_actions import GuangyaWorkspaceActions
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile
 from app.modules import guangya_workspace
@@ -82,7 +84,7 @@ class FakeWorkspaceClient:
 
 class GuangYaWorkspaceAgentTests(unittest.TestCase):
     def setUp(self):
-        workspace_actions.reset_guangya_workspace_context_for_tests()
+        self._domain_actions = DomainActions()
         self.temp = tempfile.TemporaryDirectory()
         self.obs_dir = Path(self.temp.name) / "observations"
         self.patches = [
@@ -104,7 +106,6 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
     def tearDown(self):
         for patcher in reversed(self.patches):
             patcher.stop()
-        workspace_actions.reset_guangya_workspace_context_for_tests()
         self.temp.cleanup()
 
     def _query(self, client, **overrides):
@@ -119,7 +120,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             }
         )
         with mock.patch.object(workspace_actions, "GuangYaClient", return_value=client):
-            return workspace_actions.query_guangya_filesystem(
+            return self._domain_actions.workspace.query_guangya_filesystem(
                 arguments, ToolContext(owner="owner", session_id="session")
             )
 
@@ -167,7 +168,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
         self.assertTrue(source["available"])
         self.assertEqual(source["baseline"]["selected"][0]["file_id"], "a")
         calls = list(client.list_calls)
-        following = workspace_actions.query_guangya_filesystem(
+        following = self._domain_actions.workspace.query_guangya_filesystem(
             workspace_actions.guangya_fs_query_arguments({"observation_ref": result.data["observation_ref"], "page": 2, "page_size": 1}),
             ToolContext(owner="owner", session_id="session"))
         self.assertEqual(following.data["scope_objects"], result.data["scope_objects"])
@@ -203,7 +204,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
 
     def test_overlapping_root_and_child_share_one_identity(self):
         with mock.patch.object(workspace_actions, "GuangYaClient", return_value=FakeWorkspaceClient()):
-            result = workspace_actions.query_guangya_filesystem(
+            result = self._domain_actions.workspace.query_guangya_filesystem(
                 workspace_actions.guangya_fs_query_arguments({"paths": ["/a", "/a/spam.example.com"], "operation": "tree"}),
                 ToolContext(owner="owner", session_id="session"))
         self.assertEqual(result.data["total"], 4)
@@ -231,7 +232,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             {"operation": "list", "path": "/a", "max_items": 100}
         )
         with mock.patch.object(workspace_actions, "GuangYaClient", return_value=client):
-            result = workspace_actions.query_guangya_filesystem(
+            result = self._domain_actions.workspace.query_guangya_filesystem(
                 arguments, ToolContext(owner="owner", session_id="session")
             )
         self.assertEqual(result.data["page_size"], 50)
@@ -252,7 +253,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
         with mock.patch.object(
             workspace_actions, "GuangYaClient", return_value=FakeWorkspaceClient()
         ):
-            result = workspace_actions.query_guangya_filesystem(
+            result = self._domain_actions.workspace.query_guangya_filesystem(
                 arguments, ToolContext(owner="owner", session_id="session")
             )
         self.assertEqual(result.data["operation"], "search")
@@ -285,7 +286,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             }
         )
         with mock.patch.object(workspace_actions, "GuangYaClient", return_value=client):
-            result = workspace_actions.query_guangya_filesystem(
+            result = self._domain_actions.workspace.query_guangya_filesystem(
                 arguments, ToolContext(owner="owner", session_id="session")
             )
         self.assertEqual(result.data["scope"], "2 个目录")
@@ -317,14 +318,14 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(workspace_actions.AgentToolError, "请先列出父目录"),
         ):
-            workspace_actions.query_guangya_filesystem(
+            self._domain_actions.workspace.query_guangya_filesystem(
                 arguments, ToolContext(owner="owner", session_id="session")
             )
 
     def test_observation_can_continue_by_ref_and_is_owner_bound(self):
         first = self._query(FakeWorkspaceClient(), page_size=2)
         self.assertEqual(
-            workspace_actions.latest_guangya_observation_cursor("owner"),
+            self._domain_actions.workspace.latest_guangya_observation_cursor("owner"),
             {
                 "observation_ref": first.data["observation_ref"],
                 "page": 1,
@@ -339,13 +340,13 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
                 "page_size": 2,
             }
         )
-        second = workspace_actions.query_guangya_filesystem(
+        second = self._domain_actions.workspace.query_guangya_filesystem(
             arguments, ToolContext(owner="owner", session_id="session")
         )
         self.assertEqual(second.data["page"], 2)
         self.assertEqual(len(second.data["entries"]), 2)
         self.assertEqual(
-            workspace_actions.latest_guangya_observation_cursor("owner")["has_more"],
+            self._domain_actions.workspace.latest_guangya_observation_cursor("owner")["has_more"],
             False,
         )
         with self.assertRaisesRegex(Exception, "不属于当前会话"):
@@ -554,7 +555,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
                 return None
 
         repository = StaleRepository()
-        workspace_actions.configure_guangya_workspace_context(repository)
+        self._domain_actions.workspace = GuangyaWorkspaceActions(repository)
         original_list_dir = client.list_dir
 
         def guarded_list_dir(parent_id="0"):
@@ -566,7 +567,7 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
             mock.patch.object(workspace_actions, "GuangYaClient", return_value=client),
             self.assertRaisesRegex(Exception, "更新请求取代"),
         ):
-            workspace_actions.query_guangya_filesystem(
+            self._domain_actions.workspace.query_guangya_filesystem(
                 workspace_actions.guangya_fs_query_arguments(
                     {
                         "operation": "list",
@@ -587,13 +588,13 @@ class GuangYaWorkspaceAgentTests(unittest.TestCase):
         client = FakeWorkspaceClient()
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(workspace_actions, "GuangYaClient", return_value=client):
-            first = workspace_actions.query_guangya_filesystem(
+            first = self._domain_actions.workspace.query_guangya_filesystem(
                 workspace_actions.guangya_fs_query_arguments(
                     {"operation": "list", "path": "/a"}
                 ),
                 context,
             )
-            workspace_actions.query_guangya_filesystem(
+            self._domain_actions.workspace.query_guangya_filesystem(
                 workspace_actions.guangya_fs_query_arguments(
                     {"operation": "stat", "path": "/a/DEF-456.mp4"}
                 ),

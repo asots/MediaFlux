@@ -6,10 +6,10 @@ import json
 import threading
 
 from app import database as db
+from app.agent.domains.downloads.recent_submissions import RecentDownloadSubmissionStore
+from app.agent.domains.library.recent_patrol import RecentPatrolStore
+from app.agent.domains.resources.candidate_context import RecentResourceCandidateStore
 from app.agent.models import ToolResult
-from app.agent.recent_download_submissions import RecentDownloadSubmissionStore
-from app.agent.recent_patrol import RecentPatrolStore
-from app.agent.recent_resource_candidates import RecentResourceCandidateStore
 from app.agent.session_context import SQLiteAgentSessionContextRepository
 from tests.support import IsolatedDatabaseTestCase
 
@@ -920,6 +920,6 @@ class AgentSessionContextRepositoryTests(IsolatedDatabaseTestCase):
                 raise RuntimeError("unavailable")
 
         store = RecentPatrolStore(repository=BrokenRepository())
-        with self.assertLogs("app.agent.recent_patrol", level="WARNING"):
+        with self.assertLogs("app.agent.domains.library.recent_patrol", level="WARNING"):
             store.capture(owner="session-a", result=_patrol_result())
         self.assertEqual(store.get(owner="session-a")["options"][0]["tmdb_id"], "12345")

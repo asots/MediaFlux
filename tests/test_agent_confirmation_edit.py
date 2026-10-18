@@ -9,10 +9,12 @@ from unittest.mock import patch
 import pytest
 
 from app.agent.confirmation import SQLiteConfirmationStore
+from app.agent.errors import ConfirmationClaimError, ToolPipelineError
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
-from app.agent.kernel.pipeline import ConfirmationClaimError, ToolCallContext, ToolPipeline, ToolPipelineError
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from tests.test_agent_task_cas import task_store as isolated_store
 
 task_store = isolated_store
@@ -205,10 +207,11 @@ def test_real_preference_edit_confirm_and_next_query_preserve_auditable_history(
     from app.agent.feature_gate import initialize_runtime_fence
     from app.agent.kernel.capabilities import CapabilityRetriever
     from app.agent.kernel.events import AgentEventType as E
-    from app.agent.kernel.model import ModelEvent, ModelEventType as M, ModelToolCall
+    from app.agent.kernel.model import ModelEvent, ModelToolCall
+    from app.agent.kernel.model import ModelEventType as M
     from app.agent.kernel.ports import adapt_tool_spec
     from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.state import AgentInput
+    from app.agent.kernel.state_types import AgentInput
     from tests.test_agent_kernel_core import ScriptedModel, collect
 
     env_file = tmp_path / "isolated-preferences.env"
@@ -334,9 +337,10 @@ def test_sensitive_schema_field_cannot_be_changed_by_edit_patch(rig, field):
 def test_second_card_created_by_confirmed_continuation_is_editable_under_original_fence(rig):
     from app.agent.kernel.capabilities import CapabilityRetriever
     from app.agent.kernel.events import AgentEventType as E
-    from app.agent.kernel.model import ModelEvent, ModelEventType as M, ModelToolCall
+    from app.agent.kernel.model import ModelEvent, ModelToolCall
+    from app.agent.kernel.model import ModelEventType as M
     from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.state import AgentInput
+    from app.agent.kernel.state_types import AgentInput
     from tests.test_agent_kernel_core import ScriptedModel, collect
 
     def call(label):
@@ -366,7 +370,11 @@ def test_second_card_created_by_confirmed_continuation_is_editable_under_origina
 def test_edit_rejects_live_confirmation_continuation_even_with_finished_query_marker(rig):
     from app.agent.kernel.capabilities import CapabilityRetriever
     from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.state import PublicationLease, SessionBusyError, _PublicationFinished
+    from app.agent.kernel.state_types import (
+        PublicationLease,
+        SessionBusyError,
+        _PublicationFinished,
+    )
     from tests.test_agent_kernel_core import ScriptedModel
 
     async def run():

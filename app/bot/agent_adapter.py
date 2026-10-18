@@ -29,23 +29,23 @@ from app.agent.feature_gate import (
 from app.agent.kernel.adapters import ApprovalView, TurnView
 from app.agent.kernel.bootstrap import get_agent_kernel_runtime
 from app.agent.kernel.events import AgentEvent, AgentEventType
-from app.agent.kernel.state import (
+from app.agent.kernel.state_types import (
     CancellationToken,
     SelectionInvalidError,
     SessionBusyError,
-)
-from app.agent.kernel.transports import (
-    EffectEnvelope,
-    ExplainEnvelope,
-    QueryEnvelope,
-    TransportInputError,
-    normalize_delivery_route,
 )
 from app.agent.kernel.task_state import classify_public_task
 from app.agent.owner_routes import configured_telegram_user_ids
 from app.agent.public_safety import public_tool_label, sanitize_public_text
 from app.agent.public_view import format_public_result
 from app.agent.rate_limit import agent_rate_limiter
+from app.agent.transports import (
+    EffectEnvelope,
+    ExplainEnvelope,
+    QueryEnvelope,
+    TransportInputError,
+    normalize_delivery_route,
+)
 from app.bot.progress import TelegramProgress, send_typing
 from app.bot.telegram_markdown import (
     render_telegram_markdown,
@@ -914,10 +914,9 @@ def handle_agent_callback(bot: Any, call: Any, telebot_module: Any = None) -> No
         bot.answer_callback_query(call.id, "操作过于频繁，请稍后重试", show_alert=True)
         return
     if str(getattr(call, "data", "") or "").startswith("agk:s:"):
+        from app.bot.agent_candidates import CALLBACK_RE as _CANDIDATE_CALLBACK_RE
         from app.bot.agent_candidates import handle_callback
         from app.modules.telegram_topic_routing import resolve_session_callback_route
-
-        from app.bot.agent_candidates import CALLBACK_RE as _CANDIDATE_CALLBACK_RE
 
         candidate_match = _CANDIDATE_CALLBACK_RE.fullmatch(
             str(getattr(call, "data", "") or "")

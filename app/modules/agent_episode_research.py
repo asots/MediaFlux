@@ -23,6 +23,7 @@ from dataclasses import replace
 from typing import Any
 from urllib.parse import unquote
 
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel import (
     AgentEventType,
     AgentInput,
@@ -35,13 +36,13 @@ from app.agent.kernel import (
     ToolPipeline,
 )
 from app.agent.kernel.model import ModelEventType
-from app.agent.kernel.pipeline import ToolPipelineError, _validate_json_schema
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.provider_model import (
     OpenAICompatibleModelAdapter,
     ProviderSettings,
 )
 from app.agent.kernel.session import SessionLimits
+from app.agent.schema import validate_json_schema
 from app.sensitive_data import contains_sensitive_credential, is_sensitive_key
 
 _TIMEOUT_SECONDS = 90.0
@@ -84,12 +85,12 @@ def _load_contract():
 
 
 def search_web(arguments):
-    from app.agent.web_search_actions import search_web as handler
+    from app.agent.domains.discovery.web_search_actions import search_web as handler
     return handler(arguments)
 
 
 def read_web(arguments):
-    from app.agent.web_read_actions import read_web as handler
+    from app.agent.domains.discovery.web_read_actions import read_web as handler
     return handler(arguments)
 
 
@@ -168,8 +169,8 @@ def _case_projection(case):
 
 
 def _public_url(value):
+    from app.agent.domains.discovery.web_read_actions import web_read_arguments
     from app.agent.errors import AgentToolError
-    from app.agent.web_read_actions import web_read_arguments
     try:
         return web_read_arguments({"url": value, "max_chars": 4000})["url"]
     except AgentToolError:
@@ -439,7 +440,7 @@ class _BoundedModel:
                         if not self.run.catalog.has(call.name):
                             raise _error("tool_not_available")
                         tool = self.run.catalog.get(call.name)
-                        _validate_json_schema(call.arguments, tool.input_schema)
+                        validate_json_schema(call.arguments, tool.input_schema)
                         _safe_data(call.arguments)
                         if any(not call.arguments[k].strip() for k in ("query", "reason") if k in call.arguments):
                             raise _error("invalid_arguments")

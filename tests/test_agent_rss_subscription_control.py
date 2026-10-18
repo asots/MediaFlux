@@ -7,12 +7,12 @@ from unittest.mock import Mock, patch
 
 from app import database as db
 from app.agent.action_history import action_history_owner_digest
-from app.agent.errors import AgentToolError
-from app.agent.rate_limit import agent_rate_limiter
-from app.agent.rss_subscription_control_actions import (
+from app.agent.domains.subscriptions.rss_control_actions import (
     rss_create_subscription_arguments,
     rss_update_subscription_arguments,
 )
+from app.agent.errors import AgentToolError
+from app.agent.rate_limit import agent_rate_limiter
 from app.modules.rss_subscription_config import (
     RSSSubscriptionConfigError,
     normalize_rss_subscription_create,
@@ -217,7 +217,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
         }
         prepared = service.prepare("rss.create_subscription", arguments, owner="owner")
         with patch(
-            "app.agent.rss_subscription_control_actions.db.get_rss_subscription",
+            "app.agent.domains.subscriptions.rss_control_actions.db.get_rss_subscription",
             return_value=None,
         ):
             confirmed = service.confirm(
@@ -324,7 +324,7 @@ class RSSSubscriptionControlTests(IsolatedDatabaseTestCase):
             return original_update(sub_id, fields, **kwargs)
 
         with patch(
-            "app.agent.rss_subscription_control_actions.db.update_rss_subscription",
+            "app.agent.domains.subscriptions.rss_control_actions.db.update_rss_subscription",
             side_effect=update_in_transaction,
         ):
             confirmed = service.confirm(

@@ -6,7 +6,7 @@ from contextlib import ExitStack
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
-from app.agent import episode_resource_actions as actions
+from app.agent.domains.library import episode_resource_actions as actions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext, ToolResult
 from app.indexers.models import IndexerItem
@@ -47,8 +47,8 @@ class SeasonResourceSearchTests(TestCase):
         self.store = IndexerResultStore()
         service = Mock(enabled_site_ids=("nyaa",), result_store=self.store)
         service.site_ids_for_scope.return_value = ("nyaa",)
-        self.stack.enter_context(patch("app.agent.indexer_actions.config.get_bool", return_value=True))
-        self.stack.enter_context(patch("app.agent.indexer_actions.get_indexer_service", return_value=service))
+        self.stack.enter_context(patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True))
+        self.stack.enter_context(patch("app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service))
         self.stack.enter_context(patch.object(actions, "get_indexer_service", return_value=service))
         self.audit = self.stack.enter_context(patch.object(actions, "audit_series_episodes", return_value=audit_result()))
 
@@ -301,10 +301,10 @@ class SeasonResourceSearchTests(TestCase):
         self.assertEqual(result.data["groups"][0]["status"], "cancelled")
 
     def test_tool_schema_matches_expanded_parameter_contract(self):
-        from app.agent.domain_catalog.library import register_specs
+        from app.agent.domains.library.tools import register_specs
 
         registry = Mock()
-        register_specs(registry, resource_store=None, active_ingest_store=None, ingest_actions=None)
+        register_specs(registry, missing_media_runtime=None)
         spec = next(call.args[0] for call in registry.register.call_args_list
                     if call.args[0].name == "library.search_missing_season_resources")
         properties = spec.parameters["properties"]
@@ -325,7 +325,7 @@ class SeasonResourceSearchTests(TestCase):
         self.assertTrue(all("2160p" in candidate["title"] for candidate in result.references[0].value["candidates"]))
 
     def test_real_inventory_audit_and_indexer_search_cover_eleven_in_one_pass(self):
-        from app.agent import episode_audit
+        from app.agent.domains.library import episode_audit
         from app.clients.base import (
             SeriesCandidate,
             SeriesEpisodeInventory,
@@ -356,9 +356,9 @@ class SeasonResourceSearchTests(TestCase):
         with (
             patch("socket.socket.connect", side_effect=AssertionError("network forbidden")),
             patch("app.services._configured_media_sources", return_value=[("jellyfin", "Jellyfin", "https://fixture.invalid", media)]),
-            patch("app.agent.episode_audit.TMDBClient", return_value=tmdb),
+            patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=tmdb),
             patch.object(actions, "audit_series_episodes", wraps=episode_audit.audit_series_episodes) as audit,
-            patch("app.agent.indexer_actions.get_indexer_service", return_value=service),
+            patch("app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service),
             patch.object(actions, "get_indexer_service", return_value=service),
             patch.object(service, "search_media", wraps=service.search_media) as search,
         ):

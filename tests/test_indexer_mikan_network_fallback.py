@@ -6,11 +6,10 @@ import unittest
 
 import httpx
 
-from app.indexers.errors import IndexerSecurityError, IndexerTimeout, IndexerUnavailable
-from app.indexers.http import IndexerHttpResponse
+from app.clients.http import HttpResponse, HttpSecurityError
+from app.indexers.errors import IndexerTimeout, IndexerUnavailable
 from app.indexers.models import IndexerSearchRequest
 from app.indexers.providers.mikan import MikanAdapter
-
 
 _HTML = b'''<table><tbody><tr class="js-search-results-row">
 <td><input data-magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"></td>
@@ -29,7 +28,7 @@ class _Transport:
         error = self.primary_error if len(self.calls) == 1 else self.mirror_error
         if error is not None:
             raise error
-        return IndexerHttpResponse(
+        return HttpResponse(
             url=url, status_code=200, headers={"content-type": "text/html; charset=utf-8"}, body=_HTML,
         )
 
@@ -61,7 +60,7 @@ class MikanNetworkFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(http.calls, ["https://mikanani.me/Home/Search"])
 
     async def test_security_failure_remains_fail_closed(self):
-        http = _Transport(IndexerSecurityError("upstream resolved to a non-public address"))
-        with self.assertRaises(IndexerSecurityError):
+        http = _Transport(HttpSecurityError("upstream resolved to a non-public address"))
+        with self.assertRaises(HttpSecurityError):
             await MikanAdapter(http=http).search(IndexerSearchRequest.create("Fixture"))
         self.assertEqual(http.calls, ["https://mikanani.me/Home/Search"])

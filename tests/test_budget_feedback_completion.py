@@ -16,7 +16,7 @@ from app.agent.kernel.provider_model import (
     OpenAICompatibleModelAdapter,
     ProviderSettings,
 )
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.state_types import CancellationToken
 from tests.test_agent_generation_profiles import (
     BASE,
     PATHS,

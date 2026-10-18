@@ -13,11 +13,11 @@ from unittest.mock import patch
 import httpx
 
 import tests  # noqa: F401 -- 必须先隔离配置/DB，禁止读取生产运行环境。
+from app.clients.http import HttpSecurityError
 from app.discovery.calendar.http import CalendarHttp
 from app.discovery.calendar.models import SourceUnavailable
 from app.discovery.calendar.providers.youku import YoukuCalendarProvider, _initial_data
 from app.discovery.calendar.youku_challenge import script_tokens
-from app.indexers.errors import IndexerSecurityError
 
 _FIXTURES = Path(__file__).with_name("fixtures") / "calendar" / "youku"
 _HTML = (_FIXTURES / "webcomic.html").read_text(encoding="utf-8")
@@ -337,7 +337,7 @@ class YoukuCalendarTests(unittest.IsolatedAsyncioTestCase):
                                     resolver=lambda host, port: [(2, 1, 6, "", ("93.184.216.34", port))],
                                     max_requests=1, min_interval=0)
                 try:
-                    with self.assertRaises(IndexerSecurityError):
+                    with self.assertRaises(HttpSecurityError):
                         await http.get_text(record["url"])
                 finally:
                     await http.aclose()

@@ -370,7 +370,7 @@ async def _generate_private_topic_title(
         OpenAICompatibleModelAdapter,
         ProviderSettings,
     )
-    from app.agent.kernel.state import CancellationToken
+    from app.agent.kernel.state_types import CancellationToken
     from app.modules.telegram_model_preferences import get_telegram_model_preference
 
     settings = ProviderSettings.from_config()

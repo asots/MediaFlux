@@ -6,7 +6,7 @@ import math
 import re
 from typing import Any
 
-from app.agent.media_links import sanitize_media_open_url
+from app.agent.domains.library.media_links import sanitize_media_open_url
 from app.agent.public_safety import (
     sanitize_public_text,
     sanitize_untrusted_filename,

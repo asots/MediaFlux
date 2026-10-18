@@ -20,6 +20,8 @@ from app import database as db
 from app.agent.async_bridge import run_awaitable_sync
 from app.agent.model_catalog import fetch_ai_models
 from app.agent.rate_limit import agent_rate_limiter
+from app.clients.guangya import GuangYaClient, close_guangya_client
+from app.clients.http import FixedHostHttpClient, HttpError
 from app.clients.openai_compatible import (
     PROTOCOLS,
     SUPPORTED_PROTOCOLS_TEXT,
@@ -30,26 +32,26 @@ from app.clients.openai_compatible import (
     native_tool_initial_history,
     native_tool_request_body,
     normalize_provider_location,
+    parse_generation_profiles,
     parse_native_tool_turn,
     protocol_attempts,
     provider_headers,
+    resolve_generation_profile,
     resolve_protocol,
     structured_request_body,
     text_stream_request_body,
-    parse_generation_profiles,
-    resolve_generation_profile,
 )
-from app.indexers.errors import IndexerError
-from app.indexers.http import FixedHostHttpClient
-from app.clients.guangya import GuangYaClient, close_guangya_client
 from app.logger import get_logger, redact_sensitive_text
-from app.modules import gcid_import
+from app.modules import gcid_import, recognition_preprocess_rules, tmdb_regex_rules
 from app.modules.gcid_manifest import ManifestValidationError, validate_manifest
 from app.modules.scraper import (
-    Candidate, MatchResult, TMDBScraper, decide_threshold,
-    extract_recognition_context, generate_query_variants,
+    Candidate,
+    MatchResult,
+    TMDBScraper,
+    decide_threshold,
+    extract_recognition_context,
+    generate_query_variants,
 )
-from app.modules import recognition_preprocess_rules, tmdb_regex_rules
 from app.web import api_error, api_response, csrf_token, require_api_login
 
 logger = get_logger(__name__)
@@ -353,7 +355,7 @@ def _build_naming_preview(
 ) -> dict:
     """根据命名规则预览最终文件名与归档目录，复用实际整理命名层。"""
     from app.clients.guangya import GuangYaFile
-    from app.modules.organize import OrganizeRules, Organizer
+    from app.modules.organize import Organizer, OrganizeRules
     from app.modules.scraper import MatchResult
 
     match = MatchResult(
@@ -1153,7 +1155,7 @@ async def _test_ai_provider(
         except (
             asyncio.TimeoutError,
             httpx.HTTPError,
-            IndexerError,
+            HttpError,
             KeyError,
             IndexError,
             TypeError,
@@ -1307,7 +1309,7 @@ def ai_models(request: Request, data: dict | None = Body(default=None)):
             base_url=base_url, api_key=api_key, protocol=protocol,
             timeout_seconds=_AI_MODEL_LIST_TIMEOUT_SECONDS
         ))
-    except (ValueError, IndexerError) as exc:
+    except (ValueError, HttpError) as exc:
         return api_error(str(exc), 400)
     except Exception as exc:
         logger.warning("AI 模型列表读取失败 type=%s", type(exc).__name__)
@@ -1381,7 +1383,7 @@ def ai_model_test(request: Request, data: dict | None = Body(default=None)):
         return api_error("模型连接测试超时，请检查网络或调高请求超时", 504)
     except ValueError as exc:
         return api_error(str(exc), 400)
-    except (httpx.HTTPError, IndexerError) as exc:
+    except (httpx.HTTPError, HttpError) as exc:
         logger.warning("AI 模型测试传输失败 type=%s", type(exc).__name__)
         return api_error("无法连接模型服务，请检查地址、网络与代理设置", 502)
     except Exception as exc:

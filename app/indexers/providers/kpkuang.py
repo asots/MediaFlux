@@ -13,16 +13,18 @@ from urllib.parse import urlsplit
 import httpx
 from bs4 import BeautifulSoup
 
+from app.clients.http import (
+    HttpError,
+    HttpInvalidResponse,
+    HttpResponseTooLarge,
+    HttpSecurityError,
+)
 from app.concurrency import CrossLoopAsyncLock
 
 from ..errors import (
     IndexerChallengeRequired,
-    IndexerError,
-    IndexerInvalidResponse,
     IndexerQueryRejected,
     IndexerRateLimited,
-    IndexerResponseTooLarge,
-    IndexerSecurityError,
     IndexerTimeout,
     IndexerUnavailable,
 )
@@ -65,7 +67,7 @@ KPKUANG_HOST_CONFIG = MappingProxyType({
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _MAX_CANDIDATES = 3
 _SEARCH_INTERVAL_SECONDS = 5.5
-_STOP_CANDIDATE_ERRORS = (IndexerRateLimited, IndexerChallengeRequired, IndexerSecurityError)
+_STOP_CANDIDATE_ERRORS = (IndexerRateLimited, IndexerChallengeRequired, HttpSecurityError)
 _ID = re.compile(r"^\d{1,12}$")
 
 
@@ -160,9 +162,9 @@ class KPkuangAdapter(DirectResultAdapter):
             return self._page(request, [])
 
         items: list[IndexerItem] = []
-        errors: list[IndexerError] = []
+        errors: list[HttpError] = []
         successful_details = 0
-        fatal_error: IndexerError | None = None
+        fatal_error: HttpError | None = None
         seen_hashes: set[str] = set()
         for candidate in candidates[:_MAX_CANDIDATES]:
             detail_url = fixed_host_join(self.base_url, f"{_CONFIG['detail_path_prefix']}{candidate['id']}/")
@@ -172,7 +174,7 @@ class KPkuangAdapter(DirectResultAdapter):
                 self._check_page_url(detail.url, candidate["id"], _CONFIG["detail_path_prefix"])
                 detail_soup = self._parse_main_page(self._body(detail.body), "detail")
                 successful_details += 1
-            except IndexerError as exc:
+            except HttpError as exc:
                 errors.append(exc)
                 if isinstance(exc, _STOP_CANDIDATE_ERRORS):
                     fatal_error = exc
@@ -187,7 +189,7 @@ class KPkuangAdapter(DirectResultAdapter):
                     self._check_download_url(download.url, candidate["id"])
                     download_soup = self._parse_main_page(self._body(download.body), "download")
                     items.extend(self._parse_magnets(download_soup, candidate, detail_url, seen_hashes))
-                except IndexerError as exc:
+                except HttpError as exc:
                     errors.append(exc)
                     if isinstance(exc, _STOP_CANDIDATE_ERRORS):
                         fatal_error = exc
@@ -227,7 +229,7 @@ class KPkuangAdapter(DirectResultAdapter):
             return await self.http.get(url, **kwargs)
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise IndexerTimeout("KPkuang request timed out") from exc
-        except IndexerError:
+        except HttpError:
             raise
         except (httpx.HTTPError, OSError) as exc:
             raise IndexerUnavailable("KPkuang request failed") from exc
@@ -242,12 +244,12 @@ class KPkuangAdapter(DirectResultAdapter):
         if status == 404 or status >= 500:
             raise IndexerUnavailable(f"KPkuang returned HTTP {status}")
         if status != 200:
-            raise IndexerInvalidResponse(f"KPkuang returned HTTP {status}")
+            raise HttpInvalidResponse(f"KPkuang returned HTTP {status}")
 
     @staticmethod
     def _body(body: bytes) -> bytes:
         if len(body) > MAX_RESPONSE_BYTES:
-            raise IndexerResponseTooLarge("KPkuang response exceeded the parsing limit")
+            raise HttpResponseTooLarge("KPkuang response exceeded the parsing limit")
         return body
 
     @staticmethod
@@ -266,9 +268,9 @@ class KPkuangAdapter(DirectResultAdapter):
         except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError, binascii.Error) as exc:
             if is_likely_challenge_page(body, usable_markers=("fed-main-info", "fed-part-case")):
                 raise IndexerChallengeRequired("KPkuang search requires verification") from exc
-            raise IndexerInvalidResponse("KPkuang search response was malformed") from exc
+            raise HttpInvalidResponse("KPkuang search response was malformed") from exc
         if not isinstance(values, list):
-            raise IndexerInvalidResponse("KPkuang search results were not a list")
+            raise HttpInvalidResponse("KPkuang search results were not a list")
 
         candidates = []
         for value in values:
@@ -285,7 +287,7 @@ class KPkuangAdapter(DirectResultAdapter):
                 year = None
             candidates.append({"id": candidate_id, "title": title, "year": year})
         if values and not candidates:
-            raise IndexerInvalidResponse("KPkuang search results contained no valid candidates")
+            raise HttpInvalidResponse("KPkuang search results contained no valid candidates")
         return candidates
 
     @staticmethod
@@ -294,7 +296,7 @@ class KPkuangAdapter(DirectResultAdapter):
         if soup.select_one(".fed-main-info > .fed-part-case") is None:
             if is_likely_challenge_page(body, usable_markers=("fed-main-info", "fed-part-case")):
                 raise IndexerChallengeRequired(f"KPkuang {stage} requires verification")
-            raise IndexerInvalidResponse(f"KPkuang {stage} page omitted main content")
+            raise HttpInvalidResponse(f"KPkuang {stage} page omitted main content")
         return soup
 
     @staticmethod
@@ -309,7 +311,7 @@ class KPkuangAdapter(DirectResultAdapter):
                 href = html.unescape(str(anchor.get("href") or "").strip())
                 try:
                     url = fixed_host_join(_BASE_URL, href)
-                except IndexerSecurityError:
+                except HttpSecurityError:
                     continue
                 if _belongs_to(urlsplit(url).path, prefix, candidate_id):
                     return url
@@ -352,7 +354,7 @@ class KPkuangAdapter(DirectResultAdapter):
     def _check_page_url(response_url: str, candidate_id: str, prefix: str) -> None:
         path = urlsplit(response_url).path
         if urlsplit(response_url).hostname != _BASE_HOST or not re.fullmatch(re.escape(prefix) + re.escape(candidate_id) + r"/?", path):
-            raise IndexerInvalidResponse("KPkuang detail response did not match its candidate")
+            raise HttpInvalidResponse("KPkuang detail response did not match its candidate")
 
     @staticmethod
     def _check_download_url(response_url: str, candidate_id: str) -> None:
@@ -361,7 +363,7 @@ class KPkuangAdapter(DirectResultAdapter):
             _belongs_to(path, str(_CONFIG[key]), candidate_id)
             for key in ("voddown_path_prefix", "legacy_download_path_prefix")
         ):
-            raise IndexerInvalidResponse("KPkuang download response did not match its detail")
+            raise HttpInvalidResponse("KPkuang download response did not match its detail")
 
     @staticmethod
     def _page(request, items, *, errors=(), complete=True):

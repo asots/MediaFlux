@@ -1,17 +1,25 @@
 """Cold cancellation fences executor failures at journal and delivery boundaries."""
 import asyncio
 import threading
-from dataclasses import replace
-from app.agent.kernel.pipeline import ToolPipelineError
 from contextlib import suppress
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
 
-from app.agent.kernel.bootstrap import build_agent_kernel_runtime, _capture_creation_binding
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel.bootstrap import (
+    _capture_creation_binding,
+    build_agent_kernel_runtime,
+)
 from app.agent.kernel.persistence import SQLiteKernelStore
 from tests.test_agent_read_wait_lifecycle import (
-    OWNER, WaitScript, parked_runtime, isolated_database as isolated_database,
+    OWNER,
+    WaitScript,
+    parked_runtime,
+)
+from tests.test_agent_read_wait_lifecycle import (
+    isolated_database as isolated_database,
 )
 
 

@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 from app import database as db
 from app.agent.rate_limit import agent_rate_limiter
-from app.modules.recognition import formats
 from app.modules import (
     recognition_knowledge,
     recognition_preprocess_rules,
     tmdb_regex_rules,
 )
+from app.modules.recognition import formats
 from tests.agent_kernel_test_harness import (
     get_kernel_test_service as get_agent_service,
 )
@@ -157,7 +157,7 @@ class AgentRecognitionToggleTests(IsolatedDatabaseTestCase):
             owner="owner-preprocess",
         )
         with patch(
-            "app.agent.recognition_toggle_actions.recognition_preprocess_rules.invalidate_active_cache"
+            "app.agent.domains.configuration.recognition_toggle_actions.recognition_preprocess_rules.invalidate_active_cache"
         ) as invalidate:
             service.confirm(
                 prepared["action_plan"]["plan_id"], owner="owner-preprocess"
@@ -176,7 +176,7 @@ class AgentRecognitionToggleTests(IsolatedDatabaseTestCase):
             owner="owner-knowledge",
         )
         with patch(
-            "app.agent.recognition_toggle_actions.recognition_knowledge.invalidate_active_cache"
+            "app.agent.domains.configuration.recognition_toggle_actions.recognition_knowledge.invalidate_active_cache"
         ) as invalidate:
             service.confirm(prepared["action_plan"]["plan_id"], owner="owner-knowledge")
         invalidate.assert_called_once_with()
@@ -204,8 +204,8 @@ class AgentRecognitionToggleTests(IsolatedDatabaseTestCase):
         self.assertNotIn("SECRET changed name", self._serialized(confirmed))
 
     def test_release_format_toggle_uses_native_change_and_refreshes_parser(self):
-        from tests.test_release_formats import save_teaching, filename, PARENT
         from app.modules.scraper import extract_recognition_context
+        from tests.test_release_formats import PARENT, filename, save_teaching
         item, _ = save_teaching()
         unrelated = self._preprocess_rule()
         service = get_agent_service()

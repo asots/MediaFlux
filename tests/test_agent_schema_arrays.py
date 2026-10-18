@@ -8,24 +8,23 @@ from types import MappingProxyType
 
 import pytest
 
-from app.agent.capability_discovery_actions import (
+from app.agent.domain_catalog import build_tool_specs
+from app.agent.domains.system.capability_actions import (
     CAPABILITY_PARAMETERS,
     capability_arguments,
 )
-from app.agent.domain_catalog import build_tool_specs
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     KernelToolSpec,
     ToolCatalog,
     ToolEffect,
 )
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import (
-    AgentInput,
-    CancellationToken,
-    InMemorySessionStateStore,
-)
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from tests.test_agent_tool_argument_ingress import Wire, encode, wire
 
 
@@ -61,7 +60,7 @@ async def execute(schema, arguments, trace):
         "lookup", arguments, context=context)
 
 
-@pytest.mark.parametrize("names", [[], ["library.status"] * 7])
+@pytest.mark.parametrize("names", [[], ["library.status"] * 21])
 def test_real_capability_array_rejected_before_domain_validator(names):
     trace = []
     with pytest.raises(ToolPipelineError, match=r"arguments\.tool_names") as error:

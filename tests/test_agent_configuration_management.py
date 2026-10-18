@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.configuration_management_actions import (
+from app.agent.domains.configuration.management_actions import (
     execute_knowledge,
     execute_source,
     knowledge_mutation_arguments,
@@ -31,7 +31,7 @@ class ConfigurationManagementTests(IsolatedDatabaseTestCase):
             conn.execute("DELETE FROM local_media_tasks")
             conn.execute("DELETE FROM local_media_sources")
         self.scheduler = patch(
-            "app.agent.configuration_management_actions.get_local_media_scheduler"
+            "app.agent.domains.configuration.management_actions.get_local_media_scheduler"
         )
         self.scheduler.start()
         self.addCleanup(self.scheduler.stop)
@@ -146,7 +146,8 @@ class ConfigurationManagementTests(IsolatedDatabaseTestCase):
             execute_source(args, token, "update")
 
     def test_all_specs_are_atomic_confirmable_and_no_http_calls(self):
-        from app.agent.domain_catalog import automation_rules, configuration_management
+        from app.agent.domains.automation import tools as automation_rules
+        from app.agent.domains.configuration import tools as configuration_management
 
         class Registry:
             def __init__(self):
@@ -195,7 +196,7 @@ class MediaPathMappingTests(IsolatedDatabaseTestCase):
         from app.agent.feature_gate import initialize_runtime_fence
 
         initialize_runtime_fence()
-        from app.agent.configuration_management_actions import (
+        from app.agent.domains.configuration.management_actions import (
             execute_path_mapping,
             list_path_mappings,
             prepare_path_mapping,
@@ -229,7 +230,7 @@ class MediaPathMappingTests(IsolatedDatabaseTestCase):
         self.assertEqual(list_path_mappings({"provider": "jellyfin"}).data["count"], 0)
 
     def test_mapping_concurrent_env_edit_rejects_and_preserves_external_change(self):
-        from app.agent.configuration_management_actions import (
+        from app.agent.domains.configuration.management_actions import (
             execute_path_mapping,
             prepare_path_mapping,
         )
@@ -249,7 +250,9 @@ class MediaPathMappingTests(IsolatedDatabaseTestCase):
         self.assertIn("JELLYFIN_PATH_MAPPINGS=[]", self.env_file.read_text())
 
     def test_mapping_deployment_override_and_root_paths_rejected(self):
-        from app.agent.configuration_management_actions import prepare_path_mapping
+        from app.agent.domains.configuration.management_actions import (
+            prepare_path_mapping,
+        )
 
         args = {
             "provider": "jellyfin",

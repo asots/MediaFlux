@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from app.agent.capability_discovery_actions import capability_arguments
+from app.agent.domains.system.capability_actions import capability_arguments
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import ToolCatalog, ToolEffect
 from app.agent.kernel.discovery import CapabilityDiscovery
-from app.agent.kernel.pipeline import ToolPipelineError
 from app.agent.kernel.provider_model import (
     OpenAICompatibleModelAdapter,
     ProviderSettings,
@@ -154,6 +154,7 @@ async def _native_union():
     secret = replace(read_tool("secret.inspect"), authorize=lambda c: False)
     session, _ = session_for([*targets, read_tool("overflow.inspect"), secret], [])
     session.retriever.maximum = 2
+    session.limits = replace(session.limits, capability_window=2)
     discovery_outcomes = []
     execute = session.pipeline.execute
 

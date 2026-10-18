@@ -4,16 +4,30 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agent.ingest_actions import AgentIngestSessionStore, IngestActions
-from app.agent.models import ToolContext
-from app.agent.recent_resource_candidates import RecentResourceCandidateStore
+from app.agent.domains.resources.candidate_context import RecentResourceCandidateStore
+from app.agent.domains.resources.ingest_actions import (
+    AgentIngestSessionStore,
+    IngestActions,
+)
 from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.models import ToolContext
 from app.agent.public_view import public_conversation_messages
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import (
-    AgentInput, AgentSession, CapabilityRetriever, KernelToolSpec, ModelEvent,
-    ModelEventType, ModelToolCall, PreparedEffect, ScriptedModel, ToolCatalog,
-    ToolEffect, ToolPipeline, ToolPipelineError, consume_events,
+    AgentInput,
+    AgentSession,
+    CapabilityRetriever,
+    KernelToolSpec,
+    ModelEvent,
+    ModelEventType,
+    ModelToolCall,
+    PreparedEffect,
+    ScriptedModel,
+    ToolCatalog,
+    ToolEffect,
+    ToolPipeline,
+    ToolPipelineError,
+    consume_events,
 )
 
 EXPLANATION = "提交后，请求#42的本地记录显示qB正在下载，整理与STRM仍待处理，因此尚不能确认入库完成。"
@@ -42,7 +56,7 @@ def test_ingest_followup_explanation(unresolved, foreign):
             _, fingerprint = actions.prepare_submit(args, context)
             return actions.execute_submit(args, fingerprint, context).to_dict()
         def inspect(*_):
-            with patch("app.agent.ingest_actions.db.get_download_request", return_value=row):
+            with patch("app.agent.domains.resources.ingest_actions.db.get_download_request", return_value=row):
                 result = actions.status({"request_number": row["id"]}, context).to_dict()
             reads.append(result)
             return result
@@ -75,10 +89,10 @@ def test_ingest_followup_explanation(unresolved, foreign):
         store = SQLiteKernelStore(secret_provider=lambda: "a32-offline-fixture")
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
                                pipeline=ToolPipeline(catalog=catalog, state_store=store), state_store=store)
-        with patch("app.agent.ingest_actions.download_target_readiness", return_value={"qb": True}), \
-             patch("app.agent.ingest_actions.create_request", return_value={"id": 42, "created": True, "status": "pending"}) as create, \
-             patch("app.agent.ingest_actions.dispatch_request", return_value={"ok": True, "status": "submitted", "succeeded": ["qb"], "failed": []}) as dispatch, \
-             patch("app.agent.ingest_actions.db.get_download_request", return_value=None):
+        with patch("app.agent.domains.resources.ingest_actions.download_target_readiness", return_value={"qb": True}), \
+             patch("app.agent.domains.resources.ingest_actions.create_request", return_value={"id": 42, "created": True, "status": "pending"}) as create, \
+             patch("app.agent.domains.resources.ingest_actions.dispatch_request", return_value={"ok": True, "status": "submitted", "succeeded": ["qb"], "failed": []}) as dispatch, \
+             patch("app.agent.domains.resources.ingest_actions.db.get_download_request", return_value=None):
             actions.inspect({"source_type": "direct_url", "input": "magnet:?xt=urn:btih:" + "a" * 40}, context)
             preview = await consume_events(session.run(AgentInput(message="提交下载并核验进度", owner="o", session_id="s")))
             final = await consume_events(session.confirm(owner="o", session_id="s", plan_id=preview.approval.plan_id))

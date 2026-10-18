@@ -3,19 +3,32 @@ import asyncio
 from datetime import datetime
 
 import pytest
-from app import config, database as db
+
+from app import config
+from app import database as db
+from app.agent.errors import ToolPipelineError
 from app.agent.feature_gate import initialize_runtime_fence
-from app.agent.kernel.bootstrap import build_agent_kernel_runtime, _capture_creation_binding
+from app.agent.kernel.bootstrap import (
+    _capture_creation_binding,
+    build_agent_kernel_runtime,
+)
 from app.agent.kernel.capabilities import KernelToolSpec, ToolEffect
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
-from app.agent.kernel.state import AgentInput, CancellationToken, PublicationLease
+from app.agent.kernel.state_types import AgentInput, CancellationToken, PublicationLease
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.modules.agent_jobs_scheduler import AgentJobsScheduler
 from tests.test_agent_read_wait_lifecycle import (
-    WaitScript, Quota, parked_runtime, OWNER, GOAL,
+    GOAL,
+    OWNER,
+    Quota,
+    WaitScript,
+    parked_runtime,
+)
+from tests.test_agent_read_wait_lifecycle import (
     isolated_database as isolated_database,
 )
+
 from .test_agent_read_wait_contract_repair import resumed
 
 
@@ -148,6 +161,7 @@ def test_real_authorization_changes_block_wait_stream(tg_config, change):
 @pytest.mark.parametrize('telegram', [False, True])
 def test_legacy_policy_absence_never_infers_telegram_authority(tg_config, telegram):
     from unittest.mock import patch
+
     from app.modules import telegram_model_preferences as prefs
 
     async def run():

@@ -53,6 +53,7 @@ class KernelToolSpec:
     availability: Availability | None = None
     runtime_status: Callable[[], Mapping[str, str]] | None = None
     authorize: Authorizer | None = None
+    approval_scope: Callable[[str, Mapping[str, Any], Mapping[str, Any]], dict[str, str] | None] | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     model_name: str = ""
 
@@ -133,7 +134,9 @@ class KernelToolSpec:
 class ToolCatalog:
     """只保存工具事实，不理解用户自然语言。"""
 
-    def __init__(self, tools: Iterable[KernelToolSpec] = ()) -> None:
+    def __init__(self, tools: Iterable[KernelToolSpec] = (), *, projector: Any = None, selection: Any = None) -> None:
+        self.projector = projector
+        self.selection = selection
         self._tools: dict[str, KernelToolSpec] = {}
         self._aliases: dict[str, str] = {}
         for tool in tools:

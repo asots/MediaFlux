@@ -10,18 +10,28 @@ import httpx
 import pytest
 
 from app.agent.kernel.capabilities import (
-    CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect,
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
 )
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
+from app.agent.kernel.provider_model import (
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import AgentInput
-from app.indexers.http import FixedHostHttpClient
+from app.agent.kernel.state_types import AgentInput
+from app.clients.http import FixedHostHttpClient
 from tests.support import isolated_test_database
-from tests.test_agent_provider_state import REDACTED, SIGNATURE, THINKING, anthropic_tool_frames
-
+from tests.test_agent_provider_state import (
+    REDACTED,
+    SIGNATURE,
+    THINKING,
+    anthropic_tool_frames,
+)
 
 PROTOCOLS = ("responses", "chat_completions", "anthropic_messages")
 OWNER, SESSION = "planning-recovery-owner", "planning-recovery"

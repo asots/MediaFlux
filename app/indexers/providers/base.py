@@ -9,9 +9,16 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit
 
+from app.clients.http import HttpInvalidResponse, HttpSecurityError
 from app.concurrency import CrossLoopAsyncLock
-from ..errors import IndexerInvalidResponse, IndexerSecurityError
-from ..models import IndexerCapabilities, IndexerItem, IndexerPage, IndexerSearchRequest, ResolvedDownload
+
+from ..models import (
+    IndexerCapabilities,
+    IndexerItem,
+    IndexerPage,
+    IndexerSearchRequest,
+    ResolvedDownload,
+)
 
 # 有限公开Tracker种子列表；不在运行时拉取远程列表，也不承诺可用性或下载速度。
 PUBLIC_TRACKERS = (
@@ -63,11 +70,11 @@ class IndexerAdapter(ABC):
         bases = getattr(self, "_host_bases", (self.base_url,))
         if relative_base_url is not None:
             bases = tuple(dict.fromkeys((relative_base_url, *bases)))
-        last_error: IndexerSecurityError | None = None
+        last_error: HttpSecurityError | None = None
         for base_url in bases:
             try:
                 return fixed_host_join(base_url, candidate)
-            except IndexerSecurityError as exc:
+            except HttpSecurityError as exc:
                 last_error = exc
         assert last_error is not None
         raise last_error
@@ -76,7 +83,7 @@ class IndexerAdapter(ABC):
     def http_client_for_result(self, stored_result: IndexerItem):
         """外围读取来源链接/种子时，使用该冻结结果所属的客户端。"""
         if stored_result.site_id != self.site_id:
-            raise IndexerSecurityError("result provider mismatch")
+            raise HttpSecurityError("result provider mismatch")
         return self.http
 
     def iter_http_clients(self) -> tuple[object, ...]:
@@ -122,13 +129,13 @@ class SearchRequestPacer:
 class DirectResultAdapter(IndexerAdapter):
     async def resolve(self, stored_result: IndexerItem) -> ResolvedDownload:
         if stored_result.site_id != self.site_id:
-            raise IndexerSecurityError("result provider mismatch")
+            raise HttpSecurityError("result provider mismatch")
         if stored_result.magnet and magnet_infohash(stored_result.magnet):
             return ResolvedDownload(kind="magnet", value=stored_result.magnet)
         if stored_result.torrent_url:
             safe_url = fixed_host_join(self.base_url, stored_result.torrent_url)
             return ResolvedDownload(kind="torrent", value=safe_url)
-        raise IndexerInvalidResponse("result has no downloadable candidate")
+        raise HttpInvalidResponse("result has no downloadable candidate")
 
 
 def fixed_host_join(base_url: str, candidate: str) -> str:
@@ -136,9 +143,9 @@ def fixed_host_join(base_url: str, candidate: str) -> str:
     base = urlsplit(base_url)
     parsed = urlsplit(absolute)
     if parsed.scheme != "https" or parsed.hostname != base.hostname or parsed.port not in (None, 443):
-        raise IndexerSecurityError("provider result escaped its registered host")
+        raise HttpSecurityError("provider result escaped its registered host")
     if parsed.username or parsed.password or parsed.fragment:
-        raise IndexerSecurityError("provider result URL contains forbidden components")
+        raise HttpSecurityError("provider result URL contains forbidden components")
     return absolute
 
 
@@ -218,7 +225,7 @@ def is_likely_challenge_page(
 def require_html_response(response) -> None:
     content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
     if content_type not in {"text/html", "application/xhtml+xml"}:
-        raise IndexerInvalidResponse("provider returned a non-HTML response")
+        raise HttpInvalidResponse("provider returned a non-HTML response")
 
 
 def parse_size_bytes(value: str | None) -> int | None:

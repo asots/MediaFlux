@@ -5,11 +5,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.agent.errors import AgentToolError
-from app.agent.library_batch_presence import (
+from app.agent.domains.library.batch_presence import (
     batch_library_presence,
     batch_presence_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.clients.base import MediaIdentityCandidate, MediaIdentityInventory
 from app.services import (
     inspect_media_identity_batch,
@@ -115,10 +115,10 @@ def test_batch_presence_aggregates_all_sources_without_per_title_search():
         }
     ]
     with patch(
-        "app.agent.library_batch_presence.inspect_media_identity_batch",
+        "app.agent.domains.library.batch_presence.inspect_media_identity_batch",
         return_value=sources,
     ) as inspect, patch(
-        "app.agent.library_batch_presence.summarize_media_identity_batch",
+        "app.agent.domains.library.batch_presence.summarize_media_identity_batch",
         wraps=summarize_media_identity_batch,
     ) as summarize:
         result = batch_library_presence({"items": _ITEMS})
@@ -317,9 +317,9 @@ def test_summarize_batch_without_sources_keeps_indeterminate_identities(identiti
 
 def test_batch_presence_without_sources_keeps_existing_early_return():
     with patch(
-        "app.agent.library_batch_presence.inspect_media_identity_batch", return_value=[]
+        "app.agent.domains.library.batch_presence.inspect_media_identity_batch", return_value=[]
     ) as inspect, patch(
-        "app.agent.library_batch_presence.summarize_media_identity_batch",
+        "app.agent.domains.library.batch_presence.summarize_media_identity_batch",
         side_effect=AssertionError("无媒体源时不应聚合"),
     ) as summarize:
         result = batch_library_presence({"items": _ITEMS})
@@ -337,7 +337,7 @@ def test_batch_presence_without_sources_keeps_existing_early_return():
 @pytest.mark.parametrize("status", ["possible", "indeterminate"])
 def test_batch_presence_keeps_partial_status_for_uncertain_items(status):
     with patch(
-        "app.agent.library_batch_presence.inspect_media_identity_batch",
+        "app.agent.domains.library.batch_presence.inspect_media_identity_batch",
         return_value=[{"status": "ready", "items": [{**_ITEMS[0], "status": status}]}],
     ):
         result = batch_library_presence({"items": _ITEMS[:1]})

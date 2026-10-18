@@ -11,12 +11,18 @@ from typing import Any
 import pytest
 
 from app import database as db
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import ToolOutcome
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.public_view import public_conversation_messages
 from tests.test_agent_tool_argument_ingress import Wire, encode
 

@@ -269,7 +269,7 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
 
     @staticmethod
     def _snapshot_with_season_sizes(season_sizes):
-        from app.agent.library_episode_audit import _tmdb_snapshot
+        from app.agent.domains.library.library_episode_audit import _tmdb_snapshot
 
         # 仅以本地 MagicMock 合成 TMDB 响应，不访问真实 provider。
         client = MagicMock()
@@ -319,13 +319,15 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(client.tv_season_detail.call_count, 1)
 
     def test_cross_server_series_are_grouped_by_tmdb_id_and_missing_is_bounded(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=self._sources(),
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes({"as_of": "2026-08-03", "max_series": 50})
 
         self.assertTrue(result.ok)
@@ -347,7 +349,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertIn("deadline_at", client.detail.call_args.kwargs)
 
     def test_manual_patrol_strictly_maps_unmapped_series_by_title_and_year(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         sources = [{
             "server_type": "jellyfin",
@@ -388,9 +392,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
             {"episode_number": 2, "air_date": "2026-01-09"},
         ]}
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes({"as_of": "2026-08-11", "max_series": 50})
 
         self.assertTrue(result.ok)
@@ -416,7 +420,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         )
 
     def test_manual_patrol_rejects_ambiguous_title_year_mapping(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         sources = [{
             "server_type": "jellyfin",
@@ -442,9 +448,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
             {"id": 2, "name": "同名剧", "first_air_date": "2026-02-01"},
         ]
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes({"as_of": "2026-08-11", "max_series": 50})
 
         self.assertFalse(result.ok)
@@ -460,7 +466,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         client.tv_season_detail.assert_not_called()
 
     def test_manual_patrol_rejects_title_match_with_wrong_year(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         sources = [{
             "server_type": "jellyfin",
@@ -487,9 +495,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
             "first_air_date": "2025-01-01",
         }]
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes({"as_of": "2026-08-11", "max_series": 50})
 
         self.assertFalse(result.ok)
@@ -503,7 +511,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         client.tv_season_detail.assert_not_called()
 
     def test_ready_media_server_without_series_reports_empty_inventory(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         sources = [{
             "server_type": "jellyfin",
@@ -517,10 +527,10 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
             "series": [],
         }]
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
         ), patch(
-            "app.agent.library_episode_audit.TMDBClient", return_value=MagicMock()
+            "app.agent.domains.library.library_episode_audit.TMDBClient", return_value=MagicMock()
         ):
             result = audit_library_episodes({"as_of": "2026-08-11", "max_series": 50})
 
@@ -531,12 +541,14 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertIn("没有读取到剧集条目", result.summary)
 
     def test_unknown_local_position_cannot_be_reported_as_confirmed_missing(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         sources = self._sources()
         sources[0]["series"][0]["ignored_unknown"] = 1
-        with patch("app.agent.library_episode_audit.inspect_library_series_sources", return_value=sources), patch(
-            "app.agent.library_episode_audit.TMDBClient", return_value=self._tmdb_client()
+        with patch("app.agent.domains.library.library_episode_audit.inspect_library_series_sources", return_value=sources), patch(
+            "app.agent.domains.library.library_episode_audit.TMDBClient", return_value=self._tmdb_client()
         ):
             result = audit_library_episodes({"as_of": "2026-08-03", "max_series": 50})
         self.assertFalse(result.ok)
@@ -548,7 +560,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(result.data["findings"][0]["status"], "inconclusive")
 
     def test_unknown_air_dates_make_the_series_inconclusive(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         client = self._tmdb_client()
         client.tv_season_detail.side_effect = lambda _tmdb_id, _season, **_kwargs: {
@@ -562,9 +576,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         sources[0]["series_total"] = 1
         sources[0]["series_enumerated"] = 1
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes({"as_of": "2026-08-03", "max_series": 50})
 
         self.assertFalse(result.ok)
@@ -574,16 +588,18 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(result.data["findings"][0]["status"], "inconclusive")
 
     def test_unmapped_or_truncated_sources_make_report_inconclusive(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         sources = self._sources()[:1]
         sources[0]["unmapped_count"] = 1
         sources[0]["truncated"] = True
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
         ), patch(
-            "app.agent.library_episode_audit.TMDBClient", return_value=self._tmdb_client()
+            "app.agent.domains.library.library_episode_audit.TMDBClient", return_value=self._tmdb_client()
         ):
             result = audit_library_episodes({"as_of": "2026-08-03", "max_series": 50})
 
@@ -594,7 +610,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(result.data["updates_available_count"], 1)
 
     def test_missing_tmdb_seasons_or_episodes_is_inconclusive(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         sources = self._sources()[:1]
         sources[0]["series"] = [sources[0]["series"][1]]
@@ -610,9 +628,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
                 client.detail.return_value = detail_payload
                 client.tv_season_detail.return_value = season_payload
                 with patch(
-                    "app.agent.library_episode_audit.inspect_library_series_sources",
+                    "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
                     return_value=sources,
-                ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+                ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
                     result = audit_library_episodes({"as_of": "2026-08-03", "max_series": 50})
 
                 self.assertFalse(result.ok)
@@ -621,7 +639,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
                 self.assertEqual(result.data["inconclusive_count"], 1)
 
     def test_tmdb_request_budget_stops_patrol(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         sources = self._sources()[:1]
         sources[0]["series"] = [sources[0]["series"][1]]
@@ -629,10 +649,10 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         sources[0]["series_enumerated"] = 1
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client), patch(
-            "app.agent.library_episode_audit._MAX_TMDB_REQUESTS", 1
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client), patch(
+            "app.agent.domains.library.library_episode_audit._MAX_TMDB_REQUESTS", 1
         ):
             result = audit_library_episodes({"as_of": "2026-08-03", "max_series": 50})
 
@@ -645,13 +665,15 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         client.tv_season_detail.assert_not_called()
 
     def test_max_series_is_a_global_cross_server_cap(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=self._sources(),
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes({"as_of": "2026-08-03", "max_series": 1})
 
         self.assertFalse(result.ok)
@@ -660,7 +682,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(client.detail.call_count, 1)
 
     def test_background_batch_processes_duplicate_tmdb_group_before_next_boundary(self):
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         media_client = MagicMock()
         media_client.list_library_series.return_value = SeriesSearchResult(
@@ -694,7 +718,7 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
                 ("jellyfin", "Jellyfin", "http://secret.local", media_client)
             ],
         ), patch(
-            "app.agent.library_episode_audit.TMDBClient",
+            "app.agent.domains.library.library_episode_audit.TMDBClient",
             return_value=tmdb_client,
         ):
             result = audit_library_episodes_batch({
@@ -715,14 +739,16 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         )
 
     def test_background_batch_returns_cursor_and_resumes_after_request_budget(self):
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=self._sources(),
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client), patch(
-            "app.agent.library_episode_audit._MAX_TMDB_REQUESTS", 2
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client), patch(
+            "app.agent.domains.library.library_episode_audit._MAX_TMDB_REQUESTS", 2
         ):
             first = audit_library_episodes_batch({
                 "as_of": "2026-08-03",
@@ -738,9 +764,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
 
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=self._sources(),
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             second = audit_library_episodes_batch({
                 "as_of": "2026-08-03",
                 "max_series": 50,
@@ -754,7 +780,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(client.detail.call_args.args[0], "67890")
 
     def test_background_batch_retries_first_series_when_inventory_times_out(self):
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         sources = [{
             "server_type": "jellyfin",
@@ -771,7 +799,7 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
             "series": [],
         }]
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
         ):
             result = audit_library_episodes_batch({
@@ -786,7 +814,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(result.data["stalled_tmdb_id"], "20")
 
     def test_background_batch_respects_ready_source_batch_boundary(self):
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         lower_source = {
             "server_type": "jellyfin",
@@ -860,9 +890,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         }
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=[lower_source, higher_source],
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes_batch({
                 "as_of": "2026-08-06",
                 "max_series": 2,
@@ -878,7 +908,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(client.detail.call_args.args[0], "10")
 
     def test_background_batch_does_not_advance_past_lower_cross_source_stall(self):
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         stalled_source = {
             "server_type": "jellyfin",
@@ -919,9 +951,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         }
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=[stalled_source, successful_source],
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes_batch({
                 "as_of": "2026-08-06",
                 "max_series": 50,
@@ -936,7 +968,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         client.detail.assert_not_called()
 
     def test_background_batch_processes_only_ids_below_cross_source_stall(self):
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         sources = self._sources()
         sources[0].update({
@@ -949,9 +983,9 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         })
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=sources,
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes_batch({
                 "as_of": "2026-08-06",
                 "max_series": 50,
@@ -966,14 +1000,16 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
         self.assertEqual(client.detail.call_args.args[0], "12345")
 
     def test_deadline_exhaustion_stops_before_tmdb_requests(self):
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         client = self._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=self._sources(),
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client), patch(
-            "app.agent.library_episode_audit.time.monotonic", side_effect=[0.0, 31.0]
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client), patch(
+            "app.agent.domains.library.library_episode_audit.time.monotonic", side_effect=[0.0, 31.0]
         ):
             result = audit_library_episodes({"as_of": "2026-08-03", "max_series": 50})
 
@@ -987,14 +1023,16 @@ class MediaLibraryEpisodeAuditTests(unittest.TestCase):
 
 class MediaLibraryEpisodeAuditClientLifecycleTests(unittest.TestCase):
     def test_owned_tmdb_client_is_closed_after_audit(self) -> None:
-        from app.agent.library_episode_audit import audit_library_episodes
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes,
+        )
 
         owner = MediaLibraryEpisodeAuditTests()
         client = owner._tmdb_client()
         with patch(
-            "app.agent.library_episode_audit.inspect_library_series_sources",
+            "app.agent.domains.library.library_episode_audit.inspect_library_series_sources",
             return_value=owner._sources(),
-        ), patch("app.agent.library_episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.library_episode_audit.TMDBClient", return_value=client):
             result = audit_library_episodes({
                 "as_of": "2026-08-03",
                 "max_series": 50,

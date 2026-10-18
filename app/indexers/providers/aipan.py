@@ -9,14 +9,10 @@ from urllib.parse import quote
 
 import httpx
 
-from ..config import AIPAN_URL, AIPAN_SEARCH_URL
-from ..errors import (
-    IndexerError,
-    IndexerInvalidResponse,
-    IndexerRateLimited,
-    IndexerTimeout,
-    IndexerUnavailable,
-)
+from app.clients.http import HttpError, HttpInvalidResponse
+
+from ..config import AIPAN_SEARCH_URL, AIPAN_URL
+from ..errors import IndexerRateLimited, IndexerTimeout, IndexerUnavailable
 from ..models import (
     IndexerCapabilities,
     IndexerItem,
@@ -60,7 +56,7 @@ class AipanAdapter(DirectResultAdapter):
         payload = self._parse_json(response.body, "Aipan search")
         movies = payload.get("movies") if isinstance(payload, dict) else None
         if not isinstance(movies, list):
-            raise IndexerInvalidResponse("Aipan search response omitted movies")
+            raise HttpInvalidResponse("Aipan search response omitted movies")
         if not movies:
             return self._page(request, [])
 
@@ -75,19 +71,19 @@ class AipanAdapter(DirectResultAdapter):
             if len(candidates) == _MAX_DETAIL_CANDIDATES:
                 break
         if not candidates:
-            raise IndexerInvalidResponse("Aipan search response contained no valid movie candidates")
+            raise HttpInvalidResponse("Aipan search response contained no valid movie candidates")
 
         outcomes = await self._load_details(candidates)
         items: list[IndexerItem] = []
-        failures: list[IndexerError] = []
+        failures: list[HttpError] = []
         successes = 0
         for outcome in outcomes:
             if isinstance(outcome, BaseException):
                 if isinstance(outcome, asyncio.CancelledError):
                     raise outcome
                 failures.append(
-                    outcome if isinstance(outcome, IndexerError)
-                    else IndexerInvalidResponse("Aipan detail response could not be parsed")
+                    outcome if isinstance(outcome, HttpError)
+                    else HttpInvalidResponse("Aipan detail response could not be parsed")
                 )
                 continue
             successes += 1
@@ -126,7 +122,7 @@ class AipanAdapter(DirectResultAdapter):
             payload = self._parse_json(response.body, "Aipan detail")
             resources = payload.get("resources") if isinstance(payload, dict) else None
             if not isinstance(resources, list):
-                raise IndexerInvalidResponse("Aipan detail response omitted resources")
+                raise HttpInvalidResponse("Aipan detail response omitted resources")
 
             page_url = fixed_host_join(self.base_url, f"/movie/{quote(movie_id, safe='')}")
             items: list[IndexerItem] = []
@@ -162,17 +158,17 @@ class AipanAdapter(DirectResultAdapter):
                     magnet=raw_url,
                 ))
             return items
-        except IndexerError:
+        except HttpError:
             raise
         except Exception as exc:
-            raise IndexerInvalidResponse("Aipan detail response could not be parsed") from exc
+            raise HttpInvalidResponse("Aipan detail response could not be parsed") from exc
 
     async def _get(self, url: str, **kwargs):
         try:
             return await self.http.get(url, **kwargs)
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise IndexerTimeout("Aipan request timed out") from exc
-        except IndexerError:
+        except HttpError:
             raise
         except (httpx.HTTPError, OSError) as exc:
             raise IndexerUnavailable("Aipan request failed") from exc
@@ -184,7 +180,7 @@ class AipanAdapter(DirectResultAdapter):
         try:
             return json.loads(body.decode("utf-8-sig"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise IndexerInvalidResponse(f"Aipan {stage} response was malformed") from exc
+            raise HttpInvalidResponse(f"Aipan {stage} response was malformed") from exc
 
     @staticmethod
     def _validate_response(response, *, json_response: bool) -> None:
@@ -197,11 +193,11 @@ class AipanAdapter(DirectResultAdapter):
         if status >= 500 or status in {403, 404}:
             raise IndexerUnavailable(f"Aipan returned HTTP {status}")
         if status != 200:
-            raise IndexerInvalidResponse(f"Aipan returned HTTP {status}")
+            raise HttpInvalidResponse(f"Aipan returned HTTP {status}")
         if json_response:
             content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].lower()
             if content_type != "application/json" and not content_type.endswith("+json"):
-                raise IndexerInvalidResponse("Aipan returned a non-JSON response")
+                raise HttpInvalidResponse("Aipan returned a non-JSON response")
 
     @staticmethod
     def _page(

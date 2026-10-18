@@ -4,20 +4,28 @@ import json
 
 import pytest
 
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
-from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
+from app.agent.kernel.conversation_context import tool_error_message
 from app.agent.kernel.effects import PreparedEffect
+from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import ToolOutcome
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
-from tests.test_agent_invalid_argument_progress import scenario, store, X  # noqa: F401
+from app.agent.kernel.state_types import AgentInput
+from tests.test_agent_invalid_argument_progress import X, scenario, store  # noqa: F401
 
 
 @pytest.mark.parametrize("stage", ["schema", "validator", "admission", "handler"])
 def test_read_invalid_arguments_returns_schema_without_ticket_or_field_locks(stage):
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.errors import ToolPipelineError
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
 
     async def run():
         invoked = []
@@ -54,7 +62,7 @@ def test_read_invalid_arguments_returns_schema_without_ticket_or_field_locks(sta
             await pipeline.execute(tool.name, bad, context=ctx)
         assert caught.value.code == "invalid_arguments"
         assert caught.value.repair_ticket == "" and ctx.schema_replacements == {}
-        feedback = json.loads(AgentSession._tool_error_message(
+        feedback = json.loads(tool_error_message(
             ModelToolCall("bad", tool.name, bad), caught.value, input_schema=schema).content)
         assert feedback["expected_input_schema"] == schema
         assert "repair" not in feedback
@@ -70,8 +78,9 @@ def test_read_invalid_arguments_returns_schema_without_ticket_or_field_locks(sta
 
 def test_unparsed_read_does_not_create_server_repair_authority():
     from app.agent.kernel import error_repair
-    from app.agent.kernel.pipeline import ToolCallContext
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
 
     async def run():
         state = InMemorySessionStateStore()
@@ -159,8 +168,11 @@ def test_explicit_write_repair_real_session(store, mode, effect):  # noqa: F811 
 @pytest.mark.parametrize("effect", [ToolEffect.WRITE, ToolEffect.DANGER])
 def test_write_repair_ticket_scope_and_single_consumption(field, effect):
     from dataclasses import replace
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+
+    from app.agent.errors import ToolPipelineError
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
 
     async def run():
         invoked = []
@@ -194,9 +206,11 @@ def test_write_repair_ticket_scope_and_single_consumption(field, effect):
 
 @pytest.mark.parametrize("effect", [ToolEffect.WRITE, ToolEffect.DANGER])
 def test_repair_chain_keeps_provenance_and_actual_authorization(effect):
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.errors import ToolPipelineError
     from app.agent.kernel.effects import PreparedEffect
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
 
     async def run():
         writes = []
@@ -258,8 +272,10 @@ def test_read_direct_retry_needs_no_ancestor_tickets(store):  # noqa: F811
 
 @pytest.mark.parametrize("effect", [ToolEffect.WRITE, ToolEffect.DANGER])
 def test_write_domain_validation_only_offers_actionable_field_repairs(effect):
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.errors import ToolPipelineError
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
 
     async def run():
         state = InMemorySessionStateStore()
@@ -299,9 +315,11 @@ def test_write_domain_validation_only_offers_actionable_field_repairs(effect):
 
 
 def test_actual_reference_reader_directly_retries_path_with_scope_checks():
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.errors import ToolPipelineError
     from app.agent.kernel import telegram_reference
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
 
     async def run():
         state = InMemorySessionStateStore()

@@ -9,7 +9,13 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from app import database as db
-from app.agent.episode_audit import invalidate_episode_audit_cache
+from app.agent.domains.downloads.recent_submissions import (
+    RecentDownloadSubmission,
+    RecentDownloadVerification,
+    build_recent_download_library_verification,
+    build_recent_download_status,
+)
+from app.agent.domains.library.episode_audit import invalidate_episode_audit_cache
 from app.agent.feature_gate import (
     AgentRuntimeDisabled,
     agent_runtime_effect_admission,
@@ -20,12 +26,6 @@ from app.agent.models import ToolResult
 from app.agent.owner_routes import (
     parse_telegram_owner_route,
     telegram_owner_route_is_currently_authorized,
-)
-from app.agent.recent_download_submissions import (
-    RecentDownloadSubmission,
-    RecentDownloadVerification,
-    build_recent_download_library_verification,
-    build_recent_download_status,
 )
 from app.logger import get_logger
 from app.modules.agent_download_verification_notifications import (
@@ -557,7 +557,7 @@ class DownloadLibraryVerificationScheduler:
         if not finished:
             return
         try:
-            from app.agent.missing_media_workflows import (
+            from app.agent.domains.library.missing_workflows import (
                 SQLiteMissingMediaWorkflowRepository,
             )
 
@@ -816,7 +816,9 @@ class DownloadLibraryVerificationScheduler:
 
     @staticmethod
     def _default_audit_executor(arguments: dict) -> tuple[ToolResult, int]:
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         started = time.monotonic()
         result = audit_library_episodes_batch(arguments)

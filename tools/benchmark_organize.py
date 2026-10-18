@@ -38,12 +38,16 @@ from bs4 import BeautifulSoup
 
 from app import database as db
 from app.clients.guangya import GuangYaFile
+from app.clients.http import FixedHostHttpClient
 from app.config import get
-from app.indexers.http import FixedHostHttpClient
 from app.indexers.providers.base import require_html_response
 from app.indexers.providers.nyaa import NyaaAdapter
-from app.modules.download_dispatcher import BencodeError, TorrentManifest, parse_torrent_manifest
-from app.modules.organize import OrganizePlan, OrganizeRules, Organizer
+from app.modules.download_dispatcher import (
+    BencodeError,
+    TorrentManifest,
+    parse_torrent_manifest,
+)
+from app.modules.organize import OrganizePlan, Organizer, OrganizeRules
 from app.modules.scraper import MatchResult, TMDBScraper
 
 DEFAULT_OUTPUT_ROOT = Path(".superpowers/benchmarks/nyaa-organize")

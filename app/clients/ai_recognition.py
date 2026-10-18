@@ -10,22 +10,23 @@ from typing import Any
 import httpx
 import requests
 
+from app.agent.async_bridge import (
+    AsyncBridgeUnavailable,
+    ensure_sync_bridge_available,
+    run_awaitable_sync,
+)
+from app.clients.http import FixedHostHttpClient, HttpError
 from app.clients.openai_compatible import (
     PROTOCOLS,
     SUPPORTED_PROTOCOLS_TEXT,
     extract_output_text,
     normalize_provider_location,
+    parse_generation_profiles,
     protocol_attempts,
     provider_headers,
+    resolve_generation_profile,
     resolve_protocol,
     structured_request_body,
-    parse_generation_profiles,
-    resolve_generation_profile,
-)
-from app.agent.async_bridge import (
-    AsyncBridgeUnavailable,
-    ensure_sync_bridge_available,
-    run_awaitable_sync,
 )
 from app.logger import redact_sensitive_text
 from app.modules.ai_recognition_governance import (
@@ -349,8 +350,6 @@ class AIRecognitionClient:
     async def _post_fixed_host(
         self, api_url: str, *, protocol: str, body: dict[str, Any]
     ) -> Any:
-        from app.indexers.http import FixedHostHttpClient
-
         client = FixedHostHttpClient(
             allowed_hosts={self.location.host},
             timeout_seconds=self.timeout_seconds,
@@ -483,45 +482,14 @@ class AIRecognitionClient:
                 raise AIRecognitionProviderError(
                     f"AI 识别请求失败：{safe[:240]}"
                 ) from None
-            except Exception as exc:
-                # FixedHostHttpClient 的域错误在此延迟边界统一收敛，避免包级循环导入。
+            except HttpError as exc:
                 if self.session is not None:
                     raise
-                try:
-                    from app.indexers.errors import (
-                        IndexerInvalidResponse,
-                        IndexerRateLimited,
-                        IndexerResponseTooLarge,
-                        IndexerSecurityError,
-                        IndexerTimeout,
-                        IndexerUnavailable,
-                        IndexerValidationError,
-                    )
-                except ImportError:  # pragma: no cover - 安装损坏时保留原始异常
-                    raise
-                if isinstance(exc, (IndexerUnavailable, IndexerTimeout, IndexerRateLimited)):
-                    record_ai_recognition_failure(self.provider_fingerprint)
-                    safe = redact_sensitive_text(
-                        getattr(exc, "public_message", "AI 识别服务暂时不可用")
-                    )
-                    raise AIRecognitionUnavailableError(str(safe)[:240]) from None
-                if isinstance(
-                    exc,
-                    (
-                        IndexerSecurityError,
-                        IndexerResponseTooLarge,
-                        IndexerInvalidResponse,
-                        IndexerValidationError,
-                    ),
-                ):
-                    record_ai_recognition_failure(
-                        self.provider_fingerprint, provider_failure=False
-                    )
-                    safe = redact_sensitive_text(
-                        getattr(exc, "public_message", "AI 识别请求未通过安全校验")
-                    )
-                    raise AIRecognitionError(str(safe)[:240]) from None
-                raise
+                record_ai_recognition_failure(
+                    self.provider_fingerprint, provider_failure=False
+                )
+                safe = redact_sensitive_text(exc.public_message)
+                raise AIRecognitionError(str(safe)[:240]) from None
             finally:
                 if lease is not None:
                     lease.release()

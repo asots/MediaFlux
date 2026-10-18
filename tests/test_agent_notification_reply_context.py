@@ -13,12 +13,18 @@ from app.agent.kernel.capabilities import (
     ToolCatalog,
     ToolEffect,
 )
+from app.agent.kernel.conversation_context import (
+    capability_retrieval_context,
+    persisted_conversation,
+)
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelMessage
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore, SessionState
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from app.agent.public_view import public_conversation_messages
 from app.bot.agent_adapter import _reply_context
 
@@ -100,7 +106,7 @@ def test_reference_is_retained_across_followups_but_not_public_chat():
         public = public_conversation_messages(stored.conversation)
         assert public[0] == {"role": "user", "content": "这个什么意思"}
         assert NOTICE not in str(public)
-        context = AgentSession._capability_retrieval_context(stored)
+        context = capability_retrieval_context(stored)
         assert any(NOTICE in hint for hint in context["recent_user_messages"])
         other = await state_store.load(owner="other", session_id="session")
         assert not other.conversation
@@ -111,10 +117,10 @@ def test_reference_is_retained_across_followups_but_not_public_chat():
 
 def test_pasted_notification_stays_visible_and_is_usable_as_recent_context():
     messages = [ModelMessage(role="user", content=NOTICE), ModelMessage(role="assistant", content="已收到。")]
-    stored = AgentSession._persisted_conversation(messages, current_user_index=0, original_message=NOTICE)
+    stored = persisted_conversation(messages, current_user_index=0, original_message=NOTICE)
     assert stored[0]["content"] == NOTICE
     assert "reply_context" not in stored[0]
-    context = AgentSession._capability_retrieval_context(SessionState(
+    context = capability_retrieval_context(SessionState(
         owner="owner", session_id="session", conversation=stored,
     ))
     assert NOTICE in context["recent_user_messages"][0]
@@ -127,7 +133,7 @@ def test_history_tool_context_decays_by_turn_not_just_last_six_tools():
         {"role": "user", "content": "这次本地整理呢", "reply_context": {"text": NOTICE}},
         {"role": "tool", "tool_name": "local_media.task_summaries", "content": "新结果"},
     ])
-    context = AgentSession._capability_retrieval_context(state)
+    context = capability_retrieval_context(state)
     weights = context["recent_tool_weights"]
     assert weights["local_media.task_summaries"] == 1.0
     assert weights["rss.entry_summaries"] < weights["local_media.task_summaries"]
@@ -156,7 +162,7 @@ def test_reference_focus_selects_original_domain_despite_rss_history():
     ])
     selection = CapabilityRetriever().retrieve(
         "哪个已完成那个跳过了", catalog,
-        context=AgentSession._capability_retrieval_context(state),
+        context=capability_retrieval_context(state),
     )
     assert "local_media.task_summaries" in selection.names
     assert selection.scores["local_media.task_summaries"] > selection.scores["rss.entry_summaries"]
@@ -180,7 +186,7 @@ def test_local_media_failure_reply_selects_task_binding_and_episode_remap():
     selection = CapabilityRetriever().retrieve(
         "你先改名为 S02E12",
         catalog,
-        context=AgentSession._capability_retrieval_context(state),
+        context=capability_retrieval_context(state),
     )
     assert "local_media.retry_task" in selection.names
     assert "local_media.task_summaries" in selection.names
@@ -300,16 +306,16 @@ def test_current_turn_presave_preserves_history_hints_and_tool_weights():
         ]},
         {"role": "tool", "tool_name": "local_media.task_summaries", "content": "批次结果"},
     ])
-    before = AgentSession._capability_retrieval_context(state)
+    before = capability_retrieval_context(state)
     state.conversation.append({
         "role": "user", "content": "这个呢", "reply_context": {"text": "另一条当前引用"},
     })
-    after = AgentSession._capability_retrieval_context(state, current_turn=True)
+    after = capability_retrieval_context(state, current_turn=True)
     assert after == before
     assert after["recent_tool_weights"] == {"local_media.task_summaries": 1.0}
     assert NOTICE in after["recent_user_messages"][0]
     assert "另一条当前引用" not in str(after)  # 当前引用由 caller 单独提供。
-    assert "另一条当前引用" in AgentSession._capability_retrieval_context(state)["recent_user_messages"][0]
+    assert "另一条当前引用" in capability_retrieval_context(state)["recent_user_messages"][0]
 
 
 @pytest.mark.parametrize("current_turn", [False, True])
@@ -328,9 +334,9 @@ def test_current_turn_tools_share_weight_and_older_turns_keep_decay(current_turn
     ])
     if current_turn:
         state.conversation.append({"role": "user", "content": "继续"})
-        context = AgentSession._capability_retrieval_context(state, current_turn=True)
+        context = capability_retrieval_context(state, current_turn=True)
     else:
-        context = AgentSession._capability_retrieval_context(state)
+        context = capability_retrieval_context(state)
     assert context["recent_tool_weights"] == {
         "local_media.task_summaries": 1.0, "local_media.retry_task": 1.0,
         "rss.entry_summaries": 0.35, "library.search": 0.35 ** 2,
@@ -351,11 +357,11 @@ def test_current_turn_presave_keeps_the_bounded_history_boundary(boundary_role):
         boundary,
         *[{"role": "assistant", "content": "已保留结果"} for _ in range(23)],
     ])
-    before = AgentSession._capability_retrieval_context(state)
+    before = capability_retrieval_context(state)
     assert "outside.read" not in before["recent_tool_names"]
     if boundary_role == "user":
         assert before["recent_user_messages"] == (boundary["content"][:2_000],)
     else:
         assert before["recent_tool_weights"] == {"boundary.read": 1.0}
     state.conversation.append({"role": "user", "content": "继续"})
-    assert AgentSession._capability_retrieval_context(state, current_turn=True) == before
+    assert capability_retrieval_context(state, current_turn=True) == before

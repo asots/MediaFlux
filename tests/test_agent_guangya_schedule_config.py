@@ -8,13 +8,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app import config
-from app.agent.errors import AgentToolError
-from app.agent.guangya_schedule_config_actions import (
+from app.agent.domains.guangya.schedule_actions import (
     get_guangya_connection_status,
     guangya_organize_schedule_policy_arguments,
     prepare_guangya_organize_schedule_policy_confirmation,
     summarize_guangya_organize_schedule_policy,
 )
+from app.agent.errors import AgentToolError
 from app.modules.organize_scheduler import OrganizeScheduler
 
 _GUANGYA_SCHEDULE_KEYS = {
@@ -54,7 +54,7 @@ class GuangyaSchedulePolicyUnitTests(unittest.TestCase):
         client.token = secret
         client.phone = "13800000000"
         with patch(
-            "app.agent.guangya_schedule_config_actions.GuangYaClient",
+            "app.agent.domains.guangya.schedule_actions.GuangYaClient",
             return_value=client,
         ):
             result = get_guangya_connection_status({})
@@ -70,7 +70,7 @@ class GuangyaSchedulePolicyUnitTests(unittest.TestCase):
         client.probe_connection.reset_mock()
         client.probe_connection.return_value = False
         with patch(
-            "app.agent.guangya_schedule_config_actions.GuangYaClient",
+            "app.agent.domains.guangya.schedule_actions.GuangYaClient",
             return_value=client,
         ):
             unavailable = get_guangya_connection_status({})
@@ -78,7 +78,7 @@ class GuangyaSchedulePolicyUnitTests(unittest.TestCase):
         self.assertEqual(unavailable.status, "attention")
 
         with patch(
-            "app.agent.guangya_schedule_config_actions.GuangYaClient",
+            "app.agent.domains.guangya.schedule_actions.GuangYaClient",
             side_effect=RuntimeError(f"private {secret}"),
         ):
             failed = get_guangya_connection_status({})
@@ -114,7 +114,7 @@ class GuangyaSchedulePolicyUnitTests(unittest.TestCase):
                 patch.object(config, "_cache", None),
                 patch.object(config, "_STARTUP_ENV_OVERRIDES", frozenset()),
                 patch(
-                    "app.agent.guangya_schedule_config_actions.get_organize_scheduler",
+                    "app.agent.domains.guangya.schedule_actions.get_organize_scheduler",
                     return_value=scheduler,
                 ),
             ):

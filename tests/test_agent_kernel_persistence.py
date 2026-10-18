@@ -14,7 +14,7 @@ from app.agent.kernel.persistence import (
 )
 from app.agent.kernel.references import InMemoryReferenceStore, ReferenceError
 from app.agent.kernel.session_guard import session_scope_guard
-from app.agent.kernel.state import StalePublicationError, StateUpdate
+from app.agent.kernel.state_types import StalePublicationError, StateUpdate
 
 
 class SQLiteKernelStoreTests(unittest.IsolatedAsyncioTestCase):

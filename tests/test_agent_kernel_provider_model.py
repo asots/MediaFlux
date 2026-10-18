@@ -4,8 +4,8 @@ import json
 import unittest
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from unittest.mock import patch
 from typing import Any
+from unittest.mock import patch
 
 from app.agent.kernel.model import ModelEventType, ModelRequest
 from app.agent.kernel.provider_model import (
@@ -16,7 +16,7 @@ from app.agent.kernel.provider_model import (
     _stream_deadline_seconds,
     iter_protocol_model_events,
 )
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.state_types import CancellationToken
 from app.clients.openai_compatible import ProviderStreamError, iter_provider_text_deltas
 
 

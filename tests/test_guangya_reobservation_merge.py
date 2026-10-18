@@ -6,10 +6,11 @@ from dataclasses import replace
 
 import pytest
 
-from app.agent import guangya_workspace_actions as actions
+from app.agent.domains.guangya import workspace_actions as actions
 from app.agent.errors import AgentToolError
 from app.modules import guangya_workspace as workspace
-from tests.test_agent_reobservation_queries import assert_private, case as case
+from tests.test_agent_reobservation_queries import assert_private
+from tests.test_agent_reobservation_queries import case as case
 from tests.test_guangya_observation_sources import FILMS, SHOWS
 
 

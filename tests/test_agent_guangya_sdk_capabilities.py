@@ -10,10 +10,9 @@ from unittest import mock
 
 import httpx
 
-from app.agent import guangya_account_actions as account_actions
-from app.agent import guangya_recycle_actions as recycle_actions
-from app.agent import guangya_share_actions as share_actions
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.domains.guangya import account_actions, recycle_actions, share_actions
+from app.agent.domains.guangya.workspace_actions import GuangyaWorkspaceActions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaClient, GuangYaFile, GuangYaWriteRejected
@@ -620,6 +619,9 @@ class _ShareClient:
 
 
 class GuangYaShareActionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.workspace_actions = GuangyaWorkspaceActions()
+
     def test_share_snapshot_requires_management_record_id_not_public_link_id(self) -> None:
         client = _ShareClient()
         snapshot = share_actions._load_share_snapshots(client)[0]
@@ -665,11 +667,11 @@ class GuangYaShareActionTests(unittest.TestCase):
         ):
             preview, fingerprint = share_actions.prepare_create_guangya_share(
                 normalized, context
-            )
+            , workspace_actions=self.workspace_actions)
             self.assertNotIn("file-1", str(preview.to_dict()))
             created = share_actions.execute_create_guangya_share(
                 normalized, fingerprint, context
-            )
+            , workspace_actions=self.workspace_actions)
             self.assertEqual(created.data["access_code"], "AB12")
             self.assertNotEqual(created.data["access_code"], "200")
             self.assertIn("created-share", created.data["share_url"])
@@ -728,10 +730,10 @@ class GuangYaShareActionTests(unittest.TestCase):
         ):
             _preview, fingerprint = share_actions.prepare_create_guangya_share(
                 normalized, context
-            )
+            , workspace_actions=self.workspace_actions)
             created = share_actions.execute_create_guangya_share(
                 normalized, fingerprint, context
-            )
+            , workspace_actions=self.workspace_actions)
 
         self.assertEqual(
             created.data["share_url"],
@@ -773,10 +775,10 @@ class GuangYaShareActionTests(unittest.TestCase):
         ):
             _preview, fingerprint = share_actions.prepare_create_guangya_share(
                 normalized, context
-            )
+            , workspace_actions=self.workspace_actions)
             created = share_actions.execute_create_guangya_share(
                 normalized, fingerprint, context
-            )
+            , workspace_actions=self.workspace_actions)
 
         self.assertEqual(created.status, "accepted")
         self.assertTrue(created.data["verification_pending"])

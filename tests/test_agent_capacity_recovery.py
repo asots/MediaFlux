@@ -7,12 +7,12 @@ Ordinary-domain cases also run unchanged against revisions before phase support.
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import hashlib
 import hmac
 import json
 import random
 import socket
+from copy import deepcopy
 
 import pytest
 
@@ -28,16 +28,12 @@ from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import ToolOutcome
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import (
-    AgentInput,
-    InMemorySessionStateStore,
-    SessionState,
-    StateUpdate,
-    StalePublicationError,
-)
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, StalePublicationError, StateUpdate
 from tests.support import isolated_test_database
-from tests.test_agent_provider_text_authority import native_reply
 from tests.test_agent_provider_state import REDACTED, SIGNATURE, THINKING
+from tests.test_agent_provider_text_authority import native_reply
 from tests.test_agent_tool_argument_ingress import PROTOCOLS, Wire, encode
 
 OWNER, SESSION = "checkpoint-owner", "checkpoint-session"
@@ -496,7 +492,7 @@ def test_cold_explanation_preserves_unknown_across_generations_and_new_read(
 @pytest.mark.parametrize("kind", ["sqlite", "memory"])
 def test_unstorable_new_user_request_cannot_evict_original_checkpoint(kind):
     from app.agent.kernel.conversation_codec import pending_content
-    from app.agent.kernel.state import HistoryCapacityError
+    from app.agent.kernel.state_types import HistoryCapacityError
 
     async def exercise():
         store = make_store() if kind == "sqlite" else InMemorySessionStateStore()
@@ -537,7 +533,7 @@ def test_unstorable_new_user_request_cannot_evict_original_checkpoint(kind):
 @pytest.mark.parametrize("kind", ["sqlite", "memory"])
 def test_crash_cold_read_bound_plus_one_exit_and_no_replay(kind):
     from app.agent.kernel.conversation_codec import pending_content
-    from app.agent.kernel.state import _ExecutionCapacity
+    from app.agent.kernel.state_types import _ExecutionCapacity
 
     ROWS = [
         {

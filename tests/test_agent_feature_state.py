@@ -9,12 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import config
-from app.agent.errors import AgentToolError
-from app.agent.feature_actions import (
+from app.agent.domains.configuration.feature_actions import (
     feature_state_arguments,
     prepare_feature_state_confirmation,
     verify_feature_state_write,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, RiskLevel, ToolReference, ToolResult
 from app.agent.public_view import format_public_result
 from tests.agent_kernel_test_harness import (
@@ -75,7 +75,7 @@ class FeatureStateUnitTests(unittest.TestCase):
                 patch.object(config, "_STARTUP_ENV_OVERRIDES", frozenset()),
                 patch.dict(os.environ, {"DISCOVERY_ENABLED": ""}, clear=False),
                 patch(
-                    "app.agent.feature_actions.config.update_runtime_env_file"
+                    "app.agent.domains.configuration.feature_actions.config.update_runtime_env_file"
                 ) as writer,
             ):
                 result, first = prepare_feature_state_confirmation(

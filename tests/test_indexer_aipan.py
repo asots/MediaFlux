@@ -4,8 +4,8 @@ import asyncio
 import json
 import unittest
 
-from app.indexers.errors import IndexerInvalidResponse, IndexerUnavailable
-from app.indexers.http import IndexerHttpResponse
+from app.clients.http import HttpInvalidResponse, HttpResponse
+from app.indexers.errors import IndexerUnavailable
 from app.indexers.models import IndexerSearchRequest
 from app.indexers.providers.aipan import AipanAdapter
 
@@ -16,7 +16,7 @@ HASH_TWO = "abcdef0123456789abcdef0123456789abcdef01"
 
 def response(url: str, body: bytes | str, *, status: int = 200, content_type: str = "application/json", headers=None):
     merged_headers = {"content-type": content_type, **(headers or {})}
-    return IndexerHttpResponse(
+    return HttpResponse(
         url=url,
         status_code=status,
         headers=merged_headers,
@@ -103,7 +103,7 @@ class AipanAdapterTests(unittest.IsolatedAsyncioTestCase):
         adapter = AipanAdapter(http=FakeHttp({
             AIPAN_SEARCH: response(AIPAN_SEARCH, "not-json"),
         }))
-        with self.assertRaises(IndexerInvalidResponse):
+        with self.assertRaises(HttpInvalidResponse):
             await adapter.search(IndexerSearchRequest.create("三体"))
 
         adapter = AipanAdapter(http=FakeHttp({

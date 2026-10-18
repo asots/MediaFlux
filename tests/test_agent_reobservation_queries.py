@@ -17,17 +17,18 @@ import httpx
 import pytest
 import requests
 
-from app.agent import guangya_share_actions as shares
-from app.agent import guangya_workspace_actions as files
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.errors import AgentToolError
+from app.agent.domain_catalog.catalog import DomainActions
+from app.agent.domains.guangya import share_actions as shares
+from app.agent.domains.guangya import workspace_actions as files
+from app.agent.errors import AgentToolError, ToolPipelineError
 from app.agent.kernel.adapters import TurnViewBuilder
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
 from app.agent.kernel.ports.mediaflux_policy import (
@@ -36,7 +37,8 @@ from app.agent.kernel.ports.mediaflux_policy import (
     MediaFluxTurnAdmission,
 )
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, CancellationToken
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile
 from app.modules import guangya_workspace as workspace
@@ -95,6 +97,7 @@ class QueryProvider(OfflineProvider):
 class QueryCase:
     def __init__(self, root):
         self.root = root
+        self.domain_actions = DomainActions()
         self.provider = QueryProvider()
         self.context = ToolContext(owner=OWNER, session_id="actual-reobservation-queries")
         self.artifacts = []
@@ -112,7 +115,7 @@ class QueryCase:
         if source is not None:
             context = replace(context, reobservation_source=source)
         arguments = files.guangya_fs_query_arguments(arguments or {"operation": "list", "path": "/Films/Shared"})
-        result = files.query_guangya_filesystem(arguments, context)
+        result = self.domain_actions.workspace.query_guangya_filesystem(arguments, context)
         self.record("file_read", result.to_dict())
         return result
 
@@ -122,7 +125,7 @@ class QueryCase:
         arguments = shares.guangya_share_create_arguments({"observation_ref": result.data["observation_ref"],
                                                          "object_refs": refs, "title": "Offline new approval"})
         prepared, fingerprint = shares.prepare_create_guangya_share(
-            arguments, replace(self.context, reobservation_source=source))
+            arguments, replace(self.context, reobservation_source=source), workspace_actions=self.domain_actions.workspace)
         self.record("file_prepare", {"public": prepared.to_dict(), "source": prepared.effect_metadata["reobservation_source"],
                                      "fingerprint": fingerprint})
         assert prepared.ok is True and prepared.status == "confirmation_required"
@@ -144,7 +147,7 @@ class QueryCase:
     def build_pipeline(self):
         if self.pipeline is not None:
             return
-        specs = [adapt_tool_spec(spec) for spec in build_tool_specs() if spec.name in {FS_READ, CREATE, SHARE_READ, REVOKE}]
+        specs = [adapt_tool_spec(spec) for spec in build_tool_specs(domain_actions=self.domain_actions) if spec.name in {FS_READ, CREATE, SHARE_READ, REVOKE}]
         assert len(specs) == 4
         self.catalog = ToolCatalog(specs)
         self.store = SQLiteKernelStore(secret_provider=lambda: "offline-query-source-only")
@@ -201,7 +204,6 @@ def case(tmp_path, monkeypatch, request):
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", no_network)
     with initialized_web_runtime():
         monkeypatch.setattr(workspace, "PATHS", SimpleNamespace(data_dir=tmp_path))
-        files.reset_guangya_workspace_context_for_tests()
         current = QueryCase(tmp_path)
         monkeypatch.setattr(files, "GuangYaClient", lambda: current.provider)
         monkeypatch.setattr(shares, "GuangYaClient", lambda: current.provider)
@@ -209,7 +211,6 @@ def case(tmp_path, monkeypatch, request):
             yield current
         finally:
             current.dump(request.node.name)
-            files.reset_guangya_workspace_context_for_tests()
 
 
 def assert_private(result):
@@ -557,7 +558,7 @@ def test_ordinary_new_scope_is_not_reported_as_original_scope_reobservation(case
     fresh = case.file_read({"operation": "list", "path": path}, source=source)
     obj = next(item["object_ref"] for item in fresh.data["entries"] if item["object_name"] == "Movie.mkv")
     args = shares.guangya_share_create_arguments({"observation_ref": fresh.data["observation_ref"], "object_refs": [obj]})
-    prepared, _ = shares.prepare_create_guangya_share(args, replace(case.context, reobservation_source=source))
+    prepared, _ = shares.prepare_create_guangya_share(args, replace(case.context, reobservation_source=source), workspace_actions=case.domain_actions.workspace)
     assert prepared.status == "confirmation_required"
     effects = "\n".join(prepared.data["effects"])
     assert "观察范围已变化" in effects and "新确认" in effects

@@ -15,19 +15,25 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.domains.resources.presentation import ResourceSelection
+from app.agent.domains.resources.selection import ValidatedSelection
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import (
-    AgentInput, CandidateSelectionGuard, InMemorySessionStateStore, SessionState, StateUpdate,
-)
-from app.agent.kernel.ux_selection import ValidatedSelection
+from app.agent.kernel.session_state import CandidateSelectionGuard, SessionState
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, StateUpdate
 from app.agent.models import RiskLevel, ToolResult, ToolSpec
 from tests.test_agent_kernel_core import ScriptedModel
-
 
 SESSION_CASES = (
     "read_alias", "unavailable", "invalid_alias", "pipeline_failure",
@@ -99,7 +105,7 @@ async def capture_session_contract(case):
         input_schema={"type": "object", "properties": {}}, effect=ToolEffect.WRITE,
         prepare=prepare, execute_confirmed=execute,
     )
-    catalog = ToolCatalog([reader, writer])
+    catalog = ToolCatalog([reader, writer], selection=ResourceSelection())
     store = RecordingStore()
     calls = [ModelToolCall("call-1", "inspect_alias", {"query": "fixture"})]
     if case == "unavailable":
@@ -130,7 +136,7 @@ async def capture_session_contract(case):
     )
     serial = count(1)
     with patch("secrets.token_urlsafe", side_effect=lambda *args: f"fixture_{next(serial):024d}"), \
-            patch("app.agent.kernel.session.validate_selection", new=AsyncMock(return_value=selection)):
+            patch("app.agent.domains.resources.selection.validate_selection", new=AsyncMock(return_value=selection)):
         if case == "selection":
             lease, _ = await store.begin_turn(owner="owner", session_id="session", request_id="seed")
             await store.commit(lease, updates=(StateUpdate("metadata.ux_candidate_view", {

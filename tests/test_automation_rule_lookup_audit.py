@@ -7,8 +7,8 @@ from threading import Barrier
 from unittest.mock import patch
 
 from app import database as db
-from app.agent import activity_follow_actions as follows
-from app.agent.automation_rule_actions import list_digest_rules
+from app.agent.domains.activity import follow_actions as follows
+from app.agent.domains.automation.rule_actions import list_digest_rules
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.repositories import media_automation_rules as rules

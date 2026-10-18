@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from app.agent.models import Evidence, ToolResult
-from app.agent.recent_download_submissions import (
+from app.agent.domains.downloads.recent_submissions import (
     RecentDownloadSubmission,
     RecentDownloadVerification,
     build_recent_download_library_verification,
 )
+from app.agent.models import Evidence, ToolResult
 
 _VERIFICATION_CONTEXT = {
     "title": "The Show",

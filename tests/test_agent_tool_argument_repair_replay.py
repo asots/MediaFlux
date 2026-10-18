@@ -1,19 +1,36 @@
 import asyncio
-from copy import deepcopy
 import json
+from copy import deepcopy
+
 import pytest
-from tests.test_agent_tool_argument_ingress import offline as offline, store as store, Wire, wire, frames, event_wire, encode, observe
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
+from app.agent.kernel.conversation_context import restore_messages
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.events import AgentEventType
-from app.agent.kernel.model import ModelMessage, ModelRequest, ModelEventType
-from app.agent.kernel.pipeline import ToolPipeline
-from app.agent.kernel.session import AgentSession, SessionLimits
+from app.agent.kernel.model import ModelEventType, ModelMessage, ModelRequest
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import AgentInput, CancellationToken
-from app.clients.openai_compatible import parse_native_tool_turn
-from app.agent.public_view import public_conversation_messages
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.provider_model import ModelProviderError
+from app.agent.kernel.session import AgentSession, SessionLimits
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.public_view import public_conversation_messages
+from app.clients.openai_compatible import parse_native_tool_turn
+from tests.test_agent_tool_argument_ingress import (
+    Wire,
+    encode,
+    event_wire,
+    frames,
+    observe,
+    wire,
+)
+from tests.test_agent_tool_argument_ingress import offline as offline
+from tests.test_agent_tool_argument_ingress import store as store
 
 RAW = '  {"query":"私有原串-SENTINEL", \n'
 OPAQUE = ' opaque\nPRIVATE-SENTINEL  '
@@ -103,7 +120,7 @@ def test_real_cold_restore_next_wire_and_one_correction(protocol, mode, store):
         assert rows, 'Malformed identifiable call must be durably repairable'
         call = rows[0]['tool_calls'][0]
         assert call['arguments'] is None and call['argument_error'] == 'invalid_json' and call['raw_arguments'] == RAW
-        restored = AgentSession._restore_messages(state)
+        restored = restore_messages(state)
         assert any(m.tool_calls and m.tool_calls[0].raw_arguments == RAW for m in restored)
         errors = [row for row in state.conversation if row['role'] == 'tool']
         assert json.loads(errors[0]['content'])['code'] == 'invalid_arguments'

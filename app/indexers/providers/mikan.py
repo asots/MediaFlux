@@ -4,14 +4,27 @@ import html
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-from bs4 import BeautifulSoup
 import httpx
+from bs4 import BeautifulSoup
 
-from ..config import MIKAN_URL, MIKAN_MIRROR_URL
-from ..errors import IndexerInvalidResponse, IndexerRateLimited, IndexerSecurityError, IndexerTimeout, IndexerUnavailable
-from ..models import IndexerCapabilities, IndexerItem, IndexerPage, IndexerSearchRequest, ResolvedDownload
-from .base import DirectResultAdapter, fixed_host_join, magnet_infohash, parse_size_bytes, require_html_response
+from app.clients.http import HttpInvalidResponse, HttpSecurityError
 
+from ..config import MIKAN_MIRROR_URL, MIKAN_URL
+from ..errors import IndexerRateLimited, IndexerTimeout, IndexerUnavailable
+from ..models import (
+    IndexerCapabilities,
+    IndexerItem,
+    IndexerPage,
+    IndexerSearchRequest,
+    ResolvedDownload,
+)
+from .base import (
+    DirectResultAdapter,
+    fixed_host_join,
+    magnet_infohash,
+    parse_size_bytes,
+    require_html_response,
+)
 
 _MIKAN_DATE_FORMATS = (
     "%Y/%m/%d %H:%M",
@@ -39,7 +52,7 @@ class MikanAdapter(DirectResultAdapter):
     async def search(self, request: IndexerSearchRequest) -> IndexerPage:
         if request.page > 1:
             return IndexerPage(items=[], page=request.page, has_more=False, pagination_supported=False)
-        last_error: IndexerInvalidResponse | IndexerRateLimited | IndexerTimeout | IndexerUnavailable | None = None
+        last_error: HttpInvalidResponse | IndexerRateLimited | IndexerTimeout | IndexerUnavailable | None = None
         for base_url in self._host_bases:
             try:
                 return await self._search_base(base_url, request)
@@ -47,19 +60,19 @@ class MikanAdapter(DirectResultAdapter):
                 last_error = IndexerTimeout(f"Mikan endpoint timed out: {base_url}")
             except httpx.TransportError:
                 last_error = IndexerUnavailable(f"Mikan endpoint connection failed: {base_url}")
-            except (IndexerInvalidResponse, IndexerRateLimited, IndexerUnavailable) as exc:
+            except (HttpInvalidResponse, IndexerRateLimited, IndexerUnavailable) as exc:
                 last_error = exc
         assert last_error is not None
         raise last_error
 
     async def resolve(self, stored_result: IndexerItem) -> ResolvedDownload:
         if stored_result.site_id != self.site_id:
-            raise IndexerSecurityError("result provider mismatch")
+            raise HttpSecurityError("result provider mismatch")
         if stored_result.magnet and magnet_infohash(stored_result.magnet):
             return ResolvedDownload(kind="magnet", value=stored_result.magnet)
         if stored_result.torrent_url:
             return ResolvedDownload(kind="torrent", value=self._join_known_host(stored_result.torrent_url))
-        raise IndexerInvalidResponse("result has no downloadable candidate")
+        raise HttpInvalidResponse("result has no downloadable candidate")
 
     async def _search_base(self, base_url: str, request: IndexerSearchRequest) -> IndexerPage:
         response = await self.http.get(
@@ -78,7 +91,7 @@ class MikanAdapter(DirectResultAdapter):
             and not soup.select_one("table")
             and not any(marker in text for marker in ("没有", "无结果", "no result"))
         ):
-            raise IndexerInvalidResponse("Mikan search page structure is invalid")
+            raise HttpInvalidResponse("Mikan search page structure is invalid")
         items: list[IndexerItem] = []
         for row in rows:
             item = self._parse_row(row, base_url=response_base_url)
@@ -135,7 +148,7 @@ class MikanAdapter(DirectResultAdapter):
                     torrent_anchor.get("href") or "",
                     relative_base_url=base_url,
                 )
-            except IndexerSecurityError:
+            except HttpSecurityError:
                 torrent_url = None
 
         kinds = tuple(kind for kind, value in (("magnet", magnet), ("torrent", torrent_url)) if value)
@@ -147,7 +160,7 @@ class MikanAdapter(DirectResultAdapter):
                 title_anchor.get("href") or "",
                 relative_base_url=base_url,
             )
-        except IndexerSecurityError:
+        except HttpSecurityError:
             return None
         return IndexerItem(
             site_id=self.site_id,
@@ -170,7 +183,7 @@ class MikanAdapter(DirectResultAdapter):
         for base_url in self._host_bases:
             if urlsplit(base_url).hostname == host:
                 return base_url
-        raise IndexerSecurityError("provider result escaped its registered host")
+        raise HttpSecurityError("provider result escaped its registered host")
 
     @staticmethod
     def _extract_size(row) -> tuple[str | None, int | None]:
@@ -205,4 +218,4 @@ class MikanAdapter(DirectResultAdapter):
         if status_code >= 500:
             raise IndexerUnavailable(f"Mikan returned HTTP {status_code}")
         if status_code != 200:
-            raise IndexerInvalidResponse(f"Mikan returned HTTP {status_code}")
+            raise HttpInvalidResponse(f"Mikan returned HTTP {status_code}")

@@ -10,6 +10,7 @@ from time import perf_counter
 from typing import cast
 
 from app import config
+from app.clients.http import HttpError, HttpInvalidResponse, HttpSecurityError
 from app.logger import get_logger
 
 from .config import (
@@ -17,14 +18,7 @@ from .config import (
     RETIRED_INDEXER_SITE_IDS,
     SENSITIVE_INDEXER_SITE_IDS,
 )
-from .errors import (
-    IndexerError,
-    IndexerInvalidResponse,
-    IndexerSecurityError,
-    IndexerTimeout,
-    IndexerUnavailable,
-    IndexerValidationError,
-)
+from .errors import IndexerTimeout, IndexerUnavailable, IndexerValidationError
 from .models import (
     AggregatedIndexerResult,
     IndexerItem,
@@ -35,10 +29,15 @@ from .models import (
     IndexerSitePageState,
     ResolvedDownload,
 )
-from .providers.base import magnet_infohash
-from .providers.base import page_observer, report_page
+from .providers.base import magnet_infohash, page_observer, report_page
 from .query_plan import build_site_queries, needs_bilingual_search
-from .ranking import annotate_clusters, candidate_sort_key, match_order, published_timestamp, rank_item
+from .ranking import (
+    annotate_clusters,
+    candidate_sort_key,
+    match_order,
+    published_timestamp,
+    rank_item,
+)
 from .registry import IndexerRegistry
 from .result_store import IndexerResultStore
 
@@ -566,7 +565,7 @@ class IndexerService:
                     errors.append(
                         self._public_error(
                             site_id,
-                            IndexerInvalidResponse(
+                            HttpInvalidResponse(
                                 "provider returned mismatched site_id"
                             ),
                         )
@@ -636,7 +635,7 @@ class IndexerService:
         allowed = self.site_ids_for_scope(scope)
         stored_result = self.result_store.get(result_id)
         if stored_result.site_id not in allowed:
-            raise IndexerSecurityError(
+            raise HttpSecurityError(
                 "stored result provider is not allowed for this caller"
             )
         return stored_result
@@ -648,7 +647,7 @@ class IndexerService:
         stored_result = self.get_result(result_id, scope=scope)
         site_id = stored_result.site_id
         if stored_result.download_state not in {"ready", "resolvable"}:
-            raise IndexerInvalidResponse("stored result is not downloadable")
+            raise HttpInvalidResponse("stored result is not downloadable")
         adapter = self.registry.get(site_id)
         loop = asyncio.get_running_loop()
         current_task = asyncio.current_task()
@@ -668,7 +667,7 @@ class IndexerService:
                 raise IndexerTimeout() from exc
             except asyncio.CancelledError:
                 raise
-            except IndexerError as exc:
+            except HttpError as exc:
                 raise type(exc)(public_message=exc.public_message) from None
             except Exception as exc:
                 raise IndexerUnavailable() from exc
@@ -681,19 +680,19 @@ class IndexerService:
                     self._loop_semaphores.pop(loop, None)
                 self._runtime_condition.notify_all()
         if not isinstance(resolved, ResolvedDownload):
-            raise IndexerInvalidResponse(
+            raise HttpInvalidResponse(
                 "provider returned an invalid resolved download"
             )
         if resolved.kind not in stored_result.download_kinds:
-            raise IndexerInvalidResponse(
+            raise HttpInvalidResponse(
                 "provider returned an undeclared download kind"
             )
         if resolved.kind == "magnet" and (
             not isinstance(resolved.value, str) or not magnet_infohash(resolved.value)
         ):
-            raise IndexerInvalidResponse("provider returned an invalid magnet")
+            raise HttpInvalidResponse("provider returned an invalid magnet")
         if resolved.kind == "torrent" and not isinstance(resolved.value, (str, bytes)):
-            raise IndexerInvalidResponse(
+            raise HttpInvalidResponse(
                 "provider returned an invalid torrent candidate"
             )
         return resolved
@@ -1265,7 +1264,7 @@ class IndexerService:
                     adapter.search(request), timeout=provider_timeout_seconds
                 )
             if not isinstance(page, IndexerPage):
-                raise IndexerInvalidResponse("provider returned an invalid page")
+                raise HttpInvalidResponse("provider returned an invalid page")
             return _ProviderOutcome(
                 site_id=site_id,
                 page=page,
@@ -1275,7 +1274,7 @@ class IndexerService:
             outcome = self._error_outcome(site_id, IndexerTimeout("site timeout"))
         except asyncio.CancelledError:
             raise
-        except IndexerError as exc:
+        except HttpError as exc:
             outcome = self._error_outcome(site_id, exc)
         except Exception:  # noqa: BLE001 - provider 边界统一降级为安全错误
             outcome = self._error_outcome(
@@ -1305,13 +1304,13 @@ class IndexerService:
                 self._loop_semaphores[loop] = semaphore
             return semaphore
 
-    def _error_outcome(self, site_id: str, error: IndexerError) -> _ProviderOutcome:
+    def _error_outcome(self, site_id: str, error: HttpError) -> _ProviderOutcome:
         return _ProviderOutcome(
             site_id=site_id, error=self._public_error(site_id, error)
         )
 
     @staticmethod
-    def _public_error(site_id: str, error: IndexerError) -> IndexerProviderError:
+    def _public_error(site_id: str, error: HttpError) -> IndexerProviderError:
         return IndexerProviderError(
             site_id=site_id, code=error.code, message=error.public_message
         )

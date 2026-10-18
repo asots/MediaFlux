@@ -8,14 +8,24 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import DefaultProjector
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
+from app.agent.kernel.provider_model import (
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import AgentInput, CancellationToken
-from app.indexers.http import FixedHostHttpClient
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
+from app.clients.http import FixedHostHttpClient
 from tests.support import isolated_test_database
 
 

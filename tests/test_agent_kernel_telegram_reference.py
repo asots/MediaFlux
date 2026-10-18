@@ -10,16 +10,19 @@ import httpx
 import pytest
 
 from app import database as db
-from app.bot import agent_adapter as adapter
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
-from app.agent.kernel.session import AgentSession
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
-from app.agent.kernel.transports import TelegramKernelTransport, QueryEnvelope
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
+from app.agent.kernel.provider_model import (
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
+from app.agent.kernel.session import AgentSession
 from app.agent.public_view import public_conversation_messages
-from app.indexers.http import FixedHostHttpClient
-from tests.test_agent_kernel_telegram_adapter import FakeBot, TELEBOT, Message
+from app.agent.transports import QueryEnvelope, TelegramKernelTransport
+from app.bot import agent_adapter as adapter
+from app.clients.http import FixedHostHttpClient
+from tests.test_agent_kernel_telegram_adapter import TELEBOT, FakeBot, Message
 
 TAIL = '批次Z17更正：仅检查，禁止删除，保留原文件。'
 LONG = '通知背景。' * 430 + TAIL
@@ -178,10 +181,12 @@ def test_tags_are_data_and_public_hidden(store):
 
 @pytest.mark.parametrize('mutation', ['owner', 'session', 'chat', 'thread', 'message', 'version', 'text', 'duplicate', 'evicted', 'ttl', 'reset', 'kind', 'path', 'next_generation'])
 def test_reader_scope_lifecycle(store, mutation):
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
-    from app.agent.kernel.state import CancellationToken
-    from copy import deepcopy
     import time
+    from copy import deepcopy
+
+    from app.agent.errors import ToolPipelineError
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
     _, _, owner, sid = ingress(store)
     async def scenario():
         state = await store.load(owner=owner, session_id=sid)
@@ -226,7 +231,7 @@ def test_reader_scope_lifecycle(store, mutation):
 
 @pytest.mark.parametrize('pressure', ['conversation', 'state', 'receipt_merge', 'fits'])
 def test_reference_capacity_is_explicit_and_rolls_back_before_wire(store, pressure):
-    from app.agent.kernel.state import StateUpdate
+    from app.agent.kernel.state_types import StateUpdate
     owner, sid, _ = adapter._session_for_source(-876543, 73, Message(chat_id=-876543, user_id=73, message_id=100))
     async def seed():
         lease, _ = await store.begin_turn(owner=owner, session_id=sid, request_id='seed')

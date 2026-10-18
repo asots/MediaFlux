@@ -20,12 +20,8 @@ from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import (
-    AgentInput,
-    InMemorySessionStateStore,
-    _CancelledReadInline,
-    _exact_value,
-)
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, _CancelledReadInline, _exact_value
 from tests.support import isolated_test_database
 
 OWNER = "parallel-cancel-test-owner"

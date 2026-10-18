@@ -2,7 +2,9 @@ import asyncio
 
 import pytest
 
-from app.agent.kernel.state import SessionState, StateUpdate, _apply_effect_state_change
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import _apply_effect_state_change
+from app.agent.kernel.state_types import StateUpdate
 
 
 def test_reserved_binding_cannot_be_written_by_business_update():
@@ -35,9 +37,9 @@ def test_receipt_callback_cannot_forge_binding():
 @pytest.mark.parametrize("sqlite", [False, True])
 def test_pending_transition_and_guard(sqlite):
     from app.agent.kernel.persistence import SQLiteKernelStore
-    from app.agent.kernel.state import (
-        InMemorySessionStateStore,
-        PendingEffectGuard,
+    from app.agent.kernel.session_state import PendingEffectGuard
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import (
         SelectionInvalidError,
         _PendingEffectTransition,
     )

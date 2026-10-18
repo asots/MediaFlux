@@ -5,14 +5,14 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from app.agent.errors import AgentToolError
-from app.agent.media_rating_actions import (
+from app.agent.domains.discovery.rating_actions import (
     _rating_from_douban_html,
     _select_card,
     _web_rating,
     lookup_media_rating,
     media_rating_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolResult
 from app.discovery.models import MediaCard
 from app.discovery.search import DiscoverySearchResult
@@ -121,9 +121,9 @@ class MediaRatingExecutionTests(unittest.TestCase):
         for structured in (False, True):
             for fallback in (False, True):
                 with self.subTest(structured=structured, fallback=fallback), patch(
-                    "app.agent.media_rating_actions.config.get_bool", return_value=structured
-                ), patch("app.agent.media_rating_actions.get_discovery_search_service") as source, patch(
-                    "app.agent.media_rating_actions._web_rating", return_value=None
+                    "app.agent.domains.discovery.rating_actions.config.get_bool", return_value=structured
+                ), patch("app.agent.domains.discovery.rating_actions.get_discovery_search_service") as source, patch(
+                    "app.agent.domains.discovery.rating_actions._web_rating", return_value=None
                 ) as web:
                     source.return_value.search.return_value = _search_result(
                         errors=({"provider": "douban", "code": "unavailable"},), succeeded=()
@@ -138,10 +138,10 @@ class MediaRatingExecutionTests(unittest.TestCase):
                 self.assertIn("已尝试豆瓣结构化查询" if structured else "结构化查询未启用", evidence)
                 self.assertIn("已尝试网页补查" if fallback else "未进行网页补查", evidence)
 
-    @patch("app.agent.media_rating_actions.config.get_bool", return_value=True)
-    @patch("app.agent.media_rating_actions.get_discovery_search_service")
-    @patch("app.agent.media_rating_actions.get_discovery_service")
-    @patch("app.agent.media_rating_actions.search_web")
+    @patch("app.agent.domains.discovery.rating_actions.config.get_bool", return_value=True)
+    @patch("app.agent.domains.discovery.rating_actions.get_discovery_search_service")
+    @patch("app.agent.domains.discovery.rating_actions.get_discovery_service")
+    @patch("app.agent.domains.discovery.rating_actions.search_web")
     def test_structured_search_rating_wins_without_detail_or_web(
         self, web_search, detail_factory, search_factory, _enabled
     ):
@@ -158,10 +158,10 @@ class MediaRatingExecutionTests(unittest.TestCase):
         detail_factory.assert_not_called()
         web_search.assert_not_called()
 
-    @patch("app.agent.media_rating_actions.config.get_bool", return_value=True)
-    @patch("app.agent.media_rating_actions.get_discovery_search_service")
-    @patch("app.agent.media_rating_actions.get_discovery_service")
-    @patch("app.agent.media_rating_actions.search_web")
+    @patch("app.agent.domains.discovery.rating_actions.config.get_bool", return_value=True)
+    @patch("app.agent.domains.discovery.rating_actions.get_discovery_search_service")
+    @patch("app.agent.domains.discovery.rating_actions.get_discovery_service")
+    @patch("app.agent.domains.discovery.rating_actions.search_web")
     def test_detail_supplies_rating_when_search_card_has_none(
         self, web_search, detail_factory, search_factory, _enabled
     ):
@@ -179,8 +179,8 @@ class MediaRatingExecutionTests(unittest.TestCase):
         )
         web_search.assert_not_called()
 
-    @patch("app.agent.media_rating_actions.config.get_bool", return_value=False)
-    @patch("app.agent.media_rating_actions.search_web")
+    @patch("app.agent.domains.discovery.rating_actions.config.get_bool", return_value=False)
+    @patch("app.agent.domains.discovery.rating_actions.search_web")
     def test_controlled_web_fallback_accepts_only_verified_douban_subject(
         self, web_search, _disabled
     ):
@@ -224,8 +224,8 @@ class MediaRatingExecutionTests(unittest.TestCase):
             )
         )
 
-    @patch("app.agent.media_rating_actions._fetch_douban_rating", return_value=7.9)
-    @patch("app.agent.media_rating_actions.search_web")
+    @patch("app.agent.domains.discovery.rating_actions._fetch_douban_rating", return_value=7.9)
+    @patch("app.agent.domains.discovery.rating_actions.search_web")
     def test_web_fallback_fetches_verified_subject_when_snippet_has_no_score(
         self, web_search, fetch_rating
     ):
@@ -255,7 +255,7 @@ class MediaRatingExecutionTests(unittest.TestCase):
             media_type="tv",
         )
 
-    @patch("app.agent.media_rating_actions.search_web")
+    @patch("app.agent.domains.discovery.rating_actions.search_web")
     def test_web_fallback_rejects_wrong_host_path_year_and_media_type(self, web_search):
         web_search.return_value = ToolResult(
             True,
@@ -289,9 +289,9 @@ class MediaRatingExecutionTests(unittest.TestCase):
         self.assertIsNone(_web_rating(query="九门", media_type="tv", year="2026"))
         self.assertIsNone(_web_rating(query="九门", media_type="", year="2026"))
 
-    @patch("app.agent.media_rating_actions.config.get_bool", return_value=True)
-    @patch("app.agent.media_rating_actions.get_discovery_search_service")
-    @patch("app.agent.media_rating_actions.search_web")
+    @patch("app.agent.domains.discovery.rating_actions.config.get_bool", return_value=True)
+    @patch("app.agent.domains.discovery.rating_actions.get_discovery_search_service")
+    @patch("app.agent.domains.discovery.rating_actions.search_web")
     def test_successful_empty_provider_is_not_reported_as_unavailable(
         self, web_search, search_factory, _enabled
     ):
@@ -308,9 +308,9 @@ class MediaRatingExecutionTests(unittest.TestCase):
         self.assertFalse(result.data["web_fallback_used"])
         web_search.assert_not_called()
 
-    @patch("app.agent.media_rating_actions.config.get_bool", return_value=True)
-    @patch("app.agent.media_rating_actions.get_discovery_search_service")
-    @patch("app.agent.media_rating_actions.search_web")
+    @patch("app.agent.domains.discovery.rating_actions.config.get_bool", return_value=True)
+    @patch("app.agent.domains.discovery.rating_actions.get_discovery_search_service")
+    @patch("app.agent.domains.discovery.rating_actions.search_web")
     def test_total_provider_failure_is_unavailable_without_optional_fallback(
         self, web_search, search_factory, _enabled
     ):
@@ -328,8 +328,8 @@ class MediaRatingExecutionTests(unittest.TestCase):
         self.assertEqual(result.status, "unavailable")
         web_search.assert_not_called()
 
-    @patch("app.agent.media_rating_actions.config.get_bool", return_value=False)
-    @patch("app.agent.media_rating_actions.search_web")
+    @patch("app.agent.domains.discovery.rating_actions.config.get_bool", return_value=False)
+    @patch("app.agent.domains.discovery.rating_actions.search_web")
     def test_unknown_media_type_requires_clarification_and_skips_web(
         self, web_search, _disabled
     ):

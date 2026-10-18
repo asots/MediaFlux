@@ -2,20 +2,25 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, nullcontext
-from dataclasses import replace
 import json
 import socket
+from contextlib import asynccontextmanager, nullcontext
+from dataclasses import replace
 from unittest.mock import patch
 
 import httpx
 import pytest
 
 from app.agent.kernel import provider_model as pm
-from app.agent.kernel.model import ModelMessage, ModelRequest, ModelToolCall, ProviderState
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.model import (
+    ModelMessage,
+    ModelRequest,
+    ModelToolCall,
+    ProviderState,
+)
+from app.agent.kernel.state_types import CancellationToken
 from app.clients import openai_compatible as oc
-from app.indexers.http import FixedHostHttpClient
+from app.clients.http import FixedHostHttpClient
 
 
 @pytest.mark.parametrize('status,text', [

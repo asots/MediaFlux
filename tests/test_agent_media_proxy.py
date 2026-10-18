@@ -8,10 +8,8 @@ from unittest.mock import Mock, patch
 import httpx
 
 from app import database as db
-from app.agent.media_proxy_actions import (
-    summarize_media_proxy_status,
-)
-from app.agent.media_proxy_actions import (
+from app.agent.domains.playback.proxy_actions import summarize_media_proxy_status
+from app.agent.domains.playback.proxy_actions import (
     test_media_proxy_instance as run_media_proxy_instance_test,
 )
 from app.agent.rate_limit import agent_rate_limiter
@@ -82,7 +80,7 @@ class AgentMediaProxyTests(IsolatedDatabaseTestCase):
         manager = Mock()
         manager.status.return_value = {first: {"running": True}}
         with patch(
-            "app.agent.media_proxy_actions.get_media_proxy_manager",
+            "app.agent.domains.playback.proxy_actions.get_media_proxy_manager",
             return_value=manager,
         ):
             result = summarize_media_proxy_status({})
@@ -135,7 +133,7 @@ class AgentMediaProxyTests(IsolatedDatabaseTestCase):
             with (
                 self.subTest(expected=expected),
                 patch(
-                    "app.agent.media_proxy_actions.run_awaitable_sync",
+                    "app.agent.domains.playback.proxy_actions.run_awaitable_sync",
                     side_effect=fake_run,
                 ) as run_mock,
             ):
@@ -159,10 +157,10 @@ class AgentMediaProxyTests(IsolatedDatabaseTestCase):
         service = get_agent_service()
         with (
             patch(
-                "app.agent.media_proxy_actions.clear_signed_url_cache"
+                "app.agent.domains.playback.proxy_actions.clear_signed_url_cache"
             ) as clear_cache,
             patch(
-                "app.agent.media_proxy_actions.get_media_proxy_manager",
+                "app.agent.domains.playback.proxy_actions.get_media_proxy_manager",
                 return_value=manager,
             ),
         ):
@@ -200,10 +198,10 @@ class AgentMediaProxyTests(IsolatedDatabaseTestCase):
         manager = Mock()
         with (
             patch(
-                "app.agent.media_proxy_actions.clear_signed_url_cache"
+                "app.agent.domains.playback.proxy_actions.clear_signed_url_cache"
             ) as clear_cache,
             patch(
-                "app.agent.media_proxy_actions.get_media_proxy_manager",
+                "app.agent.domains.playback.proxy_actions.get_media_proxy_manager",
                 return_value=manager,
             ),
         ):

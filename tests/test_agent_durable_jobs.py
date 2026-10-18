@@ -7,14 +7,14 @@ from datetime import datetime
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.durable_job_actions import (
+from app.agent.domains.library.patrol_progress import empty_patrol_projection
+from app.agent.domains.system.jobs_actions import (
     get_agent_job_status,
     prepare_start_episode_audit,
     start_episode_audit_arguments,
     start_episode_audit_confirmed,
 )
 from app.agent.errors import AgentToolError
-from app.agent.library_patrol_progress import empty_patrol_projection
 from app.agent.models import ToolContext, ToolResult
 from app.modules.agent_jobs_scheduler import AgentJobsScheduler
 from tests.support import IsolatedDatabaseTestCase
@@ -357,7 +357,7 @@ class AgentDurableJobTests(IsolatedDatabaseTestCase):
         )
         wake = Mock()
         with patch(
-            "app.agent.durable_job_actions.get_agent_jobs_scheduler",
+            "app.agent.domains.system.jobs_actions.get_agent_jobs_scheduler",
             return_value=Mock(wake=wake),
         ):
             accepted = start_episode_audit_confirmed(arguments, fingerprint, context)

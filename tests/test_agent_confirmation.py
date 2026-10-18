@@ -9,18 +9,25 @@ from dataclasses import replace
 from datetime import datetime
 from unittest.mock import Mock, patch
 
-from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
-from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
-from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
-from app.agent.kernel.references import InMemoryReferenceStore, ReferenceError
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore, StateUpdate
-from app.agent.confirmation import ConfirmationExpiredError, ConfirmationStore, SQLiteConfirmationStore, confirmation_reply_intent
+from app.agent.confirmation import (
+    ConfirmationExpiredError,
+    ConfirmationStore,
+    SQLiteConfirmationStore,
+    confirmation_reply_intent,
+)
 from app.agent.confirmation_contract import (
     build_confirmation_contract,
     sanitize_confirmation_contract,
 )
-from app.agent.errors import AgentToolError
+from app.agent.errors import AgentToolError, ToolPipelineError
+from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.references import InMemoryReferenceStore, ReferenceError
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken, StateUpdate
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import RiskLevel, ToolResult
 from tests.support import isolated_test_database
 
@@ -682,9 +689,11 @@ class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
 
         from app.agent.domain_catalog import build_tool_specs
         from app.agent.kernel.effects import ConfirmationEffectPlanStore
-        from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+        from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.ports import catalog_from_tool_specs
-        from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+        from app.agent.kernel.state import InMemorySessionStateStore
+        from app.agent.kernel.state_types import CancellationToken
+        from app.agent.kernel.tool_calls import ToolCallContext
 
         self.enterContext(isolated_test_database())
         self.spec = next(spec for spec in build_tool_specs() if spec.name == "guangya.fs.change.execute")
@@ -746,7 +755,7 @@ class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.pipeline.get_pending_plan(owner="fs-owner", session_id="fs-session"))
 
     async def test_empty_or_missing_operations_cannot_issue_or_reissue_a_card(self):
-        from app.agent.kernel.pipeline import ToolPipelineError
+        from app.agent.errors import ToolPipelineError
 
         for arguments in ({}, {"operations": []}, {"observation_ref": self.arguments["observation_ref"]}):
             with self.subTest(arguments=arguments), self.assertRaises(ToolPipelineError) as invalid:
@@ -769,7 +778,7 @@ class GuangYaFSConfirmationTests(unittest.IsolatedAsyncioTestCase):
         from app.agent.kernel.capabilities import ToolEffect
         from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
         from app.agent.kernel.pipeline import ToolPipeline
-        from app.agent.kernel.state import StateUpdate
+        from app.agent.kernel.state_types import StateUpdate
 
         # 历史 execute 卡片的参数为空，但对象和目标已冻结在领域快照中。
         with self.assertRaises(AgentToolError):

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.library_patrol_status import get_library_patrol_status
+from app.agent.domains.library.patrol_status import get_library_patrol_status
 from app.agent.models import ToolResult
 from app.modules.agent_library_patrol_scheduler import AgentLibraryPatrolScheduler
 from app.notifier import TelegramSendResult
@@ -927,7 +927,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         with self._config():
             scheduler.run_once()
         with patch(
-            "app.agent.library_patrol_status.config.get_bool", return_value=True
+            "app.agent.domains.library.patrol_status.config.get_bool", return_value=True
         ):
             result = get_library_patrol_status({})
         self.assertTrue(result.ok)
@@ -966,7 +966,7 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
                 ),
             )
         with patch(
-            "app.agent.library_patrol_status.config.get_bool", return_value=True
+            "app.agent.domains.library.patrol_status.config.get_bool", return_value=True
         ):
             result = get_library_patrol_status({})
         self.assertEqual(result.status, "inconclusive")

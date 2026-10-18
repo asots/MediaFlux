@@ -7,8 +7,8 @@ from unittest import mock
 from app import database as db
 from app.clients.base import MediaItem, MediaServerClient
 from app.clients.emby import EmbyClient
+from app.clients.http import HttpSecurityError
 from app.clients.jellyfin import JellyfinClient
-from app.indexers.errors import IndexerSecurityError
 from app.indexers.providers.base import IndexerAdapter
 from app.indexers.providers.btbtla import BTBtlaAdapter
 from app.indexers.providers.mikan import MikanAdapter
@@ -61,7 +61,7 @@ class SingleTrackBusinessContractTests(unittest.TestCase):
                     "https://mirror.invalid/file",
                 )
                 self.assertEqual(adapter._join_known_host("/file"), adapter.base_url + "file")
-                with self.assertRaises(IndexerSecurityError):
+                with self.assertRaises(HttpSecurityError):
                     adapter._join_known_host("https://unregistered.invalid/file")
 
     def test_tmdb_alias_traversal_is_shared_but_title_normalization_is_not_merged(self):

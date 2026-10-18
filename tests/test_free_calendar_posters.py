@@ -12,10 +12,16 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 
 import tests  # noqa: F401 -- 导入项目代码前先隔离生产配置和 DB。
+from app.clients.http import HttpSecurityError
 from app.discovery.calendar.models import CalendarEntry, CalendarEvent
-from app.discovery.calendar.poster_http import MAX_PLATFORM_IMAGE_BYTES, fetch_platform_poster
-from app.discovery.calendar.posters import canonical_platform_poster_key, platform_poster_key
-from app.indexers.errors import IndexerSecurityError
+from app.discovery.calendar.poster_http import (
+    MAX_PLATFORM_IMAGE_BYTES,
+    fetch_platform_poster,
+)
+from app.discovery.calendar.posters import (
+    canonical_platform_poster_key,
+    platform_poster_key,
+)
 from app.modules.image_payload import ImagePayloadError
 from app.routes.discovery_image import decode_poster_token, encode_poster_token
 from tests.test_discovery_api import _BaseClientTests
@@ -150,10 +156,10 @@ class PlatformPosterHTTPTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(asyncio.CancelledError):
                     await task
                 self.assertFalse(returned.is_set())
-                with self.assertRaises(IndexerSecurityError):
+                with self.assertRaises(HttpSecurityError):
                     await fetch_platform_poster("iqiyi", _KEY, resolver=fast, transport=transport)
                 # 海报不能另建自己的上限；与公开排期共用进程级容量。
-                with self.assertRaises(IndexerSecurityError):
+                with self.assertRaises(HttpSecurityError):
                     await public.get_json("https://v.qq.com/public")
                 fast.assert_not_called()
                 release.set()
@@ -183,13 +189,13 @@ class PlatformPosterHTTPTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_mixed_dns_and_redirects_are_rejected_without_followup(self):
         for address in ("127.0.0.1", "10.0.0.8", "::1", "169.254.169.254"):
-            with self.subTest(address=address), self.assertRaises(IndexerSecurityError):
+            with self.subTest(address=address), self.assertRaises(HttpSecurityError):
                 await self.fetch(httpx.Response(200, content=_IMAGE), resolver=lambda h, p: [
                     (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, p)),
                     *_resolver(h, p),
                 ])
         self.assertEqual(self.calls, [])
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await self.fetch(httpx.Response(302, headers={"Location": "https://127.0.0.1/private"}))
         self.assertEqual(len(self.calls), 1)
 
@@ -205,7 +211,7 @@ class PlatformPosterHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 6)
 
     async def test_compressed_upstream_is_rejected_before_any_body_or_decoder_work(self):
-        from app.indexers.errors import IndexerInvalidResponse
+        from app.clients.http import HttpInvalidResponse
         class Wire(httpx.AsyncByteStream):
             started = False
             closed = False
@@ -217,7 +223,7 @@ class PlatformPosterHTTPTests(unittest.IsolatedAsyncioTestCase):
 
         for encoding in ("gzip", "br", "deflate", "identity, gzip"):
             wire = Wire()
-            with self.subTest(encoding=encoding), self.assertRaises(IndexerInvalidResponse):
+            with self.subTest(encoding=encoding), self.assertRaises(HttpInvalidResponse):
                 await self.fetch(httpx.Response(200, stream=wire, headers={
                     "Content-Type": "image/png", "Content-Encoding": encoding,
                 }))
@@ -225,14 +231,14 @@ class PlatformPosterHTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(wire.closed)
 
     async def test_mime_magic_length_and_stream_limits(self):
-        from app.indexers.errors import IndexerResponseTooLarge
+        from app.clients.http import HttpResponseTooLarge
         cases = [
             ({"Content-Type": "text/html"}, b"<html>challenge</html>", ImagePayloadError),
             ({"Content-Type": "image/svg+xml"}, b"<svg></svg>", ImagePayloadError),
             ({"Content-Type": "image/webp"}, b"<html>challenge</html>", ImagePayloadError),
             ({"Content-Type": "image/png"}, _IMAGE, ImagePayloadError),
-            ({"Content-Type": "image/webp", "Content-Length": str(MAX_PLATFORM_IMAGE_BYTES + 1)}, _IMAGE, IndexerResponseTooLarge),
-            ({"Content-Type": "image/webp"}, _IMAGE + b"x" * MAX_PLATFORM_IMAGE_BYTES, IndexerResponseTooLarge),
+            ({"Content-Type": "image/webp", "Content-Length": str(MAX_PLATFORM_IMAGE_BYTES + 1)}, _IMAGE, HttpResponseTooLarge),
+            ({"Content-Type": "image/webp"}, _IMAGE + b"x" * MAX_PLATFORM_IMAGE_BYTES, HttpResponseTooLarge),
         ]
         for headers, body, error in cases:
             response = httpx.Response(200, headers=headers, content=body)

@@ -4,11 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agent.errors import AgentToolError
-from app.agent.person_filmography_actions import (
+from app.agent.domains.discovery.filmography_actions import (
     person_filmography,
     person_filmography_arguments,
 )
+from app.agent.errors import AgentToolError
 
 
 class _FakeTMDBClient:
@@ -79,8 +79,8 @@ class _FakeTMDBClient:
 def test_person_filmography_selects_department_and_sorts_released_movies():
     client = _FakeTMDBClient()
     with (
-        patch("app.agent.person_filmography_actions.config.get_bool", return_value=True),
-        patch("app.agent.person_filmography_actions.TMDBClient", return_value=client),
+        patch("app.agent.domains.discovery.filmography_actions.config.get_bool", return_value=True),
+        patch("app.agent.domains.discovery.filmography_actions.TMDBClient", return_value=client),
     ):
         result = person_filmography(
             {

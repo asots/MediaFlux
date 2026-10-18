@@ -327,7 +327,9 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         submit.assert_called_once()
 
     def test_placeholder_notification_uses_enriched_title_without_redelivery(self) -> None:
-        from app.modules.telegram_download_lifecycle import build_download_lifecycle_event
+        from app.modules.telegram_download_lifecycle import (
+            build_download_lifecycle_event,
+        )
 
         request_id, _ = self._create_request(display_title="通知中的媒体名")
         db.update_download_request(request_id, status="completed", gy_status="completed",
@@ -354,7 +356,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         )
         row = db.get_download_request(request_id)
 
-        from app.agent import download_actions
+        from app.agent.domains.downloads import actions as download_actions
         from app.routes import downloads_api
 
         self.assertEqual(downloads_api._attention_json(row)["title"], "公开展示标题")

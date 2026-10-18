@@ -6,7 +6,7 @@ import json
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.strm_failure_actions import triage_strm_failures
+from app.agent.domains.strm.failure_actions import triage_strm_failures
 from tests.support import IsolatedDatabaseTestCase
 
 

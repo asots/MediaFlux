@@ -1,10 +1,10 @@
 """Baseline-characterized canonical JSON, crypto and transaction contracts."""
 import asyncio
-from contextlib import contextmanager, nullcontext
 import hashlib
 import hmac
 import json
 import threading
+from contextlib import contextmanager, nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -14,7 +14,7 @@ from app.agent.kernel.events import AgentEvent, AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.references import ReferenceError
 from app.agent.kernel.session_guard import session_scope_guard
-from app.agent.kernel.state import StateUpdate
+from app.agent.kernel.state_types import StateUpdate
 from tests.support import isolated_test_database
 
 SECRET = "r2-synthetic-test-key"
@@ -271,7 +271,7 @@ def test_public_state_ref_event_roundtrip_and_transaction_rollback(store):
 def test_real_session_order_requests_and_plain_qa_budget(use_tool):
     from app.agent.kernel.bootstrap import build_agent_kernel_runtime
     from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-    from app.agent.kernel.state import AgentInput
+    from app.agent.kernel.state_types import AgentInput
     from tests.test_agent_kernel_core import ScriptedModel, collect
 
     async def exercise():

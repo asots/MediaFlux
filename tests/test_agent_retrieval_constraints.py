@@ -140,7 +140,8 @@ def test_native_session_first_window_includes_both_read_goals(catalog):
     from app.agent.kernel.model import ModelEvent, ModelEventType
     from app.agent.kernel.pipeline import ToolPipeline
     from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import AgentInput
     from tests.test_agent_kernel_core import ScriptedModel
 
     async def run():
@@ -199,7 +200,8 @@ def test_native_session_followup_first_window_retains_preference_tool(catalog):
     from app.agent.kernel.model import ModelEvent, ModelEventType
     from app.agent.kernel.pipeline import ToolPipeline
     from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import AgentInput
     from tests.test_agent_kernel_core import ScriptedModel
 
     async def run():

@@ -1,27 +1,26 @@
 """下载完成后自动媒体库复核的持久化状态机测试。"""
 from __future__ import annotations
 
-from datetime import datetime
 import os
 import threading
 import unittest
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.models import ToolResult
-from app.agent.feature_gate import invalidate_agent_runtime_generation
-from app.agent.recent_download_submissions import (
+from app.agent.domains.downloads.recent_submissions import (
     RecentDownloadSubmission,
     RecentDownloadVerification,
     build_recent_download_status,
     enqueue_recent_download_library_verification,
 )
+from app.agent.feature_gate import invalidate_agent_runtime_generation
+from app.agent.models import ToolResult
 from app.modules.agent_download_verification_scheduler import (
     DownloadLibraryVerificationScheduler,
 )
 from app.notifier import TelegramSendResult
 from tests.support import IsolatedDatabaseTestCase
-
 
 _CONTEXT = {
     "title": "The Show",

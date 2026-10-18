@@ -40,6 +40,7 @@ class AgentKernelArchitectureTests(unittest.TestCase):
         roots = [
             KERNEL,
             ROOT / "app" / "agent" / "domain_catalog",
+            ROOT / "app" / "agent" / "domains",
             ROOT / "app" / "routes" / "agent_api.py",
             ROOT / "app" / "bot" / "agent_adapter.py",
         ]
@@ -64,13 +65,12 @@ class AgentKernelArchitectureTests(unittest.TestCase):
     def test_domain_catalog_has_no_central_support_god_module(self) -> None:
         domain_root = ROOT / "app" / "agent" / "domain_catalog"
         self.assertFalse((domain_root / "support.py").exists())
-        for name in (
-            "shared.py",
-            "strm_runtime.py",
-            "cloud_runtime.py",
-            "library_search.py",
-        ):
-            self.assertTrue((domain_root / name).is_file(), name)
+        self.assertEqual({p.name for p in domain_root.glob("*.py")}, {"__init__.py", "catalog.py"})
+        domains = ROOT / "app" / "agent" / "domains"
+        for name in ("strm", "guangya", "library", "local_media", "subscriptions", "resources"):
+            self.assertTrue((domains / name / "tools.py").is_file(), name)
+        self.assertFalse(any((ROOT / "app" / "agent").glob("*_actions.py")) and
+                         any(p.name != "provider_actions.py" for p in (ROOT / "app" / "agent").glob("*_actions.py")))
 
         violations: list[str] = []
         for path in domain_root.glob("*.py"):
@@ -94,8 +94,12 @@ class AgentKernelArchitectureTests(unittest.TestCase):
             "catalog_from_existing_registry",
         }
         sources = [path.read_text(encoding="utf-8") for path in KERNEL.rglob("*.py")]
-        source = "\n".join(sources)
-        self.assertTrue(forbidden_names.isdisjoint(source.split()))
+        identifiers = {
+            node.id if isinstance(node, ast.Name) else node.attr
+            for text in sources for node in ast.walk(ast.parse(text))
+            if isinstance(node, (ast.Name, ast.Attribute))
+        }
+        self.assertTrue(forbidden_names.isdisjoint(identifiers))
         line_count = sum(text.count("\n") + 1 for text in sources)
         self.assertGreaterEqual(line_count, 4_000)
         # 总行数不再作为功能一票否决；交付报告完整记录 kernel/app 增长及理由。
@@ -103,7 +107,7 @@ class AgentKernelArchitectureTests(unittest.TestCase):
 
     def test_execution_kernel_does_not_import_business_ports(self) -> None:
         violations: list[str] = []
-        for name in ("pipeline.py", "session.py"):
+        for name in ("pipeline.py", "session.py", "turn.py", "model_rounds.py", "tool_batches.py", "turn_history.py"):
             path = KERNEL / name
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
@@ -114,7 +118,7 @@ class AgentKernelArchitectureTests(unittest.TestCase):
                     modules.extend(f"{node.module or ''}.{item.name}" for item in node.names)
                 else:
                     continue
-                if any("ports" in module.split(".") for module in modules):
+                if any({"ports", "domains"}.intersection(module.split(".")) for module in modules):
                     violations.append(f"{path}:{node.lineno}")
         self.assertEqual(violations, [])
 

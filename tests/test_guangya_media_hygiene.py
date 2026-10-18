@@ -8,7 +8,8 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from app.agent import guangya_rename_actions as actions
+from app.agent.domain_catalog import DomainActions
+from app.agent.domains.guangya import rename_actions as actions
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile
 from app.modules import guangya_media_hygiene as hygiene
@@ -87,7 +88,7 @@ class FakeHygieneClient:
 
 class GuangYaMediaHygieneTests(unittest.TestCase):
     def setUp(self):
-        actions.reset_guangya_rename_context_for_tests()
+        self._domain_actions = DomainActions()
         self.temp = tempfile.TemporaryDirectory()
         self.plan_dir = Path(self.temp.name) / "plans"
         self.patches = [
@@ -122,7 +123,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
         video = client.directories["dir"][0]
         video.name = "4k688.com@259LUXU-1900.mp4"
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            result = actions.preview_guangya_media_hygiene(
+            result = self._domain_actions.rename.preview_guangya_media_hygiene(
                 {"path": "/NSFW", "recursive": True, "limit": 20, "enrich_metadata": False},
                 ToolContext(owner="year-sequence-owner"),
             )
@@ -134,7 +135,6 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
     def tearDown(self):
         for patcher in reversed(self.patches):
             patcher.stop()
-        actions.reset_guangya_rename_context_for_tests()
         self.temp.cleanup()
 
     def test_preview_cleans_domain_pollution_and_preserves_companion_suffix(self):
@@ -189,7 +189,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
         client = FakeHygieneClient()
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            preview = actions.preview_guangya_media_hygiene(
+            preview = self._domain_actions.rename.preview_guangya_media_hygiene(
                 {
                     "path": "/NSFW/(spam.example.com)-ABC-123",
                     "recursive": True,
@@ -198,7 +198,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
                 },
                 context,
             )
-            confirmation, _fingerprint = actions.prepare_guangya_rename_confirmation(
+            confirmation, _fingerprint = self._domain_actions.rename.prepare_guangya_rename_confirmation(
                 {}, context
             )
         self.assertEqual(preview.status, "ready")
@@ -210,7 +210,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
         client = FakeHygieneClient()
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            actions.preview_guangya_rename(
+            self._domain_actions.rename.preview_guangya_rename(
                 {
                     "paths": ["/NSFW/(spam.example.com)-ABC-123"],
                     "mode": "replace_text",
@@ -221,7 +221,7 @@ class GuangYaMediaHygieneTests(unittest.TestCase):
                 },
                 context,
             )
-            confirmation, _fingerprint = actions.prepare_guangya_rename_confirmation(
+            confirmation, _fingerprint = self._domain_actions.rename.prepare_guangya_rename_confirmation(
                 {}, context
             )
         self.assertEqual(confirmation.status, "confirmation_required")

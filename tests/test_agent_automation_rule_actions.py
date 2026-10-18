@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from app import config
 from app import database as db
-from app.agent.automation_rule_actions import (
+from app.agent.domains.automation.rule_actions import (
     create_media_rule_arguments,
     create_media_rule_confirmed,
     digest_set_arguments,
@@ -142,8 +142,9 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
 
     def test_previous_complete_confirmation_payload_remains_executable(self):
         import json
-        from app.repositories.agent_jobs import agent_job_owner_digest
+
         from app.modules.media_automation_rules import notification_route_settings
+        from app.repositories.agent_jobs import agent_job_owner_digest
         # Existing signed plans already persisted all optional fields explicitly.
         args = {"rule_id": "", "enabled": True, "hour": 21, "minute": 0,
                 "errors_only": False, "send_empty": False}
@@ -307,21 +308,21 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
 
         with (
             patch(
-                "app.agent.automation_rule_actions.prepare_create_media_subscription",
+                "app.agent.domains.automation.rule_actions.prepare_create_media_subscription",
                 return_value=(
                     ToolResult(True, "confirmation_required", "preview"),
                     json.dumps(frozen),
                 ),
             ),
             patch(
-                "app.agent.automation_rule_actions.db.media_subscription_identity_snapshot",
+                "app.agent.domains.automation.rule_actions.db.media_subscription_identity_snapshot",
                 return_value=frozen["snapshot"],
             ),
             patch(
-                "app.agent.automation_rule_actions.get_media_subscription_service"
+                "app.agent.domains.automation.rule_actions.get_media_subscription_service"
             ) as get_service,
             patch(
-                "app.agent.automation_rule_actions._reload_scheduler", return_value=True
+                "app.agent.domains.automation.rule_actions._reload_scheduler", return_value=True
             ),
         ):
             preview, token = prepare_create_media_rule(args)
@@ -353,7 +354,7 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
         import json
 
         with patch(
-            "app.agent.automation_rule_actions.prepare_create_media_subscription",
+            "app.agent.domains.automation.rule_actions.prepare_create_media_subscription",
             return_value=(
                 ToolResult(True, "confirmation_required", "preview"),
                 json.dumps({"snapshot": {"exists": False}}),
@@ -362,11 +363,11 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
             _, token = prepare_create_media_rule(args)
         with (
             patch(
-                "app.agent.automation_rule_actions.db.media_subscription_identity_snapshot",
+                "app.agent.domains.automation.rule_actions.db.media_subscription_identity_snapshot",
                 return_value={"exists": True},
             ),
             patch(
-                "app.agent.automation_rule_actions.get_media_subscription_service"
+                "app.agent.domains.automation.rule_actions.get_media_subscription_service"
             ) as service,
         ):
             with self.assertRaises(AgentToolError):

@@ -21,7 +21,7 @@ from app.agent.kernel.provider_model import (
     ProviderSettings,
 )
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.public_view import (
     format_public_result,
     public_conversation_messages,
@@ -29,7 +29,6 @@ from app.agent.public_view import (
 )
 from tests import test_agent_provider_state as fixtures
 from tests.test_agent_provider_state import REDACTED, SIGNATURE, THINKING, WireClient
-
 
 FALSE_CLAIM = "文件已全部归档完成，可以删除源文件。"
 
@@ -515,8 +514,9 @@ def test_legacy_checkpoint_replays_trusted_receipt_not_layout_copy(protocol, sta
     of altering that safety behavior to manufacture a follow-up model call.
     """
     import asyncio
+
     from app.agent.kernel.model import ModelEventType, ModelRequest
-    from app.agent.kernel.state import CancellationToken
+    from app.agent.kernel.state_types import CancellationToken
 
     async def scenario():
         fixture = fixtures.ProviderStateSessionTests()

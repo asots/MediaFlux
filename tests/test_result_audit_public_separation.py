@@ -7,16 +7,21 @@ from dataclasses import replace
 import pytest
 
 from app.agent.kernel.adapters import TurnViewBuilder, iter_ndjson
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolResult
 from tests.test_agent_recovered_progress import reply
-from tests.test_agent_tool_argument_ingress import Wire
 from tests.test_agent_returned_limit_progress import A, X, scenario, store  # noqa: F401
+from tests.test_agent_tool_argument_ingress import Wire
 
 
 @pytest.mark.parametrize("private", [False, True])

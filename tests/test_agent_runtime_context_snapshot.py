@@ -1,7 +1,7 @@
 """Global context and provider configuration share one supported snapshot."""
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import httpx
@@ -9,12 +9,15 @@ import pytest
 
 from app import config
 from app.agent.confirmation import SQLiteConfirmationStore
-from app.agent.kernel import bootstrap, session as session_module
+from app.agent.kernel import bootstrap
+from app.agent.kernel import model_rounds as model_rounds_module
 from app.agent.kernel.model import ModelEvent, ModelEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
-from app.agent.kernel.state import AgentInput
-
+from app.agent.kernel.provider_model import (
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
+from app.agent.kernel.state_types import AgentInput
 from tests import test_agent_generation_profiles as profile_support
 
 local_config = profile_support.local_config
@@ -37,7 +40,7 @@ def harness(local_config):
     wire.handler = capture
     with (
         patch.dict(OpenAICompatibleModelAdapter.__init__.__kwdefaults__, client_factory=wire.factory),
-        patch.object(session_module, 'bounded_model_messages', wraps=session_module.bounded_model_messages) as compression,
+        patch.object(model_rounds_module, 'bounded_model_messages', wraps=model_rounds_module.bounded_model_messages) as compression,
     ):
         yield wire, compression
     assert all(client._client.is_closed for client in wire.clients)

@@ -20,11 +20,14 @@ def test_provider_pipeline_isolates_normalized_read_budgets_without_bypassing_li
     from unittest.mock import patch
 
     from app.agent.domain_catalog import build_tool_specs
+    from app.agent.errors import ToolPipelineError
     from app.agent.kernel.capabilities import ToolCatalog
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+    from app.agent.kernel.pipeline import ToolPipeline
     from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
     from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
     from app.agent.rate_limit import AgentRateLimiter
 
     calls = []

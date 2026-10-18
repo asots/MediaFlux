@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.agent.kernel.adapters import ApprovalView, TurnView
 from app.agent.kernel.events import AgentEventType, EventFactory
-from app.agent.kernel.state import SessionBusyError
+from app.agent.kernel.state_types import SessionBusyError
 from app.bot import agent_adapter as adapter
 from app.bot.telegram_markdown import telegram_html_text_length
 from tests import test_production
@@ -834,19 +834,19 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
+        from app.agent.confirmation import ConfirmationStore
         from app.agent.kernel.capabilities import (
             CapabilityRetriever,
             KernelToolSpec,
             ToolCatalog,
             ToolEffect,
         )
-        from app.agent.confirmation import ConfirmationStore
         from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
         from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
         from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.session import AgentSession
         from app.agent.kernel.state import InMemorySessionStateStore
-        from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
+        from app.agent.transports import QueryEnvelope, TelegramKernelTransport
         from tests.test_agent_kernel_core import ScriptedModel
 
         clock = [1000.0]
@@ -1128,6 +1128,7 @@ class AgentKernelTelegramAdapterTests(unittest.TestCase):
 
     def test_empty_keyboard_is_explicitly_serialized_by_telegram_sdk(self):
         import json
+
         import telebot
         with patch("telebot.apihelper._make_request", return_value=True) as send:
             telebot.TeleBot("12345:test").edit_message_text("已取消", chat_id=42, message_id=1, reply_markup=telebot.types.InlineKeyboardMarkup())
@@ -1447,7 +1448,8 @@ class TelegramAgentExecutorTests(unittest.TestCase):
     def test_stop_cancels_real_kernel_queries_but_drains_protected_work(self):
         import asyncio
         import threading
-        from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
+
+        from app.agent.transports import QueryEnvelope, TelegramKernelTransport
         from tests.test_agent_kernel_transports import make_session
 
         executor = adapter.TelegramAgentExecutor(max_queries=2, max_controls=1)
@@ -1492,6 +1494,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
     @contextmanager
     def _registered_executor(self, *, max_queries=2, max_controls=2):
         import threading
+
         from app.bot import handlers
 
         bot = RegisteredFakeBot()
@@ -1572,16 +1575,20 @@ class TelegramAgentExecutorTests(unittest.TestCase):
 
     def test_registered_callback_duplicate_keeps_real_kernel_next_approval(self):
         import threading
+
         from app.agent.confirmation import ConfirmationStore
         from app.agent.kernel.capabilities import (
-            CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect,
+            CapabilityRetriever,
+            KernelToolSpec,
+            ToolCatalog,
+            ToolEffect,
         )
         from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
         from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
         from app.agent.kernel.persistence import SQLiteKernelStore
         from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.session import AgentSession
-        from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
+        from app.agent.transports import QueryEnvelope, TelegramKernelTransport
         from tests.support import isolated_test_database
         from tests.test_agent_kernel_core import ScriptedModel
 
@@ -1853,6 +1860,7 @@ class TelegramAgentExecutorTests(unittest.TestCase):
 
     def test_registered_handlers_return_while_queries_run_and_controls_still_dispatch(self):
         import threading
+
         from app.bot import handlers
 
         executor = adapter.TelegramAgentExecutor(max_queries=2, max_controls=1)
@@ -1900,14 +1908,20 @@ class TelegramAgentExecutorTests(unittest.TestCase):
         import asyncio
         import threading
         from types import SimpleNamespace
-        from app.bot import handlers
-        from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+
+        from app.agent.kernel.capabilities import (
+            CapabilityRetriever,
+            KernelToolSpec,
+            ToolCatalog,
+            ToolEffect,
+        )
         from app.agent.kernel.effects import PreparedEffect
         from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
         from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.session import AgentSession
         from app.agent.kernel.state import InMemorySessionStateStore
-        from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
+        from app.agent.transports import QueryEnvelope, TelegramKernelTransport
+        from app.bot import handlers
         from tests.test_agent_kernel_core import ScriptedModel
 
         entered, release, executed = threading.Event(), threading.Event(), threading.Event()

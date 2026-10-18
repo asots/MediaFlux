@@ -6,7 +6,7 @@ from datetime import datetime
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.media_consumption_actions import get_today_summary
+from app.agent.domains.subscriptions.consumption_actions import get_today_summary
 from app.agent.models import ToolContext
 from app.modules import media_automation_rules as automation
 from app.repositories import media_automation_rules as rules

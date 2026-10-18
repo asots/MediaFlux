@@ -7,14 +7,18 @@ from unittest.mock import patch
 from app.agent.kernel.adapters import TurnView, consume_events
 from app.agent.kernel.events import AgentEventType, EventFactory
 from app.agent.kernel.model import ModelEvent, ModelEventType
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolResult
 from app.agent.public_view import format_public_result
 from app.bot.agent_adapter import _render_turn
-from tests.test_agent_kernel_adapters import event_stream
 from tests import test_agent_kernel_browser as browser_tests
+from tests.test_agent_kernel_adapters import event_stream
 from tests.test_agent_kernel_browser import SESSION_ID, _event
-from tests.test_agent_kernel_resource_ingest import SameTurnSearchSubmitModel, _collect, _runtime
+from tests.test_agent_kernel_resource_ingest import (
+    SameTurnSearchSubmitModel,
+    _collect,
+    _runtime,
+)
 
 WARNING = '请先核对下载器，勿直接重复提交'
 FAILURE = {'ok': False, 'status': 'manual_review', 'summary': '下载提交结果未知',
@@ -34,9 +38,9 @@ class AgentFailureProjectionTests(unittest.IsolatedAsyncioTestCase):
                 yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
         model = ReceiptModel()
         session, _, _ = _runtime(model)
-        with patch('app.agent.indexer_candidate_actions.prepare_submit_resource', return_value=(
+        with patch('app.agent.domains.resources.candidate_actions.prepare_submit_resource', return_value=(
             ToolResult(True, 'confirmation_required', '确认下载'), 'snapshot')), patch(
-            'app.agent.indexer_candidate_actions.submit_resource_confirmed', return_value=ToolResult(
+            'app.agent.domains.resources.candidate_actions.submit_resource_confirmed', return_value=ToolResult(
                 False, 'manual_review', FAILURE['summary'], data=FAILURE['data'], error=WARNING)) as execute:
             first = await _collect(session.run(AgentInput(message='搜索资源并推送到云盘',
                 owner='fixture-owner', session_id=SESSION_ID)))

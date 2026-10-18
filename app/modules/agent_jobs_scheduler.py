@@ -2,25 +2,25 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
-from datetime import date, datetime, timedelta
 import json
 import threading
 import time
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from app import database as db
-from app.agent.library_patrol_progress import (
+from app.agent.domains.library.patrol_progress import (
     finalize_patrol_progress,
     load_patrol_progress,
     merge_patrol_progress,
 )
-from app.agent.library_patrol_status import build_persisted_patrol_projection
-from app.agent.models import ToolResult
+from app.agent.domains.library.patrol_status import build_persisted_patrol_projection
 from app.agent.feature_gate import (
     agent_runtime_generation_is_current,
     current_agent_runtime_generation,
 )
+from app.agent.models import ToolResult
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -428,7 +428,9 @@ class AgentJobsScheduler:
 
     @staticmethod
     def _default_audit_executor(arguments: dict[str, Any]) -> ToolResult:
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         return audit_library_episodes_batch(arguments)
 
@@ -444,15 +446,18 @@ class AgentJobsScheduler:
 
     def _run_due_continuation_once(self) -> int:
         """一个有界的原任务续行；读取等待与后台终态共用执行器。"""
+        from dataclasses import asdict
+
         from app import config
         from app.agent.feature_gate import is_agent_enabled
         from app.agent.kernel.bootstrap import (
-            _capture_creation_binding, _recheck_creation_binding, build_agent_kernel_runtime,
+            _capture_creation_binding,
+            _recheck_creation_binding,
+            build_agent_kernel_runtime,
         )
         from app.agent.kernel.persistence import SQLiteKernelStore
         from app.agent.kernel.ports.mediaflux_policy import MediaFluxTurnAdmission
-        from app.agent.kernel.state import AgentInput
-        from dataclasses import asdict
+        from app.agent.kernel.state_types import AgentInput
         if self._stop_event.is_set() or not is_agent_enabled():
             return 0
 
@@ -462,7 +467,9 @@ class AgentJobsScheduler:
                 if self._stop_event.is_set():
                     return 0
                 if candidate.get('delivery_pending') is True:
-                    from app.agent.kernel.continuation import deliver_continuation_result
+                    from app.agent.kernel.continuation import (
+                        deliver_continuation_result,
+                    )
                     if await deliver_continuation_result(store, candidate):
                         return 1
                     continue
@@ -488,7 +495,7 @@ class AgentJobsScheduler:
                     _recheck_creation_binding(binding)
                 if runtime.creation_binding != binding or runtime.session.continuation_binding != binding:
                     return 0
-                from app.agent.kernel.state import SessionBusyError
+                from app.agent.kernel.state_types import SessionBusyError
                 try:
                     resumed = await runtime.session.resume_wait(candidate=candidate, cancelled=self._stop_event.is_set)
                 except SessionBusyError:

@@ -13,20 +13,16 @@ from typing import Any
 
 from app.agent.confirmation import ConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.errors import AgentToolError
-from app.agent.kernel.bootstrap import _configure_domain_contexts
+from app.agent.errors import AgentToolError, ToolPipelineError
+from app.agent.kernel.bootstrap import _build_domain_dependencies
 from app.agent.kernel.capabilities import ToolEffect
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
-from app.agent.kernel.pipeline import (
-    InMemoryRateLimiter,
-    PipelineResult,
-    ToolCallContext,
-    ToolPipeline,
-    ToolPipelineError,
-)
+from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore, SessionBusyError
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken, SessionBusyError
+from app.agent.kernel.tool_calls import PipelineResult, ToolCallContext
 from app.agent.models import ToolContext
 
 
@@ -92,17 +88,18 @@ class KernelDomainTestHarness:
     def __init__(self) -> None:
         self.state = InMemorySessionStateStore()
         (
-            _repository,
+            self.domain_actions,
             resource_store,
             ingest_store,
             missing_media_runtime,
-        ) = _configure_domain_contexts()
+        ) = _build_domain_dependencies()
         self.recent_resource_store = resource_store
         self.catalog = catalog_from_tool_specs(
             build_tool_specs(
                 resource_store,
                 ingest_store,
                 missing_media_runtime=missing_media_runtime,
+                domain_actions=self.domain_actions,
             )
         )
         self.pipeline = ToolPipeline(
@@ -139,7 +136,7 @@ class KernelDomainTestHarness:
             current = await self.state.load(owner=owner, session_id=session_id)
             if current.generation <= 0:
                 raise AgentToolError("没有待确认计划", code="confirmation_invalid")
-            from app.agent.kernel.state import PublicationLease
+            from app.agent.kernel.state_types import PublicationLease
 
             lease = PublicationLease(
                 owner=owner,

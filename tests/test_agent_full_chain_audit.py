@@ -8,14 +8,14 @@ from unittest.mock import patch
 import pytest
 
 from app import database as db
-from app.agent import indexer_actions
 from app.agent.confirmation import SQLiteConfirmationStore
+from app.agent.domains.resources import indexer_actions
+from app.agent.domains.resources.selection import current_candidate_view
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.transports import QueryEnvelope
-from app.agent.kernel.ux_selection import current_candidate_view
 from app.agent.public_view import public_conversation_messages
+from app.agent.transports import QueryEnvelope
 from app.indexers.models import ResolvedDownload
 from app.modules import download_dispatcher as dispatcher
 from tests.support import isolated_test_database

@@ -7,9 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app.agent.errors import AgentToolError
-from app.agent.models import ToolResult
-from app.agent.organize_actions import (
+from app.agent.domains.guangya.organize_actions import (
     _configured_sources,
     prepare_guangya_organize_run_once,
     prepare_guangya_organize_stop,
@@ -17,6 +15,8 @@ from app.agent.organize_actions import (
     run_guangya_organize_once_confirmed,
     stop_guangya_organize_confirmed,
 )
+from app.agent.errors import AgentToolError
+from app.agent.models import ToolResult
 from app.modules.organize import Organizer, OrganizeRules
 from app.modules.organize_tasks import OrganizeTaskManager
 
@@ -71,7 +71,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
             "GY_ORGANIZE_SOURCE_DIRS": '[{"id":"source-a","name":"A"},"source-b",{"id":"source-a","name":"Duplicate"}]'
         }
         with patch(
-            "app.agent.organize_actions.config.get",
+            "app.agent.domains.guangya.organize_actions.config.get",
             side_effect=lambda key, default="": values.get(key, default),
         ):
             self.assertEqual(
@@ -83,20 +83,20 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
             )
         values["GY_ORGANIZE_SOURCE_DIRS"] = "invalid-json"
         with patch(
-            "app.agent.organize_actions.config.get",
+            "app.agent.domains.guangya.organize_actions.config.get",
             side_effect=lambda key, default="": values.get(key, default),
         ), self.assertRaises(AgentToolError) as invalid:
             _configured_sources()
         self.assertEqual(invalid.exception.code, "invalid_configuration")
         values["GY_ORGANIZE_SOURCE_DIRS"] = "[]"
         with patch(
-            "app.agent.organize_actions.config.get",
+            "app.agent.domains.guangya.organize_actions.config.get",
             side_effect=lambda key, default="": values.get(key, default),
         ):
             self.assertEqual(_configured_sources(), [])
         values["GY_ORGANIZE_SOURCE_DIRS"] = ""
         with patch(
-            "app.agent.organize_actions.config.get",
+            "app.agent.domains.guangya.organize_actions.config.get",
             side_effect=lambda key, default="": values.get(key, default),
         ):
             self.assertEqual(_configured_sources(), [])
@@ -118,14 +118,14 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
 
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 side_effect=configured_inputs,
             ),
             patch(
-                "app.agent.organize_actions.GuangYaClient", side_effect=client_factory
+                "app.agent.domains.guangya.organize_actions.GuangYaClient", side_effect=client_factory
             ),
             patch(
-                "app.agent.organize_actions._organize_preview_snapshot",
+                "app.agent.domains.guangya.organize_actions._organize_preview_snapshot",
                 return_value=ToolResult(True, "preview", "preview"),
             ),
         ):
@@ -341,14 +341,14 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         client = _atomic_clean_client()
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 return_value=(sources, rules, ""),
             ),
             patch(
-                "app.agent.organize_actions.get_organize_manager", return_value=manager
+                "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
             ),
-            patch("app.agent.organize_actions.GuangYaClient", return_value=client),
-            patch("app.agent.organize_actions.Organizer", return_value=organizer),
+            patch("app.agent.domains.guangya.organize_actions.GuangYaClient", return_value=client),
+            patch("app.agent.domains.guangya.organize_actions.Organizer", return_value=organizer),
         ):
             result = preview_guangya_organize({})
         self.assertTrue(result.ok)
@@ -384,17 +384,17 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         ]
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 return_value=(sources, rules, ""),
             ),
             patch(
-                "app.agent.organize_actions.get_organize_manager", return_value=manager
+                "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
             ),
             patch(
-                "app.agent.organize_actions.GuangYaClient",
+                "app.agent.domains.guangya.organize_actions.GuangYaClient",
                 return_value=_atomic_clean_client(),
             ),
-            patch("app.agent.organize_actions.Organizer", return_value=organizer),
+            patch("app.agent.domains.guangya.organize_actions.Organizer", return_value=organizer),
         ):
             result = preview_guangya_organize({})
         self.assertTrue(result.ok)
@@ -418,17 +418,17 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 return_value=(sources, rules, ""),
             ),
             patch(
-                "app.agent.organize_actions.get_organize_manager", return_value=manager
+                "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
             ),
             patch(
-                "app.agent.organize_actions.GuangYaClient",
+                "app.agent.domains.guangya.organize_actions.GuangYaClient",
                 return_value=_atomic_clean_client(),
             ),
-            patch("app.agent.organize_actions.Organizer", return_value=organizer),
+            patch("app.agent.domains.guangya.organize_actions.Organizer", return_value=organizer),
         ):
             incomplete, _context = prepare_guangya_organize_run_once({})
         self.assertFalse(incomplete.ok)
@@ -439,17 +439,17 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         organizer.organize.return_value = ([], _preview_stats(total=0))
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 return_value=(sources, rules, ""),
             ),
             patch(
-                "app.agent.organize_actions.get_organize_manager", return_value=manager
+                "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
             ),
             patch(
-                "app.agent.organize_actions.GuangYaClient",
+                "app.agent.domains.guangya.organize_actions.GuangYaClient",
                 return_value=_atomic_clean_client(),
             ),
-            patch("app.agent.organize_actions.Organizer", return_value=organizer),
+            patch("app.agent.domains.guangya.organize_actions.Organizer", return_value=organizer),
         ):
             empty, _context = prepare_guangya_organize_run_once({})
         self.assertFalse(empty.ok)
@@ -467,15 +467,15 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         client = _atomic_clean_client(credential_generation=7)
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 return_value=(sources, rules, ""),
             ),
-            patch("app.agent.organize_actions.GuangYaClient", return_value=client),
+            patch("app.agent.domains.guangya.organize_actions.GuangYaClient", return_value=client),
             patch(
-                "app.agent.organize_actions.get_organize_manager", return_value=manager
+                "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
             ),
             patch(
-                "app.agent.organize_actions._organize_preview_snapshot",
+                "app.agent.domains.guangya.organize_actions._organize_preview_snapshot",
                 return_value=ToolResult(True, "preview", "preview"),
             ),
         ):
@@ -520,15 +520,15 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         organizer.organize.return_value = ([_preview_plan()], _preview_stats())
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 return_value=(sources, rules, ""),
             ) as configured,
-            patch("app.agent.organize_actions.GuangYaClient", return_value=client),
+            patch("app.agent.domains.guangya.organize_actions.GuangYaClient", return_value=client),
             patch(
-                "app.agent.organize_actions.get_organize_manager", return_value=manager
+                "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
             ),
             patch(
-                "app.agent.organize_actions.Organizer", return_value=organizer
+                "app.agent.domains.guangya.organize_actions.Organizer", return_value=organizer
             ) as organizer_factory,
         ):
             preview, context = prepare_guangya_organize_run_once({})
@@ -545,30 +545,30 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         manager = Mock()
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 return_value=(sources, rules, ""),
             ),
             patch(
-                "app.agent.organize_actions.GuangYaClient",
+                "app.agent.domains.guangya.organize_actions.GuangYaClient",
                 return_value=_atomic_clean_client(credential_generation=7),
             ),
             patch(
-                "app.agent.organize_actions._organize_preview_snapshot",
+                "app.agent.domains.guangya.organize_actions._organize_preview_snapshot",
                 return_value=ToolResult(True, "preview", "preview"),
             ),
         ):
             _preview, expected = prepare_guangya_organize_run_once({})
         with (
             patch(
-                "app.agent.organize_actions._configured_inputs",
+                "app.agent.domains.guangya.organize_actions._configured_inputs",
                 return_value=(sources, rules, ""),
             ),
             patch(
-                "app.agent.organize_actions.GuangYaClient",
+                "app.agent.domains.guangya.organize_actions.GuangYaClient",
                 return_value=_atomic_clean_client(credential_generation=8),
             ),
             patch(
-                "app.agent.organize_actions.get_organize_manager", return_value=manager
+                "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
             ),self.assertRaises(AgentToolError) as stale
         ):
             run_guangya_organize_once_confirmed({}, expected)
@@ -586,7 +586,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         manager.task_status.side_effect = lambda: dict(current)
         manager.stop.return_value = {"ok": True, "message": "/secret/path"}
         with patch(
-            "app.agent.organize_actions.get_organize_manager", return_value=manager
+            "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
         ):
             preview, context = prepare_guangya_organize_stop({})
             result = stop_guangya_organize_confirmed({}, context)
@@ -619,7 +619,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
             "started_at": "2026-08-03 20:00:00",
         }
         with patch(
-            "app.agent.organize_actions.get_organize_manager", return_value=manager
+            "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
         ):
             preview, context = prepare_guangya_organize_stop({})
         self.assertTrue(preview.ok)
@@ -648,7 +648,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
             separators=(",", ":"),
         )
         with patch(
-            "app.agent.organize_actions.get_organize_manager", return_value=manager
+            "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
         ), self.assertRaises(AgentToolError) as stale:
             stop_guangya_organize_confirmed({}, context)
         self.assertEqual(stale.exception.code, "confirmation_stale")
@@ -666,7 +666,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         manager = Mock()
         manager.task_status.side_effect = lambda: dict(current)
         with patch(
-            "app.agent.organize_actions.get_organize_manager", return_value=manager
+            "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
         ):
             _preview, context = prepare_guangya_organize_stop({})
             current["id"] = "secret-task-b"
@@ -678,7 +678,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
     def test_stop_preview_requires_running_and_stoppable_task(self):
         manager = Mock()
         with patch(
-            "app.agent.organize_actions.get_organize_manager", return_value=manager
+            "app.agent.domains.guangya.organize_actions.get_organize_manager", return_value=manager
         ):
             manager.task_status.return_value = {
                 "id": "",

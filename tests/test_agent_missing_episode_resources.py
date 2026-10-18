@@ -7,7 +7,7 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta
 from unittest.mock import Mock, patch
 
-from app.agent.episode_resource_actions import (
+from app.agent.domains.library.episode_resource_actions import (
     missing_episode_resource_arguments,
     missing_season_resource_arguments,
     search_missing_episode_resources,
@@ -98,10 +98,10 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         enabled_service = Mock(enabled_site_ids=("nyaa",))
         enabled_service.site_ids_for_scope.return_value = ("nyaa",)
         get_bool_patch = patch(
-            "app.agent.indexer_actions.config.get_bool", return_value=True
+            "app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True
         )
         service_patch = patch(
-            "app.agent.indexer_actions.get_indexer_service",
+            "app.agent.domains.resources.indexer_actions.get_indexer_service",
             return_value=enabled_service,
         )
         get_bool_patch.start()
@@ -148,9 +148,9 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         service = Mock(enabled_site_ids=("nyaa",))
         service.site_ids_for_scope.return_value = ("nyaa",)
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             self.assertRaisesRegex(AgentToolError, "站点未启用或不存在"),
         ):
@@ -209,9 +209,9 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         service = Mock(enabled_site_ids=("nyaa",))
         service.site_ids_for_scope.return_value = ("nyaa",)
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             self.assertRaisesRegex(AgentToolError, "站点未启用或不存在"),
         ):
@@ -228,8 +228,8 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             audit.data["target_missing"] = verdict
             with (
                 self.subTest(verdict=verdict),
-                patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=audit),
-                patch("app.agent.episode_resource_actions.search_resources") as search,
+                patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=audit),
+                patch("app.agent.domains.library.episode_resource_actions.search_resources") as search,
             ):
                 result = search_missing_episode_resources(arguments)
             self.assertFalse(result.ok)
@@ -252,15 +252,15 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         service.site_ids_for_scope.return_value = ("nyaa",)
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(missing=[{"season": 2, "episode": 3}], target_missing=True),
             ) as audit,
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 return_value=searched,
             ) as search,
         ):
@@ -301,7 +301,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         self.assertNotIn("/private/media", serialized)
 
     def test_missing_ninth_episode_does_not_promote_old_packs_or_unknown_coverage(self):
-        from app.agent.kernel.ux_selection import _recommend, candidate_item
+        from app.agent.domains.resources.selection import _recommend, candidate_item
 
         arguments = missing_episode_resource_arguments({"query": "东大高武学院", "season": 1, "episode": 9})
         old_titles = ["[GM-Team] 东大高武学院 S01E01-E04 4K", "东大高武学院 S01E08"]
@@ -313,9 +313,9 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             } for position, title in enumerate(titles, 1)])
             searched.data.update({"partial": True, "errors": [{"site_id": "btbtla", "message": "timeout"}]})
             with self.subTest(extra=extra), patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(missing=[{"season": 1, "episode": 9}], target_missing=True),
-            ), patch("app.agent.episode_resource_actions.search_resources", return_value=searched):
+            ), patch("app.agent.domains.library.episode_resource_actions.search_resources", return_value=searched):
                 result = search_missing_episode_resources(arguments)
             candidates = result.references[0].value["candidates"] if result.references else []
             assert not any(item["title"] in old_titles for item in candidates)
@@ -343,10 +343,10 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             original_searches = deepcopy(searches)
             with (
                 self.subTest(mode=mode),
-                patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=_audit_result(
+                patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=_audit_result(
                     missing=[{"season": 2, "episode": number} for number in (3, 4, 5)], target_missing=True)),
-                patch("app.agent.episode_resource_actions.search_resources", side_effect=searches) as search,
-                patch("app.agent.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
+                patch("app.agent.domains.library.episode_resource_actions.search_resources", side_effect=searches) as search,
+                patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
             ):
                 result = (search_missing_season_resources(missing_season_resource_arguments(
                     {**options, "max_episodes": 2})) if mode == "season"
@@ -424,17 +424,17 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(
                     missing=[{"season": 2, "episode": 3}], target_missing=True
                 ),
             ),
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 return_value=searched,
             ),
             patch(
-                "app.agent.episode_resource_actions.get_indexer_service",
+                "app.agent.domains.library.episode_resource_actions.get_indexer_service",
                 return_value=Mock(result_store=None),
             ),
         ):
@@ -486,17 +486,17 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(
                     missing=[{"season": 2, "episode": 3}], target_missing=True
                 ),
             ),
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 return_value=searched,
             ),
             patch(
-                "app.agent.episode_resource_actions.get_indexer_service",
+                "app.agent.domains.library.episode_resource_actions.get_indexer_service",
                 return_value=Mock(result_store=None),
             ),
         ):
@@ -528,7 +528,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         searched = _search_result(query="示例剧 S01E150")
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(
                     missing=[
                         {"season": 1, "episode": number} for number in range(1, 101)
@@ -539,7 +539,7 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
                 ),
             ) as audit,
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 return_value=searched,
             ) as search,
         ):
@@ -570,11 +570,11 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         searched = _search_result(ok=False, status="unavailable")
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(missing=[{"season": 2, "episode": 3}], target_missing=True),
             ),
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 return_value=searched,
             ) as search,
         ):
@@ -616,10 +616,10 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             with (
                 self.subTest(status=status),
                 patch(
-                    "app.agent.episode_resource_actions.audit_series_episodes",
+                    "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                     return_value=audit_result,
                 ),
-                patch("app.agent.episode_resource_actions.search_resources") as search,
+                patch("app.agent.domains.library.episode_resource_actions.search_resources") as search,
             ):
                 result = search_missing_episode_resources(arguments)
             self.assertFalse(result.ok)
@@ -653,11 +653,11 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         ]
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(missing=missing),
             ) as audit,
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 side_effect=searches,
             ) as search,
         ):
@@ -710,10 +710,10 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
             with (
                 self.subTest(status=status),
                 patch(
-                    "app.agent.episode_resource_actions.audit_series_episodes",
+                    "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                     return_value=audit_result,
                 ),
-                patch("app.agent.episode_resource_actions.search_resources") as search,
+                patch("app.agent.domains.library.episode_resource_actions.search_resources") as search,
             ):
                 result = search_missing_season_resources(arguments)
             self.assertFalse(result.ok)
@@ -731,11 +731,11 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         ]
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(missing=missing),
             ),
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 side_effect=searches,
             ) as search,
         ):
@@ -757,12 +757,12 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         missing = [{"season": 2, "episode": episode} for episode in (1, 2)]
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(missing=missing),
             ),
-            patch("app.agent.episode_resource_actions.search_resources") as search,
+            patch("app.agent.domains.library.episode_resource_actions.search_resources") as search,
             patch(
-                "app.agent.episode_resource_actions.time.monotonic",
+                "app.agent.domains.library.episode_resource_actions.time.monotonic",
                 side_effect=[0.0, 61.0],
             ),
         ):
@@ -780,15 +780,15 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
         missing = [{"season": 2, "episode": episode} for episode in (1, 2, 3)]
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=_audit_result(missing=missing),
             ),
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 return_value=_search_result(query="示例剧 S02E01"),
             ) as search,
             patch(
-                "app.agent.episode_resource_actions.time.monotonic",
+                "app.agent.domains.library.episode_resource_actions.time.monotonic",
                 side_effect=[0.0, 0.0, 46.0],
             ),
         ):
@@ -825,9 +825,9 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
 
             with (
                 self.subTest(durations=durations),
-                patch("app.agent.episode_resource_actions.time.monotonic", side_effect=lambda clock=clock: clock[0]),
-                patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit),
-                patch("app.agent.episode_resource_actions.search_resources", side_effect=search),
+                patch("app.agent.domains.library.episode_resource_actions.time.monotonic", side_effect=lambda clock=clock: clock[0]),
+                patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", side_effect=audit),
+                patch("app.agent.domains.library.episode_resource_actions.search_resources", side_effect=search),
             ):
                 result = search_missing_season_resources(missing_season_resource_arguments({"query": "示例剧", "season": 2}))
             self.assertEqual(budgets, expected_budgets)
@@ -839,9 +839,9 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
     def test_failed_attempt_is_not_counted_as_unsearched_when_deadline_expires(self):
         missing = [{"season": 2, "episode": e} for e in (1, 2, 3, 4)]
         with (
-            patch("app.agent.episode_resource_actions.time.monotonic", side_effect=[0, 0, 5, 45]),
-            patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=_audit_result(missing=missing)),
-            patch("app.agent.episode_resource_actions.search_resources", side_effect=[
+            patch("app.agent.domains.library.episode_resource_actions.time.monotonic", side_effect=[0, 0, 5, 45]),
+            patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=_audit_result(missing=missing)),
+            patch("app.agent.domains.library.episode_resource_actions.search_resources", side_effect=[
                 _search_result(query="示例剧 S02E01"), _search_result(ok=False, status="timeout"),
             ]),
         ):
@@ -867,8 +867,8 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
 
             with (
                 self.subTest(after_search=after_search),
-                patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit),
-                patch("app.agent.episode_resource_actions.search_resources", side_effect=search) as searched,
+                patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", side_effect=audit),
+                patch("app.agent.domains.library.episode_resource_actions.search_resources", side_effect=search) as searched,
             ):
                 result = search_missing_season_resources(
                     missing_season_resource_arguments({"query": "示例剧", "season": 2}),
@@ -882,9 +882,9 @@ class MissingEpisodeResourceToolTests(unittest.TestCase):
     def test_explicit_episode_limit_preserves_remaining_targets_in_batch(self):
         args = missing_season_resource_arguments({"items": [{"query": "示例剧", "season": 2, "episodes": [7, 4]}], "max_episodes": 1})
         with (
-            patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=_audit_result(
+            patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=_audit_result(
                 missing=[{"season": 2, "episode": e} for e in (1, 4, 7)])),
-            patch("app.agent.episode_resource_actions.search_resources", return_value=_search_result()) as search,
+            patch("app.agent.domains.library.episode_resource_actions.search_resources", return_value=_search_result()) as search,
         ):
             result = search_missing_season_resources(args)
         self.assertEqual([call.args[0]["episode"] for call in search.call_args_list], [4])
@@ -918,9 +918,9 @@ class MultiWorkResourceTests(unittest.TestCase):
                 {"query": name, "season": 2, "episodes": [3]} for name in names]})
             with (
                 self.subTest(include_match=include_match),
-                patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit),
-                patch("app.agent.episode_resource_actions.search_resources", side_effect=search),
-                patch("app.agent.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
+                patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", side_effect=audit),
+                patch("app.agent.domains.library.episode_resource_actions.search_resources", side_effect=search),
+                patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
             ):
                 result = search_missing_season_resources(arguments)
                 self.assertEqual(result.data["recommended_positions"], [2] if include_match else [])
@@ -972,7 +972,7 @@ class MultiWorkResourceTests(unittest.TestCase):
             title = arguments["title"]
             seen.append((title, arguments["season"], arguments["episode"]))
             return _search_result(items=[{"result_id": f"batch-precise-{len(title):04d}-{title.count('穹')}", "title": f"{title} S{arguments['season']:02d}E{arguments['episode']:02d} 1080p", "site_id": "nyaa", "site_name": "Nyaa", "download_state": "ready", "download_kinds": ["magnet"]}])
-        with patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit), patch("app.agent.episode_resource_actions.search_resources", side_effect=search), patch("app.agent.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)):
+        with patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", side_effect=audit), patch("app.agent.domains.library.episode_resource_actions.search_resources", side_effect=search), patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)):
             result = search_missing_season_resources(args)
         self.assertEqual(len(seen), 2)
         self.assertCountEqual(seen, [("万古仙穹", 3, 4), ("理想禁区", 1, 7)])
@@ -987,7 +987,7 @@ class MultiWorkResourceTests(unittest.TestCase):
                 missing_season_resource_arguments({"query": "示例", "season": 1, "episodes": episodes})
         self.assertEqual(missing_season_resource_arguments({"query": "示例", "season": 1, "episodes": [1, 2, 3, 4]})["episodes"], [1, 2, 3, 4])
         args = missing_season_resource_arguments({"query": "示例", "season": 1, "episodes": [7]})
-        with patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=_audit_result(missing=[{"season": 1, "episode": 1}])), patch("app.agent.episode_resource_actions.search_resources") as search:
+        with patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=_audit_result(missing=[{"season": 1, "episode": 1}])), patch("app.agent.domains.library.episode_resource_actions.search_resources") as search:
             result = search_missing_season_resources(args)
         self.assertEqual(result.status, "not_missing")
         self.assertIn("指定集", result.summary)
@@ -1006,9 +1006,9 @@ class MultiWorkResourceTests(unittest.TestCase):
                 missing=[] if arguments["query"] == "已在库" else [{"season": 1, "episode": 7}],
             )
         with (
-            patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit),
-            patch("app.agent.episode_resource_actions.search_resources", return_value=_search_result(status="empty", items=[])) as search,
-            patch("app.agent.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
+            patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", side_effect=audit),
+            patch("app.agent.domains.library.episode_resource_actions.search_resources", return_value=_search_result(status="empty", items=[])) as search,
+            patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=Mock(result_store=None)),
         ):
             result = search_missing_season_resources(args)
         search.assert_called_once()
@@ -1024,7 +1024,7 @@ class MultiWorkResourceTests(unittest.TestCase):
     def test_future_fin_pack_is_excluded_from_single_and_batch_missing_resources(self):
         from types import SimpleNamespace
 
-        from app.agent.kernel.ux_selection import _recommend, candidate_item
+        from app.agent.domains.resources.selection import _recommend, candidate_item
         from app.indexers.models import IndexerItem
 
         # 固定合成排期和资源，仅用于回归，不代表真实平台上的播出或检索结果。
@@ -1075,11 +1075,11 @@ class MultiWorkResourceTests(unittest.TestCase):
                     audit_result.data.update(title="诛仙", tmdb_id=target["tmdb_id"])
                     audit_result.effect_metadata["episode_mapping_context"] = mapping_context
                     with (
-                        patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=audit_result) as audit,
-                        patch("app.agent.episode_resource_actions.search_resources", return_value=_search_result(
+                        patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=audit_result) as audit,
+                        patch("app.agent.domains.library.episode_resource_actions.search_resources", return_value=_search_result(
                             query="诛仙 S04E11", items=[item.to_public_dict() for item in stored.values()]
                         )) as search,
-                        patch("app.agent.episode_resource_actions.get_indexer_service", return_value=service),
+                        patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=service),
                     ):
                         if mode == "episode":
                             arguments = missing_episode_resource_arguments({
@@ -1186,15 +1186,15 @@ class MultiWorkResourceTests(unittest.TestCase):
 
         with (
             patch(
-                "app.agent.episode_resource_actions.audit_series_episodes",
+                "app.agent.domains.library.episode_resource_actions.audit_series_episodes",
                 return_value=audit,
             ),
             patch(
-                "app.agent.episode_resource_actions.search_resources",
+                "app.agent.domains.library.episode_resource_actions.search_resources",
                 return_value=searched,
             ),
             patch(
-                "app.agent.episode_resource_actions.get_indexer_service",
+                "app.agent.domains.library.episode_resource_actions.get_indexer_service",
                 return_value=service,
             ),
         ):
@@ -1214,8 +1214,8 @@ class MultiWorkResourceTests(unittest.TestCase):
     def test_cancelled_batch_does_not_start_audits_or_indexers(self):
         from app.agent.models import ToolContext
         arguments = missing_season_resource_arguments({"items": [{"query": f"测试作品{i}", "season": 1} for i in range(7)]})
-        with patch("app.agent.episode_resource_actions.audit_series_episodes") as audit, patch(
-            "app.agent.episode_resource_actions.search_resources"
+        with patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes") as audit, patch(
+            "app.agent.domains.library.episode_resource_actions.search_resources"
         ) as search:
             result = search_missing_season_resources(arguments, context=ToolContext(cancelled=lambda: True))
         audit.assert_not_called()
@@ -1227,7 +1227,7 @@ class MultiWorkResourceTests(unittest.TestCase):
     def test_seven_work_batch_keeps_six_private_candidates_and_deduplicates_pack(self):
         from types import SimpleNamespace
 
-        from app.agent.recent_resource_candidates import (
+        from app.agent.domains.resources.candidate_context import (
             restore_resource_candidate_reference,
             validate_safe_resource_snapshot,
         )
@@ -1250,9 +1250,9 @@ class MultiWorkResourceTests(unittest.TestCase):
             title = name + (".S01E08-09.1080p" if index == 0 else ".S01E08.1080p")
             stored[result_id] = IndexerItem("nyaa", "测试站点", title, result_id=result_id, download_state="ready", download_kinds=("magnet",), magnet="magnet:?xt=urn:btih:" + "a" * 40)
             return _search_result(items=[{"result_id": result_id, "title": title, "site_id": "nyaa", "site_name": "测试站点", "download_state": "ready", "download_kinds": ["magnet"]}])
-        with patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit), patch(
-            "app.agent.episode_resource_actions.search_resources", side_effect=search
-        ), patch("app.agent.episode_resource_actions.get_indexer_service", return_value=service):
+        with patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", side_effect=audit), patch(
+            "app.agent.domains.library.episode_resource_actions.search_resources", side_effect=search
+        ), patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=service):
             result = search_missing_season_resources(args)
         self.assertEqual(len(result.data["groups"]), 7)
         self.assertEqual(result.data["recommended_positions"], [1, 2, 3, 4, 5, 6])
@@ -1275,7 +1275,7 @@ class MissingResourceInventoryFreshnessTests(unittest.TestCase):
     """资源入口运行真实审计/缓存/媒体清单链；仅外部客户端为替身。"""
 
     def setUp(self):
-        from app.agent import episode_audit
+        from app.agent.domains.library import episode_audit
         from app.clients.base import (
             SeriesCandidate,
             SeriesEpisodeInventory,
@@ -1308,14 +1308,14 @@ class MissingResourceInventoryFreshnessTests(unittest.TestCase):
         }
         for target, options in (
             ("app.services._configured_media_sources", {"side_effect": lambda: list(self.sources)}),
-            ("app.agent.episode_audit.TMDBClient", {"return_value": tmdb}),
-            ("app.agent.episode_resource_actions.get_indexer_service", {"return_value": Mock()}),
+            ("app.agent.domains.library.episode_audit.TMDBClient", {"return_value": tmdb}),
+            ("app.agent.domains.library.episode_resource_actions.get_indexer_service", {"return_value": Mock()}),
         ):
             patcher = patch(target, **options)
             patcher.start()
             self.addCleanup(patcher.stop)
         patcher = patch(
-            "app.agent.episode_resource_actions.search_resources",
+            "app.agent.domains.library.episode_resource_actions.search_resources",
             side_effect=lambda *_a, **_kw: _search_result(status="empty", items=[]),
         )
         self.search = patcher.start()

@@ -6,26 +6,37 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from dataclasses import dataclass, replace
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from urllib.parse import quote, unquote, urlsplit
 from weakref import WeakValueDictionary
 
 from bs4 import BeautifulSoup
 
+from app.clients.http import HttpError, HttpInvalidResponse, HttpSecurityError
 from app.concurrency import CrossLoopAsyncLock
-from ..config import BTBTLA_URL, BTBTLA_MIRROR_URL
-from ..errors import (
-    IndexerError,
-    IndexerInvalidResponse,
-    IndexerRateLimited,
-    IndexerResultExpired,
-    IndexerSecurityError,
-    IndexerUnavailable,
+
+from ..config import BTBTLA_MIRROR_URL, BTBTLA_URL
+from ..errors import IndexerRateLimited, IndexerResultExpired, IndexerUnavailable
+from ..models import (
+    IndexerCapabilities,
+    IndexerItem,
+    IndexerMediaSearchRequest,
+    IndexerPage,
+    IndexerProviderError,
+    IndexerSearchRequest,
+    ResolvedDownload,
 )
-from ..models import IndexerCapabilities, IndexerItem, IndexerMediaSearchRequest, IndexerPage, IndexerProviderError, IndexerSearchRequest, ResolvedDownload
 from ..ranking import candidate_sort_key, rank_item
-from .base import IndexerAdapter, SearchRequestPacer, fixed_host_join, is_likely_challenge_page, magnet_infohash, parse_size_bytes, require_html_response
+from .base import (
+    IndexerAdapter,
+    SearchRequestPacer,
+    fixed_host_join,
+    is_likely_challenge_page,
+    magnet_infohash,
+    parse_size_bytes,
+    require_html_response,
+)
 
 _MAGNET_CANDIDATE = re.compile(r"magnet:\?[^\"'\s<>]+", re.IGNORECASE)
 _RESOURCE_SIZE = re.compile(r"\[\s*([0-9]+(?:\.[0-9]+)?\s*[KMGTPE]?i?B)\s*\]", re.IGNORECASE)
@@ -201,8 +212,8 @@ class BTBtlaAdapter(IndexerAdapter):
                 known_empty = any(marker in soup.get_text(" ", strip=True).lower()
                                   for marker in ("暂无", "无结果", "no result"))
                 if not (known_empty or zero_summary) or is_likely_challenge_page(response.body):
-                    raise IndexerInvalidResponse("BTBtla search page structure is invalid")
-            except IndexerInvalidResponse as exc:
+                    raise HttpInvalidResponse("BTBtla search page structure is invalid")
+            except HttpInvalidResponse as exc:
                 raise IndexerUnavailable("BTBtla search endpoint returned an invalid page") from exc
 
         if year is not None:
@@ -217,7 +228,7 @@ class BTBtlaAdapter(IndexerAdapter):
             reverse=True,
         )[:self.max_detail_candidates]
         items: dict[str | None, IndexerItem] = {}
-        errors: list[IndexerError] = []
+        errors: list[HttpError] = []
         matched_tier = None
         for title, detail_url, category, candidate_year in ranked_candidates:
             tier = (self._search_candidate_score(query, title)[0], year is not None and candidate_year == year)
@@ -239,12 +250,12 @@ class BTBtlaAdapter(IndexerAdapter):
                     and detail_soup.select_one("#download-list") is None
                     and not detail_soup.select(".module-row-info")
                 ):
-                    raise IndexerInvalidResponse("BTBtla detail page omitted the resource list")
-            except IndexerSecurityError:
+                    raise HttpInvalidResponse("BTBtla detail page omitted the resource list")
+            except HttpSecurityError:
                 raise
-            except IndexerError as exc:
+            except HttpError as exc:
                 errors.append(exc)
-                if not isinstance(exc, (IndexerInvalidResponse, IndexerResultExpired)):
+                if not isinstance(exc, (HttpInvalidResponse, IndexerResultExpired)):
                     if not items:
                         raise
                     break
@@ -273,7 +284,7 @@ class BTBtlaAdapter(IndexerAdapter):
                 base_url=self._base_for_url(detail.url),
             )
             if not download_url:
-                raise IndexerInvalidResponse("BTBtla detail omitted download link")
+                raise HttpInvalidResponse("BTBtla detail omitted download link")
 
         download = await self._get(download_url)
         self._validate_response("download", download)
@@ -287,7 +298,7 @@ class BTBtlaAdapter(IndexerAdapter):
         )
         if torrent_url:
             return ResolvedDownload(kind="torrent", value=torrent_url)
-        raise IndexerInvalidResponse("BTBtla download page omitted a valid magnet or torrent")
+        raise HttpInvalidResponse("BTBtla download page omitted a valid magnet or torrent")
 
     def _parse_search_candidates(
         self,
@@ -321,7 +332,7 @@ class BTBtlaAdapter(IndexerAdapter):
                     anchor.get("href") or "",
                     relative_base_url=base_url,
                 )
-            except IndexerSecurityError:
+            except HttpSecurityError:
                 continue
             category = self._parse_search_category(node)
             caption = node.select_one("div.module-item-caption span")
@@ -383,7 +394,7 @@ class BTBtlaAdapter(IndexerAdapter):
                         anchor.get("href") or "",
                         relative_base_url=base_url,
                     )
-                except IndexerSecurityError:
+                except HttpSecurityError:
                     continue
                 if urlsplit(candidate).path.startswith("/tdown/"):
                     resource_anchor = anchor
@@ -423,7 +434,7 @@ class BTBtlaAdapter(IndexerAdapter):
                         download_counter.get("href") or "",
                         relative_base_url=base_url,
                     )
-                except IndexerSecurityError:
+                except HttpSecurityError:
                     continue
                 if counter_url != resource_url:
                     continue
@@ -466,7 +477,7 @@ class BTBtlaAdapter(IndexerAdapter):
                     anchor.get("href") or "",
                     relative_base_url=base_url,
                 )
-            except IndexerSecurityError:
+            except HttpSecurityError:
                 continue
             if unquote(urlsplit(candidate).path).rstrip("/") == expected_path:
                 return True
@@ -499,7 +510,7 @@ class BTBtlaAdapter(IndexerAdapter):
                     anchor.get("href") or "",
                     relative_base_url=base_url,
                 )
-            except IndexerSecurityError:
+            except HttpSecurityError:
                 continue
             candidates.append(candidate)
         candidates.sort(key=lambda value: 0 if urlsplit(value).path.startswith("/tdown/") else 1)
@@ -507,13 +518,13 @@ class BTBtlaAdapter(IndexerAdapter):
 
     def _validate_stored_result(self, stored_result: IndexerItem) -> None:
         if stored_result.site_id != self.site_id:
-            raise IndexerSecurityError("result provider mismatch")
+            raise HttpSecurityError("result provider mismatch")
         if stored_result.download_state != "resolvable" or not set(
             stored_result.download_kinds
         ).intersection({"magnet", "torrent"}):
-            raise IndexerInvalidResponse("result is not resolvable as magnet or torrent")
+            raise HttpInvalidResponse("result is not resolvable as magnet or torrent")
         if not stored_result.detail_url:
-            raise IndexerInvalidResponse("result detail URL is missing")
+            raise HttpInvalidResponse("result detail URL is missing")
 
 
     def _base_for_url(self, candidate: str) -> str:
@@ -522,7 +533,7 @@ class BTBtlaAdapter(IndexerAdapter):
         for base_url in self._host_bases:
             if urlsplit(base_url).hostname == host:
                 return base_url
-        raise IndexerSecurityError("provider result escaped its registered host")
+        raise HttpSecurityError("provider result escaped its registered host")
 
     @staticmethod
     def _extract_magnet(body: bytes, *, required: bool = True) -> str:
@@ -537,7 +548,7 @@ class BTBtlaAdapter(IndexerAdapter):
             if magnet_infohash(normalized):
                 return normalized
         if required:
-            raise IndexerInvalidResponse("BTBtla download page omitted a valid magnet")
+            raise HttpInvalidResponse("BTBtla download page omitted a valid magnet")
         return ""
 
     def _extract_torrent_url(self, body: bytes, *, base_url: str) -> str:
@@ -548,7 +559,7 @@ class BTBtlaAdapter(IndexerAdapter):
                     anchor.get("href") or "",
                     relative_base_url=base_url,
                 )
-            except IndexerSecurityError:
+            except HttpSecurityError:
                 continue
             path = urlsplit(candidate).path.lower()
             if path.startswith("/dlt/") or path.endswith(".torrent"):
@@ -573,4 +584,4 @@ class BTBtlaAdapter(IndexerAdapter):
         if status_code >= 500:
             raise IndexerUnavailable(f"BTBtla returned HTTP {status_code}")
         if status_code != 200:
-            raise IndexerInvalidResponse(f"BTBtla returned HTTP {status_code}")
+            raise HttpInvalidResponse(f"BTBtla returned HTTP {status_code}")

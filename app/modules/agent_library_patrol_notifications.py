@@ -7,7 +7,7 @@ import re
 from dataclasses import replace
 from typing import Any
 
-from app.agent.library_patrol_status import validate_persisted_patrol_projection
+from app.agent.domains.library.patrol_status import validate_persisted_patrol_projection
 from app.config import get
 from app.notifier import NotificationAction, NotificationEvent, TelegramSendResult
 
@@ -136,7 +136,9 @@ def send_library_patrol_notification_result(projection: Any) -> TelegramSendResu
         event = replace(event, actions=())
     from app.modules.telegram_notification_center import publish_notification_event
     from app.modules.telegram_notification_policy import (
-        NotificationImportance, NotificationTopic, notifications_enabled,
+        NotificationImportance,
+        NotificationTopic,
+        notifications_enabled,
     )
 
     if not notifications_enabled():

@@ -6,12 +6,19 @@ import json
 
 import pytest
 
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolPipeline
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from tests.test_agent_kernel_core import ScriptedModel
 
 
@@ -78,8 +85,8 @@ def test_independent_reads_overlap_but_never_exceed_four_and_keep_native_order(c
 
 
 @pytest.mark.parametrize("metadata,observer", [({}, None), ({"parallel_read": 1}, None),
-    ({"parallel_read": True, "source_kind": "resource_index"}, None),
-    ({"parallel_read": True, "source_kind": "resource_presentation"}, None),
+    ({"parallel_read": True, "source_kind": "resource_index", "publishes_selection": True}, None),
+    ({"parallel_read": True, "source_kind": "resource_presentation", "publishes_selection": True}, None),
     ({"parallel_read": True}, lambda result, arguments: None)])
 def test_unmarked_stateful_or_observed_reads_remain_serial(metadata, observer):
     async def scenario():

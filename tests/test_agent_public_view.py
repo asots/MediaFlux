@@ -4,8 +4,8 @@ import json
 import unittest
 
 from app.agent.public_view import (
-    format_public_result,
     format_partial_progress,
+    format_public_result,
     public_conversation_messages,
     public_result_state,
     sanitize_confirmed_answer,
@@ -705,10 +705,12 @@ if __name__ == "__main__":
 
 class PublicToolArgumentErrorTests(unittest.TestCase):
     def test_actual_validator_error_survives_kernel_and_public_projection(self):
-        from app.agent.guangya_fs_change_actions import guangya_fs_change_arguments
+        from app.agent.domains.guangya.fs_change_actions import (
+            guangya_fs_change_arguments,
+        )
+        from app.agent.errors import AgentToolError
         from app.agent.kernel.ports.existing_actions import _safe_error
         from app.agent.public_safety import sanitize_public_text
-        from app.agent.errors import AgentToolError
         with self.assertRaises(AgentToolError) as caught:
             guangya_fs_change_arguments({'operations': [{'op': 'rename', 'object_ref': 'OBJ' + 'A' * 24}]})
         error = _safe_error(caught.exception, fallback_code='invalid_tool_call')

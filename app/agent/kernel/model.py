@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from .state import CancellationToken
+from .state_types import CancellationToken
 
 
 @dataclass(frozen=True, slots=True)

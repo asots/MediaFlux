@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import unittest
 import json
+import unittest
 from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
-from app.agent.discovery_actions import recommend_arguments, recommend_discovery
+from app.agent.domains.discovery.actions import recommend_arguments, recommend_discovery
 from app.agent.errors import AgentToolError
+from app.agent.kernel.conversation_context import capability_retrieval_context
 from app.agent.models import ToolContext
 from app.clients.base import MediaIdentityCandidate, MediaIdentityInventory
 from app.discovery.models import (
@@ -79,8 +80,8 @@ def _page(items=(), *, number=1, has_more=False):
 def _recommend_fixture(service, inventory=None):
     client = Mock()
     client.list_media_identity_inventory.return_value = inventory or MediaIdentityInventory(candidates=[], total=0)
-    with patch("app.agent.discovery_actions.config.get_bool", return_value=True), \
-            patch("app.agent.discovery_actions.get_discovery_service", return_value=service), \
+    with patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True), \
+            patch("app.agent.domains.discovery.actions.get_discovery_service", return_value=service), \
             patch("app.services._configured_media_sources", return_value=[("jellyfin", "Jellyfin", "", client)]):
         yield client
 
@@ -330,8 +331,7 @@ class AgentRecommendationDeclarationTests(unittest.TestCase):
         from app.agent.domain_catalog import build_tool_specs
         from app.agent.kernel.capabilities import CapabilityRetriever
         from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
-        from app.agent.kernel.session import AgentSession
-        from app.agent.kernel.state import SessionState
+        from app.agent.kernel.session_state import SessionState
 
         fixture = Path(__file__).parent / "fixtures" / "agent_kernel_capability_cases.jsonl"
         case = next(row for line in fixture.read_text().splitlines()
@@ -341,7 +341,7 @@ class AgentRecommendationDeclarationTests(unittest.TestCase):
                              conversation=[{"role": "user", "content": case["message"]}])
         selection = CapabilityRetriever().retrieve(case["message"], catalog, context={
             "owner": state.owner, "session_id": state.session_id, "channel": "eval", "reference_kinds": (),
-            **AgentSession._capability_retrieval_context(state),
+            **capability_retrieval_context(state),
         })
         self.assertEqual(case["required"], ["media.recently_played", "discovery.recommend"])
         self.assertTrue(set(case["required"]) <= set(selection.names), selection.names)
@@ -494,8 +494,8 @@ class AgentDiscoveryRecommendTests(unittest.TestCase):
                 ("2015", "2016", "2020", "2026", "", "unknown"), 1)), page=1, has_more=True,
                 provider=ProviderHealth(name="tmdb", status="healthy"))
             service = FakeDiscoveryService(page)
-            with patch("app.agent.discovery_actions.config.get_bool", return_value=True), \
-                    patch("app.agent.discovery_actions.get_discovery_service", return_value=service):
+            with patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True), \
+                    patch("app.agent.domains.discovery.actions.get_discovery_service", return_value=service):
                 result = recommend_discovery({"provider": provider, "media_type": media_type,
                     "year_from": "2016", "year_to": "2020"})
             self.assertEqual([item["year"] for item in result.data["items"]], ["2016", "2020"])
@@ -519,8 +519,8 @@ class AgentDiscoveryRecommendTests(unittest.TestCase):
             "inventories": {"movie": {"total": 500, "truncated": False, "unmapped": 1}},
             "items": [{"tmdb_id": str(2000+i), "media_type": "movie", "status": status, "match": "provider_id"}
                 for i, status in enumerate(("present", "possible", "missing", "missing", "missing"), 1)]}
-        with patch("app.agent.discovery_actions.config.get_bool", return_value=True), \
-                patch("app.agent.discovery_actions.get_discovery_service", return_value=FakeDiscoveryService(page)), \
+        with patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True), \
+                patch("app.agent.domains.discovery.actions.get_discovery_service", return_value=FakeDiscoveryService(page)), \
                 patch("app.services.inspect_media_identity_batch", return_value=[source]) as inspect:
             result = recommend_discovery({"exclude_library": True, "limit": 2})
         self.assertEqual(inspect.call_count, 1)
@@ -536,16 +536,16 @@ class AgentDiscoveryRecommendTests(unittest.TestCase):
         page = DiscoveryPage(items=(_card(1), _card(2, tmdb_id="")), page=1, has_more=True,
             provider=ProviderHealth(name="tmdb", status="healthy"))
         for sources in ([], [{"server_type": "jellyfin", "server_name": "Jellyfin", "status": "unavailable", "items": []}]):
-            with patch("app.agent.discovery_actions.config.get_bool", return_value=True), \
-                    patch("app.agent.discovery_actions.get_discovery_service", return_value=FakeDiscoveryService(page)), \
+            with patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True), \
+                    patch("app.agent.domains.discovery.actions.get_discovery_service", return_value=FakeDiscoveryService(page)), \
                     patch("app.services.inspect_media_identity_batch", return_value=sources):
                 result = recommend_discovery({"exclude_library": True})
             self.assertEqual(result.data["items"], [])
             self.assertEqual(result.status, "partial")
             self.assertEqual(result.data["library_check"]["unmapped_candidates"], 1)
             self.assertEqual(result.data["library_check"]["counts"]["indeterminate"], 1)
-        with patch("app.agent.discovery_actions.config.get_bool", return_value=True), \
-                patch("app.agent.discovery_actions.get_discovery_service", return_value=FakeDiscoveryService(page)), \
+        with patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True), \
+                patch("app.agent.domains.discovery.actions.get_discovery_service", return_value=FakeDiscoveryService(page)), \
                 patch("app.services.inspect_media_identity_batch") as inspect:
             result = recommend_discovery({})
         inspect.assert_not_called()
@@ -564,9 +564,9 @@ class AgentDiscoveryRecommendTests(unittest.TestCase):
         )
         service = FakeDiscoveryService(page)
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.discovery_actions.get_discovery_service",
+                "app.agent.domains.discovery.actions.get_discovery_service",
                 return_value=service,
             ),
         ):
@@ -605,9 +605,9 @@ class AgentDiscoveryRecommendTests(unittest.TestCase):
     def test_disabled_feature_does_not_create_or_call_service(self):
         service = Mock()
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=False),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=False),
             patch(
-                "app.agent.discovery_actions.get_discovery_service",
+                "app.agent.domains.discovery.actions.get_discovery_service",
                 return_value=service,
             ) as getter,
         ):
@@ -632,9 +632,9 @@ class AgentDiscoveryRecommendTests(unittest.TestCase):
             service = FakeDiscoveryService(page)
             with (
                 self.subTest(provider=provider),
-                patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
                 patch(
-                    "app.agent.discovery_actions.get_discovery_service",
+                    "app.agent.domains.discovery.actions.get_discovery_service",
                     return_value=service,
                 ),
             ):
@@ -682,9 +682,9 @@ class AgentDiscoveryRecommendTests(unittest.TestCase):
         ):
             with (
                 self.subTest(error=type(error).__name__),
-                patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
                 patch(
-                    "app.agent.discovery_actions.get_discovery_service",
+                    "app.agent.domains.discovery.actions.get_discovery_service",
                     return_value=FailingService(error),
                 ),
             ):

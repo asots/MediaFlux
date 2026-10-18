@@ -109,7 +109,7 @@ MODEL → TOOL → MODEL → TOOL → … → FINAL
 
 - 初始工具召回通常为 **6–10 项**，不是把所有工具 Schema 一次发给模型。
 - 窗口保留 `agent.capabilities`，并提供当前授权范围内的紧凑能力索引；词法未召回不等于能力不存在。模型按需加载 Schema，索引不授予执行权限，也不代表后端健康。
-- 动态业务窗口硬上限为 **12 项**；每回合最多 **8 个不同的发现请求**，发现调用另受总次数上限约束，不占业务调用额度。不能在同一批次发现后猜测调用尚未加载的 Schema。
+- 动态业务窗口与初始召回数量独立，默认 **24 项**、硬上限 **32 项**；每回合最多 **8 个不同的发现请求**，发现调用另受总次数上限约束，不占业务调用额度。不能在同一批次发现后猜测调用尚未加载的 Schema。
 - 初始规划额度 **12 轮**，每个新成功的业务 READ 可扩展一轮，模型轮次硬上限 **32**；默认业务工具上限 **16 次**。增加上下文窗口不等于无限调用。
 - 复杂查询应优先使用批量能力：存在性核对用 `library.batch_presence`，多部更新核对用 `library.check_updates`（每批最多 20 部、最多 3 部并发），不必先逐部搜索身份。
 - 工具预算不足或模型轮次用完时，保留已完成事实并返回“部分完成”，可在同一会话回复“继续”；未执行的工具不会被当作完成，也不会自动扩大预算。
@@ -275,13 +275,16 @@ python tools/agent_doctor.py --json
 | 位置 | 用途 |
 |---|---|
 | [`kernel/bootstrap.py`](../../app/agent/kernel/bootstrap.py) | 唯一生产组合入口；模型、存储、目录、Pipeline 和两端 Transport |
-| [`kernel/session.py`](../../app/agent/kernel/session.py) | 唯一模型/工具循环、调用预算、取消与发布权限 |
+| [`kernel/session.py`](../../app/agent/kernel/session.py)、[`kernel/turn.py`](../../app/agent/kernel/turn.py) | 会话入口、回合准入、取消、发布与终态收束 |
+| [`kernel/model_rounds.py`](../../app/agent/kernel/model_rounds.py)、[`kernel/tool_batches.py`](../../app/agent/kernel/tool_batches.py) | 唯一模型循环、上下文预算、工具批次执行 |
+| [`kernel/turn_history.py`](../../app/agent/kernel/turn_history.py)、[`kernel/conversation_context.py`](../../app/agent/kernel/conversation_context.py) | 检查点、可信回执与消息编解码 |
 | [`kernel/capabilities.py`](../../app/agent/kernel/capabilities.py)、[`kernel/discovery.py`](../../app/agent/kernel/discovery.py) | 初始召回与运行时工具发现 |
 | [`kernel/provider_model.py`](../../app/agent/kernel/provider_model.py) | 模型协议与流式结果适配 |
 | [`kernel/pipeline.py`](../../app/agent/kernel/pipeline.py)、[`kernel/effects.py`](../../app/agent/kernel/effects.py) | 工具生命周期、冻结、确认与执行边界 |
 | [`kernel/persistence.py`](../../app/agent/kernel/persistence.py)、[`kernel/state.py`](../../app/agent/kernel/state.py) | 会话、引用、事件与发布代次 |
 | [`kernel/ports/`](../../app/agent/kernel/ports/) | 领域 Action 与 Kernel 的适配、授权和完成后置处理 |
-| [`domain_catalog/`](../../app/agent/domain_catalog/) | 工具名称、说明、Schema、风险、示例与关联工具 |
+| [`domains/`](../../app/agent/domains/)、[`domain_catalog/catalog.py`](../../app/agent/domain_catalog/catalog.py) | 各领域实现与工具声明相邻，组合入口显式装配 runtime 依赖 |
+| [`clients/http.py`](../../app/clients/http.py) | Provider 与索引器共用的 HTTP 客户端、流限额和超时 |
 | [`provider_operations.py`](../../app/agent/provider_operations.py) | Jellyfin/Emby/qB 的受控 Provider 操作目录 |
 | [`agent_api.py`](../../app/routes/agent_api.py)、[`agent_adapter.py`](../../app/bot/agent_adapter.py) | Web 与 Telegram 入口和展示 |
 

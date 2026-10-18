@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.activity_actions import search_activities
+from app.agent.domains.activity.actions import search_activities
 from app.agent.models import ToolContext
 from app.repositories import activity
 from tests.support import IsolatedDatabaseTestCase

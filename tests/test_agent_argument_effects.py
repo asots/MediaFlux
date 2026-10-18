@@ -8,10 +8,13 @@ from unittest.mock import Mock, call
 import pytest
 
 from app.agent.confirmation import ConfirmationStore
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolResult
 
 

@@ -5,15 +5,20 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.agent.capability_discovery_actions import CAPABILITY_PARAMETERS
+from app.agent.domains.system.capability_actions import CAPABILITY_PARAMETERS
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session_guard import session_scope_guard
-from app.agent.kernel.state import (
-    CancellationToken, InMemorySessionStateStore, SessionBusyError, StalePublicationError,
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import (
+    CancellationToken,
+    SessionBusyError,
+    StalePublicationError,
 )
+from app.agent.kernel.tool_calls import ToolCallContext
 from tests.support import isolated_test_database
 from tests.test_agent_schema_composition import execute
 

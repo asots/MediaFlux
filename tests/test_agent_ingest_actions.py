@@ -10,23 +10,23 @@ from unittest.mock import patch
 import pytest
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.ingest_actions import (
+from app.agent.domains.resources.candidate_context import (
+    RecentResourceCandidateStore,
+    new_resource_search_id,
+    safe_resource_snapshot,
+)
+from app.agent.domains.resources.ingest_actions import (
     AgentIngestSessionStore,
     IngestActions,
     ingest_inspect_arguments,
     ingest_status_arguments,
     ingest_submit_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.agent.kernel.adapters import TurnView
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.models import ToolContext, ToolResult
 from app.agent.public_view import format_public_result, public_result_state
-from app.agent.recent_resource_candidates import (
-    RecentResourceCandidateStore,
-    new_resource_search_id,
-    safe_resource_snapshot,
-)
 from app.agent.state_commit import (
     AgentStateCommitBuffer,
     defer_agent_state_commits,
@@ -442,13 +442,13 @@ class AgentIngestActionTests(unittest.TestCase):
         self.resources.capture(owner="owner-a", result=self.resource_result)
         before = self.resources.get(owner="owner-a")
         mutations = (
-            "app.agent.indexer_candidate_actions.prepare_submit_resource",
-            "app.agent.indexer_candidate_actions.prepare_submit_resource_batch",
-            "app.agent.indexer_candidate_actions.submit_resource_confirmed",
-            "app.agent.indexer_candidate_actions.submit_resource_batch_confirmed",
-            "app.agent.ingest_actions.create_request",
-            "app.agent.ingest_actions.dispatch_request",
-            "app.agent.ingest_actions.create_share_request",
+            "app.agent.domains.resources.candidate_actions.prepare_submit_resource",
+            "app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch",
+            "app.agent.domains.resources.candidate_actions.submit_resource_confirmed",
+            "app.agent.domains.resources.candidate_actions.submit_resource_batch_confirmed",
+            "app.agent.domains.resources.ingest_actions.create_request",
+            "app.agent.domains.resources.ingest_actions.dispatch_request",
+            "app.agent.domains.resources.ingest_actions.create_share_request",
         )
         with ExitStack() as stack:
             mocked_mutations = [stack.enter_context(patch(name)) for name in mutations]
@@ -510,7 +510,7 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertNotEqual(first.session_id, second.session_id)
 
     @patch(
-        "app.agent.ingest_actions.download_target_readiness",
+        "app.agent.domains.resources.ingest_actions.download_target_readiness",
         return_value={"qb": True},
     )
     def test_direct_reference_rebuilds_preview_after_memory_store_restart(
@@ -566,9 +566,9 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "precondition_failed")
         self.assertIsNone(self.store.get(owner="owner-a"))
 
-    @patch("app.agent.ingest_actions.db.get_download_request", return_value=None)
+    @patch("app.agent.domains.resources.ingest_actions.db.get_download_request", return_value=None)
     @patch(
-        "app.agent.ingest_actions.dispatch_request",
+        "app.agent.domains.resources.ingest_actions.dispatch_request",
         return_value={
             "ok": True,
             "status": "submitted",
@@ -577,11 +577,11 @@ class AgentIngestActionTests(unittest.TestCase):
         },
     )
     @patch(
-        "app.agent.ingest_actions.create_request",
+        "app.agent.domains.resources.ingest_actions.create_request",
         return_value={"id": 42, "created": True, "status": "pending"},
     )
     @patch(
-        "app.agent.ingest_actions.download_target_readiness", return_value={"qb": True}
+        "app.agent.domains.resources.ingest_actions.download_target_readiness", return_value={"qb": True}
     )
     def test_direct_link_requires_confirmation_and_executes_via_dispatcher(
         self, _readiness, create_request_mock, dispatch_mock, _get_request
@@ -601,7 +601,7 @@ class AgentIngestActionTests(unittest.TestCase):
         dispatch_mock.assert_called_once_with(42, "qb")
 
     @patch(
-        "app.agent.ingest_actions.inspect_share_for_transfer",
+        "app.agent.domains.resources.ingest_actions.inspect_share_for_transfer",
         return_value={
             "preview_id": "preview-secret",
             "share_id": "share-secret",
@@ -627,11 +627,11 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertEqual([item["position"] for item in result.data["items"]], [1, 2])
 
     @patch(
-        "app.agent.ingest_actions.download_target_readiness",
+        "app.agent.domains.resources.ingest_actions.download_target_readiness",
         return_value={"guangya": True},
     )
     @patch(
-        "app.agent.ingest_actions.inspect_share_for_transfer",
+        "app.agent.domains.resources.ingest_actions.inspect_share_for_transfer",
         return_value={
             "preview_id": "preview-secret",
             "share_id": "share-secret",
@@ -684,7 +684,7 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertEqual(inspect_share.call_count, 2)
 
     @patch(
-        "app.agent.ingest_actions.inspect_share_for_transfer",
+        "app.agent.domains.resources.ingest_actions.inspect_share_for_transfer",
         return_value={
             "preview_id": "preview-secret",
             "share_id": "share-secret",
@@ -707,7 +707,7 @@ class AgentIngestActionTests(unittest.TestCase):
         snapshot = self.store.get(owner="owner-a", source_type="guangya_share")
         self.assertEqual(snapshot.private["file_ids"], ["file-secret-2"])
 
-    @patch("app.agent.indexer_candidate_actions.prepare_submit_resource")
+    @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
     def test_staged_candidates_override_older_persisted_latest(self, prepare_resource):
         prepare_resource.side_effect = lambda arguments: (
             ToolResult(True, "confirmation_required", "preview", data={"resource": {}}),
@@ -757,8 +757,8 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "precondition_failed")
         self.assertIn("资源候选引用", raised.exception.safe_message)
 
-    @patch("app.agent.indexer_candidate_actions.submit_resource_confirmed")
-    @patch("app.agent.indexer_candidate_actions.prepare_submit_resource")
+    @patch("app.agent.domains.resources.candidate_actions.submit_resource_confirmed")
+    @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
     def test_confirm_uses_frozen_snapshot_after_a_newer_search(
         self, prepare_resource, submit_resource
     ):
@@ -793,8 +793,8 @@ class AgentIngestActionTests(unittest.TestCase):
             {"result_id": "resource-first-001", "target": "qb"}, "resource-first-001:qb"
         )
 
-    @patch("app.agent.indexer_candidate_actions.submit_resource_confirmed")
-    @patch("app.agent.indexer_candidate_actions.prepare_submit_resource")
+    @patch("app.agent.domains.resources.candidate_actions.submit_resource_confirmed")
+    @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
     def test_kernel_reference_snapshot_survives_preview_and_confirmation(
         self, prepare_resource, submit_resource
     ):
@@ -829,8 +829,8 @@ class AgentIngestActionTests(unittest.TestCase):
             "resource-kernel-0001:guangya",
         )
 
-    @patch("app.agent.indexer_candidate_actions.submit_resource_confirmed")
-    @patch("app.agent.indexer_candidate_actions.prepare_submit_resource")
+    @patch("app.agent.domains.resources.candidate_actions.submit_resource_confirmed")
+    @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
     def test_confirm_fails_closed_when_frozen_snapshot_was_evicted(
         self, prepare_resource, submit_resource
     ):
@@ -873,7 +873,7 @@ class AgentIngestActionTests(unittest.TestCase):
         row.update(overrides)
         return row
 
-    @patch("app.agent.ingest_actions.db.get_download_request")
+    @patch("app.agent.domains.resources.ingest_actions.db.get_download_request")
     def test_status_exposes_safe_partial_error_without_overwriting_stage_status(
         self, get_request
     ):
@@ -889,7 +889,7 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertNotIn("private.example", repr(result.to_dict()))
         self.assertNotIn("secret-token", repr(result.to_dict()))
 
-    @patch("app.agent.ingest_actions.db.get_download_request")
+    @patch("app.agent.domains.resources.ingest_actions.db.get_download_request")
     def test_status_exposes_safe_manual_review_reason(self, get_request):
         get_request.return_value = self._status_row(
             status="manual_review",
@@ -911,7 +911,7 @@ class AgentIngestActionTests(unittest.TestCase):
         self.assertNotIn("private-qb-task", repr(result.to_dict()))
         self.assertNotIn("private.example", repr(result.to_dict()))
 
-    @patch("app.agent.ingest_actions.db.get_download_request")
+    @patch("app.agent.domains.resources.ingest_actions.db.get_download_request")
     def test_status_exposes_safe_outcome_unknown_reason(self, get_request):
         get_request.return_value = self._status_row(
             status="submitted",
@@ -932,7 +932,7 @@ class AgentIngestActionTests(unittest.TestCase):
         )
         self.assertNotIn("private-qb-task", repr(result.to_dict()))
 
-    @patch("app.agent.ingest_actions.db.get_download_request")
+    @patch("app.agent.domains.resources.ingest_actions.db.get_download_request")
     def test_status_does_not_invent_failure_for_waiting_or_skipped_rows(self, get_request):
         cases = (
             {"status": "pending", "qb_status": "pending", "gy_status": "pending"},
@@ -946,7 +946,7 @@ class AgentIngestActionTests(unittest.TestCase):
                 result = self.actions.status({"request_number": 7}, self.context)
                 self.assertEqual(result.data["request"]["error"], "")
 
-    @patch("app.agent.ingest_actions.db.get_download_request")
+    @patch("app.agent.domains.resources.ingest_actions.db.get_download_request")
     def test_status_returns_only_public_request_projection(self, get_request):
         get_request.return_value = {
             "id": 7,
@@ -988,7 +988,7 @@ def test_direct_submission_receipt_matches_real_dispatch(
         isolated_test_database(),
         patch.dict(os.environ, {"QB_URL": "http://qb.invalid"}),
         patch("socket.socket.connect", side_effect=AssertionError("禁止外联")),
-        patch("app.agent.indexer_actions.GuangYaClient") as cloud_client,
+        patch("app.agent.domains.resources.indexer_actions.GuangYaClient") as cloud_client,
         patch.object(dispatcher, "_submit_qb", return_value={"ok": qb_ok}) as qb,
         patch.object(dispatcher, "_submit_guangya", return_value={"ok": gy_ok}) as gy,
     ):

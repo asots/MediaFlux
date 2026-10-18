@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.indexers.http import IndexerHttpResponse
+from app.clients.http import HttpResponse
 from app.modules.organize import OrganizeRules
 from app.modules.scraper import MatchResult, RecognitionResult, TMDBScraper
 from tools.benchmark_organize import (
@@ -174,7 +174,7 @@ class OrganizeBenchmarkTests(unittest.TestCase):
                 page = int((params or {}).get("p", 1))
                 self.pages.append(page)
                 body = html(100 + page, next_page=page + 1) if page <= 2 else html(102)
-                return IndexerHttpResponse(
+                return HttpResponse(
                     url=f"https://nyaa.si/?p={page}",
                     status_code=200,
                     headers={"content-type": "text/html; charset=utf-8"},

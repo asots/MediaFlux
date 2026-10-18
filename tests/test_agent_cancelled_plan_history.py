@@ -13,17 +13,22 @@ from dataclasses import replace
 import pytest
 
 from app.agent.confirmation import SQLiteConfirmationStore
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.adapters import consume_events
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
 from app.agent.kernel.events import AgentEventType as E
-from app.agent.kernel.model import ModelEvent, ModelEventType as M, ModelToolCall
+from app.agent.kernel.model import ModelEvent, ModelToolCall
+from app.agent.kernel.model import ModelEventType as M
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolPipelineError
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.support import isolated_test_database
 from tests.test_pending_explanation_transports import NativeRuntime
-
 
 OWNER, SID = "cancel-history-owner", "cancel-history-session"
 

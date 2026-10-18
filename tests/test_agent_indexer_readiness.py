@@ -6,11 +6,11 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.agent.errors import AgentToolError
-from app.agent.indexer_readiness_actions import (
+from app.agent.domains.resources.readiness_actions import (
     diagnose_indexer_readiness,
     indexer_readiness_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.indexers.models import IndexerCapabilities
 from tests.support import IsolatedDatabaseTestCase
 
@@ -71,11 +71,11 @@ class IndexerReadinessUnitTests(IsolatedDatabaseTestCase):
     def test_disabled_state_does_not_construct_service(self):
         with (
             patch(
-                "app.agent.indexer_readiness_actions.config.get_bool",
+                "app.agent.domains.resources.readiness_actions.config.get_bool",
                 return_value=False,
             ),
             patch(
-                "app.agent.indexer_readiness_actions.get_indexer_service"
+                "app.agent.domains.resources.readiness_actions.get_indexer_service"
             ) as service_factory,
         ):
             result = diagnose_indexer_readiness({})
@@ -103,10 +103,10 @@ class IndexerReadinessUnitTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.indexer_readiness_actions.config.get_bool", return_value=True
+                "app.agent.domains.resources.readiness_actions.config.get_bool", return_value=True
             ),
             patch(
-                "app.agent.indexer_readiness_actions.get_indexer_service",
+                "app.agent.domains.resources.readiness_actions.get_indexer_service",
                 return_value=service,
             ),
         ):
@@ -142,10 +142,10 @@ class IndexerReadinessUnitTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.indexer_readiness_actions.config.get_bool", return_value=True
+                "app.agent.domains.resources.readiness_actions.config.get_bool", return_value=True
             ),
             patch(
-                "app.agent.indexer_readiness_actions.get_indexer_service",
+                "app.agent.domains.resources.readiness_actions.get_indexer_service",
                 return_value=_Service(adapters, set()),
             ),
         ):
@@ -154,10 +154,10 @@ class IndexerReadinessUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(empty.data["counts"]["enabled"], 0)
         with (
             patch(
-                "app.agent.indexer_readiness_actions.config.get_bool", return_value=True
+                "app.agent.domains.resources.readiness_actions.config.get_bool", return_value=True
             ),
             patch(
-                "app.agent.indexer_readiness_actions.get_indexer_service",
+                "app.agent.domains.resources.readiness_actions.get_indexer_service",
                 return_value=_Service(adapters, {"nyaa", "mikan"}, broken={"mikan"}),
             ),
         ):
@@ -178,10 +178,10 @@ class IndexerReadinessUnitTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.indexer_readiness_actions.config.get_bool", return_value=True
+                "app.agent.domains.resources.readiness_actions.config.get_bool", return_value=True
             ),
             patch(
-                "app.agent.indexer_readiness_actions.get_indexer_service",
+                "app.agent.domains.resources.readiness_actions.get_indexer_service",
                 return_value=service,
             ),
         ):
@@ -198,10 +198,10 @@ class IndexerReadinessUnitTests(IsolatedDatabaseTestCase):
             self.assertNotIn(secret, serialized)
         with (
             patch(
-                "app.agent.indexer_readiness_actions.config.get_bool", return_value=True
+                "app.agent.domains.resources.readiness_actions.config.get_bool", return_value=True
             ),
             patch(
-                "app.agent.indexer_readiness_actions.get_indexer_service",
+                "app.agent.domains.resources.readiness_actions.get_indexer_service",
                 side_effect=RuntimeError(
                     "INDEXER_EXCEPTION_SECRET /srv/indexer/private"
                 ),
@@ -214,7 +214,7 @@ class IndexerReadinessUnitTests(IsolatedDatabaseTestCase):
         self.assertNotIn("INDEXER_EXCEPTION_SECRET", serialized)
         self.assertNotIn("/srv/indexer/private", serialized)
         with patch(
-            "app.agent.indexer_readiness_actions.config.get_bool",
+            "app.agent.domains.resources.readiness_actions.config.get_bool",
             side_effect=RuntimeError("INDEXER_CONFIG_SECRET /srv/config/private"),
         ):
             unavailable = diagnose_indexer_readiness({})

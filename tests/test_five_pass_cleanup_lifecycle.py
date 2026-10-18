@@ -6,7 +6,8 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from app.agent import guangya_cleanup_actions as actions
+from app.agent.domain_catalog import DomainActions
+from app.agent.domains.guangya import cleanup_actions as actions
 from app.agent.models import ToolContext
 from app.modules import guangya_residual_cleanup as cleanup
 from tests.support import IsolatedDatabaseTestCase, isolated_test_database
@@ -15,22 +16,21 @@ from tests.test_guangya_residual_cleanup import FakeCleanupClient
 
 class CleanupPlanLifecycleTests(IsolatedDatabaseTestCase):
     def setUp(self):
+        self._domain_actions = DomainActions()
         self.enterContext(isolated_test_database())
         root = self.enterContext(tempfile.TemporaryDirectory(prefix="five-pass-cleanup-"))
         self.plan_dir = Path(root) / "plans"
         self.enterContext(patch.object(cleanup, "_plan_directory", return_value=self.plan_dir))
         self.enterContext(patch.object(cleanup, "get_web_secret", return_value="synthetic-cleanup-secret"))
         self.enterContext(patch.object(actions, "_configured_sources", return_value=[{"id": "source", "name": "整理源"}]))
-        actions.reset_guangya_cleanup_context_for_tests()
-        self.addCleanup(actions.reset_guangya_cleanup_context_for_tests)
         self.client = FakeCleanupClient()
         self.client.directories["source"] = [row for row in self.client.directories["source"] if row.file_id != "residual"]
         self.context = ToolContext(owner="five-pass-owner", session_id="synthetic-session")
 
     def _preview(self):
         with patch.object(actions, "GuangYaClient", return_value=self.client):
-            actions.preview_guangya_cleanup({"max_candidates": 20}, self.context)
-        flow = actions._flow(self.context.owner)
+            self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, self.context)
+        flow = self._domain_actions.cleanup._flow(self.context.owner)
         self.assertIsNotNone(flow)
         return cleanup.load_cleanup_plan(flow.plan_id, owner=self.context.owner)
 

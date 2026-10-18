@@ -6,7 +6,12 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.ingest_actions import AgentIngestSessionStore
+from app.agent.domains.resources.candidate_context import (
+    RecentResourceCandidateStore,
+    new_resource_search_id,
+    safe_resource_snapshot,
+)
+from app.agent.domains.resources.ingest_actions import AgentIngestSessionStore
 from app.agent.kernel.bootstrap import build_agent_kernel
 from app.agent.kernel.capabilities import CapabilityRetriever
 from app.agent.kernel.discovery import CapabilityDiscovery
@@ -15,13 +20,9 @@ from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolReference, ToolResult
-from app.agent.recent_resource_candidates import (
-    RecentResourceCandidateStore,
-    new_resource_search_id,
-    safe_resource_snapshot,
-)
 from tests.test_agent_kernel_capability_corpus import NoModel
 from tests.test_agent_kernel_resource_ingest import (
     SearchThenAnswerModel,
@@ -103,10 +104,10 @@ class AgentKernelBtFollowupTests(unittest.IsolatedAsyncioTestCase):
         followup = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(),
                                 pipeline=pipeline, state_store=state)
         with (
-            patch("app.agent.indexer_candidate_actions.prepare_submit_resource_batch", return_value=(
+            patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch", return_value=(
                 ToolResult(True, "confirmation_required", "确认后提交 2 项资源"), "fixture-batch-context"
             )) as prepare,
-            patch("app.agent.indexer_candidate_actions.submit_resource_batch_confirmed", return_value=(
+            patch("app.agent.domains.resources.candidate_actions.submit_resource_batch_confirmed", return_value=(
                 ToolResult(True, "accepted", "已提交到光鸭")
             )) as execute,
         ):

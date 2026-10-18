@@ -10,12 +10,12 @@ import pytest
 
 from app import database as db
 from app.agent.action_history import action_history_owner_digest
-from app.agent.errors import AgentToolError
-from app.agent.library_recommendation_actions import (
+from app.agent.domains.library.recommendation_actions import (
     get_library_recommendations,
     library_recommendation_arguments,
 )
-from app.agent.media_consumption_actions import (
+from app.agent.domains.resources.recommendation import rank_episode_search
+from app.agent.domains.subscriptions.consumption_actions import (
     clear_preferences_confirmed,
     get_preferences,
     preferences_update_arguments,
@@ -23,13 +23,13 @@ from app.agent.media_consumption_actions import (
     prepare_set_preferences,
     set_preferences_confirmed,
 )
-from app.agent.media_preference_policy import (
+from app.agent.domains.subscriptions.preference_policy import (
     effective_preferences,
     owner_media_preferences,
     resource_preference_match,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext, ToolResult
-from app.agent.resource_recommendation import rank_episode_search
 from app.modules.media_server_profiles import MediaServerProfile
 from app.repositories.media_experience import (
     clear_media_preferences,
@@ -167,7 +167,7 @@ def test_local_recommendations_consume_saved_genre_rating_history_and_single_use
     profile = MediaServerProfile(source="configured:jellyfin", server_type="jellyfin", label="Jellyfin", url="http://example.local", credential="test", enabled=True, user_id="viewer")
     gateway = Mock()
     gateway.query.return_value = ToolResult(True, "completed", "推荐完成", data={"items": []})
-    with patch("app.agent.media_consumption_actions.list_configured_profiles", return_value=[profile]), patch("app.agent.library_recommendation_actions.get_provider_gateway", return_value=gateway):
+    with patch("app.agent.domains.subscriptions.consumption_actions.list_configured_profiles", return_value=[profile]), patch("app.agent.domains.library.recommendation_actions.get_provider_gateway", return_value=gateway):
         normalized = library_recommendation_arguments({"media_type": "tv"})
         assert "prefer" not in normalized
         assert get_library_recommendations(normalized, _context()).ok
@@ -242,7 +242,7 @@ def test_old_preference_schema_can_be_read_without_runtime_schema_mutation(prefe
 def test_missing_resource_domain_wrapper_consumes_owner_profile_before_reference_creation(
     preference_db, whole_season,
 ):
-    from app.agent.domain_catalog.library import register_specs
+    from app.agent.domains.library.tools import register_specs
 
     digest = action_history_owner_digest("viewer")
     set_media_preferences(digest, expected_revision=0, updates={
@@ -250,8 +250,7 @@ def test_missing_resource_domain_wrapper_consumes_owner_profile_before_reference
     })
     registry = Mock()
     runtime = Mock()
-    register_specs(registry, resource_store=None, active_ingest_store=None,
-                   ingest_actions=None, missing_media_runtime=runtime)
+    register_specs(registry, missing_media_runtime=runtime)
     specs = {call.args[0].name: call.args[0] for call in registry.register.call_args_list}
     tool = specs["library.search_missing_season_resources" if whole_season
                  else "library.search_missing_episode_resources"]
@@ -273,9 +272,9 @@ def test_missing_resource_domain_wrapper_consumes_owner_profile_before_reference
     searched = ToolResult(True, "success", "找到三项", data={"items": source_items})
     service = Mock()
     service.result_store.get.return_value = None
-    with patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=audit), \
-            patch("app.agent.episode_resource_actions.search_resources", return_value=searched), \
-            patch("app.agent.episode_resource_actions.get_indexer_service", return_value=service):
+    with patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=audit), \
+            patch("app.agent.domains.library.episode_resource_actions.search_resources", return_value=searched), \
+            patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=service):
         for owner, overrides, expected in (
             ("viewer", None, "b" * 20),
             ("other", None, "a" * 20),
@@ -307,7 +306,7 @@ def test_missing_resource_domain_wrapper_consumes_owner_profile_before_reference
     {"preferred_genres": ["Comedy"]}, "2160p", None,
 ])
 def test_missing_resource_override_validator_rejects_irrelevant_or_invalid_fields(invalid):
-    from app.agent.episode_resource_actions import (
+    from app.agent.domains.library.episode_resource_actions import (
         missing_episode_resource_arguments,
         missing_season_resource_arguments,
     )
@@ -323,16 +322,21 @@ def test_missing_resource_override_validator_rejects_irrelevant_or_invalid_field
 
 @pytest.fixture
 def ingest_environment(preference_db):
-    from app.agent.ingest_actions import AgentIngestSessionStore, IngestActions
-    from app.agent.recent_resource_candidates import RecentResourceCandidateStore
+    from app.agent.domains.resources.candidate_context import (
+        RecentResourceCandidateStore,
+    )
+    from app.agent.domains.resources.ingest_actions import (
+        AgentIngestSessionStore,
+        IngestActions,
+    )
 
     actions = IngestActions(store=AgentIngestSessionStore(), recent_resource_store=RecentResourceCandidateStore())
-    with patch("app.agent.ingest_actions.download_target_readiness",
+    with patch("app.agent.domains.resources.ingest_actions.download_target_readiness",
                side_effect=lambda target: {name: True for name in (["qb", "guangya"] if target == "both" else [target])}), \
-            patch("app.agent.ingest_actions.create_request", return_value={"id": 42, "created": True}) as create, \
-            patch("app.agent.ingest_actions.dispatch_request",
+            patch("app.agent.domains.resources.ingest_actions.create_request", return_value={"id": 42, "created": True}) as create, \
+            patch("app.agent.domains.resources.ingest_actions.dispatch_request",
                   side_effect=lambda number, target: {"ok": True, "status": "submitted", "succeeded": [target], "failed": []}) as dispatch, \
-            patch("app.agent.ingest_actions.db.get_download_request", return_value=None):
+            patch("app.agent.domains.resources.ingest_actions.db.get_download_request", return_value=None):
         yield actions, create, dispatch
 
 
@@ -341,7 +345,7 @@ def _inspect_direct(actions, owner="viewer"):
 
 
 def test_ingest_default_target_validator_and_share_protocol_stay_separate():
-    from app.agent.ingest_actions import ingest_submit_arguments
+    from app.agent.domains.resources.ingest_actions import ingest_submit_arguments
 
     assert ingest_submit_arguments({"source_type": "direct_url"})["target"] == "preferred"
     assert ingest_submit_arguments({"source_type": "resource_candidates", "positions": [1]})["target"] == "preferred"
@@ -355,7 +359,7 @@ def test_ingest_default_target_validator_and_share_protocol_stay_separate():
 
 
 def test_ingest_resolves_defaults_per_owner_and_explicit_choice_without_writes(ingest_environment):
-    from app.agent.ingest_actions import ingest_submit_arguments
+    from app.agent.domains.resources.ingest_actions import ingest_submit_arguments
 
     actions, create, dispatch = ingest_environment
     set_media_preferences(action_history_owner_digest("viewer"), expected_revision=0,
@@ -379,12 +383,14 @@ def test_ingest_resolves_defaults_per_owner_and_explicit_choice_without_writes(i
 
 
 def test_ingest_confirm_restores_frozen_target_after_preferences_change_and_service_restart(ingest_environment):
-    from app.agent.ingest_actions import (
+    from app.agent.domains.resources.candidate_context import (
+        RecentResourceCandidateStore,
+    )
+    from app.agent.domains.resources.ingest_actions import (
         AgentIngestSessionStore,
         IngestActions,
         ingest_submit_arguments,
     )
-    from app.agent.recent_resource_candidates import RecentResourceCandidateStore
 
     actions, create, dispatch = ingest_environment
     owner = action_history_owner_digest("viewer")
@@ -397,7 +403,7 @@ def test_ingest_confirm_restores_frozen_target_after_preferences_change_and_serv
     # 仅模拟领域进程对象重建；资源来自原 Kernel 持久 opaque ref。
     restarted = IngestActions(store=AgentIngestSessionStore(), recent_resource_store=RecentResourceCandidateStore())
     set_media_preferences(owner, expected_revision=1, updates={"preferred_download_target": "guangya"})
-    with patch("app.agent.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("确认阶段不得重读偏好")):
+    with patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("确认阶段不得重读偏好")):
         result = restarted.execute_submit(arguments, fingerprint, _context())
     assert result.ok and result.data["target"] == "qb"
     dispatch.assert_called_once_with(42, "qb")
@@ -405,7 +411,7 @@ def test_ingest_confirm_restores_frozen_target_after_preferences_change_and_serv
 
 
 def test_ingest_default_plan_rejects_tampered_target_or_missing_freeze(ingest_environment):
-    from app.agent.ingest_actions import ingest_submit_arguments
+    from app.agent.domains.resources.ingest_actions import ingest_submit_arguments
 
     actions, create, dispatch = ingest_environment
     _inspect_direct(actions)
@@ -427,21 +433,21 @@ def test_ingest_default_plan_rejects_tampered_target_or_missing_freeze(ingest_en
 
 
 def test_ingest_legacy_explicit_hash_plan_and_unavailable_default_do_not_regress(ingest_environment):
-    from app.agent.ingest_actions import ingest_submit_arguments
+    from app.agent.domains.resources.ingest_actions import ingest_submit_arguments
 
     actions, create, dispatch = ingest_environment
     _inspect_direct(actions)
     explicit = ingest_submit_arguments({"source_type": "direct_url", "target": "qb"})
     _preview, old_hash = actions.prepare_submit(explicit, _context())
     assert len(old_hash) == 64 and ":" not in old_hash
-    with patch("app.agent.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("显式目标不得读取偏好")):
+    with patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("显式目标不得读取偏好")):
         assert actions.execute_submit(explicit, old_hash, _context()).ok
     dispatch.assert_called_once_with(42, "qb")
     create.reset_mock()
     dispatch.reset_mock()
     set_media_preferences(action_history_owner_digest("viewer"), expected_revision=0,
                           updates={"preferred_download_target": "qb"})
-    with patch("app.agent.ingest_actions.download_target_readiness", return_value={"qb": False}):
+    with patch("app.agent.domains.resources.ingest_actions.download_target_readiness", return_value={"qb": False}):
         preview, fingerprint = actions.prepare_submit(ingest_submit_arguments({"source_type": "direct_url"}), _context())
     assert not preview.ok and fingerprint == ""
     create.assert_not_called()
@@ -452,15 +458,15 @@ def test_ingest_legacy_explicit_hash_plan_and_unavailable_default_do_not_regress
 def test_ingest_default_resource_single_and_batch_freeze_target_without_ref_position_drift(
     preference_db, positions,
 ):
-    from app.agent.ingest_actions import (
-        AgentIngestSessionStore,
-        IngestActions,
-        ingest_submit_arguments,
-    )
-    from app.agent.recent_resource_candidates import (
+    from app.agent.domains.resources.candidate_context import (
         RecentResourceCandidateStore,
         new_resource_search_id,
         safe_resource_snapshot,
+    )
+    from app.agent.domains.resources.ingest_actions import (
+        AgentIngestSessionStore,
+        IngestActions,
+        ingest_submit_arguments,
     )
 
     owner = action_history_owner_digest("viewer")
@@ -472,16 +478,16 @@ def test_ingest_default_resource_single_and_batch_freeze_target_without_ref_posi
     ]}), search_id=new_resource_search_id())
     arguments = ingest_submit_arguments({"source_type": "resource_candidates", "positions": positions})
     arguments["resource_candidates"] = snapshot
-    with patch("app.agent.indexer_candidate_actions.prepare_submit_resource", side_effect=lambda args: (
+    with patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource", side_effect=lambda args: (
         ToolResult(True, "confirmation_required", "预检完成", data={"resource": {"title": args["result_id"]}}),
         args["result_id"] + ":" + args["target"],
-    )), patch("app.agent.indexer_candidate_actions.submit_resource_confirmed", side_effect=lambda args, expected: ToolResult(
+    )), patch("app.agent.domains.resources.candidate_actions.submit_resource_confirmed", side_effect=lambda args, expected: ToolResult(
         True, "accepted", "已提交", data={"result_id": args["result_id"], "request_id": 42, "target": args["target"]},
-    )) as submit, patch("app.agent.indexer_candidate_actions.prepare_submit_resource_batch", side_effect=lambda args: (
+    )) as submit, patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch", side_effect=lambda args: (
         ToolResult(True, "confirmation_required", "批量预检", data={"resources": [
             {"title": result_id} for result_id in args["result_ids"]
         ]}), ":".join(args["result_ids"]) + ":" + args["target"],
-    )), patch("app.agent.indexer_candidate_actions.submit_resource_batch_confirmed", side_effect=lambda args, expected: ToolResult(
+    )), patch("app.agent.domains.resources.candidate_actions.submit_resource_batch_confirmed", side_effect=lambda args, expected: ToolResult(
         True, "completed", "已批量提交", data={"items": [
             {"result_id": result_id, "target": args["target"], "request_id": 42}
             for result_id in args["result_ids"]
@@ -492,7 +498,7 @@ def test_ingest_default_resource_single_and_batch_freeze_target_without_ref_posi
         assert arguments["search_id"] == snapshot["search_id"]
         assert arguments["positions"] == positions
         set_media_preferences(owner, expected_revision=1, updates={"preferred_download_target": "both"})
-        with patch("app.agent.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("不得重读偏好")):
+        with patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("不得重读偏好")):
             result = actions.execute_submit(arguments, frozen, _context())
         assert result.ok
         if len(positions) == 1:
@@ -504,7 +510,7 @@ def test_ingest_default_resource_single_and_batch_freeze_target_without_ref_posi
 
 
 def test_ingest_share_preview_stays_cloud_even_when_saved_target_is_qb(ingest_environment):
-    from app.agent.ingest_actions import ingest_submit_arguments
+    from app.agent.domains.resources.ingest_actions import ingest_submit_arguments
 
     actions, create, dispatch = ingest_environment
     set_media_preferences(action_history_owner_digest("viewer"), expected_revision=0,
@@ -515,7 +521,7 @@ def test_ingest_share_preview_stays_cloud_even_when_saved_target_is_qb(ingest_en
         private={"file_ids": ["private-file"], "target_id": "private-directory", "preview_id": "private-preview"},
         identity="share-test",
     )
-    with patch("app.agent.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("分享不应读取qB偏好")):
+    with patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("分享不应读取qB偏好")):
         arguments = ingest_submit_arguments({"source_type": "guangya_share", "target": "preferred"})
         preview, fingerprint = actions.prepare_submit(arguments, _context())
     assert preview.ok and preview.data["target"] == "guangya"
@@ -529,10 +535,10 @@ def test_kernel_default_target_is_prepared_and_confirmed_without_preferences_too
     from tests.support import isolated_test_database
 
     with isolated_test_database("structured-default-target-kernel.sqlite"), \
-            patch("app.agent.ingest_actions.download_target_readiness", side_effect=lambda target: {target: True}), \
-            patch("app.agent.ingest_actions.create_request", return_value={"id": 42, "created": True}) as create, \
-            patch("app.agent.ingest_actions.dispatch_request", return_value={"ok": True, "status": "submitted", "succeeded": ["qb"], "failed": []}) as dispatch, \
-            patch("app.agent.ingest_actions.db.get_download_request", return_value=None):
+            patch("app.agent.domains.resources.ingest_actions.download_target_readiness", side_effect=lambda target: {target: True}), \
+            patch("app.agent.domains.resources.ingest_actions.create_request", return_value={"id": 42, "created": True}) as create, \
+            patch("app.agent.domains.resources.ingest_actions.dispatch_request", return_value={"ok": True, "status": "submitted", "succeeded": ["qb"], "failed": []}) as dispatch, \
+            patch("app.agent.domains.resources.ingest_actions.db.get_download_request", return_value=None):
         owner = "kernel-preference-viewer"
         digest = action_history_owner_digest(owner)
         set_media_preferences(digest, expected_revision=0, updates={"preferred_download_target": "qb"})
@@ -555,7 +561,7 @@ def test_kernel_default_target_is_prepared_and_confirmed_without_preferences_too
         set_media_preferences(digest, expected_revision=1, updates={"preferred_download_target": "guangya"})
         with pytest.raises(AgentToolError):
             service.confirm(plan_id, owner="different-owner")
-        with patch("app.agent.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("确认不得查询偏好")):
+        with patch("app.agent.domains.resources.ingest_actions.explicit_preferred_download_target", side_effect=AssertionError("确认不得查询偏好")):
             confirmed = service.confirm(plan_id, owner=owner)
         assert confirmed["result"]["ok"]
         assert confirmed["result"]["data"]["target"] == "qb"

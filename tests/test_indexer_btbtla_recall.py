@@ -1,19 +1,21 @@
 """官网真实同名候选与详情快照，覆盖关键词/媒体卡片共用召回链路。"""
-from pathlib import Path
-from dataclasses import replace
-import unittest
 import asyncio
 import threading
-from bs4 import BeautifulSoup
-from app.indexers.errors import IndexerResultExpired, IndexerSecurityError, IndexerUnavailable
+import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from bs4 import BeautifulSoup
+
+from app.clients.http import HttpSecurityError
+from app.indexers.errors import IndexerResultExpired, IndexerUnavailable
 from app.indexers.models import IndexerMediaSearchRequest, IndexerSearchRequest
 from app.indexers.providers.btbtla import BTBtlaAdapter
 from app.indexers.registry import IndexerRegistry
-from app.indexers.service import IndexerService
 from app.indexers.result_store import IndexerResultStore
+from app.indexers.service import IndexerService
 from tests.test_indexer_providers import FakeHttpClient
 
 _FIXTURES = Path(__file__).parent / 'fixtures' / 'indexers'
@@ -139,7 +141,7 @@ class BTBtlaRecallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(http.calls), 4)
 
     async def test_security_and_cancellation_block_partial_catalog_publication(self):
-        for failure in (IndexerSecurityError('unsafe detail'), asyncio.CancelledError()):
+        for failure in (HttpSecurityError('unsafe detail'), asyncio.CancelledError()):
             with self.subTest(failure=type(failure).__name__):
                 http, _search, _detail = self.partial_detail_http(200)
                 original_get = http.get

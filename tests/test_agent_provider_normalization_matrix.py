@@ -10,7 +10,7 @@ import pytest
 from app.agent.kernel.model import ModelEventType, ModelRequest
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.provider_model import ModelProviderError
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.state_types import CancellationToken
 from app.agent.public_view import public_conversation_messages
 from tests import test_agent_provider_state as fixtures
 from tests.test_agent_provider_text_authority import native_reply

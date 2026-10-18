@@ -6,17 +6,15 @@ import json
 from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.conversation_state import retain_conversation
 from app.agent.kernel.model import ModelMessage
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import (
-    InMemoryRateLimiter,
-    ToolCallContext,
-    ToolPipeline,
-    ToolPipelineError,
-)
+from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolPipeline
 from app.agent.kernel.projection import DefaultProjector
-from app.agent.kernel.state import CancellationToken, retain_conversation
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.model_context_budget import (
     _compact_chain,
     compact_tool_content,
@@ -568,7 +566,8 @@ class ResultPagingTests(IsolatedDatabaseTestCase):
         from app.agent.kernel.capabilities import CapabilityRetriever
         from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
         from app.agent.kernel.session import AgentSession
-        from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+        from app.agent.kernel.state import InMemorySessionStateStore
+        from app.agent.kernel.state_types import AgentInput
         from tests.test_agent_kernel_core import ScriptedModel
 
         async def run():
@@ -703,7 +702,7 @@ class ResultPagingTests(IsolatedDatabaseTestCase):
 
 
     def test_batch_missing_episodes_survive_existing_paging_and_cold_restart(self):
-        from app.agent.update_actions import check_library_updates
+        from app.agent.domains.library.update_actions import check_library_updates
 
         expected = [{"season": season, "episode": episode}
                     for season in (1, 3) for episode in range(1, 151) if episode % 5]
@@ -716,7 +715,7 @@ class ResultPagingTests(IsolatedDatabaseTestCase):
             })
 
         async def run():
-            with patch("app.agent.update_actions.audit_series_episodes", side_effect=audit):
+            with patch("app.agent.domains.library.update_actions.audit_series_episodes", side_effect=audit):
                 result = check_library_updates({"queries": titles, "as_of": "2026-10-14"})
             observed, read = await self.snapshot_reader(result, raw=True)
             self.assertIn("result_handle", observed)

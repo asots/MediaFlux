@@ -1,20 +1,22 @@
 """Anthropic identities are native, not synthesized or normalized tool keys."""
 import asyncio
 import json
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from tests.test_agent_tool_argument_ingress import offline as offline, store as store, Wire, observe
-from tests.test_agent_tool_argument_repair_replay import make_session
 from app import database as db
 from app.agent.kernel.model import ModelEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.provider_model import ModelProviderError
 from app.agent.kernel.session import SessionLimits
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.public_view import public_conversation_messages
+from tests.test_agent_tool_argument_ingress import Wire, observe
+from tests.test_agent_tool_argument_ingress import offline as offline
+from tests.test_agent_tool_argument_ingress import store as store
+from tests.test_agent_tool_argument_repair_replay import make_session
 
 P = 'anthropic_messages'
 PRIVATE = {'type': 'thinking', 'thinking': ' synthetic-private-STUDY\n',

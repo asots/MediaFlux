@@ -9,19 +9,20 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app.agent import guangya_share_actions as actions
 from app.agent.confirmation import SQLiteConfirmationStore
-from app.agent.domain_catalog.catalog import ToolSpecCollector
-from app.agent.domain_catalog.cloud_sdk import register_specs
+from app.agent.domain_catalog.catalog import DomainActions, ToolSpecCollector
+from app.agent.domains.guangya import share_actions as actions
+from app.agent.domains.guangya.sdk_tools import register_specs
+from app.agent.domains.guangya.workspace_actions import guangya_fs_query_arguments
 from app.agent.errors import AgentToolError
-from app.agent.guangya_workspace_actions import guangya_fs_query_arguments
 from app.agent.kernel.capabilities import ToolCatalog
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.projection import DefaultProjector
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile
 from app.modules import guangya_workspace as workspace
@@ -37,6 +38,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch("app.repositories.agent_jobs.get_web_secret", return_value="source-test-secret"))
         self.enterContext(patch("app.modules.web_secret.get_web_secret", return_value="source-test-secret"))
         self.enterContext(patch.object(actions, "_now", return_value="2026-10-12T00:00:00+08:00"))
+        self._domain_actions = DomainActions()
         self.context = ToolContext(owner="source-owner", session_id="source-session")
         self.ref = "OBS" + "A" * 32
         self.handles = ["OBJ" + "B" * 24, "OBJ" + "C" * 24]
@@ -107,7 +109,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_create_preserves_all_roots_but_only_selected_identity_without_extra_reads(self):
         with patch.object(actions, "load_directory_observation", wraps=actions.load_directory_observation) as load:
-            preview, _ = actions.prepare_create_guangya_share(self.create_arguments(), self.context)
+            preview, _ = actions.prepare_create_guangya_share(self.create_arguments(), self.context, workspace_actions=self._domain_actions.workspace)
         source = preview.effect_metadata["reobservation_source"]
         self.assertEqual((source["version"], source["kind"], source["owner"], source["session_id"], source["credential_generation"]),
                          (1, "guangya_files", self.context.owner, self.context.session_id, 7))
@@ -133,11 +135,11 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_old_missing_roots_keeps_preview_but_does_not_guess_slash_or_expiry(self):
         args = self.create_arguments()
-        expected, expected_fingerprint = actions.prepare_create_guangya_share(args, self.context)
+        expected, expected_fingerprint = actions.prepare_create_guangya_share(args, self.context, workspace_actions=self._domain_actions.workspace)
         for key in ("roots", "max_items", "created_at", "created_at_epoch"):
             self.observation.pop(key)
         workspace._atomic_write(self.observation)
-        actual, fingerprint = actions.prepare_create_guangya_share(args, self.context)
+        actual, fingerprint = actions.prepare_create_guangya_share(args, self.context, workspace_actions=self._domain_actions.workspace)
         source = actual.effect_metadata["reobservation_source"]
         self.assertFalse(source["available"])
         self.assertIsNone(source["read"])
@@ -157,7 +159,7 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
                     observation["scope_path"] = "/One/b.txt"
                     observation["roots"] = [{"file_id": "file-b", "path": "/One/b.txt", "is_dir": False, "parent_id": "root-one"}]
                 workspace._atomic_write(observation)
-                preview, _ = actions.prepare_create_guangya_share(self.create_arguments(), self.context)
+                preview, _ = actions.prepare_create_guangya_share(self.create_arguments(), self.context, workspace_actions=self._domain_actions.workspace)
                 source = preview.effect_metadata["reobservation_source"]
                 self.assertTrue(source["available"])
                 self.assertEqual(source["baseline"]["max_items"], 12)
@@ -176,8 +178,8 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
     def test_resolved_observation_ref_is_recorded_when_request_uses_latest(self):
         args = self.create_arguments()
         args["observation_ref"] = ""
-        with patch.object(actions, "latest_guangya_observation_ref", return_value=self.ref) as latest:
-            preview, _ = actions.prepare_create_guangya_share(args, self.context)
+        with patch.object(self._domain_actions.workspace, "latest_guangya_observation_ref", return_value=self.ref) as latest:
+            preview, _ = actions.prepare_create_guangya_share(args, self.context, workspace_actions=self._domain_actions.workspace)
         latest.assert_called_once_with(self.context.owner)
         self.assertEqual(preview.effect_metadata["reobservation_source"]["baseline"]["observation_ref"], self.ref)
 
@@ -214,24 +216,24 @@ class ShareReobservationSourceTests(unittest.IsolatedAsyncioTestCase):
         self.observation["expires_at_epoch"] = time.time() - 1
         workspace._atomic_write(self.observation)
         with self.assertRaises(AgentToolError) as error:
-            actions.prepare_create_guangya_share(self.create_arguments(), self.context)
+            actions.prepare_create_guangya_share(self.create_arguments(), self.context, workspace_actions=self._domain_actions.workspace)
         self.assertEqual(error.exception.code, "confirmation_stale")
         self.assertFalse(workspace._plan_path("a" * 32).exists())
         self.factory.assert_not_called()
 
     def test_owner_and_credential_gates_still_reject_before_source_is_issued(self):
         with self.assertRaises(AgentToolError):
-            actions.prepare_create_guangya_share(self.create_arguments(), ToolContext(owner="another-owner", session_id=self.context.session_id))
+            actions.prepare_create_guangya_share(self.create_arguments(), ToolContext(owner="another-owner", session_id=self.context.session_id), workspace_actions=self._domain_actions.workspace)
         self.factory.assert_not_called()
         self.client.credential_generation = 8
         with self.assertRaises(AgentToolError) as error:
-            actions.prepare_create_guangya_share(self.create_arguments(), self.context)
+            actions.prepare_create_guangya_share(self.create_arguments(), self.context, workspace_actions=self._domain_actions.workspace)
         self.assertEqual(error.exception.code, "confirmation_stale")
         self.client.file_info.assert_not_called()
 
     async def test_native_pipeline_and_sqlite_effect_plan_preserve_private_source(self):
         collector = ToolSpecCollector()
-        register_specs(collector, resource_store=None, active_ingest_store=None, ingest_actions=None)
+        register_specs(collector, workspace_actions=self._domain_actions.workspace)
         catalog = ToolCatalog(adapt_tool_spec(spec) for spec in collector.items)
         state_store = SQLiteKernelStore(secret_provider=lambda: "source-test-secret")
         effect_store = ConfirmationEffectPlanStore(SQLiteConfirmationStore())

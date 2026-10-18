@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from app.agent import media_links
-from app.agent.domain_catalog import library_search
+from app.agent.domains.library import media_links
+from app.agent.domains.library import search as library_search
+from app.agent.domains.workspace.actions import _library_section
 from app.agent.kernel.projection import DefaultProjector
-from tests.test_agent_prompt_policy_window import capture_policy_windows
-from tests.test_agent_task_entry import isolated_db as isolated_db
 from app.agent.models import ToolResult
 from app.agent.provider_artifacts import ProviderArtifactStore
-from app.agent.workspace_actions import _library_section
 from app.bot.telegram_markdown import render_telegram_markdown
 from app.clients.base import MediaItem
 from app.modules.media_server_profiles import MediaServerProfile
+from tests.test_agent_prompt_policy_window import capture_policy_windows
+from tests.test_agent_task_entry import isolated_db as isolated_db
 
 
 class _ProxyManager:
@@ -248,7 +248,7 @@ def test_library_search_includes_verified_open_url(monkeypatch):
 def test_workspace_library_result_includes_verified_open_url(monkeypatch):
     direct = "http://media.local:8096/web/index.html#!/details?id=item-1"
     monkeypatch.setattr(
-        "app.agent.workspace_actions.search_media_servers",
+        "app.agent.domains.workspace.actions.search_media_servers",
         lambda _query, limit: [
             {
                 "server_type": "jellyfin",
@@ -267,7 +267,7 @@ def test_workspace_library_result_includes_verified_open_url(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        "app.agent.workspace_actions.media_open_url_resolver",
+        "app.agent.domains.workspace.actions.media_open_url_resolver",
         lambda **_kwargs: lambda item_url: str(item_url or ""),
     )
 

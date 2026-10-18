@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.discovery_watchlist_actions import (
+from app.agent.domains.discovery.watchlist_actions import (
     list_watchlist_summaries,
     remove_watchlist_arguments,
     watchlist_summaries_arguments,
@@ -71,7 +71,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
     def test_read_summaries_only_expose_public_fields(self) -> None:
         number = self._insert()
         with patch(
-            "app.agent.discovery_watchlist_actions.config.get_bool", return_value=True
+            "app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True
         ):
             listed = list_watchlist_summaries({})
             single = list_watchlist_summaries({"watchlist_number": number})
@@ -95,7 +95,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         expected = [self._insert(external_id=str(n), title=f"收藏 {n}") for n in range(45)]
         received = []
         arguments = {}
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             for _ in range(3):
                 result = list_watchlist_summaries(arguments)
                 self.assertLessEqual(len(result.data["items"]), 20)
@@ -139,7 +139,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         received = []
         pages = []
         arguments = {}
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             for _ in range(3):
                 result = service.invoke("discovery.watchlist_summaries", arguments)["result"]
                 self.assertTrue(result["ok"])
@@ -169,7 +169,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         ids = [self._insert(external_id=str(index), title="  Ａ\t收藏\x00  ") for index in range(25)]
         number = ids[0]
         service = get_agent_service()
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             first = service.invoke("discovery.watchlist_summaries", {})["result"]
             single = service.invoke(
                 "discovery.watchlist_summaries", {"watchlist_number": number}
@@ -215,8 +215,8 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
 
         with (
             patch.object(db, "get_conn", read_only),
-            patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True),
-            patch("app.agent.discovery_watchlist_actions.get_discovery_service") as provider,
+            patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.watchlist_actions.get_discovery_service") as provider,
         ):
             for arguments in (
                 {}, {"mode": "list"}, {"before_number": latest}, {"mode": "statistics"},
@@ -230,7 +230,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
 
     def test_watchlist_cursor_does_not_shift_after_inserts_or_deletes(self) -> None:
         ids = [self._insert(external_id=str(n)) for n in range(25)]
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             first = list_watchlist_summaries({})
             cursor = first.data["next_before_number"]
             self._insert(external_id="new")
@@ -241,7 +241,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
 
     def test_watchlist_exact_page_and_empty_continuation(self) -> None:
         ids = [self._insert(external_id=str(n)) for n in range(20)]
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             result = list_watchlist_summaries({})
             empty = list_watchlist_summaries({"before_number": ids[0]})
         self.assertEqual(result.data["count"], 20)
@@ -253,7 +253,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
     def test_watchlist_native_pipeline_keeps_pagination_and_private_fields_hidden(self) -> None:
         ids = [self._insert(external_id=str(n)) for n in range(21)]
         service = get_agent_service()
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             first = service.invoke("discovery.watchlist_summaries", {})["result"]
             second = service.invoke(
                 "discovery.watchlist_summaries",
@@ -303,7 +303,8 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
                 watchlist_summaries_arguments(arguments)
 
     def test_watchlist_read_modes_and_number_arguments_match_schema(self) -> None:
-        from app.agent.kernel.pipeline import ToolPipelineError, _validate_json_schema
+        from app.agent.errors import ToolPipelineError
+        from app.agent.schema import validate_json_schema
 
         schema = get_agent_service().pipeline.catalog.get("discovery.watchlist_summaries").input_schema
         for arguments in (
@@ -313,7 +314,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             {"watchlist_number": 12}, {"watchlist_number": 2_147_483_647},
         ):
             with self.subTest(arguments=arguments):
-                _validate_json_schema(arguments, schema)
+                validate_json_schema(arguments, schema)
                 self.assertEqual(watchlist_summaries_arguments(arguments), arguments)
         invalid_arguments = [
             {"mode": "statistics", "before_number": value}
@@ -346,7 +347,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
                 with self.assertRaises(AgentToolError):
                     watchlist_summaries_arguments(arguments)
                 with self.assertRaises(ToolPipelineError) as error:
-                    _validate_json_schema(arguments, schema)
+                    validate_json_schema(arguments, schema)
                 self.assertEqual(error.exception.code, "invalid_arguments")
 
     def test_watchlist_number_helper_keeps_exact_read_and_remove_boundaries(self) -> None:
@@ -372,14 +373,14 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
 
     def test_watchlist_statistics_empty_database(self) -> None:
         self.assertEqual(db.get_media_watchlist_statistics(), [])
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             result = list_watchlist_summaries({"mode": "statistics"})
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "empty")
         self.assertEqual(result.data, {"total": 0, "by_media_type": []})
 
     def test_watchlist_statistics_single_type_counts_all_and_limits_latest(self) -> None:
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             ids = [self._insert(external_id=str(index)) for index in range(2)]
             first = list_watchlist_summaries({"mode": "statistics"})
             ids.extend(self._insert(external_id=str(index)) for index in range(2, 7))
@@ -410,7 +411,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
                 [(number, f"PRIVATE_EXTERNAL_{number}", kind, f"收藏 {number}", f"PRIVATE_TIME_{3000-number}")
                  for number, kind in rows],
             )
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             result = list_watchlist_summaries({"mode": "statistics"})
         groups = result.data["by_media_type"]
         self.assertEqual(result.data["total"], len(rows))
@@ -442,7 +443,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
                 yield conn
 
         with patch.object(db, "get_conn", traced), patch(
-            "app.agent.discovery_watchlist_actions.config.get_bool", return_value=True
+            "app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True
         ):
             result = list_watchlist_summaries({"mode": "statistics"})
         self.assertEqual(len(queries), 1)
@@ -462,7 +463,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             self.assertNotIn(forbidden, queries[0])
 
     def test_watchlist_statistics_insert_update_and_delete_are_reflected(self) -> None:
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             movie = self._insert(external_id="movie")
             self._insert(external_id="tv", media_type="tv")
             first = list_watchlist_summaries({"mode": "statistics"})
@@ -520,7 +521,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
                 finally:
                     reader.set_progress_handler(None, 0)
 
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             with patch.object(db, "get_conn", traced):
                 snapshot = list_watchlist_summaries({"mode": "statistics"})
             fresh = list_watchlist_summaries({"mode": "statistics"})
@@ -540,7 +541,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         movie = self._insert(external_id="movie", title="  Ａ\t收藏\x00  ")
         tv = self._insert(external_id="tv", media_type="tv")
         service = get_agent_service()
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=True):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True):
             statistics = service.invoke("discovery.watchlist_summaries", {"mode": "statistics"})["result"]
             default = service.invoke("discovery.watchlist_summaries", {})["result"]
             explicit = service.invoke("discovery.watchlist_summaries", {"mode": "list"})["result"]
@@ -561,7 +562,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
             self.assertNotIn(forbidden, serialized)
 
     def test_watchlist_statistics_keeps_discovery_feature_switch(self) -> None:
-        with patch("app.agent.discovery_watchlist_actions.config.get_bool", return_value=False):
+        with patch("app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=False):
             for arguments in ({}, {"mode": "list"}, {"mode": "statistics"}, {"watchlist_number": 12}):
                 result = list_watchlist_summaries(arguments)
                 self.assertFalse(result.ok)
@@ -574,11 +575,11 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         provider.get_detail.return_value = _card(1)
         with (
             patch(
-                "app.agent.discovery_watchlist_actions.config.get_bool",
+                "app.agent.domains.discovery.watchlist_actions.config.get_bool",
                 return_value=True,
             ),
             patch(
-                "app.agent.discovery_watchlist_actions.get_discovery_service",
+                "app.agent.domains.discovery.watchlist_actions.get_discovery_service",
                 return_value=provider,
             ),
         ):
@@ -608,11 +609,11 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         provider.get_detail.return_value = _card(2)
         with (
             patch(
-                "app.agent.discovery_watchlist_actions.config.get_bool",
+                "app.agent.domains.discovery.watchlist_actions.config.get_bool",
                 return_value=True,
             ),
             patch(
-                "app.agent.discovery_watchlist_actions.get_discovery_service",
+                "app.agent.domains.discovery.watchlist_actions.get_discovery_service",
                 return_value=provider,
             ),
         ):
@@ -629,7 +630,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         number = self._insert(external_id="201", title="待移除")
         service = get_agent_service()
         with patch(
-            "app.agent.discovery_watchlist_actions.config.get_bool", return_value=True
+            "app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True
         ):
             prepared = service.prepare(
                 "discovery.remove_watchlist",
@@ -646,7 +647,7 @@ class AgentDiscoveryWatchlistTests(IsolatedDatabaseTestCase):
         reset_agent_service_for_tests()
         service = get_agent_service()
         with patch(
-            "app.agent.discovery_watchlist_actions.config.get_bool", return_value=True
+            "app.agent.domains.discovery.watchlist_actions.config.get_bool", return_value=True
         ):
             prepared = service.prepare(
                 "discovery.remove_watchlist",

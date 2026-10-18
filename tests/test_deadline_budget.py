@@ -2,56 +2,25 @@
 
 
 import asyncio
-
-
-from contextlib import contextmanager
-
-
 import hashlib
-
-
 import json
-
-
 import os
-
-
-from pathlib import Path
-
-
-
-
 import sys
-
-
+from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
-
-
 from unittest.mock import Mock, patch
 
-
 import httpx
-
-
 import pytest
 
-
-from app import config, database as db
-
-
+from app import config
+from app import database as db
 from app.agent.kernel import bootstrap
-
-
 from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter
-
-
-from app.agent.kernel.state import AgentInput
-
-
-
-
+from app.agent.kernel.state_types import AgentInput
 from tests import test_agent_generation_profiles as support
-from tests.test_agent_generation_profiles import Wire, response, BASE
+from tests.test_agent_generation_profiles import BASE, Wire, response
 
 local_config = support.local_config
 config_api = support.config_api
@@ -134,6 +103,7 @@ def harness(local_config, request, tmp_path):
 
 def select(model, owner, session_id):
     import telebot
+
     from app.bot import agent_adapter
     from app.modules import telegram_model_preferences as prefs
     token = prefs.create_model_callback(owner, session_id, 41, action='select', model_id=model)
@@ -189,6 +159,26 @@ def test_small_context_blocks_complete_chain(harness, config_api, context):
     assert not wire.requests
     assert any(e.payload.get('code') == 'context_budget_exceeded' for e in events)
     assert traces == [dict(context_window_tokens=context, output_tokens=127)]
+
+
+def test_capability_index_uses_the_profile_budget_estimator():
+    from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+    from app.agent.kernel.discovery import CapabilityDiscovery
+    from app.agent.model_context_budget import conservative_tokens, estimated_tokens
+
+    tools = [KernelToolSpec(
+        name=name, domain="library", description="读取作品详情", input_schema={},
+        effect=ToolEffect.READ, read=lambda _args, _context: None,
+    ) for name in ["agent.capabilities", *(f"library.item_{i}" for i in range(80))]]
+    discovery = CapabilityDiscovery(ToolCatalog(tools), context={})
+    default_index = discovery.model_index(maximum_tokens=400)
+    assert "library.item_79" in default_index
+    assert estimated_tokens(default_index) <= 400 < conservative_tokens(default_index)
+    conservative_index = discovery.model_index(maximum_tokens=400, conservative=True)
+    assert "library(81)" in conservative_index and "catalog" in conservative_index
+    assert "item_" not in conservative_index
+    assert conservative_tokens(conservative_index) <= 400
+    assert discovery.model_index(maximum_tokens=1, conservative=True) == ""
 
 
 def test_small_context_fitting_complete_chain(harness, config_api):

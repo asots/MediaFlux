@@ -3,17 +3,27 @@ import asyncio
 
 import pytest
 
+# Fixture migration: real GuangYa status producer, not arbitrary ready semantics.
+from app.agent.domains.guangya.runtime import _project_guangya_status
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.public_view import format_partial_progress, public_conversation_messages
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import (
-    AgentInput, AgentSession, CapabilityRetriever, KernelToolSpec, ModelEvent,
-    ModelEventType, ModelToolCall, PreparedEffect, ScriptedModel, ToolCatalog,
-    ToolEffect, ToolPipeline, ToolPipelineError, consume_events,
+    AgentInput,
+    AgentSession,
+    CapabilityRetriever,
+    KernelToolSpec,
+    ModelEvent,
+    ModelEventType,
+    ModelToolCall,
+    PreparedEffect,
+    ScriptedModel,
+    ToolCatalog,
+    ToolEffect,
+    ToolPipeline,
+    ToolPipelineError,
+    consume_events,
 )
-
-# Fixture migration: real GuangYa status producer, not arbitrary ready semantics.
-from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
 
 EXPLANATION = "文件变更共5项，已完成3项，仍有2项未确认完成。第4项因前置条件未满足而受阻。"
 READ_RESULT = _project_guangya_status({

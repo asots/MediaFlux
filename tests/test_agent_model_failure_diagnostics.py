@@ -20,12 +20,9 @@ from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
 from app.agent.kernel.events import TERMINAL_EVENT_TYPES, AgentEventType
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import (
-    AgentInput,
-    CancellationToken,
-    InMemorySessionStateStore,
-)
-from app.indexers.http import FixedHostHttpClient
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.clients.http import FixedHostHttpClient
 from tests.test_agent_protocol_fallback import (
     PROTOCOL_PATHS,
     SECRET,

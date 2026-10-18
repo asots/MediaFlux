@@ -7,13 +7,15 @@ from unittest import mock
 
 import httpx
 
-from app.agent import guangya_account_actions as actions
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.domains.guangya import account_actions as actions
 from app.agent.errors import AgentToolError
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolEffect
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.clients.guangya import GuangYaClient
 
 PROFILE = {"sub": "private-account", "name": "Alice", "phone_number": "13800138000"}

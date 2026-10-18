@@ -5,8 +5,13 @@ import asyncio
 
 import httpx
 
-from app.indexers.http import FixedHostHttpClient
-from app.modules.image_payload import ImagePayloadError, SAFE_IMAGE_MIME_TYPES, matches_image_magic
+from app.clients.http import FixedHostHttpClient
+from app.modules.image_payload import (
+    SAFE_IMAGE_MIME_TYPES,
+    ImagePayloadError,
+    matches_image_magic,
+)
+
 from .http import _bounded_resolver
 from .posters import canonical_platform_poster_key
 

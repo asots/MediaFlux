@@ -10,12 +10,23 @@ import pytest
 from app import database as db
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.lifecycle import AgentSessionLifecycle
-from app.agent.kernel.session import _AgentTurn
-from app.agent.kernel.state import PublicationLease, SessionBusyError, StalePublicationError, StateUpdate
-from app.agent.kernel.transports import QueryEnvelope
+from app.agent.kernel.state_types import (
+    PublicationLease,
+    SessionBusyError,
+    StalePublicationError,
+    StateUpdate,
+)
+from app.agent.kernel.turn import AgentTurn
+from app.agent.transports import QueryEnvelope
 from tests import test_agent_full_chain_audit as chain
 from tests.test_agent_full_chain_audit import persistent_runtime
-from tests.test_agent_ux_backend import OWNER, SESSION, _events, _publish_candidates, _selection
+from tests.test_agent_ux_backend import (
+    OWNER,
+    SESSION,
+    _events,
+    _publish_candidates,
+    _selection,
+)
 
 
 @pytest.fixture
@@ -185,9 +196,10 @@ def test_independent_owner_session_can_confirm_while_first_scope_is_writing(isol
         try:
             assert await asyncio.to_thread(entered.wait, 5)
             # 第二个候选换成另一磁力，避免下载层正确的全局资源幂等影响 scope 验证。
-            with patch("app.agent.indexer_actions.get_indexer_service") as get_service:
+            with patch("app.agent.domains.resources.indexer_actions.get_indexer_service") as get_service:
                 # 恢复外层隔离 fixture 的 service，不改候选身份和冻结摘要。
                 from types import SimpleNamespace
+
                 from app.indexers.models import ResolvedDownload
                 from tests.test_agent_ux_backend import _resources
                 items = {item["result_id"]: SimpleNamespace(**item) for item in _resources().data["items"]}
@@ -208,7 +220,8 @@ def test_independent_owner_session_can_confirm_while_first_scope_is_writing(isol
 def _process_confirm(db_path, plan, pipe):
     """spawn worker 使用父进程的测试 DB；只替换远端，不初始化/恢复运行中的数据库。"""
     from types import SimpleNamespace
-    from app.agent import indexer_actions
+
+    from app.agent.domains.resources import indexer_actions
     from app.indexers.models import ResolvedDownload
     from app.modules import download_dispatcher as dispatcher
     from tests.test_agent_ux_backend import SECRET, _resources
@@ -246,6 +259,7 @@ def _process_confirm(db_path, plan, pipe):
 @pytest.mark.parametrize("exit_kind", ["normal", "killed"])
 def test_process_exit_releases_scope_and_restart_never_reexecutes_claimed_plan(isolated_chain, exit_kind):
     import multiprocessing
+
     from tests.test_agent_ux_backend import SECRET
 
     async def exercise():
@@ -416,7 +430,7 @@ def test_cancelled_producer_drains_external_thread_and_persists_receipt(isolated
             return {"ok": True, "task_id": "fake-gy"}
 
         isolated_chain[0].side_effect = remote_write
-        task = asyncio.create_task(_AgentTurn(writer,
+        task = asyncio.create_task(AgentTurn(writer,
             QueryEnvelope(owner=OWNER, session_id=SESSION, message="继续已确认任务", request_id="cancel-producer", channel="api").to_agent_input(),
             queue, plan_id=plan,
         ).run())
@@ -538,7 +552,7 @@ def test_cancellation_during_confirmed_finalization_keeps_receipt_and_terminal_f
 
         with patch.object(store, method, side_effect=persistence), \
              patch.object(pipeline.effect_lifecycle, "completed", side_effect=attach_reference):
-            task = asyncio.create_task(_AgentTurn(writer, QueryEnvelope(owner=OWNER, session_id=SESSION,
+            task = asyncio.create_task(AgentTurn(writer, QueryEnvelope(owner=OWNER, session_id=SESSION,
                 message="继续已确认任务", request_id="finalization-cancel", channel="api").to_agent_input(), queue, plan_id=plan).run())
             try:
                 assert await asyncio.to_thread(entered.wait, 5)

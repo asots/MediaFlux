@@ -5,14 +5,14 @@ from __future__ import annotations
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.media_consumption_actions import (
+from app.agent.domains.subscriptions.consumption_actions import (
     continue_watching_arguments,
     notification_rule_update_arguments,
     preferences_update_arguments,
-    recently_played_arguments,
     recently_added_arguments,
+    recently_played_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolResult
 from app.agent.provider_models import ProviderGatewayError
 from app.agent.rate_limit import agent_rate_limiter
@@ -133,8 +133,8 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
         gateway = Mock()
         gateway.query.return_value = ToolResult(True, "success", "仅查询媒体库：电视剧", data={"items": []})
         with (
-            patch("app.agent.media_consumption_actions.list_configured_profiles", return_value=[profile]),
-            patch("app.agent.media_consumption_actions.get_provider_gateway", return_value=gateway),
+            patch("app.agent.domains.subscriptions.consumption_actions.list_configured_profiles", return_value=[profile]),
+            patch("app.agent.domains.subscriptions.consumption_actions.get_provider_gateway", return_value=gateway),
         ):
             for media_type in ("tv", "episode"):
                 with self.subTest(media_type=media_type):
@@ -177,11 +177,11 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.media_consumption_actions.list_configured_profiles",
+                "app.agent.domains.subscriptions.consumption_actions.list_configured_profiles",
                 return_value=[profile],
             ),
             patch(
-                "app.agent.media_consumption_actions.get_provider_gateway",
+                "app.agent.domains.subscriptions.consumption_actions.get_provider_gateway",
                 return_value=gateway,
             ),
         ):
@@ -214,11 +214,11 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.media_consumption_actions.list_configured_profiles",
+                "app.agent.domains.subscriptions.consumption_actions.list_configured_profiles",
                 return_value=[profile],
             ),
             patch(
-                "app.agent.media_consumption_actions.get_provider_gateway",
+                "app.agent.domains.subscriptions.consumption_actions.get_provider_gateway",
                 return_value=failed_gateway,
             ),
         ):
@@ -252,11 +252,11 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.media_consumption_actions.list_configured_profiles",
+                "app.agent.domains.subscriptions.consumption_actions.list_configured_profiles",
                 return_value=[profile_without_user],
             ),
             patch(
-                "app.agent.media_consumption_actions.get_provider_gateway",
+                "app.agent.domains.subscriptions.consumption_actions.get_provider_gateway",
                 return_value=default_gateway,
             ),
         ):
@@ -296,11 +296,11 @@ class MediaConsumptionAgentTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.media_consumption_actions.list_configured_profiles",
+                "app.agent.domains.subscriptions.consumption_actions.list_configured_profiles",
                 return_value=[profile],
             ),
             patch(
-                "app.agent.media_consumption_actions.get_provider_gateway",
+                "app.agent.domains.subscriptions.consumption_actions.get_provider_gateway",
                 return_value=gateway,
             ),
         ):

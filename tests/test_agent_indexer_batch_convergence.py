@@ -11,12 +11,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import database as db
-from app.agent import indexer_actions
+from app.agent.domains.resources import indexer_actions
 from app.indexers.downloads import download_indexer_result_public
 from app.indexers.models import ResolvedDownload
 from app.modules import download_dispatcher as dispatcher
 from tests.support import isolated_test_database
-
 
 FIRST = "opaque-resource-first"
 ALIAS = "opaque-resource-alias"

@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import json
+from copy import deepcopy
 
 import pytest
 
@@ -15,13 +15,18 @@ from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.provider_gateway import ProviderGateway
-from app.agent.provider_models import ProviderGatewayError, ProviderPayload, ProviderProfileView
+from app.agent.provider_models import (
+    ProviderGatewayError,
+    ProviderPayload,
+    ProviderProfileView,
+)
 from app.agent.provider_operations import build_provider_catalog
 from tests.test_agent_recovered_progress import reply
-from tests.test_agent_tool_argument_ingress import Wire, offline as offline, store as store
-
+from tests.test_agent_tool_argument_ingress import Wire
+from tests.test_agent_tool_argument_ingress import offline as offline
+from tests.test_agent_tool_argument_ingress import store as store
 
 _PROTOCOL = 'anthropic_messages'
 _OWNER = 'provider-repair-owner'

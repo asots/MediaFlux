@@ -9,19 +9,23 @@ from unittest.mock import patch
 import httpx
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.kernel.projection import DefaultProjector
-from app.agent.models import ToolResult
-from app.agent.rate_limit import tool_rate_limit_policy
-from app.agent.web_request_singleflight import web_request_singleflight
-from app.agent.web_read_actions import (
+from app.agent.domains.discovery.web_read_actions import (
     _extract_tavily,
     _map_extract_response,
     _provider_error,
     read_web,
     web_read_arguments,
 )
-from app.agent.web_search_actions import reset_web_search_cache_for_tests
+from app.agent.domains.discovery.web_request_singleflight import (
+    web_request_singleflight,
+)
+from app.agent.domains.discovery.web_search_actions import (
+    reset_web_search_cache_for_tests,
+)
+from app.agent.errors import AgentToolError
+from app.agent.kernel.projection import DefaultProjector
+from app.agent.models import ToolResult
+from app.agent.rate_limit import tool_rate_limit_policy
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -165,10 +169,10 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
     def test_disabled_or_missing_key_never_calls_provider(self):
         with (
             patch(
-                "app.agent.web_read_actions.get",
+                "app.agent.domains.discovery.web_read_actions.get",
                 side_effect=_config({"WEB_SEARCH_ENABLED": "0"}),
             ),
-            patch("app.agent.web_read_actions._extract_tavily") as provider,
+            patch("app.agent.domains.discovery.web_read_actions._extract_tavily") as provider,
         ):
             self.assertEqual(
                 read_web({"url": "https://example.com"}).status, "disabled"
@@ -176,12 +180,12 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
             provider.assert_not_called()
         with (
             patch(
-                "app.agent.web_read_actions.get",
+                "app.agent.domains.discovery.web_read_actions.get",
                 side_effect=_config(
                     {"WEB_SEARCH_ENABLED": "1", "TAVILY_API_KEY": ""}
                 ),
             ),
-            patch("app.agent.web_read_actions._extract_tavily") as provider,
+            patch("app.agent.domains.discovery.web_read_actions._extract_tavily") as provider,
         ):
             self.assertEqual(
                 read_web({"url": "https://example.com"}).status,
@@ -191,8 +195,8 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
 
     def test_sensitive_url_never_calls_provider_or_consumes_budget(self):
         with (
-            patch("app.agent.web_read_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_read_actions._extract_tavily") as provider,
+            patch("app.agent.domains.discovery.web_read_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_read_actions._extract_tavily") as provider,
             self.assertRaisesRegex(AgentToolError, "疑似包含凭据"),
         ):
             read_web(
@@ -229,9 +233,9 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
             return result
 
         with (
-            patch("app.agent.web_read_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_read_actions.get", side_effect=_config(self.values)),
             patch(
-                "app.agent.web_read_actions._extract_tavily", side_effect=provider
+                "app.agent.domains.discovery.web_read_actions._extract_tavily", side_effect=provider
             ) as call,
         ):
             first = read_web(
@@ -304,8 +308,8 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
                 errors.append(exc)
 
         with (
-            patch("app.agent.web_read_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_read_actions._extract_tavily", side_effect=provider),
+            patch("app.agent.domains.discovery.web_read_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_read_actions._extract_tavily", side_effect=provider),
             patch.object(web_request_singleflight, "reserve", side_effect=reserve),
         ):
             threads = [
@@ -334,8 +338,8 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
             return ToolResult(False, "timeout", "网页读取服务响应超时")
 
         with (
-            patch("app.agent.web_read_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_read_actions._extract_tavily", side_effect=provider),
+            patch("app.agent.domains.discovery.web_read_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_read_actions._extract_tavily", side_effect=provider),
         ):
             result = read_web({"url": "https://example.com/failure"})
         self.assertEqual(result.status, "timeout")
@@ -357,8 +361,8 @@ class WebReadExecutionTests(IsolatedDatabaseTestCase):
             )
         )
         with (
-            patch("app.agent.web_read_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_read_actions._extract_tavily") as provider,
+            patch("app.agent.domains.discovery.web_read_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_read_actions._extract_tavily") as provider,
         ):
             result = read_web({"url": "https://example.com/budget"})
         self.assertEqual(result.status, "budget_exhausted")

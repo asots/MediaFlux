@@ -8,9 +8,9 @@ from collections.abc import Callable
 from typing import Any
 
 from app.agent.confirmation import confirmation_context_fingerprint
-from app.agent.library_quality_actions import inspect_library_quality
-from app.agent.media_links import media_open_url_resolver
-from app.agent.media_user_actions import (
+from app.agent.domains.library.media_links import media_open_url_resolver
+from app.agent.domains.library.quality_actions import inspect_library_quality
+from app.agent.domains.playback.user_actions import (
     USER_READS,
     USER_WRITES,
     execute_media_user,

@@ -4,9 +4,15 @@ import asyncio
 import pytest
 
 from app import database as db
-from app.agent.kernel.state import StalePublicationError
+from app.agent.kernel.state_types import StalePublicationError
 from tests.test_agent_kernel_session_guard import (
-    OWNER, SESSION, confirmation, prepare, persistent_runtime,
+    OWNER,
+    SESSION,
+    confirmation,
+    persistent_runtime,
+    prepare,
+)
+from tests.test_agent_kernel_session_guard import (
     isolated_chain as isolated_chain,
 )
 from tests.test_agent_ux_backend import _runtime

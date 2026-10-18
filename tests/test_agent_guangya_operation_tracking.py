@@ -2,22 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import contextmanager
 import threading
 import unittest
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 from app import database as db
-from app.agent.domain_catalog.cloud_runtime import guangya_organize_status
-from app.agent.effect_completion import (
-    _CompletionTracker,
-    _patrol_status,
-    wait_for_effect_completion,
-)
+from app.agent.completion_observers import _CompletionTracker, _patrol_status
+from app.agent.domains.guangya.runtime import guangya_organize_status
+from app.agent.effect_completion import wait_for_effect_completion
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken
 from app.agent.models import RiskLevel, ToolContext, ToolReference, ToolResult, ToolSpec
-
 from app.modules.local_media_models import LOCAL_BUSY_TASK_STATUSES
 from app.modules.local_media_scan_runs import (
     finish_local_media_scan_report,
@@ -174,7 +171,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "app.agent.domain_catalog.cloud_runtime.guangya_organize_status",
+                "app.agent.domains.guangya.runtime.guangya_organize_status",
                 side_effect=lambda *_args, **_kwargs: next(snapshots),
             ) as status,
             patch(
@@ -229,7 +226,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
                     "已提交",
                     data={"operation_ref": _OPERATION_REF},
                 ),
-                "app.agent.domain_catalog.cloud_runtime.guangya_organize_status",
+                "app.agent.domains.guangya.runtime.guangya_organize_status",
             ),
             (
                 "private_task_id",
@@ -238,7 +235,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
                     task_id="private-organize-task",
                     operation="run",
                 ),
-                "app.agent.domain_catalog.cloud_runtime.guangya_organize_task_status",
+                "app.agent.domains.guangya.runtime.guangya_organize_task_status",
             ),
         )
         expected_statuses = ["running", "queued", "running", "completed"]
@@ -301,7 +298,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         progress = AsyncMock()
         with (
             patch(
-                "app.agent.guangya_recycle_actions.query_guangya_task_status",
+                "app.agent.domains.guangya.recycle_actions.query_guangya_task_status",
                 side_effect=lambda *_args, **_kwargs: next(snapshots),
             ) as status,
             patch(
@@ -334,7 +331,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_failure_and_timeout_never_claim_completion(self) -> None:
         failed = ToolResult(False, "failed", "光鸭任务执行失败", data={"progress": 0.4})
         with patch(
-            "app.agent.guangya_recycle_actions.query_guangya_task_status",
+            "app.agent.domains.guangya.recycle_actions.query_guangya_task_status",
             return_value=failed,
         ):
             result = await wait_for_effect_completion(
@@ -351,7 +348,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             True, "running", "光鸭任务仍在处理中", data={"progress": 0.2}
         )
         with patch(
-            "app.agent.guangya_recycle_actions.query_guangya_task_status",
+            "app.agent.domains.guangya.recycle_actions.query_guangya_task_status",
             return_value=running,
         ) as status:
             result = await wait_for_effect_completion(
@@ -374,21 +371,21 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             (
                 "guangya_organize_task",
                 {"task_id": "private-organize-task", "operation": "run"},
-                "app.agent.domain_catalog.cloud_runtime.guangya_organize_task_status",
+                "app.agent.domains.guangya.runtime.guangya_organize_task_status",
                 (_snapshot("queued"), _snapshot("completed")),
                 "completed",
             ),
             (
                 "local_media_task",
                 {"task_id": 91, "task_number": 4, "operation": "retry"},
-                "app.agent.local_media_task_actions.local_media_completion_status",
+                "app.agent.domains.local_media.task_queries.local_media_completion_status",
                 (_snapshot("running"), _snapshot("completed")),
                 "completed",
             ),
             (
                 "agent_job",
                 {"job_id": "private-agent-job", "operation": "audit"},
-                "app.agent.durable_job_actions.get_agent_job_status",
+                "app.agent.domains.system.jobs_actions.get_agent_job_status",
                 (
                     ToolResult(True, "pending", "全库检查已排队"),
                     ToolResult(True, "up_to_date", "全库检查已完成"),
@@ -398,14 +395,14 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             (
                 "strm_run",
                 {"after_run_id": 8, "trigger_type": "manual", "operation": "run"},
-                "app.agent.effect_completion._strm_status",
+                "app.agent.completion_observers._strm_status",
                 (_snapshot("running"), _snapshot("completed")),
                 "completed",
             ),
             (
                 "library_patrol",
                 {"lease_generation": 3, "task_status": "pending", "operation": "run"},
-                "app.agent.effect_completion._patrol_status",
+                "app.agent.completion_observers._patrol_status",
                 (
                     _snapshot("queued"),
                     ToolResult(True, "up_to_date", "全库巡检已完成"),
@@ -456,7 +453,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
                     task_id="private-organize-task",
                     operation="stop",
                 ),
-                "app.agent.domain_catalog.cloud_runtime.guangya_organize_task_status",
+                "app.agent.domains.guangya.runtime.guangya_organize_task_status",
                 _snapshot("stopped"),
                 "光鸭整理任务已停止",
                 "stopped",
@@ -465,7 +462,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
                 _tracked_accepted(
                     "agent_job", job_id="private-agent-job", operation="cancel"
                 ),
-                "app.agent.durable_job_actions.get_agent_job_status",
+                "app.agent.domains.system.jobs_actions.get_agent_job_status",
                 ToolResult(True, "cancelled", "全库检查已取消"),
                 "全库检查已取消",
                 "cancelled",
@@ -551,7 +548,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("app.database.get_agent_library_patrol", return_value=row),
             patch(
-                "app.agent.library_patrol_status.get_library_patrol_status"
+                "app.agent.domains.library.patrol_status.get_library_patrol_status"
             ) as terminal_status,
         ):
             result = _patrol_status(tracker)
@@ -564,7 +561,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         snapshot = _snapshot("completed", stats={"renamed": 1, "strm_scope_unknown": 1})
         snapshot.suggestions.append("同步范围未能确认，本次未触发 STRM 联动。")
         with patch(
-            "app.agent.domain_catalog.cloud_runtime.guangya_organize_status",
+            "app.agent.domains.guangya.runtime.guangya_organize_status",
             return_value=snapshot,
         ):
             result = await wait_for_effect_completion(
@@ -596,7 +593,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
                 )
                 with (
                     patch(
-                        "app.agent.domain_catalog.cloud_runtime.guangya_organize_status",
+                        "app.agent.domains.guangya.runtime.guangya_organize_status",
                         return_value=_snapshot(terminal),
                     ) as status,
                     patch(
@@ -628,7 +625,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             data={"operation_ref": _OPERATION_REF, "total": 1},
         )
         with patch(
-            "app.agent.domain_catalog.cloud_runtime.guangya_organize_status",
+            "app.agent.domains.guangya.runtime.guangya_organize_status",
             return_value=ToolResult(
                 False,
                 "empty",
@@ -650,7 +647,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             True, "accepted", "已提交", data={"accepted": True, "total": 1}
         )
         with patch(
-            "app.agent.domain_catalog.cloud_runtime.guangya_organize_status"
+            "app.agent.domains.guangya.runtime.guangya_organize_status"
         ) as status:
             unchanged = await wait_for_effect_completion(
                 normal_write,
@@ -672,7 +669,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         with patch(
-            "app.agent.domain_catalog.cloud_runtime.guangya_organize_status",
+            "app.agent.domains.guangya.runtime.guangya_organize_status",
             return_value=_snapshot("running"),
         ):
             result = await wait_for_effect_completion(
@@ -729,7 +726,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         lease, _ = await state.begin_turn(
             owner="webk:v1:owner-safe", session_id="session", request_id="request"
         )
-        from app.agent.kernel.pipeline import ToolCallContext
+        from app.agent.kernel.tool_calls import ToolCallContext
 
         context = ToolCallContext(
             owner="webk:v1:owner-safe",
@@ -789,7 +786,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         lease, _ = await state.begin_turn(
             owner="webk:v1:owner-safe", session_id="session", request_id="request"
         )
-        from app.agent.kernel.pipeline import ToolCallContext
+        from app.agent.kernel.tool_calls import ToolCallContext
 
         context = ToolCallContext(
             owner="webk:v1:owner-safe",
@@ -850,7 +847,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         lease, _ = await state.begin_turn(
             owner="webk:v1:owner-safe", session_id="session", request_id="request"
         )
-        from app.agent.kernel.pipeline import ToolCallContext
+        from app.agent.kernel.tool_calls import ToolCallContext
 
         context = ToolCallContext(
             owner="webk:v1:owner-safe",
@@ -906,7 +903,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         lease, _ = await state.begin_turn(
             owner="service-owner", session_id="session", request_id="request"
         )
-        from app.agent.kernel.pipeline import ToolCallContext
+        from app.agent.kernel.tool_calls import ToolCallContext
 
         context = ToolCallContext(
             owner="service-owner",
@@ -931,7 +928,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
 
 class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
     def test_relocated_download_continuation_is_visible_without_claiming_completion(self):
-        from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
+        from app.agent.domains.guangya.runtime import _project_guangya_status
         for location in ("stats", "result"):
             with self.subTest(location=location):
                 snapshot = _project_guangya_status(
@@ -954,7 +951,7 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("核对失败项", str(snapshot.suggestions))
 
     async def test_cleanup_verification_failure_reaches_terminal_receipt_without_private_error(self):
-        from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
+        from app.agent.domains.guangya.runtime import _project_guangya_status
         from app.agent.public_view import format_public_result
         snapshot = _project_guangya_status(
             {'status': 'partial', 'stats': {'total': 2, 'failed': 2, 'verification_failed': 2},
@@ -962,7 +959,7 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
             overview={}, operation_ref=_OPERATION_REF,
         )
         accepted = ToolResult(True, 'accepted', '清理已提交', data={'operation_ref': _OPERATION_REF})
-        with patch('app.agent.domain_catalog.cloud_runtime.guangya_organize_status', return_value=snapshot):
+        with patch('app.agent.domains.guangya.runtime.guangya_organize_status', return_value=snapshot):
             result = await wait_for_effect_completion(accepted, tool='guangya.organize.cleanup.execute', context=ToolContext(owner='owner'))
         self.assertFalse(result.ok)
         self.assertEqual(result.status, 'partial')
@@ -977,7 +974,7 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
                               data={'operation_ref': _OPERATION_REF, 'operation': 'filesystem_change'},
                               model_data={'operation': 'filesystem_change'})
         snapshot = _snapshot('completed', stats={'renamed': 6, 'moved': 0})
-        with patch('app.agent.domain_catalog.cloud_runtime.guangya_organize_status', return_value=snapshot):
+        with patch('app.agent.domains.guangya.runtime.guangya_organize_status', return_value=snapshot):
             result = await wait_for_effect_completion(accepted, tool='guangya.fs.change.execute', context=ToolContext(owner='owner'))
         self.assertTrue(result.ok)
         self.assertEqual(result.data['scope_note'], result.model_data['scope_note'])
@@ -987,7 +984,7 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('移动 6 项', text)
 
     def test_preflight_and_audit_failure_counts_have_distinct_explanations(self):
-        from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
+        from app.agent.domains.guangya.runtime import _project_guangya_status
         result = _project_guangya_status({'status': 'manual_review', 'stats': {'precondition_failed': 1, 'audit_failures': 2}}, overview={})
         self.assertIn('1 项写前核对未通过，后续动作未执行', result.error)
         self.assertIn('2 项执行审计未完整保存', result.error)
@@ -995,7 +992,7 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(success.error, '')
 
     def test_stale_recovered_plan_does_not_deny_prior_writes(self):
-        from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
+        from app.agent.domains.guangya.runtime import _project_guangya_status
         result = _project_guangya_status({"status": "failed", "error_code": "GuangYaFSChangeStale", "result": {
             "stats": {"total": 2}, "operation_items": [
                 {"position": 1, "operation": "rename", "status": "unknown", "completed_actions": []},
@@ -1005,7 +1002,7 @@ class GuangYaOperationResultMeaningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("本次变更未执行", result.error)
 
     def test_task_projection_passes_sanitized_operation_items_and_keeps_legacy_stats(self):
-        from app.agent.domain_catalog.cloud_runtime import _project_guangya_status
+        from app.agent.domains.guangya.runtime import _project_guangya_status
 
         projected = _project_guangya_status(
             {
@@ -1232,7 +1229,7 @@ class LocalMediaScanCompletionTests(unittest.IsolatedAsyncioTestCase):
                     resolve.assert_called_once_with(scan_ref, owner="admin")
 
     async def test_scan_uses_existing_kernel_completion_wait(self):
-        from app.agent.kernel.pipeline import ToolCallContext
+        from app.agent.kernel.tool_calls import ToolCallContext
 
         accepted = self._accepted([self._task()])
         tool = adapt_tool_spec(ToolSpec(
@@ -1270,8 +1267,8 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.database.__exit__(None, None, None)
 
     async def pending(self, channel="web"):
-        from app.agent.effect_completion import EffectCompletionScope
-        with patch("app.agent.effect_completion._poll", new=AsyncMock(
+        from app.agent.kernel.completion_receipts import EffectCompletionScope
+        with patch("app.agent.completion_observers._poll", new=AsyncMock(
             return_value=(_snapshot("running"), "running", {"status": "running"}),
         )):
             result = await wait_for_effect_completion(
@@ -1293,14 +1290,14 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
 
     async def finish(self, *, store=None):
         from app.agent.effect_completion import poll_effect_receipts
-        with patch("app.agent.effect_completion._poll", new=AsyncMock(
+        with patch("app.agent.completion_observers._poll", new=AsyncMock(
             return_value=(ToolResult(True, "completed", "云盘任务已完成"), "completed", {"status": "completed"}),
         )) as reader:
             count = await poll_effect_receipts(store or self.store)
         return count, reader
 
     def create_agent_job(self):
-        from app.agent.library_patrol_progress import empty_patrol_projection
+        from app.agent.domains.library.patrol_progress import empty_patrol_projection
 
         row, created = db.create_agent_job(
             owner=self.scope_args["owner"], job_type="library_episode_audit",
@@ -1312,7 +1309,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         return row
 
     async def handoff_agent_job(self, job, *, operation="audit"):
-        from app.agent.effect_completion import EffectCompletionScope
+        from app.agent.kernel.completion_receipts import EffectCompletionScope
 
         with patch("app.agent.effect_completion.asyncio.sleep", new=AsyncMock(
             side_effect=AssertionError("持久任务应交回前台，不等待后台终态"),
@@ -1387,7 +1384,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_job_handoff_requires_persisted_tracking(self):
         job = self.create_agent_job()
         with patch.object(self.store, "update_effect_state", side_effect=OSError("storage unavailable")), patch(
-            "app.agent.effect_completion._poll", new=AsyncMock(),
+            "app.agent.completion_observers._poll", new=AsyncMock(),
         ) as poll:
             with self.assertRaises(OSError):
                 await self.handoff_agent_job(job)
@@ -1395,22 +1392,23 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.get_agent_job(owner=self.scope_args["owner"], job_id=job["job_id"])["status"], "pending")
         self.assertEqual((await self.store.load(**self.scope_args)).metadata.get("effect_waits", {}), {})
         # 提交后跟踪登记失败不能靠重放制造第二份任务；重新确认复用原队列行。
-        from app.agent.durable_job_actions import (
-            prepare_start_episode_audit, start_episode_audit_confirmed,
+        from app.agent.domains.system.jobs_actions import (
+            prepare_start_episode_audit,
+            start_episode_audit_confirmed,
         )
         arguments = {"as_of": "2026-10-08", "max_series": 1}
         context = ToolContext(**self.scope_args)
         _, fingerprint = prepare_start_episode_audit(arguments, context)
-        with patch("app.agent.durable_job_actions.get_agent_jobs_scheduler"):
+        with patch("app.agent.domains.system.jobs_actions.get_agent_jobs_scheduler"):
             recovered = start_episode_audit_confirmed(arguments, fingerprint, context)
         self.assertFalse(recovered.data["created"])
         self.assertEqual(recovered.data["job_id"], job["job_id"])
         self.assertEqual(len(db.list_agent_jobs(owner=self.scope_args["owner"])), 1)
 
     async def test_many_already_accepted_tasks_are_not_rejected_after_the_write(self):
-        from app.agent.effect_completion import (
-            EffectCompletionScope, _CompletionTracker, _register_effect_wait,
-        )
+        from app.agent.completion_observers import _CompletionTracker
+        from app.agent.effect_completion import _register_effect_wait
+        from app.agent.kernel.completion_receipts import EffectCompletionScope
         for index in range(17):
             await _register_effect_wait(
                 _provider_accepted("empty_recycle_bin", 1),
@@ -1424,7 +1422,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_restart_completes_once_and_preserves_new_turn_and_plan(self):
         from app.agent.kernel.persistence import SQLiteKernelStore
-        from app.agent.kernel.state import StateUpdate
+        from app.agent.kernel.state_types import StateUpdate
         await self.pending()
         second, _ = await self.store.begin_turn(**self.scope_args, request_id="new-question")
         await self.store.commit(second, conversation=[{"role": "user", "content": "另一件事"}],
@@ -1476,8 +1474,8 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("等待完成", json.dumps(public, ensure_ascii=False))
 
     async def test_receipt_fallback_without_public_text_never_exposes_internal_json(self):
-        from app.agent.public_view import public_conversation_messages
         from app.agent.kernel.model import ModelMessage
+        from app.agent.public_view import public_conversation_messages
         await self.pending()
         await self.finish()
         state = await self.store.load(**self.scope_args)
@@ -1489,8 +1487,10 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('"evidence"', public[-1]["content"])
 
     async def test_foreground_terminal_saved_before_ack_does_not_duplicate(self):
-        from app.agent.effect_completion import (
-            EffectCompletionScope, _record_effect_observation, remember_effect_receipt,
+        from app.agent.effect_completion import _record_effect_observation
+        from app.agent.kernel.completion_receipts import (
+            EffectCompletionScope,
+            remember_effect_receipt,
         )
         await self.pending()
         scope = EffectCompletionScope(self.store, self.lease, self.plan_id)
@@ -1513,7 +1513,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         async def reset(*args):
             await self.store.reset_session(**self.scope_args)
             return ToolResult(True, "completed", "完成"), "completed", {}
-        with patch("app.agent.effect_completion._poll", side_effect=reset), patch(
+        with patch("app.agent.completion_observers._poll", side_effect=reset), patch(
             "app.agent.effect_completion._enqueue_late_receipt",
         ) as send:
             self.assertEqual(await poll_effect_receipts(self.store), 0)
@@ -1525,7 +1525,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
     async def test_transient_read_failure_remains_pending_without_fabricated_success(self):
         from app.agent.effect_completion import poll_effect_receipts
         await self.pending()
-        with patch("app.agent.effect_completion._poll", side_effect=OSError("offline")):
+        with patch("app.agent.completion_observers._poll", side_effect=OSError("offline")):
             self.assertEqual(await poll_effect_receipts(self.store), 0)
         state = await self.store.load(**self.scope_args)
         self.assertEqual(state.conversation, [])
@@ -1536,7 +1536,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_reference_ends_tracking_without_replaying_write(self):
         from app.agent.effect_completion import poll_effect_receipts
         await self.pending()
-        with patch("app.agent.effect_completion._poll", side_effect=LookupError("removed")) as read:
+        with patch("app.agent.completion_observers._poll", side_effect=LookupError("removed")) as read:
             self.assertEqual(await poll_effect_receipts(self.store), 1)
         read.assert_awaited_once()
         state = await self.store.load(**self.scope_args)
@@ -1551,7 +1551,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
             entered.set()
             await release.wait()
             return ToolResult(True, "completed", "完成"), "completed", {}
-        with patch("app.agent.effect_completion._poll", side_effect=delayed) as read:
+        with patch("app.agent.completion_observers._poll", side_effect=delayed) as read:
             task = asyncio.create_task(poll_effect_receipts(self.store))
             await entered.wait()
             self.assertEqual(await poll_effect_receipts(self.store), 0)
@@ -1562,7 +1562,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_tracking_does_not_discard_failed_telegram_handoff(self):
         from app.agent.effect_completion import poll_effect_receipts
         await self.pending(channel="telegram")
-        with patch("app.agent.effect_completion._poll", side_effect=LookupError("removed")), patch(
+        with patch("app.agent.completion_observers._poll", side_effect=LookupError("removed")), patch(
             "app.agent.effect_completion._enqueue_late_receipt", return_value=False,
         ):
             self.assertEqual(await poll_effect_receipts(self.store), 0)
@@ -1570,7 +1570,7 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.metadata["effect_waits"][self.plan_id]["delivered"])
         self.assertIn("无法核验", state.conversation[-1]["public_content"])
         await self.make_due()
-        with patch("app.agent.effect_completion._poll") as read, patch(
+        with patch("app.agent.completion_observers._poll") as read, patch(
             "app.agent.effect_completion._enqueue_late_receipt", return_value=True,
         ):
             self.assertEqual(await poll_effect_receipts(self.store), 1)
@@ -1587,7 +1587,8 @@ class PersistentEffectReceiptTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_telegram_outbox_handoff_is_idempotent_and_deleted_session_invalidates(self):
         from app.agent.effect_completion import (
-            _effect_reply_key, agent_effect_reply_is_current,
+            _effect_reply_key,
+            agent_effect_reply_is_current,
         )
         from app.modules.telegram_notification_center import get_notification
         await self.pending(channel="telegram")

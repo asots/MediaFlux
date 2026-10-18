@@ -2,25 +2,31 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import json
+from copy import deepcopy
 
 import pytest
 
-from app.agent.capability_discovery_actions import CAPABILITY_PARAMETERS
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.domains.system.capability_actions import CAPABILITY_PARAMETERS
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.error30_model_inputs import explicit_repair_wire
 from tests.test_agent_recovered_progress import reply
-from tests.test_agent_tool_argument_ingress import Wire, offline as offline, store as store
-
+from tests.test_agent_tool_argument_ingress import Wire
+from tests.test_agent_tool_argument_ingress import offline as offline
+from tests.test_agent_tool_argument_ingress import store as store
 
 _PROTOCOL = 'anthropic_messages'
 _OWNER = 'repair-modes-owner'

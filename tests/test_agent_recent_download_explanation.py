@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.recent_download_submissions import (
+from app.agent.domains.downloads.recent_submissions import (
     RecentDownloadSubmissionStore,
     explain_recent_download_status,
 )
@@ -71,7 +71,7 @@ class RecentDownloadExplanationProjectionTests(IsolatedDatabaseTestCase):
             failed=("qb",),
         )
         with patch(
-            "app.agent.recent_download_submissions.db.get_download_request_status_snapshot"
+            "app.agent.domains.downloads.recent_submissions.db.get_download_request_status_snapshot"
         ) as reader:
             result = explain_recent_download_status(record, position=1)
         reader.assert_not_called()
@@ -216,7 +216,7 @@ class RecentDownloadExplanationProjectionTests(IsolatedDatabaseTestCase):
             123, dispatch_status="duplicate", result_status="conflict", succeeded=()
         )
         with patch(
-            "app.agent.recent_download_submissions.db.get_download_request_status_snapshot"
+            "app.agent.domains.downloads.recent_submissions.db.get_download_request_status_snapshot"
         ) as reader:
             duplicate_result = explain_recent_download_status(duplicate, position=1)
         reader.assert_not_called()

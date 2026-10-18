@@ -11,16 +11,20 @@ from unittest.mock import Mock, patch
 import pytest
 
 import tests  # noqa: F401 -- 必须在 app 导入前建立临时 DB/config 隔离。
-from app.agent.calendar_actions import anime_calendar, anime_calendar_arguments
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.domains.discovery.calendar_actions import (
+    anime_calendar,
+    anime_calendar_arguments,
+)
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolEffect
 from app.agent.kernel.discovery import CapabilityDiscovery
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
-from tests.test_agent_prompt_policy_window import capture_policy_windows
-from tests.test_agent_task_entry import isolated_db as isolated_db
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import RiskLevel
 from app.agent.public_safety import public_tool_label, sanitize_public_text
 from app.agent.rate_limit import (
@@ -28,6 +32,8 @@ from app.agent.rate_limit import (
     allow_agent_tool,
     tool_rate_limit_policy,
 )
+from tests.test_agent_prompt_policy_window import capture_policy_windows
+from tests.test_agent_task_entry import isolated_db as isolated_db
 
 NEW_TOOL = "discovery.anime_calendar"
 OLD_TOOL = "bangumi.calendar"
@@ -194,7 +200,7 @@ def test_calendar_does_not_replace_library_recommendations_or_rss(catalog, messa
 @pytest.mark.parametrize("arguments", [{"query": "追漫日历"}, {"tool_names": [NEW_TOOL]}])
 def test_discovery_pipeline_loads_real_tool_without_executing_calendar(catalog, arguments):
     finder = CapabilityDiscovery(catalog, context={})
-    with patch("app.agent.calendar_actions.get_calendar_service") as service:
+    with patch("app.agent.domains.discovery.calendar_actions.get_calendar_service") as service:
         result = asyncio.run(_execute(catalog, "agent.capabilities", arguments, finder=finder))
     service.assert_not_called()
     data = result.outcome.public_content["data"]
@@ -211,9 +217,9 @@ def test_real_pipeline_reads_single_cached_snapshot_and_projects_flat_events(cat
     service = Mock()
     service.get_week.return_value = _snapshot()
     with (
-        patch("app.agent.calendar_actions.config.get_bool", return_value=True),
-        patch("app.agent.calendar_actions.get_calendar_service", return_value=service),
-        patch("app.agent.discovery_actions.get_discovery_service") as bangumi,
+        patch("app.agent.domains.discovery.calendar_actions.config.get_bool", return_value=True),
+        patch("app.agent.domains.discovery.calendar_actions.get_calendar_service", return_value=service),
+        patch("app.agent.domains.discovery.actions.get_discovery_service") as bangumi,
     ):
         result = asyncio.run(_execute(catalog, tool_name, {"source": "tencent"}))
     service.get_week.assert_called_once()
@@ -244,9 +250,9 @@ def test_cold_calendar_pipeline_returns_loading_without_retry_or_bangumi(catalog
     service = Mock()
     service.get_week.return_value = _snapshot(loading=True)
     with (
-        patch("app.agent.calendar_actions.config.get_bool", return_value=True),
-        patch("app.agent.calendar_actions.get_calendar_service", return_value=service),
-        patch("app.agent.discovery_actions.get_discovery_service") as bangumi,
+        patch("app.agent.domains.discovery.calendar_actions.config.get_bool", return_value=True),
+        patch("app.agent.domains.discovery.calendar_actions.get_calendar_service", return_value=service),
+        patch("app.agent.domains.discovery.actions.get_discovery_service") as bangumi,
     ):
         result = asyncio.run(_execute(catalog, NEW_TOOL, {}))
     service.get_week.assert_called_once()
@@ -265,7 +271,7 @@ def test_cold_calendar_pipeline_returns_loading_without_retry_or_bangumi(catalog
 ])
 def test_registered_validator_rejects_unsafe_arguments_before_service(catalog, arguments):
     with (
-        patch("app.agent.calendar_actions.get_calendar_service") as service,
+        patch("app.agent.domains.discovery.calendar_actions.get_calendar_service") as service,
         pytest.raises(ToolPipelineError),
     ):
         asyncio.run(_execute(catalog, NEW_TOOL, arguments))
@@ -281,8 +287,8 @@ def test_rate_policy_has_independent_six_per_minute_bucket_and_canonical_alias(c
     service.get_week.return_value = _snapshot()
     with (
         patch("app.agent.rate_limit.agent_rate_limiter", limiter),
-        patch("app.agent.calendar_actions.config.get_bool", return_value=True),
-        patch("app.agent.calendar_actions.get_calendar_service", return_value=service),
+        patch("app.agent.domains.discovery.calendar_actions.config.get_bool", return_value=True),
+        patch("app.agent.domains.discovery.calendar_actions.get_calendar_service", return_value=service),
     ):
         for index in range(6):
             name = NEW_TOOL if index % 2 else MODEL_TOOL

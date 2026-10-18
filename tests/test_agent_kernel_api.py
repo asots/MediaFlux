@@ -4,13 +4,15 @@ import asyncio
 import json
 import types
 import unittest
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.agent.kernel.adapters import TurnView
-from app.agent.kernel.state import SessionBusyError
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state_types import SessionBusyError
 from app.routes import agent_api as agent_kernel_api
 
 
@@ -98,9 +100,7 @@ class FakeWeb:
 
 class FakeStore:
     def __init__(self):
-        self.state = types.SimpleNamespace(
-            generation=0, conversation=[], pending_effect_plan_id=""
-        )
+        self.state = SessionState(owner="webk:v1:" + "a" * 64, session_id="session_1234567890")
         self.events = []
         self.event_calls = []
 
@@ -181,8 +181,8 @@ class AgentKernelApiTests(unittest.TestCase):
             lifecycle=self.lifecycle,
             metrics=types.SimpleNamespace(snapshot=lambda: {"turns": 0}),
         )
-        from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.capabilities import ToolCatalog
+        from app.agent.kernel.pipeline import ToolPipeline
         self.runtime.session.pipeline = ToolPipeline(
             catalog=ToolCatalog([]), state_store=self.runtime.store,
             effect_store=self.lifecycle.effect_store,
@@ -322,7 +322,7 @@ class AgentKernelApiTests(unittest.TestCase):
         self.assertEqual(self.web.queries, [])
 
     def test_session_restore_reconstructs_matching_pending_approval(self):
-        self.runtime.store.state = types.SimpleNamespace(
+        self.runtime.store.state = replace(self.runtime.store.state,
             generation=4,
             conversation=[
                 {"role": "user", "content": "暂停下载任务"},
@@ -372,7 +372,7 @@ class AgentKernelApiTests(unittest.TestCase):
         from app.agent.kernel.session_guard import session_scope_guard
 
         owner, sid = "webk:v1:" + "a" * 64, "session_1234567890"
-        self.runtime.store.state = types.SimpleNamespace(
+        self.runtime.store.state = replace(self.runtime.store.state,
             generation=4, conversation=[], metadata={},
             pending_effect_plan_id="plan-restore-0001",
         )
@@ -444,12 +444,12 @@ class AgentKernelApiTests(unittest.TestCase):
             "status": "running",
         }
         self.web.activity_results = [activity, None]
-        old_state = types.SimpleNamespace(
+        old_state = replace(self.runtime.store.state,
             generation=7,
             conversation=[{"role": "user", "content": "旧状态"}],
             pending_effect_plan_id="",
         )
-        completed_state = types.SimpleNamespace(
+        completed_state = replace(self.runtime.store.state,
             generation=8,
             conversation=[
                 {"role": "user", "content": "新问题"},
@@ -545,11 +545,11 @@ class AgentKernelApiTests(unittest.TestCase):
 
     def test_fast_completed_turn_between_two_idle_activity_samples_returns_new_result(self):
         session_id = "session_1234567890"
-        self.runtime.store.state = types.SimpleNamespace(
+        self.runtime.store.state = replace(self.runtime.store.state,
             generation=1, conversation=[{"role": "assistant", "content": "旧结果"}], pending_effect_plan_id="",
         )
         async def completed_events(**kwargs):
-            self.runtime.store.state = types.SimpleNamespace(
+            self.runtime.store.state = replace(self.runtime.store.state,
                 generation=2, conversation=[{"role": "assistant", "content": "新结果"}], pending_effect_plan_id="",
             )
             return [{"type": "turn.completed", "request_id": "new-request", "turn_id": "new-turn", "payload": {"answer": "新结果"}}]
@@ -638,7 +638,7 @@ class AgentKernelApiTests(unittest.TestCase):
             "status": "running",
         }
         self.web.activity_results = [activity, activity]
-        self.runtime.store.state = types.SimpleNamespace(
+        self.runtime.store.state = replace(self.runtime.store.state,
             generation=4,
             conversation=[{"role": "user", "content": "执行已确认操作"}],
             pending_effect_plan_id="plan-protected-0001",
@@ -727,11 +727,14 @@ class AgentKernelApiTests(unittest.TestCase):
     def test_session_stop_cancels_parked_read_once_and_isolates_owner_and_session(self):
         from app import database as db
         from app.agent.feature_gate import initialize_runtime_fence
-        from app.agent.kernel.bootstrap import build_agent_kernel_runtime, _capture_creation_binding
+        from app.agent.kernel.bootstrap import (
+            _capture_creation_binding,
+            build_agent_kernel_runtime,
+        )
         from app.agent.kernel.persistence import SQLiteKernelStore
-        from app.agent.kernel.state import AgentInput
+        from app.agent.kernel.state_types import AgentInput
         from tests.support import isolated_test_database
-        from tests.test_agent_read_wait_lifecycle import WaitScript, Quota, GOAL
+        from tests.test_agent_read_wait_lifecycle import GOAL, Quota, WaitScript
 
         owner, session_id = "webk:v1:" + "a" * 64, "session_wait_stop_0001"
         scopes = [(owner, session_id), (owner, "session_wait_other_0001"), ("webk:v1:" + "b" * 64, session_id)]
@@ -775,10 +778,16 @@ class AgentKernelApiTests(unittest.TestCase):
 
     def test_pipeline_snapshots_the_exact_projected_public_result(self):
         from app.agent.confirmation import ConfirmationStore
-        from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
+        from app.agent.kernel.capabilities import (
+            KernelToolSpec,
+            ToolCatalog,
+            ToolEffect,
+        )
         from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
-        from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
-        from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+        from app.agent.kernel.pipeline import ToolPipeline
+        from app.agent.kernel.state import InMemorySessionStateStore
+        from app.agent.kernel.state_types import CancellationToken
+        from app.agent.kernel.tool_calls import ToolCallContext
 
         state = InMemorySessionStateStore()
         effect_store = ConfirmationEffectPlanStore(ConfirmationStore())
@@ -841,7 +850,7 @@ class AgentKernelApiTests(unittest.TestCase):
         from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
         from app.agent.kernel.events import AgentEvent, AgentEventType
         from app.agent.kernel.persistence import SQLiteKernelStore
-        from app.agent.kernel.state import StateUpdate
+        from app.agent.kernel.state_types import StateUpdate
         from tests.support import isolated_test_database
 
         owner = "webk:v1:" + "a" * 64
@@ -1093,7 +1102,7 @@ class AgentKernelApiTests(unittest.TestCase):
                 ))
 
     def test_session_restore_does_not_revive_consumed_or_expired_plan(self):
-        self.runtime.store.state = types.SimpleNamespace(
+        self.runtime.store.state = replace(self.runtime.store.state,
             generation=4, conversation=[], pending_effect_plan_id="plan-stale-0001", metadata={}
         )
         self.lifecycle.effect_store.active = False
@@ -1104,7 +1113,7 @@ class AgentKernelApiTests(unittest.TestCase):
         self.assertIsNone(response.json()["pending_approval"])
 
     def test_session_restore_filters_intermediate_tool_turns_and_uses_public_result(self):
-        self.runtime.store.state = types.SimpleNamespace(
+        self.runtime.store.state = replace(self.runtime.store.state,
             generation=5,
             conversation=[
                 {"role": "user", "content": "搜索并推送 4K 版"},

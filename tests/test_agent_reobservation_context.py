@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 
 from app.agent.kernel.ports.existing_actions import _kernel_context
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.test_agent_failed_effect_followup import case as case
 
 

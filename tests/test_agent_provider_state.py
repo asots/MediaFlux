@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app import database as db
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
+from app.agent.kernel.conversation_context import restore_messages
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.provider_model import (
@@ -17,11 +18,10 @@ from app.agent.kernel.provider_model import (
     ProviderSettings,
 )
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.public_view import public_conversation_messages
 from tests.test_agent_kernel_core import read_tool
 from tests.test_agent_kernel_provider_model import chunks
-
 
 THINKING = "private-thought-do-not-publish"
 SIGNATURE = "signature/opaque+unchanged=="
@@ -415,6 +415,7 @@ class ProviderStateSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_state_absent_from_web_tg_metrics_journal_and_logs(self):
         import logging
+
         from app.agent.kernel.adapters import consume_events, iter_ndjson
         from app.agent.kernel.metrics import KernelMetrics
         from tests.test_agent_kernel_core import _events_stream
@@ -452,7 +453,7 @@ class ProviderStateSessionTests(unittest.IsolatedAsyncioTestCase):
         ).decode()
         journal = await self.store.list_events(owner="owner", session_id="session")
         state = await self.store.load(owner="owner", session_id="session")
-        restored = AgentSession._restore_messages(state)
+        restored = restore_messages(state)
         public = (
             ndjson
             + repr(view.to_dict())
@@ -592,7 +593,7 @@ class ProviderStateSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_response_byte_limit_applies_to_sse_and_json_before_finish(self):
         from app.agent.kernel.model import ModelRequest
         from app.agent.kernel.provider_model import ModelProviderError
-        from app.agent.kernel.state import CancellationToken
+        from app.agent.kernel.state_types import CancellationToken
 
         for reply in (
             [{"choices": [{"delta": {"reasoning_content": "x" * 800}}]}] * 4
@@ -639,7 +640,7 @@ class ProviderStateSessionTests(unittest.IsolatedAsyncioTestCase):
             for _ in range(4)
         ]
         wire = WireClient([frames, anthropic_answer()])
-        with self.assertLogs("app.agent.kernel.session", level="WARNING") as logs:
+        with self.assertLogs("app.agent.kernel.turn", level="WARNING") as logs:
             events = await self.run_session(self.session(wire))
         self.assertEqual(self.handled, [])
         self.assertEqual(len(wire.requests), 1)

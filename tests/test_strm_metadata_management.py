@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import database as db
+from app.agent.domains.strm.metadata_actions import cancel_confirmed, prepare_cancel
 from app.agent.models import ToolContext
-from app.agent.strm_metadata_actions import cancel_confirmed, prepare_cancel
 from app.modules import strm_metadata_management as service
 from app.repositories import strm as repository
 from tests.support import IsolatedDatabaseTestCase

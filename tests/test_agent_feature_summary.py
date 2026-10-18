@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from app.agent.errors import AgentToolError
-from app.agent.feature_actions import (
+from app.agent.domains.configuration.feature_actions import (
     feature_summary_arguments,
     summarize_feature_states,
 )
+from app.agent.errors import AgentToolError
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -39,10 +39,10 @@ class FeatureSummaryUnitTests(IsolatedDatabaseTestCase):
             return default
 
         with (
-            patch("app.agent.feature_actions.config.get_bool", side_effect=get_bool),
-            patch("app.agent.feature_actions.config.get", side_effect=get_value),
+            patch("app.agent.domains.configuration.feature_actions.config.get_bool", side_effect=get_bool),
+            patch("app.agent.domains.configuration.feature_actions.config.get", side_effect=get_value),
             patch(
-                "app.agent.feature_actions.config.has_external_override",
+                "app.agent.domains.configuration.feature_actions.config.has_external_override",
                 side_effect=lambda key: key == "DISCOVERY_DOUBAN_ENABLED",
             ),
         ):
@@ -93,12 +93,12 @@ class FeatureSummaryUnitTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.feature_actions.config.get_bool",
+                "app.agent.domains.configuration.feature_actions.config.get_bool",
                 side_effect=lambda key, default=False: enabled.get(key, default),
             ),
-            patch("app.agent.feature_actions.config.get", return_value=""),
+            patch("app.agent.domains.configuration.feature_actions.config.get", return_value=""),
             patch(
-                "app.agent.feature_actions.config.has_external_override",
+                "app.agent.domains.configuration.feature_actions.config.has_external_override",
                 return_value=False,
             ),
         ):
@@ -106,10 +106,10 @@ class FeatureSummaryUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(result.status, "ready")
         self.assertEqual(result.data["available_count"], 7)
         with (
-            patch("app.agent.feature_actions.config.get_bool", return_value=False),
-            patch("app.agent.feature_actions.config.get", return_value=""),
+            patch("app.agent.domains.configuration.feature_actions.config.get_bool", return_value=False),
+            patch("app.agent.domains.configuration.feature_actions.config.get", return_value=""),
             patch(
-                "app.agent.feature_actions.config.has_external_override",
+                "app.agent.domains.configuration.feature_actions.config.has_external_override",
                 return_value=False,
             ),
         ):

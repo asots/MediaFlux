@@ -4,19 +4,21 @@ from __future__ import annotations
 import json
 
 from app import database as db
-from app.agent.missing_media_workflow_runtime import MissingMediaWorkflowRuntime
-from app.agent.missing_media_workflows import (
+from app.agent.domains.downloads.recent_submissions import (
+    RecentDownloadSubmissionStore,
+    enqueue_recent_download_library_verification,
+    parse_recent_download_verification_context,
+)
+from app.agent.domains.library.missing_workflow_runtime import (
+    MissingMediaWorkflowRuntime,
+)
+from app.agent.domains.library.missing_workflows import (
     SQLiteMissingMediaWorkflowRepository,
     list_missing_workflows,
     workflow_followup_context,
     workflow_ref_from_context,
 )
 from app.agent.models import ToolContext, ToolResult
-from app.agent.recent_download_submissions import (
-    RecentDownloadSubmissionStore,
-    enqueue_recent_download_library_verification,
-    parse_recent_download_verification_context,
-)
 from tests.support import IsolatedDatabaseTestCase
 
 _VERIFICATION = {

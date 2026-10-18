@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from app.agent.activity_actions import timeline_snapshot
+from app.agent.domains.activity.actions import timeline_snapshot
 from app.agent.public_safety import sanitize_public_text
 from app.modules.media_automation_rules import RuleDelivery
 from app.notifier import NotificationEvent

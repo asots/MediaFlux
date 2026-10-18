@@ -16,10 +16,11 @@ import httpx
 import requests
 
 from app import database as db
-from app.agent import guangya_fs_change_actions as changes
-from app.agent import guangya_workspace_actions as files
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.domain_catalog.catalog import DomainActions
+from app.agent.domains.guangya import fs_change_actions as changes
+from app.agent.domains.guangya import workspace_actions as files
 from app.agent.kernel.adapters import TurnViewBuilder
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
@@ -34,7 +35,7 @@ from app.agent.kernel.ports.mediaflux_policy import (
     MediaFluxTurnAdmission,
 )
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.clients.guangya import GuangYaClient
 from app.modules import guangya_fs_change as plans
@@ -130,11 +131,8 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
         monkeypatch.setattr(plans, "PATHS", paths)
         monkeypatch.setattr(files, "GuangYaClient", lambda: provider)
         monkeypatch.setattr(changes, "GuangYaClient", lambda: provider)
-        files.reset_guangya_workspace_context_for_tests()
-        changes.reset_guangya_fs_change_context_for_tests()
         repository = SQLiteAgentSessionContextRepository()
-        files.configure_guangya_workspace_context(repository)
-        changes.configure_guangya_fs_change_context(repository)
+        domain_actions = DomainActions(repository)
         # 复用 queue 测试的独立 manager/进程内锁；入队、签名校验、worker、回执均真实。
         manager = organize_tasks.OrganizeTaskManager()
         manager._lock = threading.Lock()
@@ -147,7 +145,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
 
         async def run():
             script = FsReobservationScript()
-            specs = [adapt_tool_spec(spec) for spec in build_tool_specs() if spec.name in {READ, EXECUTE}]
+            specs = [adapt_tool_spec(spec) for spec in build_tool_specs(domain_actions=domain_actions) if spec.name in {READ, EXECUTE}]
             assert len(specs) == 2
             catalog = ToolCatalog(specs)
             store = SQLiteKernelStore(secret_provider=lambda: SECRET)
@@ -174,7 +172,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert source["baseline"]["selected"][0]["file_id"] == "move"
             old_observation = source["baseline"]["observation_ref"]
             old_object = script.calls[1]["arguments"]["operations"][0]["object_ref"]
-            flow = changes._flow(OWNER)
+            flow = domain_actions.fs_change._flow(OWNER)
             assert flow is not None
             frozen = plans._read(flow.plan_id)
             assert frozen["operations"][0]["source"]["name"] == "Move.mp4"
@@ -219,7 +217,7 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             assert new.plan_id != old.plan_id and new.snapshot_fingerprint != old.snapshot_fingerprint
             assert new.metadata["reobservation_source"]["baseline"]["observation_ref"] == current["observation_ref"]
             assert new.metadata["reobservation_source"]["baseline"]["selected"][0]["file_id"] == "move"
-            new_flow = changes._flow(OWNER)
+            new_flow = domain_actions.fs_change._flow(OWNER)
             assert new_flow is not None and new_flow.plan_id != frozen["plan_id"]
             new_frozen = plans._read(new_flow.plan_id)
             assert new_frozen["status"] == "previewed"
@@ -296,5 +294,3 @@ def test_expired_fs_plan_confirmation_reobserves_renamed_object_and_requires_new
             asyncio.run(run())
         finally:
             assert manager.shutdown(timeout=2.0), "离线 worker 必须在释放临时数据库前结束"
-            files.reset_guangya_workspace_context_for_tests()
-            changes.reset_guangya_fs_change_context_for_tests()

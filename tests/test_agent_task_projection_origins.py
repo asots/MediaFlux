@@ -13,7 +13,7 @@ from app import database as db
 from app.agent.kernel.adapters import TurnViewBuilder
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.routes import agent_api
 from tests.test_agent_task_first_slice import GOAL, OWNER, NativeScript
 

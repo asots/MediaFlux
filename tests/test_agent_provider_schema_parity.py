@@ -5,12 +5,17 @@ import asyncio
 
 import pytest
 
+from app.agent.errors import ToolPipelineError
 from app.agent.models import RiskLevel, ToolContext
 from app.agent.provider_gateway import ProviderGateway
-from app.agent.provider_models import ProviderGatewayError, ProviderOperationSpec, ProviderPayload, ProviderProfileView
+from app.agent.provider_models import (
+    ProviderGatewayError,
+    ProviderOperationSpec,
+    ProviderPayload,
+    ProviderProfileView,
+)
 from app.agent.provider_operations import build_provider_catalog
 from tests.test_agent_schema_composition import catalog_schema, execute
-from app.agent.kernel.pipeline import ToolPipelineError
 
 
 class Transport:
@@ -208,8 +213,9 @@ def test_domain_success_controls(name, args):
 ])
 def test_failed_provider_normalization_retains_registered_schema_without_changing_it(invalid):
     from copy import deepcopy
-    from app.agent.kernel.pipeline import _validate_json_schema
+
     from app.agent.provider_policy import validate_provider_arguments
+    from app.agent.schema import validate_json_schema
 
     # Missing additionalProperties is still closed by Provider normalization.
     schema = {'type': 'object', 'properties': {
@@ -223,9 +229,9 @@ def test_failed_provider_normalization_retains_registered_schema_without_changin
     assert effective is not None
     assert effective['properties']['nested']['additionalProperties'] is False
     with pytest.raises(ToolPipelineError):
-        _validate_json_schema(invalid, effective)
+        validate_json_schema(invalid, effective)
     corrected = {'nested': {'flag': True}}
-    _validate_json_schema(corrected, effective)
+    validate_json_schema(corrected, effective)
     assert validate_provider_arguments(schema, corrected) == corrected
     assert 'not-a-schema' not in str(failure.value)
 
@@ -233,12 +239,15 @@ def test_failed_provider_normalization_retains_registered_schema_without_changin
 @pytest.mark.parametrize("bad_operation,bad_profile", [(True, True), (True, False), (False, True)])
 def test_unknown_query_selectors_directly_retry_at_real_admission(bad_operation, bad_profile):
     from unittest.mock import patch
+
     from app.agent.domain_catalog import build_tool_specs
     from app.agent.kernel.capabilities import ToolCatalog
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+    from app.agent.kernel.pipeline import ToolPipeline
     from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
     from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
     from app.agent.rate_limit import AgentRateLimiter
 
     gw, transport = gateway()
@@ -290,12 +299,15 @@ def test_query_selector_contract_does_not_turn_permissions_into_repair_authority
 
 def test_query_retry_changes_optional_filters_but_keeps_real_profile_validation():
     from unittest.mock import patch
+
     from app.agent.domain_catalog import build_tool_specs
     from app.agent.kernel.capabilities import ToolCatalog
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+    from app.agent.kernel.pipeline import ToolPipeline
     from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
     from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
-    from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
     from app.agent.rate_limit import AgentRateLimiter
 
     gw, transport = gateway()

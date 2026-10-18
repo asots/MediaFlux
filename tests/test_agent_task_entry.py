@@ -11,13 +11,14 @@ from starlette.requests import Request
 
 from app import database as db
 from app.agent import domain_tool_metadata
-from app.agent.kernel.task_state import task_projection
 from app.agent.kernel.adapters import TurnViewBuilder
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
+from app.agent.kernel.conversation_state import retain_conversation
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import AgentInput, retain_conversation
+from app.agent.kernel.state_types import AgentInput
+from app.agent.kernel.task_state import task_projection
 from app.routes import agent_api
-from tests.test_agent_task_first_slice import NativeScript, OWNER
+from tests.test_agent_task_first_slice import OWNER, NativeScript
 
 GOAL = "帮我分别看看 TMDB 和 qBittorrent 当前配置，列出已检查和还没检查的内容；只读，不做修改。"
 CONSTRAINT = "只读，不做修改"
@@ -475,7 +476,7 @@ def test_non_admitted_source_rejected(isolated_db, tmp_path, origin):
 @pytest.mark.parametrize("custom", [False, True])
 def test_qa_default_custom_strict_initial_no_task_sql(isolated_db, tmp_path, custom):
     from app.agent.kernel.capabilities import CapabilityRetriever
-    from app.agent.kernel.session import AgentSession, DEFAULT_SYSTEM_PROMPT
+    from app.agent.kernel.session import DEFAULT_SYSTEM_PROMPT, AgentSession
 
     class StrictRetriever:
         def retrieve(self, message, catalog, *, context=None):
@@ -551,6 +552,7 @@ def test_qa_default_custom_strict_initial_no_task_sql(isolated_db, tmp_path, cus
 
 def test_literal_optins_visibility_related_and_description():
     from dataclasses import replace
+
     from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
     from app.agent.kernel.discovery import CapabilityDiscovery
     from app.agent.kernel.task_state import task_tool
@@ -637,7 +639,9 @@ def test_small_window_inherited_exact_discovery_characterization(isolated_db, tm
 
 def test_admitted_multiline_file_goal_is_task_data_not_a_public_summary_filter():
     from types import SimpleNamespace
-    from app.agent.kernel.task_state import proposal as make_patch, reduce_task
+
+    from app.agent.kernel.task_state import proposal as make_patch
+    from app.agent.kernel.task_state import reduce_task
 
     source = '为 /临时验收/test.txt 准备一天分享。\n先建立任务清单，未经确认不得分享。'
     args = {
@@ -673,8 +677,9 @@ def test_task_text_still_rejects_credentials_and_terminal_controls(unsafe):
 
 @pytest.mark.parametrize('operation', ['create', 'revise', 'checkpoint', 'cancel'])
 def test_task_published_schema_matches_operation_required_and_allowed_fields(operation):
-    from app.agent.kernel.pipeline import _validate_json_schema, ToolPipelineError
+    from app.agent.errors import ToolPipelineError
     from app.agent.kernel.task_state import task_tool, validate_proposal
+    from app.agent.schema import validate_json_schema
     if operation in {'create', 'revise'}:
         args = {**proposal(), 'operation': operation}
     elif operation == 'checkpoint':
@@ -682,19 +687,19 @@ def test_task_published_schema_matches_operation_required_and_allowed_fields(ope
     else:
         args = {'operation': operation, 'source': GOAL}
     schema = task_tool().input_schema
-    _validate_json_schema(args, schema)
+    validate_json_schema(args, schema)
     assert validate_proposal(args) == args
     for missing in args:
         incomplete = {key: value for key, value in args.items() if key != missing}
         with pytest.raises(ToolPipelineError):
-            _validate_json_schema(incomplete, schema)
+            validate_json_schema(incomplete, schema)
     extra = 'source' if operation == 'checkpoint' else 'evidence_ids'
     with pytest.raises(ToolPipelineError):
-        _validate_json_schema({**args, extra: GOAL if extra == 'source' else []}, schema)
+        validate_json_schema({**args, extra: GOAL if extra == 'source' else []}, schema)
     # Retired model-supplied version arguments are rejected, not silently adapted.
     for retired in (None, {'task_id': 'existing-task', 'epoch': 1, 'revision': 35}):
         with pytest.raises(ToolPipelineError):
-            _validate_json_schema({**args, 'expected': retired}, schema)
+            validate_json_schema({**args, 'expected': retired}, schema)
         with pytest.raises(ValueError):
             validate_proposal({**args, 'expected': retired})
 
@@ -707,12 +712,13 @@ def test_task_published_schema_matches_operation_required_and_allowed_fields(ope
     {'kind': 'network_reachable', 'criterion': ''},
 ])
 def test_task_published_schema_rejects_invalid_acceptance_shape(acceptance):
-    from app.agent.kernel.pipeline import _validate_json_schema, ToolPipelineError
+    from app.agent.errors import ToolPipelineError
     from app.agent.kernel.task_state import task_tool
+    from app.agent.schema import validate_json_schema
     args = proposal()
     args['obligations'][0]['acceptance'] = acceptance
     with pytest.raises(ToolPipelineError):
-        _validate_json_schema(args, task_tool().input_schema)
+        validate_json_schema(args, task_tool().input_schema)
 
 
 def test_explicit_checklist_is_visible_in_first_model_request_without_auto_creation(isolated_db):
@@ -731,7 +737,12 @@ def test_explicit_checklist_is_visible_in_first_model_request_without_auto_creat
 
 
 def test_query_utility_does_not_replace_business_slot_or_match_substrings():
-    from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+    from app.agent.kernel.capabilities import (
+        CapabilityRetriever,
+        KernelToolSpec,
+        ToolCatalog,
+        ToolEffect,
+    )
     from app.agent.kernel.task_state import task_tool
     business = KernelToolSpec(name="library.check", domain="library", description="check",
         input_schema={"type": "object"}, effect=ToolEffect.READ, read=lambda *_: {"ok": True})

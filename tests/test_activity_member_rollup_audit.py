@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.activity_actions import (
+from app.agent.domains.activity.actions import (
     search_arguments,
     select_activity,
     selection_arguments,
@@ -15,7 +15,8 @@ from app.agent.activity_actions import (
 )
 from app.modules.media_automation_rules import drain_automation_rules
 from app.modules.telegram_notification_policy import NotificationImportance
-from app.repositories import activity, media_automation_rules as rules
+from app.repositories import activity
+from app.repositories import media_automation_rules as rules
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -318,7 +319,7 @@ class ActivityMemberRollupAuditTests(IsolatedDatabaseTestCase):
     def test_last_emitted_timeline_reference_is_accepted_by_public_selection_contract(
         self,
     ):
-        from app.agent.domain_catalog.activity import _SELECTION
+        from app.agent.domains.activity.tools import _SELECTION
 
         target = self._linked_download("failed")
         reference = timeline_snapshot(target).references[0].value

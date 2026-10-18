@@ -10,7 +10,11 @@ import pytest
 
 from app import database as db
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import StateUpdate, StalePublicationError, SessionBusyError
+from app.agent.kernel.state_types import (
+    SessionBusyError,
+    StalePublicationError,
+    StateUpdate,
+)
 from app.agent.kernel.task_state import (
     TaskConflict,
     identity,

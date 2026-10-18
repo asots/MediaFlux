@@ -2,16 +2,23 @@
 import asyncio
 import json
 
-
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.pipeline import ToolPipeline
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
+from app.agent.kernel.provider_model import (
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import read_tool
-from tests.test_agent_provider_state import WireClient, anthropic_tool_frames, anthropic_answer, SIGNATURE
+from tests.test_agent_provider_state import (
+    SIGNATURE,
+    WireClient,
+    anthropic_answer,
+    anthropic_tool_frames,
+)
 from tests.test_cancelled_read_inline import sqlite_store
 
 

@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.agent.library_quality_actions import (
+from app.agent.domains.library.quality_actions import (
     inspect_library_quality,
     inspect_quality_item,
 )

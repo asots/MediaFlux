@@ -7,14 +7,18 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+
 from app import database as db
+from app.agent.errors import ToolRateLimitError
 from app.agent.feature_gate import initialize_runtime_fence
-from app.agent.kernel.bootstrap import build_agent_kernel_runtime, _capture_creation_binding
+from app.agent.kernel.bootstrap import (
+    _capture_creation_binding,
+    build_agent_kernel_runtime,
+)
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import AgentInput
-from app.agent.kernel.pipeline import ToolRateLimitError
+from app.agent.kernel.state_types import AgentInput
 from app.agent.rate_limit import RateLimitDecision
-from tests.test_agent_task_first_slice import NativeScript, declaration, GOAL, OWNER
+from tests.test_agent_task_first_slice import GOAL, OWNER, NativeScript, declaration
 
 
 @pytest.fixture(autouse=True)
@@ -194,8 +198,9 @@ def test_cold_wait_expiry_or_clock_reversal_never_requests_model(advance):
 
 
 def test_claim_exclusion_running_never_replays_after_lease():
-    from app.agent.kernel.model import ModelEvent, ModelEventType
     from contextlib import suppress
+
+    from app.agent.kernel.model import ModelEvent, ModelEventType
     async def run():
         timer = [100]
         _, candidate = await parked_runtime(timer)
@@ -367,7 +372,8 @@ async def parked_runtime(timer, session_id='wait-control'):
 @pytest.mark.parametrize('phase', ['acquire', 'handler'])
 def test_cold_cancel_blocks_handler_start_and_late_reference(phase):
     from contextlib import suppress
-    from app.agent.kernel.projection import ToolOutcome, ReferenceValue
+
+    from app.agent.kernel.projection import ReferenceValue, ToolOutcome
     async def run():
         timer = [100]
         runtime, candidate = await parked_runtime(timer)

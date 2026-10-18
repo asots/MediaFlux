@@ -18,8 +18,6 @@ from unittest.mock import ANY, Mock, patch
 
 from fastapi.testclient import TestClient
 
-from tests.support import PagedDirectoryTestMixin
-
 from app import config
 from app import database as db
 from app.clients.base import DashboardData
@@ -82,6 +80,7 @@ from app.modules.strm import STRM_SUBDIR, sync_strm
 from tests.support import (
     InitializedWebTestCase,
     IsolatedDatabaseTestCase,
+    PagedDirectoryTestMixin,
     release_parse_fields,
     release_parse_result,
 )
@@ -3628,7 +3627,7 @@ class TelegramBotTests(unittest.TestCase):
                 side_effect=lambda key, default="": values.get(key, default),
             ),
             patch(
-                "telebot.TeleBot",
+                "app.bot.client.TopicRoutingBot",
                 return_value=bot,
             ) as constructor,
         ):

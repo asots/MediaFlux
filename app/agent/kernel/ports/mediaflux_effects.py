@@ -10,25 +10,25 @@ from typing import Any
 
 from app import config
 from app.agent.action_history import (
-    record_confirmation_error,
     record_confirmation_claimed,
+    record_confirmation_error,
     record_confirmation_interrupted,
     record_confirmed_result,
 )
-from app.agent.action_undo import attach_undo_receipt, compensation_candidate
-from app.agent.activity_actions import attach_activity_reference
-from app.agent.feature_gate import invalidate_agent_runtime_generation
-from app.agent.missing_media_workflow_runtime import (
+from app.agent.domains.activity.actions import attach_activity_reference
+from app.agent.domains.activity.undo import attach_undo_receipt, compensation_candidate
+from app.agent.domains.library.missing_workflow_runtime import (
     MISSING_MEDIA_CANDIDATES_KEY,
     MISSING_MEDIA_FOLLOWUPS_KEY,
     MissingMediaWorkflowRuntime,
 )
+from app.agent.feature_gate import invalidate_agent_runtime_generation
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import RiskLevel, ToolContext, ToolResult
 from app.logger import get_logger
 
 from ..capabilities import KernelToolSpec, ToolEffect
 from ..effects import EffectPlan, PreparedEffect
-from ..pipeline import ToolCallContext
 
 logger = get_logger(__name__)
 

@@ -13,33 +13,14 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.errors import AgentToolError
-from app.agent.indexer_candidate_actions import (
+from app.agent.domains.library.missing_workflow_runtime import (
+    MissingMediaWorkflowRuntime,
+)
+from app.agent.domains.resources.candidate_actions import (
     present_candidates,
     present_candidates_arguments,
 )
-from app.agent.ingest_actions import (
-    AgentIngestSessionStore,
-    IngestActions,
-    ingest_inspect_arguments,
-    ingest_submit_arguments,
-)
-from app.agent.kernel.events import AgentEventType
-from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import (
-    ToolCallContext,
-    ToolPipelineError,
-    _validate_json_schema,
-)
-from app.agent.kernel.projection import DefaultProjector
-from app.agent.kernel.state import AgentInput, CancellationToken
-from app.agent.kernel.transports import QueryEnvelope
-from app.agent.kernel.ux_selection import current_candidate_view, normalize_selection
-from app.agent.missing_media_workflow_runtime import MissingMediaWorkflowRuntime
-from app.agent.models import ToolContext, ToolReference, ToolResult
-from app.agent.public_view import candidate_result_lines
-from app.agent.recent_resource_candidates import (
+from app.agent.domains.resources.candidate_context import (
     RecentResourceCandidateStore,
     attach_resource_candidate_reference,
     new_resource_search_id,
@@ -47,6 +28,28 @@ from app.agent.recent_resource_candidates import (
     safe_resource_snapshot,
     validate_safe_resource_snapshot,
 )
+from app.agent.domains.resources.ingest_actions import (
+    AgentIngestSessionStore,
+    IngestActions,
+    ingest_inspect_arguments,
+    ingest_submit_arguments,
+)
+from app.agent.domains.resources.presentation import MediaFluxProjector
+from app.agent.domains.resources.selection import (
+    current_candidate_view,
+    normalize_selection,
+)
+from app.agent.errors import AgentToolError, ToolPipelineError
+from app.agent.kernel.events import AgentEventType
+from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.projection import DefaultProjector
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
+from app.agent.models import ToolContext, ToolReference, ToolResult
+from app.agent.public_view import candidate_result_lines
+from app.agent.schema import validate_json_schema
+from app.agent.transports import QueryEnvelope
 from app.indexers.models import IndexerItem
 from app.indexers.result_store import IndexerResultStore
 from tests import test_agent_ux_backend as ux
@@ -147,15 +150,15 @@ def test_schema_and_validators_share_resource_capacity_without_reducing_share_ca
     assert specs["indexer.search_resources"].parameters["properties"]["limit"]["maximum"] == 50
     for name, valid in arguments.items():
         spec = specs[name]
-        _validate_json_schema(valid, spec.parameters)
+        validate_json_schema(valid, spec.parameters)
         assert spec.validator(valid)["positions"] == positions
         invalid = {**valid, "positions": [51]}
         with pytest.raises(ToolPipelineError):
-            _validate_json_schema(invalid, spec.parameters)
+            validate_json_schema(invalid, spec.parameters)
         with pytest.raises(AgentToolError):
             spec.validator(invalid)
     share = {"source_type": "guangya_share", "ingest_snapshot_ref": reference, "positions": [200]}
-    _validate_json_schema(share, specs["ingest.submit"].parameters)
+    validate_json_schema(share, specs["ingest.submit"].parameters)
     assert ingest_submit_arguments(share)["positions"] == [200]
     selection = {"ref": reference, "positions": positions[::-1], "target": "guangya"}
     assert normalize_selection(selection)["positions"] == positions
@@ -176,7 +179,7 @@ def test_low_model_budget_still_persists_full_reference_and_presents_tail(store)
     async def exercise():
         with patch.object(ux, "_resources", side_effect=lambda **_: _resources(50)):
             _, pipeline, states = ux._runtime(store)
-            pipeline.projector = DefaultProjector(max_model_chars=2000)
+            pipeline.projector = MediaFluxProjector(max_model_chars=2000)
             lease, _ = await states.begin_turn(owner=ux.OWNER, session_id=ux.SESSION, request_id="budget")
             context = ToolCallContext(owner=ux.OWNER, session_id=ux.SESSION, request_id="budget", turn_id=lease.turn_id,
                                       lease=lease, cancellation=CancellationToken(), report_progress=AsyncMock())
@@ -246,8 +249,8 @@ def test_full_batch_is_frozen_in_one_plan_and_only_dispatched_once_after_confirm
             {"status": "submitted", "request_id": position, "succeeded": ["guangya"], "failed": []}
             for position in positions
         ]})
-        with patch("app.agent.indexer_candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch) as prepare, \
-             patch("app.agent.indexer_candidate_actions.submit_resource_batch_confirmed", return_value=result) as execute:
+        with patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch) as prepare, \
+             patch("app.agent.domains.resources.candidate_actions.submit_resource_batch_confirmed", return_value=result) as execute:
             events = await ux._events(session.run(user))
             approvals = [event for event in events if event.type is AgentEventType.EFFECT_APPROVAL_REQUIRED]
             assert len(approvals) == 1
@@ -295,7 +298,7 @@ def test_lifecycle_failure_returns_full_aligned_empty_slots():
 
 
 def test_multi_work_search_keeps_all_thirty_six_candidates_and_private_handles():
-    from app.agent.episode_resource_actions import (
+    from app.agent.domains.library.episode_resource_actions import (
         missing_season_resource_arguments,
         search_missing_season_resources,
     )
@@ -330,9 +333,9 @@ def test_multi_work_search_keeps_all_thirty_six_candidates_and_private_handles()
             items.append({**item.to_public_dict(), "result_id": provider.result_store.put(item)})
         return _search_result(query=f"{name} S01", items=items)
 
-    with patch("app.agent.episode_resource_actions.audit_series_episodes", side_effect=audit) as audits, \
-         patch("app.agent.episode_resource_actions.search_resources", side_effect=search) as searches, \
-         patch("app.agent.episode_resource_actions.get_indexer_service", return_value=provider):
+    with patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", side_effect=audit) as audits, \
+         patch("app.agent.domains.library.episode_resource_actions.search_resources", side_effect=search) as searches, \
+         patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=provider):
         result = search_missing_season_resources(arguments)
     assert audits.call_count == searches.call_count == len(names)
     assert {call.args[0]["query"] for call in audits.call_args_list} == set(names)

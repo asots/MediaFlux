@@ -6,7 +6,7 @@ import sqlite3
 from unittest.mock import patch
 
 from app import database as db
-from app.agent import media_consumption_actions as actions
+from app.agent.domains.subscriptions import consumption_actions as actions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.repositories import media_experience as repository

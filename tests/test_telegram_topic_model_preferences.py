@@ -287,7 +287,7 @@ class TelegramTopicAndModelPreferenceTests(unittest.TestCase):
         provider_module.resolve_protocol = resolve_protocol
         provider_module.provider_headers = provider_headers
 
-        http_module = ModuleType("app.indexers.http")
+        http_module = ModuleType("app.clients.http")
 
         class FakeHttpClient:
             def __init__(self, **kwargs):
@@ -314,7 +314,7 @@ class TelegramTopicAndModelPreferenceTests(unittest.TestCase):
             "app.clients": clients_package,
             "app.clients.openai_compatible": provider_module,
             "app.indexers": indexers_package,
-            "app.indexers.http": http_module,
+            "app.clients.http": http_module,
         }
         with patch.dict(sys.modules, modules):
             models = asyncio.run(

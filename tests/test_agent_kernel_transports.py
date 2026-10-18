@@ -22,7 +22,7 @@ from app.agent.kernel.model import (
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state import InMemorySessionStateStore
-from app.agent.kernel.transports import (
+from app.agent.transports import (
     EffectEnvelope,
     QueryEnvelope,
     TelegramKernelTransport,
@@ -146,8 +146,9 @@ class TelegramCancellationTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.modules.telegram_model_preferences.get_telegram_model_preference", return_value="")
     async def test_stop_requested_before_turn_start_is_not_lost(self, _preference):
         import asyncio
-        from app.agent.kernel.state import CancellationToken
+
         from app.agent.kernel.events import AgentEventType
+        from app.agent.kernel.state_types import CancellationToken
 
         session = make_session()
         original = session.run
@@ -248,7 +249,7 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.metrics.snapshot()["statuses"], {"cancelled": 1})
 
     async def test_non_web_consumer_close_keeps_original_cancellation_semantics(self):
-        from app.agent.kernel.state import AgentInput
+        from app.agent.kernel.state_types import AgentInput
         session, entered, release, cancelled, calls = self.paused_session()
         stream = session.run(AgentInput(owner="owner", session_id="session", message="原API取消", channel="api"))
         await anext(stream)
@@ -259,7 +260,7 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(session._detached_tasks)
 
     async def test_cancel_during_admission_records_request_without_publishing_a_turn(self):
-        from app.agent.kernel.state import AgentInput
+        from app.agent.kernel.state_types import AgentInput
 
         entered = asyncio.Event()
 
@@ -289,7 +290,7 @@ class WebDetachedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.conversation)
 
     async def test_revoked_admission_is_counted_as_cancelled_not_failed(self):
-        from app.agent.kernel.state import AgentInput, StalePublicationError
+        from app.agent.kernel.state_types import AgentInput, StalePublicationError
 
         class RevokedAdmission:
             async def begin(self, agent_input):

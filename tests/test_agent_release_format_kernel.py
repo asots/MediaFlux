@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import json
+from copy import deepcopy
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -13,9 +13,9 @@ from app.agent.kernel.adapters import consume_events
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
 from app.agent.kernel.capabilities import ToolEffect
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.state import AgentInput
-from app.agent.public_safety import public_tool_label
+from app.agent.kernel.state_types import AgentInput
 from app.agent.owner_routes import web_kernel_owner
+from app.agent.public_safety import public_tool_label
 from app.modules.recognition import formats
 from app.modules.scraper import _parse_release_core
 from tests.support import IsolatedDatabaseTestCase
@@ -224,8 +224,8 @@ class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
         self.assertFalse(hasattr(formats, "_request"))
 
     def test_web_chat_and_confirmation_use_real_persistent_runtime(self):
-        from tests.test_release_formats import ReleaseFormatApiTests
         from app.main import create_app
+        from tests.test_release_formats import ReleaseFormatApiTests
         runtime = self.runtime(TeachingModel())
         with patch("app.routes.agent_api.get_agent_kernel_runtime", return_value=runtime):
             client = TestClient(create_app(), raise_server_exceptions=False)

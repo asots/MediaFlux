@@ -10,15 +10,13 @@ from urllib.parse import parse_qs, quote_from_bytes, urlsplit
 
 from bs4 import BeautifulSoup
 
+from app.clients.http import HttpError, HttpInvalidResponse, HttpSecurityError
 from app.concurrency import CrossLoopAsyncLock
 
 from ..errors import (
-    IndexerError,
     IndexerChallengeRequired,
     IndexerQueryRejected,
-    IndexerInvalidResponse,
     IndexerRateLimited,
-    IndexerSecurityError,
     IndexerTimeout,
     IndexerUnavailable,
 )
@@ -224,7 +222,7 @@ class EmpireAdapter(DirectResultAdapter):
                 detail_url = self._join_known_host(
                     anchor.get("href", ""), relative_base_url=result_url,
                 )
-            except IndexerSecurityError:
+            except HttpSecurityError:
                 continue
             if self.site_id == "dygang" and not _DYGANG_DETAIL_PATH.fullmatch(
                 urlsplit(detail_url).path
@@ -242,7 +240,7 @@ class EmpireAdapter(DirectResultAdapter):
         page_text = soup.get_text(" ", strip=True).casefold()
         if any(marker.casefold() in page_text for marker in _EMPTY_MARKERS):
             return []
-        raise IndexerInvalidResponse(f"{self.site_name} search page structure is unrecognized")
+        raise HttpInvalidResponse(f"{self.site_name} search page structure is unrecognized")
 
     async def _fetch_detail(
         self, result: _SearchResult, referer: str,
@@ -257,7 +255,7 @@ class EmpireAdapter(DirectResultAdapter):
                 soup.get_text(" ", strip=True)
                 or soup.select_one("a[href], script, [data-magnet], [data-clipboard-text]")
             ):
-                raise IndexerInvalidResponse("detail page structure is empty")
+                raise HttpInvalidResponse("detail page structure is empty")
             candidates = self._extract_magnets(body, soup)
             valid = [
                 (magnet, link_text)
@@ -287,7 +285,7 @@ class EmpireAdapter(DirectResultAdapter):
             raise
         except Exception as exc:
             return [], self._detail_error(exc), isinstance(
-                exc, (IndexerRateLimited, IndexerSecurityError, IndexerChallengeRequired),
+                exc, (IndexerRateLimited, HttpSecurityError, IndexerChallengeRequired),
             )
 
     @staticmethod
@@ -336,11 +334,11 @@ class EmpireAdapter(DirectResultAdapter):
         return None
 
     def _detail_error(self, exc: Exception) -> IndexerProviderError:
-        code = exc.code if isinstance(exc, IndexerError) else "unavailable"
+        code = exc.code if isinstance(exc, HttpError) else "unavailable"
         return IndexerProviderError(
             site_id=self.site_id,
             code=code,
-            message=f"{self.site_name}：{exc.public_message if isinstance(exc, IndexerError) else '详情页获取失败'}",
+            message=f"{self.site_name}：{exc.public_message if isinstance(exc, HttpError) else '详情页获取失败'}",
         )
 
     def _validate_status(self, status_code: int) -> None:
@@ -349,4 +347,4 @@ class EmpireAdapter(DirectResultAdapter):
         if status_code >= 500:
             raise IndexerUnavailable(f"{self.site_name} returned HTTP {status_code}")
         if status_code != 200:
-            raise IndexerInvalidResponse(f"{self.site_name} returned HTTP {status_code}")
+            raise HttpInvalidResponse(f"{self.site_name} returned HTTP {status_code}")

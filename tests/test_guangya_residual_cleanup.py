@@ -8,7 +8,8 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from app.agent import guangya_cleanup_actions as actions
+from app.agent.domain_catalog import DomainActions
+from app.agent.domains.guangya import cleanup_actions as actions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile
@@ -146,8 +147,8 @@ class FakeCleanupClient:
 
 class GuangYaResidualCleanupTests(unittest.TestCase):
     def setUp(self):
+        self._domain_actions = DomainActions()
         self.enterContext(mock.patch("app.clients.guangya.sleep"))
-        actions.reset_guangya_cleanup_context_for_tests()
         self.temp = tempfile.TemporaryDirectory()
         self.plan_dir = Path(self.temp.name) / "plans"
         self.patches = [
@@ -169,7 +170,6 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
     def tearDown(self):
         for patcher in reversed(self.patches):
             patcher.stop()
-        actions.reset_guangya_cleanup_context_for_tests()
         self.temp.cleanup()
 
     def test_plan_keeps_media_metadata_and_requires_filename_review(self):
@@ -414,12 +414,12 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         client = FakeCleanupClient()
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            preview = actions.preview_guangya_cleanup({"max_candidates": 20}, context)
-            reviewed = actions.classify_guangya_cleanup_candidates(
+            preview = self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, context)
+            reviewed = self._domain_actions.cleanup.classify_guangya_cleanup_candidates(
                 {"decisions": [{"candidate_number": 1, "action": "quarantine"}]},
                 context,
             )
-            confirmation, fingerprint = actions.prepare_guangya_cleanup_confirmation(
+            confirmation, fingerprint = self._domain_actions.cleanup.prepare_guangya_cleanup_confirmation(
                 {}, context
             )
             manager = mock.Mock()
@@ -432,7 +432,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
             with mock.patch(
                 "app.modules.organize_tasks.get_organize_manager", return_value=manager
             ):
-                accepted = actions.execute_guangya_cleanup_confirmed(
+                accepted = self._domain_actions.cleanup.execute_guangya_cleanup_confirmed(
                     {}, fingerprint, context
                 )
         self.assertEqual(preview.status, "selection_required")
@@ -458,7 +458,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 side_effect=AssertionError("不应读取预配置来源"),
             ),
         ):
-            preview = actions.preview_guangya_cleanup(arguments, context)
+            preview = self._domain_actions.cleanup.preview_guangya_cleanup(arguments, context)
         self.assertEqual(preview.status, "selection_required")
         self.assertEqual(preview.data["source_count"], 1)
         self.assertEqual(preview.data["empty_dir_count"], 1)
@@ -492,8 +492,8 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
             ]
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            preview = actions.preview_guangya_cleanup({"max_candidates": 20}, context)
-            first_batch = actions.classify_guangya_cleanup_candidates(
+            preview = self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, context)
+            first_batch = self._domain_actions.cleanup.classify_guangya_cleanup_candidates(
                 {
                     "decisions": [
                         {"candidate_number": number, "action": "keep"}
@@ -502,7 +502,7 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 },
                 context,
             )
-            final = actions.classify_guangya_cleanup_candidates(
+            final = self._domain_actions.cleanup.classify_guangya_cleanup_candidates(
                 {
                     "decisions": [
                         {"candidate_number": 17, "action": "quarantine"},
@@ -552,24 +552,24 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         client = FakeCleanupClient()
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            preview = actions.preview_guangya_cleanup({"max_candidates": 16}, context)
+            preview = self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 16}, context)
             with self.assertRaisesRegex(AgentToolError, "尚未逐项复核"):
-                actions.prepare_guangya_cleanup_confirmation({}, context)
+                self._domain_actions.cleanup.prepare_guangya_cleanup_confirmation({}, context)
         self.assertEqual(preview.data["undecided_count"], 1)
 
     def test_keep_revision_invalidates_previous_confirmation_context(self):
         client = FakeCleanupClient()
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            actions.preview_guangya_cleanup({"max_candidates": 16}, context)
-            actions.classify_guangya_cleanup_candidates(
+            self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 16}, context)
+            self._domain_actions.cleanup.classify_guangya_cleanup_candidates(
                 {"decisions": [{"candidate_number": 1, "action": "quarantine"}]},
                 context,
             )
             _confirmation, previous_context = (
-                actions.prepare_guangya_cleanup_confirmation({}, context)
+                self._domain_actions.cleanup.prepare_guangya_cleanup_confirmation({}, context)
             )
-            revised = actions.classify_guangya_cleanup_candidates(
+            revised = self._domain_actions.cleanup.classify_guangya_cleanup_candidates(
                 {
                     "decisions": [
                         {
@@ -582,10 +582,10 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
                 context,
             )
             _confirmation, current_context = (
-                actions.prepare_guangya_cleanup_confirmation({}, context)
+                self._domain_actions.cleanup.prepare_guangya_cleanup_confirmation({}, context)
             )
             with self.assertRaisesRegex(AgentToolError, "预览已变化"):
-                actions.execute_guangya_cleanup_confirmed({}, previous_context, context)
+                self._domain_actions.cleanup.execute_guangya_cleanup_confirmed({}, previous_context, context)
         self.assertNotEqual(previous_context, current_context)
         self.assertEqual(revised.data["selected_count"], 0)
         self.assertEqual(revised.data["kept_count"], 1)
@@ -595,8 +595,8 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
         client = FakeCleanupClient()
         context = ToolContext(owner="owner", session_id="session")
         with mock.patch.object(actions, "GuangYaClient", return_value=client):
-            actions.preview_guangya_cleanup({"max_candidates": 20}, context)
-        previous = actions._flow("owner")
+            self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, context)
+        previous = self._domain_actions.cleanup._flow("owner")
         self.assertIsNotNone(previous)
         previous_path = cleanup._plan_path(previous.plan_id)
         self.assertTrue(previous_path.is_file())
@@ -609,8 +609,8 @@ class GuangYaResidualCleanupTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(Exception, "临时读取失败"),
         ):
-            actions.preview_guangya_cleanup({"max_candidates": 20}, context)
-        self.assertEqual(actions._flow("owner").plan_id, previous.plan_id)
+            self._domain_actions.cleanup.preview_guangya_cleanup({"max_candidates": 20}, context)
+        self.assertEqual(self._domain_actions.cleanup._flow("owner").plan_id, previous.plan_id)
         self.assertTrue(previous_path.is_file())
 
     def test_terminal_cleanup_plan_is_removed_after_retention(self):

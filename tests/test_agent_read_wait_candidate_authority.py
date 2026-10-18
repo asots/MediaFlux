@@ -4,14 +4,21 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
 from app import database as db
+from app.agent.errors import ToolRateLimitError
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolRateLimitError
 from app.agent.rate_limit import RateLimitDecision
-from tests.test_agent_read_wait_lifecycle import (
-    parked_runtime, OWNER, GOAL, isolated_database as isolated_database,
-)
 from tests.test_agent_read_wait_contract_repair import resumed
+from tests.test_agent_read_wait_lifecycle import (
+    GOAL,
+    OWNER,
+    parked_runtime,
+)
+from tests.test_agent_read_wait_lifecycle import (
+    isolated_database as isolated_database,
+)
+
 
 @pytest.mark.parametrize('mode', ['stale_resume', 'stale_effect_cleanup', 'stale_binding_control', 'fresh_control'])
 def test_same_wait_id_repark_preserves_current_authority(mode, tmp_path):
@@ -50,8 +57,8 @@ def test_same_wait_id_repark_preserves_current_authority(mode, tmp_path):
             # actual pipeline prepare, not a forged record or continued model.
             from app.agent.kernel.capabilities import KernelToolSpec, ToolEffect
             from app.agent.kernel.effects import PreparedEffect
-            from app.agent.kernel.pipeline import ToolCallContext
-            from app.agent.kernel.state import CancellationToken, PublicationLease
+            from app.agent.kernel.state_types import CancellationToken, PublicationLease
+            from app.agent.kernel.tool_calls import ToolCallContext
             def prepare(args, context):
                 preparations.append(dict(args))
                 return PreparedEffect(preview={'summary':'offline'}, snapshot_fingerprint='fixed')
@@ -80,7 +87,12 @@ def test_same_wait_id_repark_preserves_current_authority(mode, tmp_path):
         if mode == 'stale_effect_cleanup':
             from datetime import datetime
             from unittest.mock import patch
-            from app.agent.feature_gate import begin_runtime_change, finish_runtime_change, read_runtime_fence
+
+            from app.agent.feature_gate import (
+                begin_runtime_change,
+                finish_runtime_change,
+                read_runtime_fence,
+            )
             from app.modules.agent_jobs_scheduler import AgentJobsScheduler
             with db.get_conn() as conn:
                 conn.execute('BEGIN IMMEDIATE')

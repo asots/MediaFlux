@@ -4,7 +4,7 @@ import pytest
 
 from app.agent.kernel.adapters import consume_events
 from app.agent.kernel.effects import PreparedEffect
-from app.agent.kernel.state import StateUpdate
+from app.agent.kernel.state_types import StateUpdate
 from tests.support import isolated_test_database
 from tests.test_pending_explanation_transports import NativeRuntime
 

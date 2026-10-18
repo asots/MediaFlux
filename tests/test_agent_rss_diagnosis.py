@@ -6,8 +6,11 @@ import json
 from unittest.mock import patch
 
 from app import database as db
+from app.agent.domains.subscriptions.rss_actions import (
+    diagnose_rss,
+    rss_diagnosis_arguments,
+)
 from app.agent.errors import AgentToolError
-from app.agent.rss_actions import diagnose_rss, rss_diagnosis_arguments
 from tests.support import IsolatedDatabaseTestCase
 
 _SNAPSHOT = "2026-08-01 12:00:00"
@@ -40,7 +43,7 @@ class RssDiagnosisUnitTests(IsolatedDatabaseTestCase):
         _clear_rss()
 
     def _diagnose(self):
-        with patch("app.agent.rss_actions.db.now", return_value=_SNAPSHOT):
+        with patch("app.agent.domains.subscriptions.rss_actions.db.now", return_value=_SNAPSHOT):
             return diagnose_rss({})
 
     def test_arguments_reject_extra_fields(self):
@@ -250,7 +253,7 @@ class RssDiagnosisUnitTests(IsolatedDatabaseTestCase):
         self.assertTrue(result.data["attention"]["truncated"])
 
     def test_database_exception_is_fixed_and_sanitized(self):
-        with patch("app.agent.rss_actions.db.get_rss_diagnostic_summary") as mocked:
+        with patch("app.agent.domains.subscriptions.rss_actions.db.get_rss_diagnostic_summary") as mocked:
             mocked.side_effect = RuntimeError("RSS_PASSKEY_9f /srv/RSS_PATH_SECRET")
             result = self._diagnose()
         self.assertFalse(result.ok)

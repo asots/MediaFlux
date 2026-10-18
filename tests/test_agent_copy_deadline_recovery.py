@@ -13,15 +13,14 @@ from unittest import mock
 
 import pytest
 
-from tests.support import isolated_test_database
-from tests.test_agent_guangya_fs_gateway import FakeGatewayClient
-
-from app.agent import guangya_fs_change_actions
+from app.agent.domains.guangya import fs_change_actions as guangya_fs_change_actions
 from app.agent.effect_completion import wait_for_effect_completion
 from app.agent.models import ToolContext, ToolResult
 from app.modules import guangya_fs_change, guangya_workspace, organize_tasks
 from app.modules.organize_tasks import OrganizeTaskManager
 from app.repositories import organize_operation_jobs as jobs
+from tests.support import isolated_test_database
+from tests.test_agent_guangya_fs_gateway import FakeGatewayClient
 
 _OWNER = "copy-deadline-recovery-owner"
 

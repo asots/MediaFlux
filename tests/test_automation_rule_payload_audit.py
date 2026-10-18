@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.automation_rule_actions import list_digest_rules
+from app.agent.domains.automation.rule_actions import list_digest_rules
 from app.agent.models import ToolContext
 from app.modules.media_automation_rules import drain_automation_rules
 from app.repositories import media_automation_rules as rules

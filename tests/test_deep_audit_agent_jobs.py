@@ -9,12 +9,12 @@ from unittest.mock import Mock, patch
 import pytest
 
 from app import database as db
-from app.agent.durable_job_actions import (
+from app.agent.domains.library.patrol_progress import empty_patrol_projection
+from app.agent.domains.system.jobs_actions import (
     get_agent_job_status,
     prepare_start_episode_audit,
     start_episode_audit_confirmed,
 )
-from app.agent.library_patrol_progress import empty_patrol_projection
 from app.agent.models import ToolContext, ToolResult
 from app.modules.agent_jobs_scheduler import AgentJobsScheduler
 from tests.support import isolated_test_database
@@ -93,7 +93,7 @@ def test_normal_confirmed_audit_has_persisted_business_receipt():
     arguments = {"as_of": AS_OF, "max_series": 2}
     preview, fingerprint = prepare_start_episode_audit(arguments, context)
     assert preview.ok and preview.status == "confirmation_required"
-    with patch("app.agent.durable_job_actions.get_agent_jobs_scheduler") as scheduler:
+    with patch("app.agent.domains.system.jobs_actions.get_agent_jobs_scheduler") as scheduler:
         accepted = start_episode_audit_confirmed(arguments, fingerprint, context)
     assert accepted.ok and accepted.status == "accepted"
     assert accepted.data["created"] is True

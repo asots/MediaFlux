@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from app.agent.automation_actions import (
+from app.agent.domains.automation.diagnostics import (
     automation_pipeline_arguments,
     diagnose_automation_pipeline,
 )
@@ -55,7 +55,7 @@ class AutomationPipelineUnitTests(IsolatedDatabaseTestCase):
             strm_last_status="completed",
         )
         with patch(
-            "app.agent.automation_actions.db.get_dashboard_automation_summary",
+            "app.agent.domains.automation.diagnostics.db.get_dashboard_automation_summary",
             return_value=snapshot,
         ):
             result = diagnose_automation_pipeline({})
@@ -82,7 +82,7 @@ class AutomationPipelineUnitTests(IsolatedDatabaseTestCase):
             strm_last_status="failed",
         )
         with patch(
-            "app.agent.automation_actions.db.get_dashboard_automation_summary",
+            "app.agent.domains.automation.diagnostics.db.get_dashboard_automation_summary",
             return_value=snapshot,
         ):
             result = diagnose_automation_pipeline({})
@@ -107,7 +107,7 @@ class AutomationPipelineUnitTests(IsolatedDatabaseTestCase):
     def test_failed_last_strm_run_without_open_failure_marks_pipeline_attention(self):
         snapshot = _aggregate(rss_subscriptions=1, strm_last_status="failed")
         with patch(
-            "app.agent.automation_actions.db.get_dashboard_automation_summary",
+            "app.agent.domains.automation.diagnostics.db.get_dashboard_automation_summary",
             return_value=snapshot,
         ):
             result = diagnose_automation_pipeline({})
@@ -142,7 +142,7 @@ class AutomationPipelineUnitTests(IsolatedDatabaseTestCase):
             title="TITLE_SECRET",
         )
         with patch(
-            "app.agent.automation_actions.db.get_dashboard_automation_summary",
+            "app.agent.domains.automation.diagnostics.db.get_dashboard_automation_summary",
             return_value=snapshot,
         ):
             result = diagnose_automation_pipeline({})
@@ -165,7 +165,7 @@ class AutomationPipelineUnitTests(IsolatedDatabaseTestCase):
 
     def test_database_exception_returns_fixed_sanitized_error(self):
         with patch(
-            "app.agent.automation_actions.db.get_dashboard_automation_summary",
+            "app.agent.domains.automation.diagnostics.db.get_dashboard_automation_summary",
             side_effect=RuntimeError("PIPELINE_SECRET /srv/hidden"),
         ):
             result = diagnose_automation_pipeline({})

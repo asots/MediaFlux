@@ -24,6 +24,7 @@ from app import config
 from app import database as db
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.adapters import TurnViewBuilder
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
@@ -34,7 +35,7 @@ from app.agent.kernel.capabilities import (
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
 from app.agent.kernel.ports.mediaflux_policy import (
@@ -44,7 +45,8 @@ from app.agent.kernel.ports.mediaflux_policy import (
 )
 from app.agent.kernel.projection import ToolOutcome
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, CancellationToken, SessionBusyError
+from app.agent.kernel.state_types import AgentInput, CancellationToken, SessionBusyError
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolResult
 from app.agent.public_view import public_result_state
 from tests.support import initialized_web_runtime

@@ -52,6 +52,7 @@ def test_native_retention_guidance_release_then_actual_eviction(tmp_path):
 
     script = Script("fixture")
     session.retriever = Initial()
+    session.limits = replace(session.limits, capability_window=10)
     session.model = script.adapter
     events = asyncio.run(collect(session.run(replace(
         request(), message="读取初始对象并保留能力，分两阶段发现十种能力，再次读取；释放保留后再次分阶段发现。"))))

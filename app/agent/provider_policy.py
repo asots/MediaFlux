@@ -5,8 +5,9 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from app.agent.kernel.pipeline import ToolPipelineError, _validate_json_schema
+from app.agent.errors import ToolPipelineError
 from app.agent.provider_models import ProviderGatewayError
+from app.agent.schema import validate_json_schema
 
 _FORBIDDEN_ARGUMENT_KEYS = frozenset({
     "url", "base_url", "host", "hostname", "port", "scheme",
@@ -112,7 +113,7 @@ def validate_provider_arguments(
     parameter_schema = _validation_schema(schema)
     try:
         normalized = _normalize_object(schema, arguments)
-        _validate_json_schema(normalized, parameter_schema)
+        validate_json_schema(normalized, parameter_schema)
     except (ProviderGatewayError, ToolPipelineError) as exc:
         # Only the registered operation schema is evidence for a repair;
         # neither provider responses nor model-supplied fields define it.

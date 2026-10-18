@@ -7,12 +7,12 @@ from unittest.mock import Mock, patch
 
 from app import database as db
 from app.agent.action_history import action_history_owner_digest
-from app.agent.errors import AgentToolError
-from app.agent.local_media_source_actions import (
+from app.agent.domains.local_media.source_actions import (
     local_media_source_summaries_arguments,
     local_media_source_summary_arguments,
     local_media_source_trigger_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import RiskLevel
 from app.agent.rate_limit import agent_rate_limiter
 from tests.agent_kernel_test_harness import (
@@ -144,7 +144,7 @@ class LocalMediaSourceAgentControlTests(IsolatedDatabaseTestCase):
         )
         scheduler = Mock()
         with patch(
-            "app.agent.local_media_source_actions.get_local_media_scheduler",
+            "app.agent.domains.local_media.source_actions.get_local_media_scheduler",
             return_value=scheduler,
         ):
             confirmed = service.confirm(

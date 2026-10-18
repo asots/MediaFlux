@@ -6,14 +6,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.agent.models import ToolResult
-from app.agent.recent_resource_candidates import (
+from app.agent.domains.resources.candidate_context import (
     RecentResourceCandidateStore,
     attach_resource_candidate_reference,
     public_candidate_projection,
     restore_resource_candidate_reference,
     validate_safe_resource_snapshot,
 )
+from app.agent.models import ToolResult
 from app.indexers.models import IndexerItem
 from app.indexers.result_store import IndexerResultStore
 
@@ -113,7 +113,7 @@ def _season_result(*candidates: dict) -> ToolResult:
 
 class RecentResourceCandidateStoreTests(unittest.TestCase):
     def test_review_search_freezes_all_numbered_candidates_not_only_top_four(self):
-        from app.agent.resource_recommendation import rank_episode_search
+        from app.agent.domains.resources.recommendation import rank_episode_search
         items = [dict(result_id=f"review-resource-{number:04d}", title=f"理想禁区 {number:02d} 黑历史 1080P",
                       site_id="mikan", site_name="Mikan", download_state="ready", download_kinds=["magnet"])
                  for number in range(1, 12)]

@@ -8,18 +8,22 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.agent.errors import ToolPipelineError, ToolRateLimitError, _ReadPermitRejected
 from app.agent.feature_gate import RuntimeFence
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.continuation import (
-    _ContinuationAction, anchor_for, apply_actions, history_call,
-    register_effect, release_effect,
+    _ContinuationAction,
+    anchor_for,
+    apply_actions,
+    history_call,
+    register_effect,
+    release_effect,
 )
-from app.agent.kernel.pipeline import (
-    _ReadPermitRejected, ToolCallContext, ToolPipeline, ToolPipelineError, ToolRateLimitError,
-)
-from app.agent.kernel.state import (
-    CancellationToken, InMemorySessionStateStore, PublicationLease, SessionState,
-)
+from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken, PublicationLease
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.rate_limit import RateLimitDecision
 
 NOW = 100.0

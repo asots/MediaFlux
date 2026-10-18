@@ -5,10 +5,13 @@ import asyncio
 
 import pytest
 
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import KernelToolSpec, ToolCatalog, ToolEffect
 from app.agent.kernel.effects import PreparedEffect
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 
 
 @pytest.mark.parametrize('composition', ['oneOf', 'anyOf'])
@@ -158,8 +161,8 @@ def test_write_value_errors_and_complex_branches_do_not_unlock_omission(composit
 @pytest.mark.parametrize("effect", [ToolEffect.READ, ToolEffect.WRITE, ToolEffect.DANGER])
 @pytest.mark.parametrize("read_status", ["success", "found", "empty"])
 def test_conditional_read_retry_uses_schema_while_writes_keep_locks(correction, allowed, effect, read_status):
-    from tests.test_agent_schema_composition import catalog_schema
     from app.agent.kernel.effects import PreparedEffect
+    from tests.test_agent_schema_composition import catalog_schema
 
     async def run():
         schema = catalog_schema("guangya.fs.query")

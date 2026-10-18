@@ -5,7 +5,7 @@ from __future__ import annotations
 from threading import Event, Thread
 from unittest.mock import Mock, patch
 
-from app.agent import guangya_rename_actions as actions
+from app.agent.domains.guangya import rename_actions as actions
 from app.agent.models import ToolContext
 from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.modules import guangya_rename as plans
@@ -20,8 +20,7 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
         patch.object(plans, "get_web_secret", return_value="test-secret"),
         patch.object(actions, "GuangYaClient", FakeGuangYaClient),
     ):
-        actions.reset_guangya_rename_context_for_tests()
-        actions.configure_guangya_rename_context(SQLiteAgentSessionContextRepository())
+        rename_actions = actions.GuangyaRenameActions(SQLiteAgentSessionContextRepository())
         entered, proceed = Event(), Event()
         accepted, failures = [], []
         thread = None
@@ -33,9 +32,9 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
             arguments = actions.guangya_rename_preview_arguments(
                 {"paths": ["/整理/动漫"], "mode": "remove_bitrate"}
             )
-            assert actions.preview_guangya_rename(arguments, context).ok
-            prior = actions._flow(context.owner)
-            _, fingerprint = actions.prepare_guangya_rename_confirmation({}, context)
+            assert rename_actions.preview_guangya_rename(arguments, context).ok
+            prior = rename_actions._flow(context.owner)
+            _, fingerprint = rename_actions.prepare_guangya_rename_confirmation({}, context)
             load, build = actions.load_rename_plan, actions.build_rename_plan
             manager = Mock()
             manager.start_durable_operation.return_value = {
@@ -53,7 +52,7 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
             def confirm_old():
                 try:
                     accepted.append(
-                        actions.execute_guangya_rename_confirmed(
+                        rename_actions.execute_guangya_rename_confirmed(
                             {}, fingerprint, context
                         )
                     )
@@ -78,7 +77,7 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
                 thread = Thread(target=confirm_old, daemon=True)
                 thread.start()
                 assert entered.wait(5), "旧确认未取得 flow"
-                assert actions.preview_guangya_rename(arguments, other_session).ok
+                assert rename_actions.preview_guangya_rename(arguments, other_session).ok
             assert accepted[0].ok and accepted[0].status == "accepted"
             # CAS 正确拒绝消费新 generation，但队列已经接受旧任务。
             assert accepted[0].data["requires_manual"] is True
@@ -93,4 +92,3 @@ def test_accepted_rename_survives_replacement_preview(tmp_path):
             proceed.set()
             if thread is not None:
                 thread.join(5)
-            actions.reset_guangya_rename_context_for_tests()

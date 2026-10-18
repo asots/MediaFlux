@@ -2,27 +2,32 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import json
 import socket
 import sqlite3
+from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
 
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import ToolOutcome
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.support import isolated_test_database
-from tests.test_agent_provider_text_authority import native_reply
 from tests.test_agent_provider_state import REDACTED, SIGNATURE, THINKING
+from tests.test_agent_provider_text_authority import native_reply
 from tests.test_agent_tool_argument_ingress import PROTOCOLS, Wire, encode
-
 
 OWNER, SESSION = "checkpoint-owner", "checkpoint-session"
 FIRST_FACT = "FIRST_FACT: inventory independently observed"
@@ -301,7 +306,7 @@ def test_preexecution_checkpoint_failure_never_runs_handler_or_erases_prior_fact
         assert_unknown(rows[1], "not_executed")
         assert_unknown(rows[2], "not_executed")
         if failure == "cancel":
-            from app.agent.kernel.state import StalePublicationError
+            from app.agent.kernel.state_types import StalePublicationError
             old_lease, = cancelled_leases
             assert assert_pairs(final, calls) == prior_native[0]
             assert final.generation == old_lease.generation + 1

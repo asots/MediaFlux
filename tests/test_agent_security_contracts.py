@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import unittest
 
-from app.agent.discovery_watchlist_actions import watchlist_summary_arguments
+from app.agent.domains.discovery.watchlist_actions import watchlist_summary_arguments
+from app.agent.domains.subscriptions.common import media_subscription_summary_arguments
+from app.agent.domains.subscriptions.rss_control_actions import (
+    rss_delete_subscription_arguments,
+)
+from app.agent.domains.subscriptions.rss_refresh_actions import (
+    rss_refresh_subscription_arguments,
+)
 from app.agent.errors import AgentToolError
 from app.agent.kernel.session import DEFAULT_SYSTEM_PROMPT
-from app.agent.media_subscription_actions import media_subscription_summary_arguments
-from app.agent.rss_refresh_actions import rss_refresh_subscription_arguments
-from app.agent.rss_subscription_control_actions import rss_delete_subscription_arguments
 
 
 class AgentSecurityContractTests(unittest.TestCase):

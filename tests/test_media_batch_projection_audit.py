@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app import services
-from app.agent import library_batch_presence as actions
+from app.agent.domains.library import batch_presence as actions
 from app.modules.media_refresh_coordinator import MediaRefreshCoordinator
 from app.repositories import media_refresh_queue as queue
 from tests.support import isolated_test_database

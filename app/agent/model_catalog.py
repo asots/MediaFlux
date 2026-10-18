@@ -29,12 +29,12 @@ async def fetch_ai_models(
     *, base_url: str, api_key: str, protocol: str, timeout_seconds: int
 ) -> list[str]:
     """从受限 Provider ``/models`` 端点读取可选模型 ID。"""
+    from app.clients.http import FixedHostHttpClient
     from app.clients.openai_compatible import (
         normalize_provider_location,
         provider_headers,
         resolve_protocol,
     )
-    from app.indexers.http import FixedHostHttpClient
 
     location = normalize_provider_location(
         base_url, https_only=True, public_only=True

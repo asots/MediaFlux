@@ -9,11 +9,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.agent.domain_catalog.shared import _library_update_arguments
+from app.agent.domains.library.update_actions import check_library_updates
+from app.agent.domains.shared_arguments import _library_update_arguments
 from app.agent.errors import AgentToolError
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.models import Evidence, ToolResult
-from app.agent.update_actions import check_library_updates
 
 
 def _identity(arguments):
@@ -174,9 +174,9 @@ class LibraryUpdateActionTests(unittest.TestCase):
             }
         ]
         with (
-            patch("app.agent.update_actions.audit_series_episodes") as audit,
+            patch("app.agent.domains.library.update_actions.audit_series_episodes") as audit,
             patch(
-                "app.agent.update_actions.search_media_servers", return_value=sources
+                "app.agent.domains.library.update_actions.search_media_servers", return_value=sources
             ) as search,
         ):
             result = check_library_updates(arguments)
@@ -225,7 +225,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
             }
         ]
         with patch(
-            "app.agent.update_actions.search_media_servers", return_value=possible
+            "app.agent.domains.library.update_actions.search_media_servers", return_value=possible
         ):
             result = check_library_updates(
                 {
@@ -240,7 +240,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
         self.assertEqual(result.data["local_match_status"], "possible")
         self.assertEqual(result.data["exact_match_count"], 0)
         with patch(
-            "app.agent.update_actions.search_media_servers",
+            "app.agent.domains.library.update_actions.search_media_servers",
             return_value=[
                 {
                     "server_type": "jellyfin",
@@ -263,7 +263,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
         self.assertEqual(result.status, "not_found")
         self.assertEqual(result.data["local_match_status"], "not_found")
         with patch(
-            "app.agent.update_actions.search_media_servers",
+            "app.agent.domains.library.update_actions.search_media_servers",
             side_effect=RuntimeError("secret"),
         ):
             result = check_library_updates(
@@ -310,7 +310,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
             },
         ]
         with patch(
-            "app.agent.update_actions.search_media_servers", return_value=sources
+            "app.agent.domains.library.update_actions.search_media_servers", return_value=sources
         ):
             result = check_library_updates(
                 {
@@ -346,7 +346,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
             }
         ]
         with patch(
-            "app.agent.update_actions.search_media_servers", return_value=sources
+            "app.agent.domains.library.update_actions.search_media_servers", return_value=sources
         ):
             result = check_library_updates(
                 {
@@ -391,7 +391,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
             },
         ]
         with patch(
-            "app.agent.update_actions.search_media_servers", return_value=sources
+            "app.agent.domains.library.update_actions.search_media_servers", return_value=sources
         ):
             result = check_library_updates(
                 {
@@ -413,7 +413,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
 
     def test_tv_delegates_to_episode_audit_and_labels_definition(self):
         with patch(
-            "app.agent.update_actions.audit_series_episodes",
+            "app.agent.domains.library.update_actions.audit_series_episodes",
             return_value=_audit_result(),
         ) as audit:
             result = check_library_updates(
@@ -440,14 +440,14 @@ class LibraryUpdateActionTests(unittest.TestCase):
         arguments = {"query": "Fixture", "tmdb_id": "7", "season": 1, "as_of": "2020-02-01"}
         for refresh in (True, False):
             with self.subTest(refresh=refresh), patch(
-                "app.agent.update_actions.audit_series_episodes", return_value=_audit_result(),
+                "app.agent.domains.library.update_actions.audit_series_episodes", return_value=_audit_result(),
             ) as audit:
                 check_library_updates({**arguments, "media_type": "tv", "refresh": refresh})
                 audit.assert_called_once_with(arguments, refresh=refresh)
 
     def test_auto_not_found_does_not_claim_movie_or_series_is_current(self):
         with patch(
-            "app.agent.update_actions.audit_series_episodes",
+            "app.agent.domains.library.update_actions.audit_series_episodes",
             return_value=_audit_result(status="not_found"),
         ):
             result = check_library_updates(
@@ -500,7 +500,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
                     active -= 1
 
         with patch(
-            "app.agent.update_actions.audit_series_episodes",
+            "app.agent.domains.library.update_actions.audit_series_episodes",
             side_effect=audit_side_effect,
         ) as audit:
             result = check_library_updates(
@@ -571,7 +571,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
     def test_batch_status_is_success_when_every_item_is_determinable(self):
         titles = ["可判定剧一", "可判定剧二"]
         with patch(
-            "app.agent.update_actions.audit_series_episodes",
+            "app.agent.domains.library.update_actions.audit_series_episodes",
             side_effect=lambda arguments, *, refresh: _query_audit_result(
                 arguments["query"], status="up_to_date"
             ),
@@ -616,7 +616,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
             return result
 
         with patch(
-            "app.agent.update_actions.audit_series_episodes",
+            "app.agent.domains.library.update_actions.audit_series_episodes",
             side_effect=audit_side_effect,
         ):
             result = check_library_updates(
@@ -654,7 +654,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
                     missing_sample=list(missing),
                     missing_sample_truncated=truncated,
                 )
-                with patch("app.agent.update_actions.audit_series_episodes", return_value=scalar):
+                with patch("app.agent.domains.library.update_actions.audit_series_episodes", return_value=scalar):
                     result = check_library_updates(_library_update_arguments({
                         "queries": ["示例剧"], "as_of": "2026-08-01",
                     }))
@@ -676,7 +676,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
                                        "status": "ready", "truncated": False} for i in range(3)]
             result.data["missing_sample"] = [{"season": 1, "episode": n} for n in range(3, 8)]
             return result
-        with patch("app.agent.update_actions.audit_series_episodes", side_effect=audit):
+        with patch("app.agent.domains.library.update_actions.audit_series_episodes", side_effect=audit):
             result = check_library_updates(_library_update_arguments({"queries": titles, "as_of": "2026-08-01"}))
         self.assertGreater(len(json.dumps(result.to_dict(), ensure_ascii=False)), 24_000)
         projected = DefaultProjector().project(result).model_content
@@ -690,7 +690,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
     def test_batch_preserves_unknown_metadata_counts_in_public_and_model_evidence(self):
         scalar = _query_audit_result("示例剧", status="up_to_date")
         scalar.data.update(unknown_air_date_count=1, ignored_unknown_local=2)
-        with patch("app.agent.update_actions.audit_series_episodes", return_value=scalar):
+        with patch("app.agent.domains.library.update_actions.audit_series_episodes", return_value=scalar):
             result = check_library_updates(_library_update_arguments({"queries": ["示例剧"], "as_of": "2026-08-01"}))
         model = json.loads(DefaultProjector().project(result).model_content)
         for data in (result.data, model["data"]):
@@ -710,7 +710,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
         from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.ports import catalog_from_tool_specs
         from app.agent.kernel.session import AgentSession
-        from app.agent.kernel.state import AgentInput
+        from app.agent.kernel.state_types import AgentInput
         from tests.support import isolated_test_database
         from tests.test_agent_kernel_core import ScriptedModel
         names = [f"取消测试作品{i}" for i in range(10)]
@@ -781,7 +781,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
                 release.set()
                 if not task.done():
                     task.cancel()
-        with isolated_test_database(), patch("app.agent.update_actions.audit_series_episodes", side_effect=audit):
+        with isolated_test_database(), patch("app.agent.domains.library.update_actions.audit_series_episodes", side_effect=audit):
             asyncio.run(run())
 
     def test_movie_comparison_unavailable_counts_as_uncertain_in_batch(self):
@@ -806,7 +806,7 @@ class LibraryUpdateActionTests(unittest.TestCase):
             ]
 
         with patch(
-            "app.agent.update_actions.search_media_servers",
+            "app.agent.domains.library.update_actions.search_media_servers",
             side_effect=movie_sources,
         ):
             result = check_library_updates(

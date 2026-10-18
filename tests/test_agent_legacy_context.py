@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from hashlib import sha256
 from collections.abc import AsyncIterator
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +17,15 @@ from app.agent.kernel.capabilities import (
     ToolEffect,
 )
 from app.agent.kernel.conversation_codec import conversation_rows
+from app.agent.kernel.conversation_context import (
+    persisted_conversation,
+    restore_messages,
+)
+from app.agent.kernel.conversation_state import (
+    historical_user_sources,
+    history_memory,
+    preserve_history,
+)
 from app.agent.kernel.model import (
     ModelEvent,
     ModelEventType,
@@ -26,19 +35,11 @@ from app.agent.kernel.model import (
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import (
-    AgentInput,
-    HistoryCapacityError,
-    InMemorySessionStateStore,
-    SessionState,
-    StateUpdate,
-    historical_user_sources,
-    history_memory,
-    preserve_history,
-)
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, HistoryCapacityError, StateUpdate
 from app.agent.kernel.task_state import classify_public_task, task_tool
 from tests.support import isolated_test_database
-
 
 OWNER = "legacy-context-owner"
 SESSION = "legacy-context-session"
@@ -236,8 +237,8 @@ def test_repeated_user_choices_keep_event_order_and_checkpoint_idempotence(commi
         requests = history_memory(state)["requests"]
         assert [row["text"] for row in requests[:3]] == [row["content"] for row in choices]
         assert len({row["history_id"] for row in requests[:3]}) == 3
-        restored = AgentSession._restore_messages(state)
-        persisted = AgentSession._persisted_conversation(
+        restored = restore_messages(state)
+        persisted = persisted_conversation(
             restored, current_user_index=None, original_message="", prior_conversation=state.conversation,
         )
         unchanged = await commit_store.commit(lease, conversation=persisted)
@@ -734,8 +735,9 @@ def test_real_session_task_create_receives_only_trusted_cropped_user_history():
 
 @pytest.mark.parametrize("schema_error", [False, True])
 def test_long_old_request_is_readable_without_freezing_unrelated_turn_or_repair(schema_error):
-    from app.agent.kernel.pipeline import ToolCallContext, ToolPipelineError
-    from app.agent.kernel.state import CancellationToken
+    from app.agent.errors import ToolPipelineError
+    from app.agent.kernel.state_types import CancellationToken
+    from app.agent.kernel.tool_calls import ToolCallContext
 
     async def exercise():
         store = InMemorySessionStateStore()

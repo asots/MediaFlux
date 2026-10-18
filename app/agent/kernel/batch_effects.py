@@ -10,20 +10,20 @@ import hashlib
 import json
 import secrets
 import time
-from dataclasses import replace
 from copy import deepcopy
-from typing import TYPE_CHECKING
+from dataclasses import replace
 
 from app.agent.confirmation_contract import build_confirmation_contract
+from app.agent.errors import ToolPipelineError
 from app.agent.models import RiskLevel, ToolResult
-from app.agent.public_view import public_result_state
 from app.agent.public_safety import sanitize_public_text
+from app.agent.public_view import public_result_state
 
+from .batch_progress import batch_result
 from .capabilities import KernelToolSpec, ToolEffect
 from .effects import PreparedEffect
-
-if TYPE_CHECKING:
-    from .pipeline import ToolPipeline, ToolCallContext
+from .invocation import invoke
+from .tool_calls import PipelineResult, ToolCallContext
 
 
 def _fingerprint(value: dict) -> str:
@@ -31,40 +31,16 @@ def _fingerprint(value: dict) -> str:
                                      separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
-def batch_result(arguments: dict, results: list[dict], *, waiting: bool = False) -> ToolResult:
-    items = deepcopy(results)
-    for step in arguments["steps"][len(items):]:
-        items.append({"tool": step["tool"], "result": {"ok": False, "status": "not_started",
-                      "summary": "等待已确认前项完成" if waiting else "未执行"}})
-    done = sum(public_result_state(item["result"]) == "success" for item in items)
-    data = {"steps": items, "completed": done, "total": len(items)}
-    if waiting:
-        data["background_job"] = {"kind": "approved_batch", "status": "continuation_pending", "followup_pending": True}
-    return ToolResult(waiting or done == len(items), "running" if waiting else "completed" if done == len(items) else "partial",
-        f"组合变更：{done}/{len(items)} 项完成" + ("，剩余已确认操作将自动接续" if waiting else "") + "\n" + "\n".join(
-            f"{i}. {item['result'].get('summary', '请核对执行结果')}" for i, item in enumerate(items, 1)), data=data)
 
 
-def observe_batch(row: dict, origin: dict, result: dict) -> dict:
-    """只记后台前项的真实终态；轮询器仍不执行任何后续写操作。"""
-    if not origin.get("batch_plan"):
-        return result
-    progress = row.setdefault("batch_progress", {"results": [{"tool": origin["arguments"]["steps"][0]["tool"], "result": result}],
-                                               "executing": None, "done": public_result_state(result) != "success"})
-    from .continuation import EFFECT_PENDING
-    active = (row.get("continuation") or {}).get("state") in EFFECT_PENDING
-    if not active and progress["executing"] is not None:
-        step = origin["arguments"]["steps"][progress["executing"]]
-        progress["results"].append({"tool": step["tool"], "result": {
-            "ok": False, "status": "outcome_unknown", "summary": "本项已开始写入，但回执未能保存；请核对实际状态，不会自动重放"}})
-        progress.update(executing=None, done=True)
-    return batch_result(origin["arguments"], progress["results"], waiting=not progress["done"] and active).to_dict()
 
 
 async def _checkpoint(pipeline, context, index, result=None):
-    from .state import StalePublicationError, publication_matches, commit_conversation
+    from .completion_receipts import _completion_cipher, _late_receipt
     from .continuation import check_claim
-    from app.agent.effect_completion import _completion_cipher, _late_receipt
+    from .conversation_state import commit_conversation
+    from .session_state import publication_matches
+    from .state_types import StalePublicationError
     plan = context.active_effect_plan
 
     def update(state):
@@ -98,7 +74,6 @@ async def _checkpoint(pipeline, context, index, result=None):
 
 async def resume_batch(pipeline, restored, context, progress):
     """只接收原 continuation 已验证的签名状态，复用相同组合执行函数。"""
-    from .pipeline import PipelineResult, ToolPipelineError
     if not isinstance(progress, dict) or not progress.get("results"):
         raise ToolPipelineError("缺少组合前项终态，不能重新提交原操作", code="confirmation_invalid")
     plan = restored.effect_plan
@@ -107,7 +82,7 @@ async def resume_batch(pipeline, restored, context, progress):
                     effect=pipeline.catalog.get(first["tool"]).effect,
                     arguments=first["arguments"], snapshot_fingerprint=first["snapshot"],
                     metadata=first["metadata"], confirmation_contract={"audit_contract": first["metadata"].get("confirmation", {})})
-    from app.agent.effect_completion import _seed_result
+    from .completion_receipts import _seed_result
     pipeline._notify_effect("completed", plan=child, value=_seed_result({"result": progress["results"][0]["result"]}), elapsed_ms=0)
     value = await pipeline._run_effect(plan, context=replace(context, batch_progress=deepcopy(progress)))
     pipeline._notify_effect("completed", plan=plan, value=value, elapsed_ms=0)
@@ -116,8 +91,7 @@ async def resume_batch(pipeline, restored, context, progress):
     return PipelineResult(restored.tool, dict(plan.arguments), replace(outcome, effect_plan=plan), effect_plan=plan)
 
 
-def batch_tool(pipeline: ToolPipeline) -> KernelToolSpec | None:
-    from .pipeline import ToolPipelineError, _invoke
+def batch_tool(pipeline) -> KernelToolSpec | None:
 
     tools = [t for t in pipeline.catalog.visible() if t.metadata.get("batch_mode")
              and t.effect is not ToolEffect.READ]
@@ -198,7 +172,7 @@ def batch_tool(pipeline: ToolPipeline) -> KernelToolSpec | None:
                 resolved = await pipeline._authorize(tool, dict(step["arguments"]), context, confirmation=True)
                 if tool.metadata.get("batch_mode") == "tracked":
                     continue
-                observed = await _invoke(tool.prepare, resolved, context)
+                observed = await invoke(tool.prepare, resolved, context)
                 if not isinstance(observed, PreparedEffect) or observed.snapshot_fingerprint != step["snapshot"]:
                     raise ToolPipelineError("组合后项状态已变化，未执行新的写入；请重新预检", code="confirmation_stale")
         except ToolPipelineError as exc:

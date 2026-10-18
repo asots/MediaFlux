@@ -1,24 +1,30 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-from bs4 import BeautifulSoup
 import httpx
+from bs4 import BeautifulSoup
 
-from ..errors import (
-    IndexerError,
-    IndexerInvalidResponse,
-    IndexerRateLimited,
-    IndexerSecurityError,
-    IndexerTimeout,
-    IndexerUnavailable,
+from app.clients.http import HttpError, HttpInvalidResponse, HttpSecurityError
+
+from ..errors import IndexerRateLimited, IndexerTimeout, IndexerUnavailable
+from ..models import (
+    IndexerCapabilities,
+    IndexerItem,
+    IndexerPage,
+    IndexerSearchRequest,
+    ResolvedDownload,
 )
-from ..models import IndexerCapabilities, IndexerItem, IndexerPage, IndexerSearchRequest, ResolvedDownload
-from .base import DirectResultAdapter, fixed_host_join, magnet_infohash, parse_size_bytes, require_html_response
-
+from .base import (
+    DirectResultAdapter,
+    fixed_host_join,
+    magnet_infohash,
+    parse_size_bytes,
+    require_html_response,
+)
 
 _DETAIL_PATH = re.compile(r"^/view/\d+$")
 _SIZE_TEXT = re.compile(r"^[0-9]+(?:\.[0-9]+)?\s*[KMGTPE]?i?B$", re.IGNORECASE)
@@ -56,7 +62,7 @@ class NyaaAdapter(DirectResultAdapter):
         self._preferred_base_url = self.base_url
 
     async def search(self, request: IndexerSearchRequest) -> IndexerPage:
-        last_error: IndexerError | None = None
+        last_error: HttpError | None = None
         for base_url in self._ordered_base_urls():
             try:
                 operation = self._search_base(base_url, request)
@@ -72,9 +78,9 @@ class NyaaAdapter(DirectResultAdapter):
                 last_error = IndexerTimeout(f"Nyaa endpoint timed out: {base_url}")
                 continue
             except (
-                IndexerInvalidResponse,
+                HttpInvalidResponse,
                 IndexerRateLimited,
-                IndexerSecurityError,
+                HttpSecurityError,
                 IndexerUnavailable,
             ) as exc:
                 last_error = exc
@@ -93,22 +99,22 @@ class NyaaAdapter(DirectResultAdapter):
 
     async def resolve(self, stored_result: IndexerItem) -> ResolvedDownload:
         if stored_result.site_id != self.site_id:
-            raise IndexerSecurityError("result provider mismatch")
+            raise HttpSecurityError("result provider mismatch")
         if stored_result.magnet and magnet_infohash(stored_result.magnet):
             return ResolvedDownload(kind="magnet", value=stored_result.magnet)
         if stored_result.torrent_url:
             # 镜像返回的 torrent 直链落在镜像域名上，宿主校验覆盖全部注册域名。
-            last_error: IndexerSecurityError | None = None
+            last_error: HttpSecurityError | None = None
             for base_url in self._base_urls:
                 try:
                     safe_url = fixed_host_join(base_url, stored_result.torrent_url)
-                except IndexerSecurityError as exc:
+                except HttpSecurityError as exc:
                     last_error = exc
                     continue
                 return ResolvedDownload(kind="torrent", value=safe_url)
             assert last_error is not None
             raise last_error
-        raise IndexerInvalidResponse("result has no downloadable candidate")
+        raise HttpInvalidResponse("result has no downloadable candidate")
 
     async def _search_base(self, base_url: str, request: IndexerSearchRequest) -> IndexerPage:
         last_page: IndexerPage | None = None
@@ -153,12 +159,12 @@ class NyaaAdapter(DirectResultAdapter):
         rows = self._select_rows(soup)
         if not rows and "no results found" not in soup.get_text(" ", strip=True).lower():
             if soup.select_one("table.torrent-list") is None:
-                raise IndexerInvalidResponse("Nyaa search page structure is invalid")
+                raise HttpInvalidResponse("Nyaa search page structure is invalid")
         items: list[IndexerItem] = []
         for row in rows:
             try:
                 item = self._parse_row(row, base_url)
-            except (IndexerSecurityError, ValueError):
+            except (HttpSecurityError, ValueError):
                 item = None
             if item is not None:
                 items.append(item)
@@ -218,7 +224,7 @@ class NyaaAdapter(DirectResultAdapter):
         if torrent_anchor is not None:
             try:
                 torrent_url = fixed_host_join(base_url, torrent_anchor.get("href"))
-            except IndexerSecurityError:
+            except HttpSecurityError:
                 torrent_url = None
         size_text = self._select_size_text(cells)
         published_at = self._select_published_at(row)
@@ -306,7 +312,7 @@ class NyaaAdapter(DirectResultAdapter):
         if status_code >= 500:
             raise IndexerUnavailable(f"Nyaa returned HTTP {status_code}")
         if status_code != 200:
-            raise IndexerInvalidResponse(f"Nyaa returned HTTP {status_code}")
+            raise HttpInvalidResponse(f"Nyaa returned HTTP {status_code}")
 
 
 def _is_detail_href(value: object) -> bool:
@@ -352,7 +358,7 @@ def _page_number(href: str | None) -> int:
 def _search_page_number(href: str | None, *, base_url: str) -> int:
     try:
         candidate = fixed_host_join(base_url, str(href or ""))
-    except IndexerSecurityError:
+    except HttpSecurityError:
         return 0
     base_path = urlsplit(base_url).path.rstrip("/")
     if urlsplit(candidate).path.rstrip("/") != base_path:

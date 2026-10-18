@@ -1,13 +1,20 @@
 """Agent 全库缺集巡检的持久化只读调度器。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import json
 import threading
 import time
+from datetime import datetime, timedelta
 from typing import Callable
 
-from app import config, database as db
+from app import config
+from app import database as db
+from app.agent.domains.library.patrol_progress import (
+    finalize_patrol_progress,
+    load_patrol_progress,
+    merge_patrol_progress,
+)
+from app.agent.domains.library.patrol_status import serialize_patrol_projection
 from app.agent.feature_gate import (
     AgentRuntimeDisabled,
     agent_runtime_effect_admission,
@@ -15,19 +22,13 @@ from app.agent.feature_gate import (
     current_agent_runtime_generation,
 )
 from app.agent.models import ToolResult
-from app.agent.library_patrol_status import serialize_patrol_projection
-from app.agent.library_patrol_progress import (
-    finalize_patrol_progress,
-    load_patrol_progress,
-    merge_patrol_progress,
-)
+from app.logger import get_logger
 from app.modules.agent_library_patrol_notifications import (
     build_patrol_result_fingerprint,
     load_patrol_notification_payload,
     send_library_patrol_notification_result,
     serialize_patrol_notification_payload,
 )
-from app.logger import get_logger
 from app.notifier import TelegramSendResult
 
 logger = get_logger(__name__)
@@ -504,7 +505,9 @@ class AgentLibraryPatrolScheduler:
 
     @staticmethod
     def _default_audit_executor(arguments: dict) -> tuple[ToolResult, int]:
-        from app.agent.library_episode_audit import audit_library_episodes_batch
+        from app.agent.domains.library.library_episode_audit import (
+            audit_library_episodes_batch,
+        )
 
         started = time.monotonic()
         result = audit_library_episodes_batch(arguments)

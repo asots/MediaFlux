@@ -10,18 +10,18 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from app import database as db
-from app.agent.effect_completion import wait_for_effect_completion
-from app.agent.errors import AgentToolError
-from app.agent.local_media_scan_actions import (
+from app.agent.domains.local_media.scan_actions import (
     local_media_scan_arguments,
     prepare_scan_local_media_sources,
     scan_local_media_sources_confirmed,
 )
-from app.agent.media_proxy_actions import (
+from app.agent.domains.playback.proxy_actions import (
     media_proxy_restart_arguments,
     prepare_restart_media_proxy_instance,
     restart_media_proxy_instance_confirmed,
 )
+from app.agent.effect_completion import wait_for_effect_completion
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.modules.local_media_scheduler import LocalMediaScheduler
 from tests.support import IsolatedDatabaseTestCase
@@ -77,7 +77,7 @@ class AgentGeneralistOperationTests(IsolatedDatabaseTestCase):
                 "queued_count": 2,
             }
             with patch(
-                "app.agent.local_media_scan_actions.get_local_media_scheduler",
+                "app.agent.domains.local_media.scan_actions.get_local_media_scheduler",
                 return_value=scheduler,
             ):
                 result = scan_local_media_sources_confirmed(
@@ -140,7 +140,7 @@ class AgentGeneralistOperationTests(IsolatedDatabaseTestCase):
             scheduler = LocalMediaScheduler(service=Mock())
             _, fingerprint = prepare_scan_local_media_sources({})
             with (
-                patch("app.agent.local_media_scan_actions.get_local_media_scheduler", return_value=scheduler),
+                patch("app.agent.domains.local_media.scan_actions.get_local_media_scheduler", return_value=scheduler),
                 patch.object(scheduler, "status", return_value={"running": False}),
                 patch.object(scheduler, "start") as start,
             ):
@@ -207,10 +207,10 @@ class AgentGeneralistOperationTests(IsolatedDatabaseTestCase):
         manager.request_restart.return_value = future
         with (
             patch(
-                "app.agent.media_proxy_actions.clear_signed_url_cache", return_value=3
+                "app.agent.domains.playback.proxy_actions.clear_signed_url_cache", return_value=3
             ),
             patch(
-                "app.agent.media_proxy_actions.get_media_proxy_manager",
+                "app.agent.domains.playback.proxy_actions.get_media_proxy_manager",
                 return_value=manager,
             ),
         ):
@@ -257,15 +257,15 @@ class AgentGeneralistOperationTests(IsolatedDatabaseTestCase):
                 manager.request_restart.return_value = future
                 with (
                     patch(
-                        "app.agent.media_proxy_actions.clear_signed_url_cache",
+                        "app.agent.domains.playback.proxy_actions.clear_signed_url_cache",
                         return_value=1,
                     ),
                     patch(
-                        "app.agent.media_proxy_actions.get_media_proxy_manager",
+                        "app.agent.domains.playback.proxy_actions.get_media_proxy_manager",
                         return_value=manager,
                     ),
                     patch(
-                        "app.agent.media_proxy_actions._MEDIA_PROXY_RESTART_WAIT_SECONDS",
+                        "app.agent.domains.playback.proxy_actions._MEDIA_PROXY_RESTART_WAIT_SECONDS",
                         0.001,
                     ),
                 ):

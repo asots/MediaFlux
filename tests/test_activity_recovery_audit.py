@@ -8,10 +8,11 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.activity_actions import timeline_snapshot
+from app.agent.domains.activity.actions import timeline_snapshot
 from app.modules.media_automation_rules import drain_automation_rules
 from app.modules.telegram_notification_center import NotificationPublishResult
-from app.repositories import activity, media_automation_rules as rules
+from app.repositories import activity
+from app.repositories import media_automation_rules as rules
 from tests.support import IsolatedDatabaseTestCase
 
 

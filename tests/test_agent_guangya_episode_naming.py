@@ -8,9 +8,10 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from app.agent import guangya_episode_naming_actions as episode_actions
-from app.agent import guangya_fs_change_actions as change_actions
-from app.agent import guangya_workspace_actions as workspace_actions
+from app.agent.domain_catalog import DomainActions
+from app.agent.domains.guangya import episode_naming_actions as episode_actions
+from app.agent.domains.guangya import fs_change_actions as change_actions
+from app.agent.domains.guangya import workspace_actions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile
@@ -124,10 +125,9 @@ def observed_plan(arguments: dict) -> dict:
 
 class GuangYaEpisodeNamingTests(unittest.TestCase):
     def setUp(self):
+        self._domain_actions = DomainActions()
         self.enterContext(isolated_test_database())
         self.enterContext(mock.patch("socket.socket.connect", side_effect=AssertionError("禁止外联")))
-        workspace_actions.reset_guangya_workspace_context_for_tests()
-        change_actions.reset_guangya_fs_change_context_for_tests()
         self.temp = tempfile.TemporaryDirectory()
         self.obs_dir = Path(self.temp.name) / "observations"
         self.plan_dir = Path(self.temp.name) / "changes"
@@ -156,8 +156,6 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
     def tearDown(self):
         for patcher in reversed(self.patches):
             patcher.stop()
-        workspace_actions.reset_guangya_workspace_context_for_tests()
-        change_actions.reset_guangya_fs_change_context_for_tests()
         self.temp.cleanup()
 
     @staticmethod
@@ -218,7 +216,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
             }
         )
         with mock.patch.object(workspace_actions, "GuangYaClient", return_value=client):
-            result = workspace_actions.query_guangya_filesystem(
+            result = self._domain_actions.workspace.query_guangya_filesystem(
                 arguments, ToolContext(owner="owner", session_id="session")
             )
         self.assertEqual(result.data["total"], 206)
@@ -304,7 +302,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         ):
             confirmation, fingerprint = episode_actions.prepare_guangya_episode_naming_confirmation(
                 arguments, ToolContext(owner="owner", session_id="session")
-            )
+            , fs_change_actions=self._domain_actions.fs_change)
 
         self.assertEqual(confirmation.status, "confirmation_required")
         self.assertEqual(confirmation.data["total"], 200)
@@ -315,7 +313,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(len(fingerprint), 64)
         self.assertEqual(len(list(self.plan_dir.glob("*.json"))), 1)
 
-        flow = change_actions._flow("owner")
+        flow = self._domain_actions.fs_change._flow("owner")
         self.assertIsNotNone(flow)
         plan = guangya_fs_change.load_fs_change_plan(
             flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint
@@ -335,7 +333,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         ):
             confirmation, fingerprint = episode_actions.prepare_guangya_episode_naming_confirmation(
                 arguments, ToolContext(owner="owner", session_id="session")
-            )
+            , fs_change_actions=self._domain_actions.fs_change)
 
         self.assertEqual(confirmation.status, "confirmation_required")
         self.assertEqual(confirmation.data["total"], 202)
@@ -346,7 +344,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         self.assertEqual(len(fingerprint), 64)
         self.assertEqual(len(list(self.plan_dir.glob("*.json"))), 1)
 
-        flow = change_actions._flow("owner")
+        flow = self._domain_actions.fs_change._flow("owner")
         self.assertIsNotNone(flow)
         plan = guangya_fs_change.load_fs_change_plan(
             flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint
@@ -391,7 +389,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         ):
             episode_actions.prepare_guangya_episode_naming_confirmation(
                 arguments, ToolContext(owner="owner", session_id="session")
-            )
+            , fs_change_actions=self._domain_actions.fs_change)
         self.assertEqual(raised.exception.code, "precondition_failed")
         self.assertIn("预期 4 集，实际匹配 3 集", str(raised.exception))
         self.assertEqual(list(self.plan_dir.glob("*.json")), [])
@@ -402,12 +400,16 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         from dataclasses import replace
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
-        from app.agent.domain_catalog.cloud import register_specs
+
+        from app.agent.domains.guangya.tools import register_specs
+        from app.agent.errors import ToolPipelineError
         from app.agent.kernel.capabilities import ToolCatalog
-        from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+        from app.agent.kernel.pipeline import ToolPipeline
         from app.agent.kernel.ports.existing_actions import adapt_tool_spec
         from app.agent.kernel.references import InMemoryReferenceStore
-        from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+        from app.agent.kernel.state import InMemorySessionStateStore
+        from app.agent.kernel.state_types import CancellationToken
+        from app.agent.kernel.tool_calls import ToolCallContext
 
         client = EpisodeNamingClient(episodes_per_group=1)
         for prefix, directory in (("a", "release-a"), ("b", "release-b")):
@@ -417,7 +419,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
             client.directories[directory] = [GuangYaFile(nested_id, "Season 01", True, parent_id=directory, etag=nested_id)]
             client.directories[nested_id] = [video]
         specs = []
-        register_specs(SimpleNamespace(register=specs.append), resource_store=None, active_ingest_store=None, ingest_actions=None)
+        register_specs(SimpleNamespace(register=specs.append), cleanup_actions=self._domain_actions.cleanup, directory_scrape_actions=self._domain_actions.directory_scrape, fs_change_actions=self._domain_actions.fs_change, rename_actions=self._domain_actions.rename, workspace_actions=self._domain_actions.workspace)
         catalog = ToolCatalog([adapt_tool_spec(spec) for spec in specs if spec.name.startswith("guangya.episode_naming.")])
         clock = [0.0]
         refs = InMemoryReferenceStore(clock=lambda: clock[0])
@@ -441,7 +443,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
                                      "source_episode_end": 1, "target_season": 2, "expected_count": 1}]}
             prepared = await pipeline.execute("guangya.episode_naming.plan", arguments, context=context)
             self.assertIsNotNone(prepared.effect_plan)
-            flow = change_actions._flow("owner")
+            flow = self._domain_actions.fs_change._flow("owner")
             plan = guangya_fs_change.load_fs_change_plan(flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint)
             self.assertEqual({op["source"]["file_id"] for op in plan["operations"]}, {"b-1"})
             for foreign in (replace(context, owner="other"), replace(context, session_id="other")):
@@ -884,12 +886,12 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         args = self._arguments()
         args["groups"] = [dict(group, source_episode_end=3, expected_count=3) for group in args["groups"]]
         with mock.patch.object(episode_actions, "GuangYaClient", return_value=client), mock.patch.object(change_actions, "GuangYaClient", return_value=client):
-            confirmation, _ = episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"))
+            confirmation, _ = episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"), fs_change_actions=self._domain_actions.fs_change)
         mapping = confirmation.data["episode_naming"]
         self.assertEqual(mapping["selected_files"], 6)
         self.assertEqual(mapping["included_extra_count"], 0)
         self.assertEqual(mapping["groups"][0]["excluded_extra_count"], 1)
-        flow = change_actions._flow("owner")
+        flow = self._domain_actions.fs_change._flow("owner")
         plan = guangya_fs_change.load_fs_change_plan(flow.plan_id, owner="owner", expected_fingerprint=flow.fingerprint)
         self.assertEqual({op["source"]["file_id"] for op in plan["operations"]}, {f"{prefix}-{i}" for prefix in ("a", "b") for i in range(1, 4)})
         self.assertFalse(plan["trigger_strm"])
@@ -900,7 +902,7 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         args = self._arguments()
         args["groups"] = [dict(args["groups"][0], source_episode_end=1, expected_count=1, include_extras=True)]
         with mock.patch.object(episode_actions, "GuangYaClient", return_value=client), mock.patch.object(change_actions, "GuangYaClient", return_value=client):
-            confirmation, _ = episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"))
+            confirmation, _ = episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"), fs_change_actions=self._domain_actions.fs_change)
         self.assertEqual(confirmation.data["episode_naming"]["included_extra_count"], 1)
         self.assertIn("含 1 个非正片", confirmation.summary)
         self.assertEqual(confirmation.status, "confirmation_required")
@@ -925,10 +927,10 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
     def test_catalog_keeps_mapping_compatibility_and_declares_opt_in_extras(self):
         from types import SimpleNamespace
 
-        from app.agent.domain_catalog.cloud import register_specs
+        from app.agent.domains.guangya.tools import register_specs
 
         specs = []
-        register_specs(SimpleNamespace(register=specs.append), resource_store=None, active_ingest_store=None, ingest_actions=None)
+        register_specs(SimpleNamespace(register=specs.append), cleanup_actions=self._domain_actions.cleanup, directory_scrape_actions=self._domain_actions.directory_scrape, fs_change_actions=self._domain_actions.fs_change, rename_actions=self._domain_actions.rename, workspace_actions=self._domain_actions.workspace)
         plan = next(spec for spec in specs if spec.name == "guangya.episode_naming.plan")
         group = plan.parameters["properties"]["groups"]["items"]
         self.assertNotIn("target_episode_start", group["required"])
@@ -953,10 +955,10 @@ class GuangYaEpisodeNamingTests(unittest.TestCase):
         with (
             mock.patch.object(episode_actions, "_fresh_observation", return_value=observation),
             mock.patch.object(episode_actions, "discard_observation") as discard,
-            mock.patch.object(episode_actions, "prepare_guangya_fs_change_confirmation") as preview,
+            mock.patch.object(self._domain_actions.fs_change, "prepare_guangya_fs_change_confirmation") as preview,
             self.assertRaisesRegex(AgentToolError, "无需变更"),
         ):
-            episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"))
+            episode_actions.prepare_guangya_episode_naming_confirmation(args, ToolContext(owner="owner", session_id="session"), fs_change_actions=self._domain_actions.fs_change)
         discard.assert_called_once_with("b1-observation")
         preview.assert_not_called()
         self.assertEqual(list(self.plan_dir.glob("*.json")), [])

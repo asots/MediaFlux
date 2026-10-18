@@ -2,23 +2,17 @@
 from __future__ import annotations
 
 import json
-import time
 import sqlite3
 import tempfile
+import time
 from contextlib import contextmanager
-from pathlib import Path
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import patch
 
 from app import database as db
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.errors import AgentToolError
-from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog, ToolEffect
-from app.agent.kernel.ports.existing_actions import adapt_tool_spec
-from app.agent.kernel.projection import DefaultProjector
-from app.agent.models import RiskLevel
-from app.agent.public_safety import public_tool_label
-from app.agent.release_format_actions import (
+from app.agent.domains.configuration.release_format_actions import (
     inspect_filenames,
     inspect_filenames_arguments,
     prepare_release_format,
@@ -26,9 +20,19 @@ from app.agent.release_format_actions import (
     save_release_format_confirmed,
     teaching_arguments,
 )
+from app.agent.errors import AgentToolError
+from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog, ToolEffect
+from app.agent.kernel.ports.existing_actions import adapt_tool_spec
+from app.agent.kernel.projection import DefaultProjector
+from app.agent.models import RiskLevel
+from app.agent.public_safety import public_tool_label
 from app.modules import recognition_knowledge as knowledge
 from app.modules.recognition import formats
-from app.modules.scraper import _parse_release_core, extract_recognition_context, parse_release_position
+from app.modules.scraper import (
+    _parse_release_core,
+    extract_recognition_context,
+    parse_release_position,
+)
 from tests.support import IsolatedDatabaseTestCase
 
 TEMPLATE = "[Example-Team][{title}][track{episode}r{version}][{resolution}].mkv"
@@ -63,7 +67,8 @@ class ReleaseFormatAgentActionTests(IsolatedDatabaseTestCase):
 
     def test_teaching_tools_explain_runtime_directory_context_not_source_labels(self):
         from types import SimpleNamespace
-        from app.agent.domain_catalog.configuration_management import register_specs
+
+        from app.agent.domains.configuration.tools import register_specs
 
         specs = []
         register_specs(SimpleNamespace(register=specs.append))
@@ -290,9 +295,9 @@ class RecognitionInspectionTests(IsolatedDatabaseTestCase):
 
     def test_gm_team_batch_calls_real_parsers_and_returns_raw_release_positions(self):
         with (
-            patch("app.agent.release_format_actions.extract_recognition_context",
+            patch("app.agent.domains.configuration.release_format_actions.extract_recognition_context",
                   wraps=extract_recognition_context) as context_parser,
-            patch("app.agent.release_format_actions.parse_release_position",
+            patch("app.agent.domains.configuration.release_format_actions.parse_release_position",
                   wraps=parse_release_position) as position_parser,
         ):
             result = inspect_filenames({"filenames": SAMPLES})

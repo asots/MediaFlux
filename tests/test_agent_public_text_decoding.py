@@ -11,15 +11,24 @@ import pytest
 
 from app import database as db
 from app.agent.kernel.adapters import TurnViewBuilder, iter_ndjson
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.events import AgentEvent, AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolResult
-from app.agent.public_safety import replace_internal_identifiers, sanitize_public_text, sanitize_resource_title
+from app.agent.public_safety import (
+    replace_internal_identifiers,
+    sanitize_public_text,
+    sanitize_resource_title,
+)
 from app.agent.public_view import public_conversation_messages
 from tests.test_agent_tool_argument_ingress import PROTOCOLS, Wire, encode
 
@@ -82,7 +91,8 @@ def reply(protocol, *, name="", index=0):
 async def assert_scoped_snapshot(pipeline, handle, expected, *, owner, session_id):
     """Read the actual registered continuation API, including paged leaves."""
     from types import SimpleNamespace
-    from app.agent.kernel.pipeline import ToolPipelineError
+
+    from app.agent.errors import ToolPipelineError
 
     reader = pipeline.catalog.get("agent.read_result").read
     context = SimpleNamespace(owner=owner, session_id=session_id)

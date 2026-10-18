@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from app.agent.media_health_actions import diagnose_workspace_health
+from app.agent.domains.workspace.health_actions import diagnose_workspace_health
 from app.agent.models import ToolResult
 from tests.support import IsolatedDatabaseTestCase
 
@@ -87,15 +87,15 @@ class WorkspaceHealthUnitTests(IsolatedDatabaseTestCase):
     def test_aggregates_fixed_safe_schema_and_real_network_flag(self):
         with (
             patch(
-                "app.agent.media_health_actions.summarize_workspace_briefing",
+                "app.agent.domains.workspace.health_actions.summarize_workspace_briefing",
                 return_value=_workspace_result(),
             ),
             patch(
-                "app.agent.media_health_actions.diagnose_config",
+                "app.agent.domains.workspace.health_actions.diagnose_config",
                 return_value=_config_result(),
             ),
             patch(
-                "app.agent.media_health_actions.diagnose_media_servers",
+                "app.agent.domains.workspace.health_actions.diagnose_media_servers",
                 return_value=_media_result(),
             ),
         ):
@@ -146,15 +146,15 @@ class WorkspaceHealthUnitTests(IsolatedDatabaseTestCase):
     def test_partial_child_failure_is_explicit_and_other_areas_survive(self):
         with (
             patch(
-                "app.agent.media_health_actions.summarize_workspace_briefing",
+                "app.agent.domains.workspace.health_actions.summarize_workspace_briefing",
                 side_effect=RuntimeError("PRIVATE database failure"),
             ),
             patch(
-                "app.agent.media_health_actions.diagnose_config",
+                "app.agent.domains.workspace.health_actions.diagnose_config",
                 return_value=_config_result(warnings=1),
             ),
             patch(
-                "app.agent.media_health_actions.diagnose_media_servers",
+                "app.agent.domains.workspace.health_actions.diagnose_media_servers",
                 return_value=_media_result(
                     network_accessed=False,
                     enabled=0,
@@ -186,15 +186,15 @@ class WorkspaceHealthUnitTests(IsolatedDatabaseTestCase):
     def test_structured_offline_media_diagnosis_is_attention_not_missing_coverage(self):
         with (
             patch(
-                "app.agent.media_health_actions.summarize_workspace_briefing",
+                "app.agent.domains.workspace.health_actions.summarize_workspace_briefing",
                 return_value=_workspace_result(),
             ),
             patch(
-                "app.agent.media_health_actions.diagnose_config",
+                "app.agent.domains.workspace.health_actions.diagnose_config",
                 return_value=_config_result(),
             ),
             patch(
-                "app.agent.media_health_actions.diagnose_media_servers",
+                "app.agent.domains.workspace.health_actions.diagnose_media_servers",
                 return_value=_media_result(
                     status="unavailable",
                     online=0,
@@ -216,15 +216,15 @@ class WorkspaceHealthUnitTests(IsolatedDatabaseTestCase):
     def test_all_child_failures_return_safe_unavailable(self):
         with (
             patch(
-                "app.agent.media_health_actions.summarize_workspace_briefing",
+                "app.agent.domains.workspace.health_actions.summarize_workspace_briefing",
                 side_effect=RuntimeError("PRIVATE-1"),
             ),
             patch(
-                "app.agent.media_health_actions.diagnose_config",
+                "app.agent.domains.workspace.health_actions.diagnose_config",
                 side_effect=RuntimeError("PRIVATE-2"),
             ),
             patch(
-                "app.agent.media_health_actions.diagnose_media_servers",
+                "app.agent.domains.workspace.health_actions.diagnose_media_servers",
                 side_effect=RuntimeError("PRIVATE-3"),
             ),
         ):

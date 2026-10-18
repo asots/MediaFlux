@@ -8,8 +8,7 @@ import unittest
 
 import httpx
 
-from app.indexers.errors import IndexerInvalidResponse
-from app.indexers.http import FixedHostHttpClient, IndexerHttpResponse
+from app.clients.http import FixedHostHttpClient, HttpInvalidResponse, HttpResponse
 from app.indexers.models import IndexerCapabilities, IndexerItem, IndexerPage
 from app.indexers.providers.base import IndexerAdapter, magnet_infohash
 from app.indexers.providers.mikan import MikanAdapter
@@ -17,7 +16,6 @@ from app.indexers.providers.nyaa import NyaaAdapter
 from app.indexers.registry import IndexerRegistry
 from app.indexers.result_store import IndexerResultStore
 from app.indexers.service import IndexerService
-
 
 PUBLIC_RESOLVER = lambda host, port: [
     (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
@@ -30,7 +28,7 @@ class FakeHttp:
         self.content_type = content_type
 
     async def get(self, url, **kwargs):
-        return IndexerHttpResponse(
+        return HttpResponse(
             url=url,
             status_code=200,
             headers={"content-type": self.content_type},
@@ -160,11 +158,11 @@ class IndexerHardeningTests(unittest.IsolatedAsyncioTestCase):
             site_id="nyaa", site_name="Nyaa", base_url="https://nyaa.si/",
             http=FakeHttp(nyaa_html, "application/octet-stream"), default_enabled=True,
         )
-        with self.assertRaises(IndexerInvalidResponse):
+        with self.assertRaises(HttpInvalidResponse):
             await nyaa.search(type("R", (), {"query": "x", "page": 1})())
 
         mikan = MikanAdapter(http=FakeHttp(b"<html><title>blocked</title></html>"))
-        with self.assertRaises(IndexerInvalidResponse):
+        with self.assertRaises(HttpInvalidResponse):
             await mikan.search(type("R", (), {"query": "x", "page": 1})())
 
     def test_hex_and_base32_btih_normalize_to_same_key(self):

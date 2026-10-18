@@ -9,11 +9,11 @@ from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, _CancelledReadInline
 from app.agent.kernel.session_guard import _held_scope
+from app.agent.kernel.state_types import AgentInput, _CancelledReadInline
+from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import ScriptedModel
 from tests.test_agent_parallel_reads import query_tool
-from tests.support import isolated_test_database
 
 
 def test_parallel_reads_queue_real_reference_transactions_without_false_busy():

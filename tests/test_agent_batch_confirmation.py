@@ -9,17 +9,24 @@ import pytest
 from app.agent import rate_limit as rates
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.adapters import TurnViewBuilder
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.events import AgentEventType as Event
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolPipeline
 from app.agent.kernel.ports import mediaflux_policy
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, CancellationToken
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import RiskLevel, ToolResult, ToolSpec
 from tests.test_agent_kernel_core import ScriptedModel, collect
 from tests.test_agent_task_cas import task_store as isolated_store

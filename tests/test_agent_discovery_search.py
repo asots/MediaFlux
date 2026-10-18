@@ -5,8 +5,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
-from app.agent.discovery_actions import search_arguments, search_discovery
-from app.agent.discovery_mapping_actions import get_discovery_detail
+from app.agent.domains.discovery.actions import search_arguments, search_discovery
+from app.agent.domains.discovery.mapping_actions import get_discovery_detail
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.discovery.models import MediaCard
@@ -101,9 +101,9 @@ class AgentDiscoverySearchTests(unittest.TestCase):
     def test_disabled_feature_does_not_create_or_call_service(self):
         service = Mock()
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=False),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=False),
             patch(
-                "app.agent.discovery_actions.get_discovery_search_service",
+                "app.agent.domains.discovery.actions.get_discovery_search_service",
                 return_value=service,
             ) as getter,
         ):
@@ -118,9 +118,9 @@ class AgentDiscoverySearchTests(unittest.TestCase):
             _result(items=(_card(1), _card(2)), has_more=True)
         )
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.discovery_actions.get_discovery_search_service",
+                "app.agent.domains.discovery.actions.get_discovery_search_service",
                 return_value=service,
             ),
         ):
@@ -149,9 +149,9 @@ class AgentDiscoverySearchTests(unittest.TestCase):
         )
         service = FakeDiscoverySearchService(result)
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.discovery_actions.get_discovery_search_service",
+                "app.agent.domains.discovery.actions.get_discovery_search_service",
                 return_value=service,
             ),
         ):
@@ -201,9 +201,9 @@ class AgentDiscoverySearchTests(unittest.TestCase):
         for raw, ok, status in cases:
             with (
                 self.subTest(status=status),
-                patch("app.agent.discovery_actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
                 patch(
-                    "app.agent.discovery_actions.get_discovery_search_service",
+                    "app.agent.domains.discovery.actions.get_discovery_search_service",
                     return_value=FakeDiscoverySearchService(raw),
                 ),
             ):
@@ -217,8 +217,8 @@ class AgentDiscoveryIdentityRegressionTests(unittest.TestCase):
     def search(self, arguments, raw):
         service = FakeDiscoverySearchService(raw)
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=True),
-            patch("app.agent.discovery_actions.get_discovery_search_service", return_value=service),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.actions.get_discovery_search_service", return_value=service),
         ):
             result = search_discovery(arguments)
         return result, service
@@ -268,8 +268,8 @@ class AgentDiscoveryIdentityRegressionTests(unittest.TestCase):
     def test_keyword_constraints_cannot_be_silently_truncated(self):
         service = Mock()
         with (
-            patch("app.agent.discovery_actions.config.get_bool", return_value=True),
-            patch("app.agent.discovery_actions.get_discovery_search_service", return_value=service),
+            patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.actions.get_discovery_search_service", return_value=service),
             self.assertRaisesRegex(AgentToolError, "120"),
         ):
             search_discovery({"query": "长" * 120, "region": "日本", "genre": "动画"})
@@ -294,8 +294,8 @@ class AgentDiscoveryIdentityRegressionTests(unittest.TestCase):
         service = DiscoverySearchService(providers={"tmdb": TMDBSearchProvider(client=client)})
         try:
             with (
-                patch("app.agent.discovery_actions.config.get_bool", return_value=True),
-                patch("app.agent.discovery_actions.get_discovery_search_service", return_value=service),
+                patch("app.agent.domains.discovery.actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.discovery.actions.get_discovery_search_service", return_value=service),
             ):
                 result = search_discovery({"query": "狐妖小红娘", "media_type": "tv", "year": "2015", "providers": ["tmdb"]})
             self.assertEqual(len(http.calls), 1)
@@ -310,9 +310,9 @@ class AgentDiscoveryDetailRegressionTests(unittest.TestCase):
         service = Mock()
         service.get_detail.return_value = card
         with (
-            patch("app.agent.discovery_mapping_actions.config.get_bool", return_value=True),
-            patch("app.agent.discovery_mapping_actions.get_discovery_service", return_value=service),
-            patch("app.agent.discovery_mapping_actions.db.get_media_external_id", return_value=None),
+            patch("app.agent.domains.discovery.mapping_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.mapping_actions.get_discovery_service", return_value=service),
+            patch("app.agent.domains.discovery.mapping_actions.db.get_media_external_id", return_value=None),
         ):
             result = get_discovery_detail(
                 {"provider": card.provider, "external_id": card.external_id, "media_type": card.media_type},
@@ -356,7 +356,7 @@ class AgentDiscoveryDetailRegressionTests(unittest.TestCase):
                 self.assertIsNone(result.data["seasons"])
 
     def test_detail_season_names_use_existing_public_sanitizer_without_mutation(self):
-        from app.agent.discovery_mapping_actions import _safe
+        from app.agent.domains.discovery.mapping_actions import _safe
         from app.discovery.providers.tmdb import TMDBProvider
 
         name = "长季名" * 200

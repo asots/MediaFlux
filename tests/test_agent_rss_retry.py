@@ -9,7 +9,7 @@ import requests
 from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
 
 from app import database as db
-from app.agent.rss_retry_actions import (
+from app.agent.domains.subscriptions.rss_retry_actions import (
     prepare_rss_failure_retry,
     retry_failed_rss_confirmed,
 )
@@ -494,7 +494,9 @@ class RssFailureRetryUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual([row["id"] for row in db.get_retryable_failed_rss_snapshot()], [limited])
 
     def test_cloud_retry_reason_is_readable_without_raw_errors(self):
-        from app.agent.rss_entry_actions import list_rss_entry_summaries
+        from app.agent.domains.subscriptions.rss_entry_actions import (
+            list_rss_entry_summaries,
+        )
 
         sub = self._subscription("Cloud", "guangya")
         self._failed(sub, 408, "guangya_manifest_unavailable", True)

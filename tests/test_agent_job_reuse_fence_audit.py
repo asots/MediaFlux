@@ -11,12 +11,12 @@ from unittest.mock import Mock, patch
 
 from app import database as db
 from app.agent.confirmation import SQLiteConfirmationStore
-from app.agent.errors import AgentToolError
-from app.agent.durable_job_actions import (
+from app.agent.domains.library.patrol_progress import empty_patrol_projection
+from app.agent.domains.system.jobs_actions import (
     prepare_start_episode_audit,
     start_episode_audit_confirmed,
 )
-from app.agent.library_patrol_progress import empty_patrol_projection
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from tests.support import isolated_test_database
 
@@ -37,7 +37,7 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
             ),
             isolated_test_database(),
             patch(
-                "app.agent.durable_job_actions.get_agent_jobs_scheduler",
+                "app.agent.domains.system.jobs_actions.get_agent_jobs_scheduler",
                 return_value=Mock(),
             ),
         ):
@@ -156,7 +156,7 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
             self.assertEqual(store.list_active_tickets(owner=OWNER), [])
 
     def test_current_reuse_and_other_owner_keep_single_owner_scoped_job(self):
-        from app.agent import durable_job_actions as actions
+        from app.agent.domains.system import jobs_actions as actions
 
         with (
             isolated_test_database(),
@@ -179,7 +179,7 @@ class AgentJobReuseFenceAuditTests(unittest.TestCase):
             self.assertEqual(len(db.list_agent_jobs(owner=OWNER)), 1)
 
     def test_cancelled_reuse_cannot_attach_to_new_active_replacement(self):
-        from app.agent import durable_job_actions as actions
+        from app.agent.domains.system import jobs_actions as actions
 
         with (
             isolated_test_database(),

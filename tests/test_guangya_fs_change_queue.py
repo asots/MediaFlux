@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from app import database, database_migrations
-from app.agent.domain_catalog.cloud_runtime import guangya_organize_status
+from app.agent.domains.guangya.runtime import guangya_organize_status
 from app.agent.effect_completion import wait_for_effect_completion
 from app.agent.models import ToolContext, ToolResult
 from app.modules import guangya_fs_change

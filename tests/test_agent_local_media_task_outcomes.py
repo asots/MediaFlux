@@ -8,13 +8,11 @@ from unittest.mock import patch
 import pytest
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.local_media_task_actions import (
-    _current_task,
-    list_local_media_task_summaries,
+from app.agent.domain_catalog import DomainActions
+from app.agent.domains.local_media.task_arguments import (
     local_media_task_summaries_arguments,
-    reset_local_media_agent_context_for_tests,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.modules.local_media_outcomes import local_media_task_outcome
 from tests.support import IsolatedDatabaseTestCase
@@ -71,7 +69,7 @@ def test_task_outcome_only_retains_basename_and_bounded_names():
 
 class LocalMediaTaskOutcomeTests(IsolatedDatabaseTestCase):
     def setUp(self):
-        reset_local_media_agent_context_for_tests()
+        self._domain_actions = DomainActions()
         with db.get_conn() as conn:
             conn.execute("DELETE FROM local_media_operation_steps")
             conn.execute("DELETE FROM local_media_task_items")
@@ -86,8 +84,6 @@ class LocalMediaTaskOutcomeTests(IsolatedDatabaseTestCase):
             owner="admin",
         )
 
-    def tearDown(self):
-        reset_local_media_agent_context_for_tests()
 
     def _task(
         self,
@@ -125,7 +121,7 @@ class LocalMediaTaskOutcomeTests(IsolatedDatabaseTestCase):
         return task_id
 
     def _list(self, **arguments):
-        return list_local_media_task_summaries(
+        return self._domain_actions.local_media.list_local_media_task_summaries(
             local_media_task_summaries_arguments(arguments),
             ToolContext(owner="owner-a"),
         )
@@ -322,7 +318,7 @@ class LocalMediaTaskOutcomeTests(IsolatedDatabaseTestCase):
         assert item["current_status"] == "requires_manual"
         assert item["file_outcome"] == "conflict_skipped"
         assert item["can_inspect"]
-        _, selected_task = _current_task("owner-a", 1)
+        _, selected_task = self._domain_actions.local_media._current_task("owner-a", 1)
         assert selected_task.id == task_ids[20]
         assert selected_task.status == "requires_manual"
 

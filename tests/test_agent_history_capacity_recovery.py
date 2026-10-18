@@ -3,15 +3,20 @@ import asyncio
 import json
 
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
-from app.agent.kernel.conversation_codec import PendingText, pending_content, conversation_cost
+from app.agent.kernel.conversation_codec import (
+    PendingText,
+    conversation_cost,
+    pending_content,
+)
+from app.agent.kernel.conversation_state import retain_conversation
 from app.agent.kernel.events import AgentEventType
+from app.agent.kernel.model import ModelEvent, ModelEventType
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import AgentInput, retain_conversation
+from app.agent.kernel.state_types import AgentInput
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import ScriptedModel
 from tests.test_cancelled_read_inline import sqlite_store
-from app.agent.kernel.model import ModelEvent, ModelEventType
 
 
 def large_history():

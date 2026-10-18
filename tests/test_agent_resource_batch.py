@@ -8,23 +8,24 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agent.kernel.events import AgentEventType
-from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.references import ReferenceError
-from app.agent.kernel.state import AgentInput, SelectionInvalidError
-from app.agent.kernel.transports import QueryEnvelope, TelegramKernelTransport
-from app.agent.kernel.ux_selection import (
+from app.agent.domains.resources.selection import (
     _recommend,
     candidate_item,
     current_candidate_view,
     normalize_selection,
 )
+from app.agent.kernel.conversation_context import persisted_conversation
+from app.agent.kernel.events import AgentEventType
+from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.references import ReferenceError
+from app.agent.kernel.state_types import AgentInput, SelectionInvalidError
 from app.agent.models import ToolResult
 from app.agent.public_view import (
     format_public_result,
     public_conversation_messages,
 )
+from app.agent.transports import QueryEnvelope, TelegramKernelTransport
 from app.bot import agent_adapter, agent_candidates
 from tests import test_agent_ux_backend as ux
 from tests.test_agent_kernel_telegram_adapter import TELEBOT, Call, FakeBot, Message
@@ -113,8 +114,8 @@ def test_both_intent_inputs_share_one_batch_plan_and_settle_after_confirm(store,
         user = AgentInput(owner=OWNER, session_id=SESSION, message=message) if natural else QueryEnvelope(
             owner=OWNER, session_id=SESSION, message=message, selection=_selection(view, [2, 1], "both"),
         ).to_agent_input()
-        with patch("app.agent.indexer_candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch) as prepare, \
-             patch("app.agent.indexer_candidate_actions.submit_resource_batch_confirmed", side_effect=lambda *a: _batch_result()) as execute:
+        with patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch) as prepare, \
+             patch("app.agent.domains.resources.candidate_actions.submit_resource_batch_confirmed", side_effect=lambda *a: _batch_result()) as execute:
             events = await _events(session.run(user))
             approvals = [e for e in events if e.type is AgentEventType.EFFECT_APPROVAL_REQUIRED]
             assert len(approvals) == 1
@@ -163,9 +164,9 @@ def test_receiving_directory_change_invalidates_frozen_plan_without_any_download
     async def exercise():
         session, pipeline, states = _runtime(store)
         view, _ = await _publish_candidates(pipeline, states)
-        with patch("app.agent.indexer_candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch), \
-             patch("app.agent.indexer_candidate_actions.submit_resource_batch_confirmed") as execute, \
-             patch("app.agent.ingest_actions._receiving_folders", return_value=(["光鸭：接收A"], "a")) as folders:
+        with patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch), \
+             patch("app.agent.domains.resources.candidate_actions.submit_resource_batch_confirmed") as execute, \
+             patch("app.agent.domains.resources.ingest_actions._receiving_folders", return_value=(["光鸭：接收A"], "a")) as folders:
             events = await _events(session.run(QueryEnvelope(owner=OWNER, session_id=SESSION, message="预检", selection=_selection(view, [1, 2], "both")).to_agent_input()))
             approval = next(e for e in events if e.type is AgentEventType.EFFECT_APPROVAL_REQUIRED)
             assert approval.payload["plan"]["preview"]["data"]["receiving_folders"] == ["光鸭：接收A"]
@@ -188,7 +189,7 @@ def _target_options(_owner):
 def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeypatch, terminal_action):
     owner = agent_adapter.telegram_agent_owner(-100, 7)
     session_id = agent_adapter.telegram_agent_session_id(-100, 7)
-    monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
+    monkeypatch.setattr("app.agent.domains.resources.selection._target_options", _target_options)
     from tests.test_agent_kernel_core import ScriptedModel
     model = ScriptedModel([[ModelEvent(ModelEventType.TEXT_DELTA, text="已接受任务请见回执；未知结果请先核验。"), ModelEvent(ModelEventType.FINISH, finish_reason="stop")]])
     session, pipeline, states = _runtime(store, model=model)
@@ -235,8 +236,8 @@ def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeyp
         for button in edit[3]["reply_markup"].buttons:
             assert len(button.callback_data.encode()) <= 64
             assert "http" not in button.callback_data
-    with patch("app.agent.indexer_candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch), \
-         patch("app.agent.indexer_candidate_actions.submit_resource_batch_confirmed", side_effect=lambda *a: _batch_result()) as execute:
+    with patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch", side_effect=_prepare_batch), \
+         patch("app.agent.domains.resources.candidate_actions.submit_resource_batch_confirmed", side_effect=lambda *a: _batch_result()) as execute:
         click("p")
         assert draft["phase"] == "approval" and session.model.requests == []
         execute.assert_not_called()
@@ -265,7 +266,7 @@ def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeyp
 
 @pytest.mark.parametrize("final_text", ["已完成", "已取消，本次未执行"])
 def test_telegram_followup_approval_transfers_then_closes_the_same_draft(store, monkeypatch, final_text):
-    monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
+    monkeypatch.setattr("app.agent.domains.resources.selection._target_options", _target_options)
 
     async def exercise():
         _, pipeline, states = _runtime(store)
@@ -292,7 +293,7 @@ def test_telegram_followup_approval_transfers_then_closes_the_same_draft(store, 
 
 
 def test_telegram_ui_cas_survives_restart_rejects_concurrent_and_cross_owner(store, monkeypatch):
-    monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
+    monkeypatch.setattr("app.agent.domains.resources.selection._target_options", _target_options)
     async def exercise():
         _, pipeline, states = _runtime(store)
         view, _ = await _publish_candidates(pipeline, states)
@@ -328,7 +329,7 @@ def test_resource_titles_preserve_filename_not_tool_names():
 
 
 def test_telegram_reply_binding_uses_signed_batch_and_rejects_replaced_search(store, monkeypatch):
-    monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
+    monkeypatch.setattr("app.agent.domains.resources.selection._target_options", _target_options)
     async def exercise():
         _, pipeline, states = _runtime(store)
         view, _ = await _publish_candidates(pipeline, states)
@@ -345,11 +346,10 @@ def test_telegram_reply_binding_uses_signed_batch_and_rejects_replaced_search(st
 
 def test_candidate_result_history_metadata_survives_model_round_without_entering_model():
     from app.agent.kernel.model import ModelMessage
-    from app.agent.kernel.session import AgentSession
     prior = [{"role": "assistant", "content": "可信结果", "tool_name": "ingest.submit", "public_content": "已提交", "candidate_result_ref": "ref_example"}]
     messages = [ModelMessage.from_dict(prior[0]), ModelMessage(role="user", content="后续提问")]
     assert "candidate_result_ref" not in messages[0].to_dict()
-    stored = AgentSession._persisted_conversation(messages, current_user_index=1, original_message="后续提问", prior_conversation=prior)
+    stored = persisted_conversation(messages, current_user_index=1, original_message="后续提问", prior_conversation=prior)
     assert stored[0]["candidate_result_ref"] == "ref_example"
     assert stored[0]["public_content"] == "已提交"
 
@@ -372,7 +372,7 @@ def test_telegram_real_kernel_keeps_empty_update_answer_without_a_zero_selection
 
     resources = ux._episode_candidates_result() if scoped else ux._resources()
     monkeypatch.setattr(ux, "_resources", lambda **_: resources)
-    monkeypatch.setattr("app.agent.kernel.ux_selection._target_options", _target_options)
+    monkeypatch.setattr("app.agent.domains.resources.selection._target_options", _target_options)
     model = Model()
     session, _, _ = _runtime(store, model=model)
     runtime = SimpleNamespace(store=store, telegram=TelegramKernelTransport(session))

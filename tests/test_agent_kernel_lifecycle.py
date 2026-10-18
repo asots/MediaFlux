@@ -10,12 +10,9 @@ from app.agent.kernel.effects import (
     PreparedEffect,
 )
 from app.agent.kernel.lifecycle import AgentSessionLifecycle
-from app.agent.kernel.state import (
-    PublicationLease,
-    SessionBusyError,
-    SessionState,
-    TurnCoordinator,
-)
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import TurnCoordinator
+from app.agent.kernel.state_types import PublicationLease, SessionBusyError
 from app.concurrency import CrossLoopAsyncLock
 
 

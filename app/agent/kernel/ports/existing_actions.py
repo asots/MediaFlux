@@ -18,23 +18,28 @@ from app.agent.domain_tool_metadata import (
     PREFIX_RETRIEVAL_TERMS,
     TOOL_RETRIEVAL_TERMS,
 )
+from app.agent.domains.discovery.watchlist_actions import watchlist_approval_scope
+from app.agent.domains.resources.presentation import (
+    MediaFluxProjector,
+    ResourceSelection,
+)
 from app.agent.effect_completion import wait_for_effect_completion
-from app.agent.errors import AgentToolError
+from app.agent.errors import AgentToolError, ToolPipelineError
 from app.agent.feature_gate import (
     AgentRuntimeDisabled,
     agent_runtime_admission,
     current_agent_runtime_generation,
 )
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import RiskLevel, ToolContext, ToolResult, ToolSpec
 from app.agent.owner_routes import telegram_owner_route_is_currently_authorized
 from app.agent.public_safety import sanitize_public_text
 
 from ..capabilities import KernelToolSpec, ToolCatalog, ToolEffect
-from ..task_state import COMPONENTS
 from ..effects import PreparedEffect
-from ..pipeline import ToolCallContext, ToolPipelineError
 from ..projection import DefaultProjector, ToolOutcome
 from ..session_guard import guarded_state_call
+from ..task_state import COMPONENTS
 
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
 
@@ -199,10 +204,12 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
         effect=effect,
         validator=spec.validator,
         runtime_status=spec.runtime_status,
+        approval_scope=watchlist_approval_scope if spec.name == "discovery.add_watchlist" else None,
         metadata={
             "source_kind": spec.source_kind,
             "freshness": spec.freshness,
             "parallel_read": spec.parallel_read,
+            **({"publishes_selection": True} if spec.source_kind in {"resource_index", "resource_presentation"} else {}),
             **({"batch_mode": spec.batch_mode} if spec.batch_mode else {}),
             "workflow": spec.workflow,
             "workflow_stage": spec.workflow_stage,
@@ -371,4 +378,4 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
 
 
 def catalog_from_tool_specs(specs: Iterable[ToolSpec]) -> ToolCatalog:
-    return ToolCatalog(adapt_tool_spec(spec) for spec in specs)
+    return ToolCatalog((adapt_tool_spec(spec) for spec in specs), projector=MediaFluxProjector(), selection=ResourceSelection())

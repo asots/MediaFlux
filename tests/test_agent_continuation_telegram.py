@@ -12,7 +12,7 @@ import requests
 from app import database as db
 from app.agent.kernel.adapters import ApprovalView, consume_events
 from app.agent.kernel.events import AgentEventType, EventFactory
-from app.agent.kernel.transports import (
+from app.agent.transports import (
     EffectEnvelope,
     ExplainEnvelope,
     QueryEnvelope,

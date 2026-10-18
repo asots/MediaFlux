@@ -27,8 +27,8 @@ from app.agent.kernel.provider_model import (
     ProviderSettings,
 )
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
-from app.agent.kernel.transports import TelegramKernelTransport, WebKernelTransport
+from app.agent.kernel.state_types import AgentInput
+from app.agent.transports import TelegramKernelTransport, WebKernelTransport
 from tests.support import initialized_web_runtime, isolated_test_database
 
 

@@ -1,24 +1,29 @@
 """Private returned READ settlement: full facts, exact CAS and no authority revival."""
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import replace
-import json
 from unittest.mock import patch
 
 import pytest
 
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.conversation_codec import pending_content
 from app.agent.kernel.events import AgentEventType
+from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore, StalePublicationError
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, StalePublicationError
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import ScriptedModel
-from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-
 
 READ_TOOL = KernelToolSpec(name="library.inspect", domain="library", description="inspect",
     effect=ToolEffect.READ, input_schema={"type": "object"}, read=lambda arguments: arguments)
@@ -177,7 +182,16 @@ def test_small_cancelled_fact_real_consumer():
 
 def test_native_cold_followup():
     from tests.test_agent_started_checkpoint import (
-        OWNER, SESSION, batch, wire, spec, session, collect, reopened, assert_native_wire, native_reply,
+        OWNER,
+        SESSION,
+        assert_native_wire,
+        batch,
+        collect,
+        native_reply,
+        reopened,
+        session,
+        spec,
+        wire,
     )
     async def run():
         calls = [("native-call", "inspect_batch", {"selector": "one", "exclude_played": True})]
@@ -214,8 +228,12 @@ def test_native_cold_followup():
 @pytest.mark.parametrize("excess", [0, 1])
 def test_exact_whole_state_capacity(backend, excess):
     async def run():
-        from app.agent.kernel.state import _CancelledReadInline, _ExecutionCapacity, StateUpdate
         from app.agent.kernel.conversation_codec import json_text
+        from app.agent.kernel.state_types import (
+            StateUpdate,
+            _CancelledReadInline,
+            _ExecutionCapacity,
+        )
         store = sqlite_store() if backend == "sqlite" else InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner="o", session_id="s", request_id="same")
         rows = [{"role": "assistant", "content": "", "tool_calls": [
@@ -251,7 +269,10 @@ def test_exact_whole_state_capacity(backend, excess):
 @pytest.mark.parametrize("mode", ["success", "prefix", "native_type", "wrong_row", "wrong_same_id", "pending", "scope", "forged", "write_failure", "capacity"])
 def test_checkpoint_cas(backend, mode):
     async def run():
-        from app.agent.kernel.state import _CancelledReadInline, _ExecutionCapacity
+        from app.agent.kernel.state_types import (
+            _CancelledReadInline,
+            _ExecutionCapacity,
+        )
         store = sqlite_store() if backend == "sqlite" else InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner="o", session_id="s", request_id="same")
         rows = [{"role": "user", "content": "original prefix"},
@@ -281,7 +302,7 @@ def test_checkpoint_cas(backend, mode):
             receipt.put_once('{"ok":true}')
         if mode == "forged": receipt = {"effect": "read", "content": "fake"}
         if mode == "capacity":
-            from app.agent.kernel.state import StateUpdate
+            from app.agent.kernel.state_types import StateUpdate
             await store.commit(lease, updates=(StateUpdate("metadata.filler", "z" * 220000),))
         assert await store.cancel_publication(owner="o", session_id="s", request_id="same")
         cold = sqlite_store() if backend == "sqlite" else store
@@ -319,8 +340,12 @@ def test_checkpoint_cas(backend, mode):
 def test_cancelled_read_batch_settlement_is_atomic(backend, mode):
     async def run():
         from dataclasses import replace
-        from app.agent.kernel.state import _CancelledReadInline, _ExecutionCapacity
+
         from app.agent.kernel.conversation_codec import json_text
+        from app.agent.kernel.state_types import (
+            _CancelledReadInline,
+            _ExecutionCapacity,
+        )
         store = sqlite_store() if backend == "sqlite" else InMemorySessionStateStore()
         lease, _ = await store.begin_turn(owner="o", session_id="s", request_id="batch")
         calls = [{"call_id": f"read-{i}", "name": "library.inspect", "arguments": {}} for i in range(2)]

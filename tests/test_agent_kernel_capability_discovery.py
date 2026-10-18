@@ -10,13 +10,13 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agent.capability_discovery_actions import (
+from app.agent.domain_catalog import build_tool_specs
+from app.agent.domains.system.capability_actions import (
     CAPABILITY_PARAMETERS,
     capability_arguments,
     web_capability_status,
 )
-from app.agent.domain_catalog import build_tool_specs
-from app.agent.errors import AgentToolError
+from app.agent.errors import AgentToolError, ToolPipelineError
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     CapabilitySelection,
@@ -28,17 +28,15 @@ from app.agent.kernel.discovery import CapabilityDiscovery
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.pipeline import (
-    ToolPipeline,
-    ToolPipelineError,
-    _validate_json_schema,
-)
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
-from app.agent.models import ToolContext
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from app.agent.model_context_budget import estimated_tokens
+from app.agent.models import ToolContext
+from app.agent.schema import validate_json_schema
 from tests.test_agent_kernel_core import ScriptedModel, collect, read_tool
 
 
@@ -389,10 +387,10 @@ def test_web_configuration_is_not_confused_with_provider_reachability(
 ):
     with (
         patch(
-            "app.agent.capability_discovery_actions.config.get_bool",
+            "app.agent.domains.system.capability_actions.config.get_bool",
             return_value=enabled,
         ),
-        patch("app.agent.capability_discovery_actions.config.get", return_value=key),
+        patch("app.agent.domains.system.capability_actions.config.get", return_value=key),
     ):
         result = web_capability_status()
     assert result["status"] == status
@@ -408,7 +406,7 @@ def test_web_configuration_is_not_confused_with_provider_reachability(
         {"query": 2},
         {"tool_names": "web.search"},
         {"tool_names": []},
-        {"tool_names": ["x"] * 7},
+        {"tool_names": ["x"] * 21},
         {"query": "actors", "tool_names": ["discovery.credits"]},
         {"execute": True},
     ],
@@ -427,7 +425,7 @@ _DISCOVERY_MODES = [
 
 @pytest.mark.parametrize("arguments", [{}, {"catalog": {}}, *_DISCOVERY_MODES])
 def test_discovery_each_mode_and_overview_keep_public_contract(arguments):
-    _validate_json_schema(arguments, CAPABILITY_PARAMETERS)
+    validate_json_schema(arguments, CAPABILITY_PARAMETERS)
     assert capability_arguments(arguments).keys() == arguments.keys()
 
 
@@ -435,7 +433,7 @@ def test_discovery_each_mode_and_overview_keep_public_contract(arguments):
 def test_discovery_all_mixed_modes_rejected_before_business_execution(left, right):
     arguments = {**left, **right}
     with pytest.raises(ToolPipelineError):
-        _validate_json_schema(arguments, CAPABILITY_PARAMETERS)
+        validate_json_schema(arguments, CAPABILITY_PARAMETERS)
     with pytest.raises(AgentToolError):
         capability_arguments(arguments)
 
@@ -445,7 +443,7 @@ def test_discovery_all_mixed_modes_rejected_before_business_execution(left, righ
 def test_catalog_legacy_pagination_rejected_by_schema_and_domain_validator(scope, legacy):
     arguments = {"catalog": {**scope, **legacy}}
     with pytest.raises(ToolPipelineError, match="未知参数") as error:
-        _validate_json_schema(arguments, CAPABILITY_PARAMETERS)
+        validate_json_schema(arguments, CAPABILITY_PARAMETERS)
     assert error.value.code == "invalid_arguments"
     with pytest.raises(AgentToolError, match="catalog.*domains"):
         capability_arguments(arguments)
@@ -528,7 +526,7 @@ def test_catalog_domain_casefold_keeps_filter_scope(domain):
     tools = [read_tool("rss.item", domain="rss"), read_tool("library.item", domain="library")]
     finder = CapabilityDiscovery(ToolCatalog(tools), context={})
     raw = {"catalog": {"domains": [domain, "rss"]}}
-    _validate_json_schema(raw, CAPABILITY_PARAMETERS)
+    validate_json_schema(raw, CAPABILITY_PARAMETERS)
     arguments = capability_arguments(raw)
     assert arguments == {"catalog": {"domains": ["rss"]}}
     result = finder.search(arguments)

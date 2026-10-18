@@ -25,18 +25,12 @@ from app.agent.kernel.effects import (
 )
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.pipeline import (
-    InMemoryRateLimiter,
-    ToolCallContext,
-    ToolPipeline,
-)
+from app.agent.kernel.pipeline import InMemoryRateLimiter, ToolPipeline
 from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import (
-    AgentInput,
-    CancellationToken,
-    InMemorySessionStateStore,
-)
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolResult
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import ScriptedModel, collect

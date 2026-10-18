@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
+from app.agent.domains.library.recent_patrol import RecentPatrolStore
 from app.agent.models import ToolResult
-from app.agent.recent_patrol import RecentPatrolStore
 
 
 def _identity(arguments):

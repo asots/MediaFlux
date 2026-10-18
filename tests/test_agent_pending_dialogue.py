@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from app import database as db
 from app.agent.confirmation import SQLiteConfirmationStore
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     KernelToolSpec,
@@ -24,10 +25,9 @@ from app.agent.kernel.pipeline import (
     DefaultAuthorizationPolicy,
     NoopEffectLifecycle,
     ToolPipeline,
-    ToolPipelineError,
 )
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.support import isolated_test_database
 
 OWNER, SID = "dialogue-owner", "pending-dialogue"

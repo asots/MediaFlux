@@ -9,10 +9,17 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from app.agent.errors import _ReadPermitRejected
 from app.agent.feature_gate import RuntimeFence, require_runtime_fence
+
+from .batch_progress import observe_batch
+from .completion_receipts import EFFECT_PENDING, _completion_cipher, _late_receipt
 from .conversation_codec import conversation_payload, json_text
-from .state import PublicationLease, SessionState, StateUpdate, StalePublicationError
+from .conversation_state import commit_conversation
+from .session_state import SessionState
+from .state_types import PublicationLease, StalePublicationError, StateUpdate
 from .task_state import identity
+from .tool_calls import PipelineResult
 
 MAX_WAIT_SEGMENTS = 3
 MAX_WAIT_SECONDS = 180
@@ -106,6 +113,21 @@ def task_changed(state):
     record["expected_task"] = identity(task)
 
 
+def interrupt_read_wait(state, now):
+    """调用方已独占续行 OS 锁；开始过的 READ 只能收束，不能重放。"""
+    record = state.metadata.get("read_wait") or {}
+    if record.get("state") != "running":
+        return False
+    record.update(state="terminal", terminal_reason="interrupted", claim_id="",
+                  claim_until=0, last_checked_at=max(now, record.get("last_checked_at", now)))
+    marker = state.metadata.get("active_publication") or {}
+    if (record.get("publication_generation") == state.generation
+            and marker.get("generation") == state.generation
+            and marker.get("request_id") == record.get("source_request_id")):
+        marker["status"] = "finished"
+    return True
+
+
 def apply_actions(state, lease, updates, now, conn=None):
     for update in updates:
         if type(update) is not _ContinuationAction:
@@ -120,9 +142,6 @@ def apply_actions(state, lease, updates, now, conn=None):
             if lease.continuation_kind == "effect":
                 row = state.metadata["effect_waits"][record["wait_id"]]
                 if row.get("batch_progress"):
-                    from .batch_effects import observe_batch
-                    from .state import commit_conversation
-                    from app.agent.effect_completion import _late_receipt
                     payload = effect_payload(state, record)
                     final = observe_batch(row, payload["origin"], payload["result"])
                     row.update(final_result=final, receipt_message=_late_receipt(payload["seed"], final))
@@ -167,7 +186,6 @@ def apply_actions(state, lease, updates, now, conn=None):
             continue
         if operation == "park":
             permit = value["permit"]
-            from .pipeline import _ReadPermitRejected
             if not isinstance(permit, _ReadPermitRejected) or permit.rate_limit["reason"] != "quota":
                 raise ValueError("untrusted READ rejection")
             due = permit.rate_limit["retry_at_epoch"]
@@ -262,7 +280,6 @@ def claim(state: SessionState, candidate, now, binding, conn=None):
 # Accepted writes are never resubmitted. A frozen batch may finish its approved
 # synchronous tail; other continuations can only plan new work with fresh consent.
 EFFECT_ACTIVE_SECONDS = 1800
-EFFECT_PENDING = {"waiting", "pending", "claimed", "running"}
 
 
 def continuation_record(state, wait_id, kind):
@@ -271,10 +288,6 @@ def continuation_record(state, wait_id, kind):
         return row.get("continuation") or {}
     return state.metadata.get("read_wait") or {}
 
-
-def effect_active(row):
-    record = row.get("continuation") or {}
-    return record.get("state") in EFFECT_PENDING or record.get("delivery_pending") is True
 
 
 def effect_origin(state, context, plan):
@@ -333,7 +346,6 @@ def due_records(metadata, now):
 
 def effect_payload(state, record):
     # The encrypted admission seed, not a chat summary or model-supplied goal.
-    from app.agent.effect_completion import _completion_cipher
     row = (state.metadata.get("effect_waits") or {}).get(record["wait_id"])
     if not row or not isinstance(row.get("final_result"), dict):
         raise ValueError("effect completion unavailable")
@@ -413,7 +425,6 @@ def apply_effect_action(state, lease, update, now):
             budget[counter] += amount
         record.update(state="running", last_checked_at=now, claim_until=now + EFFECT_ACTIVE_SECONDS + CLAIM_SECONDS)
     elif value["operation"] == "park":
-        from .pipeline import _ReadPermitRejected
         permit = value["permit"]
         if not isinstance(permit, _ReadPermitRejected) or permit.rate_limit["reason"] != "quota":
             raise ValueError("untrusted READ rejection")
@@ -452,7 +463,6 @@ async def adopt_foreground(store, lease, plan_id):
 
 def confirmed_result(catalog, state, record):
     from .effects import EffectPlan
-    from .pipeline import PipelineResult
     from .projection import ToolOutcome
     payload = effect_payload(state, record)
     seed, origin, result = payload["seed"], payload["origin"], payload["result"]
@@ -495,7 +505,10 @@ class _DeliveryAcknowledged:
 
 async def deliver_continuation_result(store, candidate):
     """只重投已保存的最终视图；进程重启不能再次调用模型或执行旧写操作。"""
-    from app.bot.agent_adapter import prepare_agent_continuation_delivery, publish_agent_continuation_delivery
+    from app.bot.agent_adapter import (
+        prepare_agent_continuation_delivery,
+        publish_agent_continuation_delivery,
+    )
 
     state = await store.load(owner=candidate["owner"], session_id=candidate["session_id"])
     record = continuation_record(state, candidate["wait_id"], candidate.get("kind"))

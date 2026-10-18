@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app import services
-from app.agent.domain_catalog import library, library_search
+from app.agent.domains.library import search as library_search
+from app.agent.domains.library import tools as library
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.agent.provider_gateway import ProviderGateway
@@ -266,7 +267,7 @@ def test_library_rejects_invalid_search_options(options):
 
 def test_library_and_provider_schemas_expose_same_search_options():
     registry = MagicMock()
-    library.register_specs(registry, resource_store=None, active_ingest_store=None, ingest_actions=None)
+    library.register_specs(registry, missing_media_runtime=None)
     spec = next(call.args[0] for call in registry.register.call_args_list if call.args[0].name == "library.search")
     provider_spec = build_provider_catalog().get("media.items.search")
     for key in ("offset", "search_by", "media_type", "count_only"):

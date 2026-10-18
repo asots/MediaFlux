@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from app.agent.errors import AgentToolError
-from app.agent.models import Evidence, ToolResult
-from app.agent.workspace_next_actions import (
+from app.agent.domains.workspace.next_actions import (
     resolve_workspace_action_handoff,
     summarize_workspace_next_actions,
     workspace_action_handoff_arguments,
 )
+from app.agent.errors import AgentToolError
+from app.agent.models import Evidence, ToolResult
 from tests.support import IsolatedDatabaseTestCase
 
 _ACTION_KEYS = {
@@ -60,13 +60,13 @@ def _area(source: str, reason: str, count: object = 1, **extra):
 
 class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
     def test_empty_local_snapshot_keeps_health_scope_in_model_dto_without_probing(self):
-        from app.agent.kernel.projection import DefaultProjector
-        from app.agent.workspace_todo_actions import (
+        from app.agent.domains.workspace.todo_actions import (
             WORKSPACE_BACKLOG_SCOPE,
             summarize_workspace_todo,
         )
+        from app.agent.kernel.projection import DefaultProjector
 
-        with patch("app.agent.media_health_actions.diagnose_media_servers") as probe:
+        with patch("app.agent.domains.workspace.health_actions.diagnose_media_servers") as probe:
             results = (summarize_workspace_todo({}), summarize_workspace_next_actions({}))
         probe.assert_not_called()
         for result in results:
@@ -82,11 +82,11 @@ class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(results[1].suggestions, [])
 
     def test_scope_is_fixed_even_when_child_contains_a_broader_claim(self):
-        from app.agent.workspace_todo_actions import WORKSPACE_BACKLOG_SCOPE
+        from app.agent.domains.workspace.todo_actions import WORKSPACE_BACKLOG_SCOPE
 
         for status in ("attention", "active", "waiting", "empty", "partial", "unavailable"):
             with self.subTest(status=status), patch(
-                "app.agent.workspace_next_actions.summarize_workspace_todo",
+                "app.agent.domains.workspace.next_actions.summarize_workspace_todo",
                 return_value=_todo(status=status, ok=status != "unavailable", scope="PRIVATE: 所有模块正常"),
             ):
                 result = summarize_workspace_next_actions({})
@@ -114,7 +114,7 @@ class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
             data={"actions": [{"action_key": "review_rss", "target_tool": "PRIVATE"}]},
         )
         with patch(
-            "app.agent.workspace_next_actions.summarize_workspace_next_actions",
+            "app.agent.domains.workspace.next_actions.summarize_workspace_next_actions",
             return_value=fresh,
         ) as summarize:
             resolved = resolve_workspace_action_handoff({"action_key": "review_rss"})
@@ -136,7 +136,7 @@ class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
             with (
                 self.subTest(status=snapshot.status),
                 patch(
-                    "app.agent.workspace_next_actions.summarize_workspace_next_actions",
+                    "app.agent.domains.workspace.next_actions.summarize_workspace_next_actions",
                     return_value=snapshot,
                 ),
                 self.assertRaises(AgentToolError) as captured,
@@ -165,7 +165,7 @@ class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
             token="PRIVATE-DATA",
         )
         with patch(
-            "app.agent.workspace_next_actions.summarize_workspace_todo",
+            "app.agent.domains.workspace.next_actions.summarize_workspace_todo",
             return_value=child,
         ) as summarize:
             result = summarize_workspace_next_actions({})
@@ -218,7 +218,7 @@ class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
             _area("local_media", "local_media_failed", 3, status="active"),
         ]
         with patch(
-            "app.agent.workspace_next_actions.summarize_workspace_todo",
+            "app.agent.domains.workspace.next_actions.summarize_workspace_todo",
             return_value=_todo(status="empty", areas=areas),
         ):
             result = summarize_workspace_next_actions({})
@@ -227,7 +227,7 @@ class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
 
     def test_partial_and_unavailable_results_do_not_leak_child_errors(self):
         with patch(
-            "app.agent.workspace_next_actions.summarize_workspace_todo",
+            "app.agent.domains.workspace.next_actions.summarize_workspace_todo",
             return_value=_todo(
                 status="partial",
                 areas=[_area("downloads", "download_needs_review")],
@@ -240,7 +240,7 @@ class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(partial.data["unavailable_areas"], ["rss"])
         self.assertEqual(len(partial.data["actions"]), 1)
         with patch(
-            "app.agent.workspace_next_actions.summarize_workspace_todo",
+            "app.agent.domains.workspace.next_actions.summarize_workspace_todo",
             return_value=_todo(ok=False, status="unavailable", areas=[]),
         ):
             unavailable = summarize_workspace_next_actions({})
@@ -255,7 +255,7 @@ class WorkspaceNextActionsUnitTests(IsolatedDatabaseTestCase):
             with (
                 self.subTest(status=status),
                 patch(
-                    "app.agent.workspace_next_actions.summarize_workspace_todo",
+                    "app.agent.domains.workspace.next_actions.summarize_workspace_todo",
                     return_value=_todo(status=status, areas=[]),
                 ),
             ):

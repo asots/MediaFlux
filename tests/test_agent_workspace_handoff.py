@@ -9,16 +9,28 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.agent import workspace_next_actions
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.domains.workspace import next_actions as workspace_next_actions
+from app.agent.errors import ToolPipelineError, ToolRateLimitError
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError, ToolRateLimitError
-from app.agent.kernel.session import AgentSession, _AgentTurn
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
-from app.agent.kernel.transports import QueryEnvelope, TransportInputError, WebKernelTransport
+from app.agent.kernel.model_rounds import next_round
+from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.session import AgentSession
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolResult
 from app.agent.rate_limit import RateLimitDecision
+from app.agent.transports import (
+    QueryEnvelope,
+    TransportInputError,
+    WebKernelTransport,
+)
 from app.routes import agent_api
 from tests import test_agent_ux_backend as backend_support
 from tests.test_agent_kernel_api import FakeWeb
@@ -280,6 +292,6 @@ class WorkspaceHandoffKernelTests(unittest.IsolatedAsyncioTestCase):
         pending_resume = {"arguments": {"page": 2}}
         turn = SimpleNamespace(pending_initial_read=initial, pending_resume_call=pending_resume,
                                tool_definitions=(), session=SimpleNamespace(system_prompt="system"))
-        result = await _AgentTurn.next_round(turn, None, 4)
+        result = await next_round(turn, None, 4)
         assert result.calls == (initial,) and result.resuming_read is False
         assert turn.pending_initial_read is None and turn.pending_resume_call is pending_resume

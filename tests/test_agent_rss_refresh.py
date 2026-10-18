@@ -7,13 +7,13 @@ from unittest.mock import patch
 
 from app import database as db
 from app.agent.action_history import action_history_owner_digest
-from app.agent.errors import AgentToolError
-from app.agent.rate_limit import agent_rate_limiter
-from app.agent.rss_refresh_actions import (
+from app.agent.domains.subscriptions.rss_refresh_actions import (
     prepare_rss_subscription_refresh,
     prepare_rss_subscriptions_refresh,
     rss_refresh_subscriptions_arguments,
 )
+from app.agent.errors import AgentToolError
+from app.agent.rate_limit import agent_rate_limiter
 from app.modules.rss import RSS_REFRESH_BUSY_ERROR, RSSEngine
 from tests.agent_kernel_test_harness import (
     get_kernel_test_service as get_agent_service,

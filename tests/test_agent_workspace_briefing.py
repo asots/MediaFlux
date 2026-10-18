@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+from app.agent.domains.workspace.briefing_actions import summarize_workspace_briefing
 from app.agent.models import Evidence, ToolResult
-from app.agent.workspace_briefing_actions import summarize_workspace_briefing
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -68,15 +68,15 @@ class WorkspaceBriefingUnitTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.workspace_briefing_actions.summarize_workspace_todo",
+                "app.agent.domains.workspace.briefing_actions.summarize_workspace_todo",
                 return_value=_todo_result(),
             ),
             patch(
-                "app.agent.workspace_briefing_actions.diagnose_indexer_readiness",
+                "app.agent.domains.workspace.briefing_actions.diagnose_indexer_readiness",
                 return_value=_indexer_result(),
             ),
             patch(
-                "app.agent.workspace_briefing_actions.config.get",
+                "app.agent.domains.workspace.briefing_actions.config.get",
                 side_effect=lambda key, default="": config_values.get(key, default),
             ),
         ):
@@ -110,15 +110,15 @@ class WorkspaceBriefingUnitTests(IsolatedDatabaseTestCase):
     def test_partial_failures_are_not_reported_as_zero_or_healthy(self):
         with (
             patch(
-                "app.agent.workspace_briefing_actions.summarize_workspace_todo",
+                "app.agent.domains.workspace.briefing_actions.summarize_workspace_todo",
                 side_effect=RuntimeError("PRIVATE database error"),
             ),
             patch(
-                "app.agent.workspace_briefing_actions.diagnose_indexer_readiness",
+                "app.agent.domains.workspace.briefing_actions.diagnose_indexer_readiness",
                 return_value=_indexer_result(),
             ),
             patch(
-                "app.agent.workspace_briefing_actions.config.get",
+                "app.agent.domains.workspace.briefing_actions.config.get",
                 side_effect=RuntimeError("PRIVATE config error"),
             ),
         ):
@@ -169,14 +169,14 @@ class WorkspaceBriefingUnitTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.workspace_briefing_actions.summarize_workspace_todo",
+                "app.agent.domains.workspace.briefing_actions.summarize_workspace_todo",
                 return_value=todo,
             ),
             patch(
-                "app.agent.workspace_briefing_actions.diagnose_indexer_readiness",
+                "app.agent.domains.workspace.briefing_actions.diagnose_indexer_readiness",
                 return_value=_indexer_result(),
             ),
-            patch("app.agent.workspace_briefing_actions.config.get", return_value="0"),
+            patch("app.agent.domains.workspace.briefing_actions.config.get", return_value="0"),
         ):
             result = summarize_workspace_briefing({})
         workspace_evidence = next(
@@ -192,7 +192,7 @@ class WorkspaceBriefingUnitTests(IsolatedDatabaseTestCase):
     def test_disabled_and_not_configured_are_distinct_from_unavailable(self):
         with (
             patch(
-                "app.agent.workspace_briefing_actions.summarize_workspace_todo",
+                "app.agent.domains.workspace.briefing_actions.summarize_workspace_todo",
                 return_value=ToolResult(
                     True,
                     "empty",
@@ -213,10 +213,10 @@ class WorkspaceBriefingUnitTests(IsolatedDatabaseTestCase):
                 ),
             ),
             patch(
-                "app.agent.workspace_briefing_actions.diagnose_indexer_readiness",
+                "app.agent.domains.workspace.briefing_actions.diagnose_indexer_readiness",
                 return_value=_indexer_result(status="disabled"),
             ),
-            patch("app.agent.workspace_briefing_actions.config.get", return_value="0"),
+            patch("app.agent.domains.workspace.briefing_actions.config.get", return_value="0"),
         ):
             result = summarize_workspace_briefing({})
         self.assertEqual(result.status, "healthy")

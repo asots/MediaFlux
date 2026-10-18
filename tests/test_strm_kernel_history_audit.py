@@ -10,18 +10,16 @@ from app import database as db
 from app.agent.action_history import action_history_owner_digest
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.domain_catalog import strm_runtime
+from app.agent.domains.strm import runtime as strm_runtime
+from app.agent.errors import ConfirmationClaimError
 from app.agent.kernel.capabilities import ToolCatalog
 from app.agent.kernel.effects import ConfirmationEffectPlanStore
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import (
-    ConfirmationClaimError,
-    ToolCallContext,
-    ToolPipeline,
-)
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
 from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
-from app.agent.kernel.state import CancellationToken
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.modules.scheduler import STRMScheduler
 from tests.support import isolated_test_database
 

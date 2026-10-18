@@ -9,15 +9,23 @@ import httpx
 import pytest
 
 from app import database as db
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.model import ModelEventType, ModelRequest
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
-from app.agent.kernel.provider_model import ModelProviderError, OpenAICompatibleModelAdapter, ProviderSettings
+from app.agent.kernel.provider_model import (
+    ModelProviderError,
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, CancellationToken
-from app.indexers.http import FixedHostHttpClient
-
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.clients.http import FixedHostHttpClient
 
 PROTOCOLS = ("chat_completions", "responses", "anthropic_messages")
 MISSING = object()

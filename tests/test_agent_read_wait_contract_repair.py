@@ -5,14 +5,29 @@ from datetime import datetime
 from unittest.mock import patch
 
 import pytest
+
 from app import database as db
-from app.agent.feature_gate import begin_runtime_change, finish_runtime_change, read_runtime_fence, initialize_runtime_fence
-from app.agent.kernel.bootstrap import build_agent_kernel_runtime, _capture_creation_binding
+from app.agent.feature_gate import (
+    begin_runtime_change,
+    finish_runtime_change,
+    initialize_runtime_fence,
+    read_runtime_fence,
+)
+from app.agent.kernel.bootstrap import (
+    _capture_creation_binding,
+    build_agent_kernel_runtime,
+)
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.modules.agent_jobs_scheduler import AgentJobsScheduler
 from tests.test_agent_read_wait_lifecycle import (
-    WaitScript, Quota, parked_runtime, OWNER, GOAL,
+    GOAL,
+    OWNER,
+    Quota,
+    WaitScript,
+    parked_runtime,
+)
+from tests.test_agent_read_wait_lifecycle import (
     isolated_database as isolated_database,
 )
 

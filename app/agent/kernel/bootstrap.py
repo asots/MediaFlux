@@ -5,33 +5,33 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 
-from app import database as db
-from app.agent.feature_gate import RuntimeFence, RuntimeFenceError, read_runtime_fence, require_runtime_fence
-
 from app import config
+from app import database as db
 from app.agent.confirmation import SQLiteConfirmationStore
-from app.agent.discovery_mapping_actions import configure_discovery_mapping_context
-from app.agent.domain_catalog import build_tool_specs
-from app.agent.guangya_cleanup_actions import configure_guangya_cleanup_context
-from app.agent.guangya_directory_scrape_actions import (
-    configure_directory_scrape_context,
+from app.agent.domain_catalog import DomainActions, build_tool_specs
+from app.agent.domains.downloads.recent_submissions import RecentDownloadSubmissionStore
+from app.agent.domains.library.missing_workflow_runtime import (
+    MissingMediaWorkflowRuntime,
 )
-from app.agent.guangya_fs_change_actions import configure_guangya_fs_change_context
-from app.agent.guangya_rename_actions import configure_guangya_rename_context
-from app.agent.guangya_workspace_actions import configure_guangya_workspace_context
-from app.agent.ingest_actions import AgentIngestSessionStore
-from app.agent.local_media_task_actions import configure_local_media_agent_context
-from app.agent.missing_media_workflow_runtime import MissingMediaWorkflowRuntime
-from app.agent.missing_media_workflows import SQLiteMissingMediaWorkflowRepository
+from app.agent.domains.library.missing_workflows import (
+    SQLiteMissingMediaWorkflowRepository,
+)
+from app.agent.domains.resources.candidate_context import RecentResourceCandidateStore
+from app.agent.domains.resources.ingest_actions import AgentIngestSessionStore
+from app.agent.feature_gate import (
+    RuntimeFence,
+    RuntimeFenceError,
+    read_runtime_fence,
+    require_runtime_fence,
+)
 from app.agent.provider_actions import clear_provider_session_state
-from app.agent.recent_download_submissions import RecentDownloadSubmissionStore
-from app.agent.recent_resource_candidates import RecentResourceCandidateStore
 from app.agent.session_context import SQLiteAgentSessionContextRepository
+from app.agent.transports import TelegramKernelTransport, WebKernelTransport
 
 from .capabilities import CapabilityRetriever
 from .effects import ConfirmationEffectPlanStore
-from .metrics import KernelMetrics
 from .lifecycle import AgentSessionLifecycle
+from .metrics import KernelMetrics
 from .model import ModelAdapter
 from .persistence import SQLiteKernelStore
 from .pipeline import ToolPipeline
@@ -45,7 +45,6 @@ from .ports.mediaflux_policy import (
 )
 from .provider_model import OpenAICompatibleModelAdapter, ProviderSettings
 from .session import AgentSession, SessionLimits
-from .transports import TelegramKernelTransport, WebKernelTransport
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +83,7 @@ class AgentKernelRuntime:
     metrics: KernelMetrics
     web: WebKernelTransport
     telegram: TelegramKernelTransport
+    domain_actions: DomainActions
     creation_binding: RuntimeCreationBinding | None = None
 
 
@@ -91,20 +91,14 @@ _lock = threading.Lock()
 _runtime: AgentKernelRuntime | None = None
 
 
-def _configure_domain_contexts() -> tuple[
-    SQLiteAgentSessionContextRepository,
+def _build_domain_dependencies() -> tuple[
+    DomainActions,
     RecentResourceCandidateStore,
     AgentIngestSessionStore,
     MissingMediaWorkflowRuntime,
 ]:
     context_repository = SQLiteAgentSessionContextRepository()
-    configure_local_media_agent_context(context_repository)
-    configure_discovery_mapping_context(context_repository)
-    configure_directory_scrape_context(context_repository)
-    configure_guangya_rename_context(context_repository)
-    configure_guangya_cleanup_context(context_repository)
-    configure_guangya_workspace_context(context_repository)
-    configure_guangya_fs_change_context(context_repository)
+    domain_actions = DomainActions(context_repository)
     resource_store = RecentResourceCandidateStore(repository=context_repository)
     ingest_store = AgentIngestSessionStore()
     missing_media_runtime = MissingMediaWorkflowRuntime(
@@ -113,7 +107,7 @@ def _configure_domain_contexts() -> tuple[
             repository=context_repository
         ),
     )
-    return context_repository, resource_store, ingest_store, missing_media_runtime
+    return domain_actions, resource_store, ingest_store, missing_media_runtime
 
 
 def _session_limits_from_config() -> SessionLimits:
@@ -150,15 +144,16 @@ def _build_agent_kernel_runtime(
 ) -> AgentKernelRuntime:
     """组合唯一 Kernel、领域能力、持久化与两个薄入口。"""
     (
-        _context_repository,
+        domain_actions,
         resource_store,
         ingest_store,
         missing_media_runtime,
-    ) = _configure_domain_contexts()
+    ) = _build_domain_dependencies()
     declarations = build_tool_specs(
         resource_store,
         ingest_store,
         missing_media_runtime=missing_media_runtime,
+        domain_actions=domain_actions,
     )
     catalog = catalog_from_tool_specs(declarations)
     kernel_store = store or SQLiteKernelStore()
@@ -211,6 +206,7 @@ def _build_agent_kernel_runtime(
         metrics=session.metrics,
         web=WebKernelTransport(session),
         telegram=TelegramKernelTransport(session),
+        domain_actions=domain_actions,
         creation_binding=creation_binding,
     )
 

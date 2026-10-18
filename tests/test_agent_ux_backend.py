@@ -17,33 +17,35 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app import database as db
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.ingest_actions import AgentIngestSessionStore
-from app.agent.kernel.capabilities import CapabilityRetriever
-from app.agent.kernel.events import AgentEventType
-from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
-from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
-from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import (
-    AgentInput,
-    CancellationToken,
-    InMemorySessionStateStore,
-    SelectionInvalidError,
-    StateUpdate,
-)
-from app.agent.kernel.transports import QueryEnvelope
-from app.agent.kernel.ux_selection import (
-    CANDIDATE_VIEW_KEY,
-    current_candidate_view,
-    validate_selection,
-)
-from app.agent.models import ToolReference, ToolResult
-from app.agent.recent_resource_candidates import (
+from app.agent.domains.resources.candidate_context import (
     RecentResourceCandidateStore,
     new_resource_search_id,
     safe_resource_snapshot,
 )
+from app.agent.domains.resources.ingest_actions import AgentIngestSessionStore
+from app.agent.domains.resources.selection import (
+    CANDIDATE_VIEW_KEY,
+    current_candidate_view,
+    validate_selection,
+)
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel.capabilities import CapabilityRetriever
+from app.agent.kernel.events import AgentEventType
+from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
+from app.agent.kernel.session import AgentSession
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import (
+    AgentInput,
+    CancellationToken,
+    SelectionInvalidError,
+    StateUpdate,
+)
+from app.agent.kernel.tool_calls import ToolCallContext
+from app.agent.models import ToolReference, ToolResult
+from app.agent.transports import QueryEnvelope
 from app.routes import agent_api
 from tests.test_agent_ux_model_context import model_resource_candidates
 
@@ -148,7 +150,7 @@ def test_next_actions_existing_local_projection_max_three_and_unavailable(api, m
         "areas": [{"source": source, "status": "attention", "attention_count": 1,
                    "reason_codes": [reason]} for source, reason in sources],
     })
-    with patch("app.agent.workspace_next_actions.summarize_workspace_todo", return_value=todo) as reader:
+    with patch("app.agent.domains.workspace.next_actions.summarize_workspace_todo", return_value=todo) as reader:
         response = api.client.get("/api/agent/next-actions")
     assert response.status_code == 200
     payload = response.json()
@@ -483,7 +485,7 @@ def test_invalid_selection_never_calls_model_provider_or_consumes_pending(store,
         rows_before = _row_snapshot()
         with patch.object(pipeline, "cancel_effect", new_callable=AsyncMock) as cancel, \
              patch.object(pipeline, "execute", new_callable=AsyncMock) as execute, \
-             patch("app.agent.recent_resource_candidates.restore_resource_candidate_reference", side_effect=AssertionError("restore forbidden")) as restore:
+             patch("app.agent.domains.resources.candidate_context.restore_resource_candidate_reference", side_effect=AssertionError("restore forbidden")) as restore:
             events = await _events(session.run(AgentInput(message="选择并预览", owner=owner, session_id=session_id, metadata={"selection": value})))
         assert len(events) == 1 and events[0].type is AgentEventType.TURN_FAILED
         assert events[0].payload["code"] == "selection_invalid"
@@ -523,8 +525,8 @@ def test_selection_click_only_previews_and_explicit_confirmation_has_one_effect(
         session, pipeline, states = _runtime(store, model=model)
         view, _ = await _publish_candidates(pipeline, states)
         envelope = QueryEnvelope(owner=OWNER, session_id=SESSION, message="选择并预览", selection=_selection(view))
-        with patch("app.agent.indexer_candidate_actions.prepare_submit_resource") as prepare, \
-             patch("app.agent.indexer_candidate_actions.submit_resource_confirmed") as execute:
+        with patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource") as prepare, \
+             patch("app.agent.domains.resources.candidate_actions.submit_resource_confirmed") as execute:
             prepare.side_effect = lambda args: (ToolResult(True, "confirmation_required", "确认后提交", data={"resource": {"title": "Example"}}), f"{args['result_id']}:{args['target']}")
             execute.return_value = ToolResult(True, "accepted", "已提交")
             events = await _events(session.run(envelope.to_agent_input()))
@@ -560,7 +562,7 @@ def test_pipeline_rejects_model_rewriting_verified_choice_before_provider(store)
         state = await states.load(owner=OWNER, session_id=SESSION)
         verified = await validate_selection(_selection(view), state=state, store=store)
         context = replace(context, selection_arguments=verified.arguments)
-        with patch("app.agent.indexer_candidate_actions.prepare_submit_resource") as prepare:
+        with patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource") as prepare:
             for arguments in ({**verified.arguments, "positions": [2]},
                               {**verified.arguments, "positions": [True]},
                               {**verified.arguments, "target": "both"}):
@@ -627,7 +629,10 @@ def test_empty_or_failed_same_turn_search_invalidates_old_candidate(store, faile
         read = Mock(side_effect=RuntimeError("offline")) if failed else Mock(return_value=ToolResult(
             True, "empty", "没有候选", data={"items": [], "rawresult": {"url": "https://10.0.0.9/private"}},
         ))
-        catalog = type(pipeline.catalog)([replace(original, read=read), pipeline.catalog.get("ingest.submit")])
+        catalog = type(pipeline.catalog)(
+            [replace(original, read=read), pipeline.catalog.get("ingest.submit")],
+            projector=pipeline.catalog.projector, selection=pipeline.catalog.selection,
+        )
         newer = ToolPipeline(catalog=catalog, state_store=states, reference_store=store)
         if failed:
             with pytest.raises(ToolPipelineError, match="工具执行失败"):
@@ -699,7 +704,10 @@ def test_same_turn_read_invalidation_reaches_real_progress_stream_before_termina
         reader = Mock(side_effect=[
             _episode_candidates_result(match="exact_episode"), RuntimeError("offline") if second_result == "failed" else ToolResult(True, "empty", "无候选", data={"items": []}),
         ])
-        catalog = type(original.catalog)([replace(original.catalog.get("indexer.search_resources"), read=reader)])
+        catalog = type(original.catalog)(
+            [replace(original.catalog.get("indexer.search_resources"), read=reader)],
+            projector=original.catalog.projector, selection=original.catalog.selection,
+        )
         pipeline = ToolPipeline(catalog=catalog, state_store=states, reference_store=store)
         model = SearchTwiceModel()
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(), pipeline=pipeline, state_store=states)
@@ -837,7 +845,7 @@ def test_listing_sql_sorts_only_small_keys_and_explicitly_opens_read_transaction
 
 
 def test_verified_cross_series_recommendations_keep_identity_and_global_positions():
-    from app.agent.kernel.ux_selection import _recommend, candidate_item
+    from app.agent.domains.resources.selection import _recommend, candidate_item
 
     names = ["光阴之外", "择日飞升", "大主宰", "牧神记", "沧元图", "一斩苍穹"]
     items = [candidate_item({
@@ -854,7 +862,7 @@ def test_verified_cross_series_recommendations_keep_identity_and_global_position
 
 
 def test_same_title_different_tmdb_id_are_distinct_recommendation_scopes():
-    from app.agent.kernel.ux_selection import _recommend, candidate_item
+    from app.agent.domains.resources.selection import _recommend, candidate_item
     items = [candidate_item({"title": "同名剧.S01E01", "match": "exact_episode", "_verification_context": {
         "title": "同名剧", "tmdb_id": str(identity), "season": 1, "episode": 1,
     }}, position) for position, identity in enumerate((111, 222), 1)]
@@ -884,7 +892,7 @@ def test_general_search_does_not_recommend_old_episodes_or_suggest_ingest(store)
 
 @pytest.mark.parametrize("match", ["", "unknown", "season_pack", "conflict"])
 def test_missing_episode_context_alone_does_not_prove_candidate_coverage(match):
-    from app.agent.kernel.ux_selection import _recommend, candidate_item
+    from app.agent.domains.resources.selection import _recommend, candidate_item
 
     item = candidate_item({
         "title": "[GM-Team][东大高武学院][01-04][4K]", "match": match,
@@ -895,7 +903,7 @@ def test_missing_episode_context_alone_does_not_prove_candidate_coverage(match):
 
 
 def test_verified_match_recommendations_use_domain_evidence_not_generic_title_ranges():
-    from app.agent.kernel.ux_selection import _recommend, candidate_item
+    from app.agent.domains.resources.selection import _recommend, candidate_item
 
     candidates = [
         {"title": "东大高武学院 S01E01-E04", "match": "conflict"},
@@ -944,7 +952,7 @@ def test_missing_episode_search_without_verified_coverage_does_not_issue_a_card(
 
 @pytest.mark.parametrize("legacy_empty", [False, True])
 def test_restored_empty_or_unverified_episode_card_is_not_resurrected(store, legacy_empty):
-    from app.agent.kernel.ux_selection import candidate_item
+    from app.agent.domains.resources.selection import candidate_item
 
     async def exercise():
         _, pipeline, states = _runtime(store)
@@ -1230,7 +1238,7 @@ def test_general_resource_search_can_explicitly_present_a_relevant_subset(store)
     ("2160p.HLG.HEVC", "HLG", None),
 ])
 def test_candidate_technical_evidence_is_title_only_and_unknown_is_not_sdr(suffix, dynamic, depth):
-    from app.agent.kernel.ux_selection import annotate_resource_candidates
+    from app.agent.domains.resources.selection import annotate_resource_candidates
 
     item = {"position": 1, "media_title": "Example", "requested_episode": "",
             "match": "unknown", "title": f"Example.S03E01.{suffix}", "coverage": {}}
@@ -1250,8 +1258,8 @@ def test_eight_step_query_contract_survives_empty_results_and_database_reload(st
     from tests.test_agent_indexer_actions import FakeIndexerService, _resource_item
 
     service = FakeIndexerService(items=[], partial=False)
-    monkeypatch.setattr('app.agent.indexer_actions.config.get_bool', lambda _: True)
-    monkeypatch.setattr('app.agent.indexer_actions.get_indexer_service', lambda: service)
+    monkeypatch.setattr('app.agent.domains.resources.indexer_actions.config.get_bool', lambda _: True)
+    monkeypatch.setattr('app.agent.domains.resources.indexer_actions.get_indexer_service', lambda: service)
 
     async def exercise():
         specs = build_tool_specs(RecentResourceCandidateStore(), AgentIngestSessionStore())

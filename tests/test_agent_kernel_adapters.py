@@ -5,6 +5,7 @@ import unittest
 
 from app.agent.kernel.adapters import TurnViewBuilder, consume_events, iter_ndjson
 from app.agent.kernel.events import AgentEvent, AgentEventType, EventFactory
+from app.agent.kernel.turn_display import active_turn_view, last_turn_view
 
 
 async def event_stream(events):
@@ -17,6 +18,48 @@ async def append_event(target, event):
 
 
 class AgentKernelAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_and_restored_terminal_views_share_event_status(self):
+        for event_type, payload, live_status, restored_status in (
+            (AgentEventType.TURN_COMPLETED, {}, "success", "completed"),
+            (AgentEventType.TURN_COMPLETED, {"status": "success"}, "success", "completed"),
+            (AgentEventType.TURN_COMPLETED, {"status": "partial"}, "partial", "completed"),
+            (AgentEventType.TURN_COMPLETED, {"status": "approval_required"}, "approval_required", "completed"),
+            (AgentEventType.TURN_COMPLETED, {"status": "waiting"}, "waiting", "waiting"),
+            (AgentEventType.TURN_FAILED, {"status": "waiting"}, "failed", "failed"),
+            (AgentEventType.TURN_CANCELLED, {"status": "waiting"}, "cancelled", "cancelled"),
+        ):
+            with self.subTest(event_type=event_type, payload=payload):
+                factory = EventFactory(session_id="s", turn_id="t", request_id="r")
+                events = [factory.create(AgentEventType.TURN_STARTED), factory.create(event_type, payload)]
+                view = await consume_events(event_stream(events))
+                restored = last_turn_view([events[-1].to_dict()], None)
+                self.assertEqual(view.status, live_status)
+                self.assertIsNotNone(restored)
+                self.assertEqual(restored["status"], restored_status)
+                self.assertEqual(restored["request_id"], view.request_id)
+                self.assertEqual(restored["turn_id"], view.turn_id)
+
+    async def test_incomplete_live_stream_and_bounded_history_keep_distinct_evidence(self):
+        factory = EventFactory(session_id="s", turn_id="t", request_id="r")
+        events = [factory.create(AgentEventType.TURN_STARTED), factory.create(
+            AgentEventType.EFFECT_COMPLETED, {"result": {"ok": True, "summary": "步骤已完成"}},
+        )]
+        live = await consume_events(event_stream(events))
+        tail = [events[-1].to_dict()]
+        restored = last_turn_view(tail, None)
+        self.assertEqual(live.status, "partial")
+        self.assertEqual(live.error_code, "stream_incomplete")
+        self.assertEqual(restored["status"], "interrupted")
+        activity = {"status": "running", "request_id": "r", "turn_id": "t", "generation": 1}
+        active = active_turn_view(activity, tail)
+        self.assertEqual(active["detail"], "正在整理操作结果")
+        self.assertIsNone(last_turn_view(tail, active))
+        # 相同 turn_id 的其他请求不能覆盖正在恢复的回合。
+        other = {**tail[-1], "request_id": "other", "type": "model.started"}
+        self.assertEqual(active_turn_view(activity, [*tail, other]), active)
+        activity["status"] = "cancelling"
+        self.assertEqual(active_turn_view(activity, tail)["detail"], "正在停止本轮任务")
+
     async def test_web_and_telegram_consume_the_same_event_truth(self) -> None:
         factory = EventFactory(session_id="s1", turn_id="t1", request_id="r1")
         events = [

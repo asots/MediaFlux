@@ -6,16 +6,15 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
+from app.clients.http import HttpSecurityError
 from app.indexers.downloads import _resolve
 from app.indexers.errors import (
-    IndexerRateLimited,
-    IndexerQueryRejected,
     IndexerChallengeRequired,
-    IndexerSecurityError,
+    IndexerQueryRejected,
+    IndexerRateLimited,
     IndexerUnavailable,
     IndexerValidationError,
 )
-from app.indexers.ranking import candidate_sort_key
 from app.indexers.models import (
     IndexerItem,
     IndexerMediaSearchRequest,
@@ -23,6 +22,7 @@ from app.indexers.models import (
     IndexerProviderError,
     ResolvedDownload,
 )
+from app.indexers.ranking import candidate_sort_key
 from app.indexers.registry import IndexerRegistry
 from app.indexers.result_store import IndexerResultStore
 from app.indexers.service import IndexerService
@@ -1138,7 +1138,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(stored.title, "Old manual candidate")
         self.assertEqual(resolved.kind, "magnet")
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await _resolve(service, old_manual_result, scope="manual")
 
         stored, resolved = await _resolve(
@@ -1146,7 +1146,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(stored.site_id, "aipan")
         self.assertEqual(resolved.kind, "magnet")
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await _resolve(service, agent_only_result, scope="manual")
 
     async def test_short_cache_skips_providers_then_expires(self):
@@ -1270,7 +1270,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         service = self.service([adapter])
 
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await service.resolve(stored_id)
         self.assertEqual(adapter.resolve_calls, [])
 
@@ -1336,7 +1336,7 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry.title for entry in recovered.items], ["recovered"])
 
     async def test_security_error_site_cools_down_immediately(self):
-        adapter = FakeAdapter("btbtla", error=IndexerSecurityError("challenge"))
+        adapter = FakeAdapter("btbtla", error=HttpSecurityError("challenge"))
         service = self.service([adapter], breaker_cooldown_seconds=300)
 
         await service.search("sec-0", 1, ("btbtla",))

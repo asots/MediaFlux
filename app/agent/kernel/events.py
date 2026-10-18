@@ -30,13 +30,21 @@ class AgentEventType(StrEnum):
     TURN_CANCELLED = "turn.cancelled"
 
 
-TERMINAL_EVENT_TYPES = frozenset(
-    {
-        AgentEventType.TURN_COMPLETED,
-        AgentEventType.TURN_FAILED,
-        AgentEventType.TURN_CANCELLED,
-    }
-)
+_TERMINAL_TURN_STATUSES: dict[str, str] = {
+    AgentEventType.TURN_COMPLETED: "success",
+    AgentEventType.TURN_FAILED: "failed",
+    AgentEventType.TURN_CANCELLED: "cancelled",
+}
+TERMINAL_EVENT_TYPES = frozenset(_TERMINAL_TURN_STATUSES)
+
+
+def terminal_turn_status(
+    event_type: AgentEventType | str, payload: Mapping[str, Any]
+) -> str | None:
+    """公开响应回合的终态；waiting 仅表示已交接，不证明后台业务完成。"""
+    if event_type == AgentEventType.TURN_COMPLETED:
+        return str(payload.get("status") or "success")
+    return _TERMINAL_TURN_STATUSES.get(event_type)
 
 
 def utc_now_iso() -> str:

@@ -1,12 +1,18 @@
 """Final serialized native bodies must remain inside explicit model caps."""
 import asyncio
 import json
+
 import pytest
+
 from app.agent.kernel.model import ModelMessage, ModelRequest
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings, ModelProviderError
-from app.agent.kernel.state import CancellationToken
-from tests.test_agent_generation_profiles import BASE, Wire
+from app.agent.kernel.provider_model import (
+    ModelProviderError,
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
+from app.agent.kernel.state_types import CancellationToken
 from tests import test_deadline_budget as support
+from tests.test_agent_generation_profiles import BASE, Wire
 from tests.test_deadline_budget import publish, row, turn
 
 harness = support.harness

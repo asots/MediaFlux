@@ -8,13 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import config
-from app.agent.errors import AgentToolError
-from app.agent.safe_policy_actions import (
+from app.agent.domains.configuration.policy_actions import (
     prepare_safe_policy_confirmation,
     safe_policy_arguments,
     safe_policy_summary_arguments,
     summarize_safe_policies,
 )
+from app.agent.errors import AgentToolError
 
 _POLICY_KEYS = {
     "TMDB_MATCH_MODE",

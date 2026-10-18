@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from app.agent.confirmation import SQLiteConfirmationStore
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.adapters import consume_events
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
@@ -14,13 +15,13 @@ from app.agent.kernel.capabilities import (
 )
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.provider_model import (
     OpenAICompatibleModelAdapter,
     ProviderSettings,
 )
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.support import isolated_test_database
 
 

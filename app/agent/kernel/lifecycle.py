@@ -5,10 +5,12 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any, Protocol
 
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state_types import SessionBusyError
+
 from .effects import ConfirmationEffectPlanStore
 from .session import AgentSession
 from .session_guard import guarded_state_call, session_scope_guard
-from .state import SessionBusyError, SessionState
 
 
 class SessionLifecycleStore(Protocol):

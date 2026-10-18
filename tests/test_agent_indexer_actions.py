@@ -1,27 +1,26 @@
 """Media Agent 多站资源搜索与确认提交测试。"""
 
 from __future__ import annotations
-import asyncio
-from dataclasses import replace
 
+import asyncio
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
-from app.agent.errors import AgentToolError
-from app.agent.indexer_actions import (
+from app.agent.domains.resources.candidate_actions import (
+    present_candidates,
+    present_candidates_arguments,
+)
+from app.agent.domains.resources.indexer_actions import (
     _submit_resource,
     _submit_resource_batch,
     prepare_submit_resource,
     search_arguments,
     search_resources,
 )
-from app.agent.indexer_candidate_actions import (
-    present_candidates,
-    present_candidates_arguments,
-)
-from app.modules.download_dispatcher import DownloadInput
+from app.agent.errors import AgentToolError
 from app.indexers.downloads import download_indexer_result
 from app.indexers.errors import (
     IndexerChallengeRequired,
@@ -35,6 +34,7 @@ from app.indexers.models import (
     ResolvedDownload,
 )
 from app.indexers.providers.empire import EmpireAdapter
+from app.modules.download_dispatcher import DownloadInput
 
 _RESULT_ID = "opaque-result-1234"
 _SECRET_MAGNET = "magnet:?xt=urn:btih:" + "a" * 40
@@ -174,9 +174,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
     def test_search_arguments_normalize_and_reject_unsafe_fields(self):
         service = FakeIndexerService()
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
         ):
             normalized = search_arguments(
@@ -221,9 +221,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
     def test_search_arguments_reject_site_absent_from_agent_registry(self):
         service = FakeIndexerService()
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             self.assertRaises(AgentToolError) as rejected,
         ):
@@ -233,9 +233,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
     def test_disabled_sukebei_does_not_suggest_enabling_all_sites(self):
         service = FakeIndexerService()
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             self.assertRaises(AgentToolError) as rejected,
         ):
@@ -265,9 +265,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             partial=False,
         )
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
         ):
             arguments = search_arguments(
@@ -302,8 +302,8 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
                 else:
                     result.items = [service.item, service.item]
                 with (
-                    patch("app.agent.indexer_actions.config.get_bool", return_value=True),
-                    patch("app.agent.indexer_actions.get_indexer_service", return_value=service),
+                    patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
+                    patch("app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service),
                     patch.object(service, "search_media", new=AsyncMock(return_value=result)),
                 ):
                     output = search_resources({"title": "Demo", "original_title": "", "english_title": "",
@@ -328,9 +328,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             "limit": 20,
         }
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
         ):
             result = search_resources(arguments)
@@ -389,8 +389,8 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             "limit": 20,
         }
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
-            patch("app.agent.indexer_actions.get_indexer_service", return_value=service),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service),
             patch.object(service, "search_media", new=AsyncMock(return_value=result)),
         ):
             output = search_resources(arguments)
@@ -418,10 +418,10 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         snapshot = _candidate_snapshot()
         with (
             patch(
-                "app.agent.indexer_candidate_actions.restore_resource_candidate_reference"
+                "app.agent.domains.resources.candidate_actions.restore_resource_candidate_reference"
             ) as restore,
             patch(
-                "app.agent.indexer_candidate_actions.active_agent_resource_candidates"
+                "app.agent.domains.resources.candidate_actions.active_agent_resource_candidates"
             ) as active,
         ):
             result = present_candidates(
@@ -492,9 +492,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             "limit": 20,
         }
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
         ):
             result = search_resources(arguments)
@@ -523,9 +523,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             "limit": 20,
         }
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
         ):
             result = search_resources(arguments, timeout_seconds=0.001)
@@ -535,8 +535,8 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
 
     def test_search_resources_disabled_does_not_create_service(self):
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=False),
-            patch("app.agent.indexer_actions.get_indexer_service") as service_factory,
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=False),
+            patch("app.agent.domains.resources.indexer_actions.get_indexer_service") as service_factory,
         ):
             result = search_resources({})
         self.assertFalse(result.ok)
@@ -547,12 +547,12 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         service = FakeIndexerService()
         arguments = {"result_id": _RESULT_ID, "target": "qb"}
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             patch(
-                "app.agent.indexer_actions.download_target_readiness",
+                "app.agent.domains.resources.indexer_actions.download_target_readiness",
                 return_value={"qb": True},
             ),
         ):
@@ -564,12 +564,12 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         self.assertNotIn(_SECRET_TORRENT_URL, serialized)
         self.assertNotIn(_SECRET_DETAIL_URL, serialized)
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             patch(
-                "app.agent.indexer_actions.download_target_readiness",
+                "app.agent.domains.resources.indexer_actions.download_target_readiness",
                 return_value={"qb": False},
             ),
         ):
@@ -580,9 +580,9 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
     def test_preview_rejects_expired_and_non_downloadable_results(self):
         service = FakeIndexerService()
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
         ):
             expired, _context = prepare_submit_resource(
@@ -609,11 +609,11 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             enabled_site_ids=("btbtla", "aipan"),
         )
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
-            patch("app.agent.indexer_actions.download_target_readiness") as readiness,
+            patch("app.agent.domains.resources.indexer_actions.download_target_readiness") as readiness,
         ):
             expired, _context = prepare_submit_resource(
                 {"result_id": _RESULT_ID, "target": "qb"}
@@ -628,12 +628,12 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         service = FakeIndexerService()
         arguments = {"result_id": _RESULT_ID, "target": "qb"}
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             patch(
-                "app.agent.indexer_actions.download_target_readiness",
+                "app.agent.domains.resources.indexer_actions.download_target_readiness",
                 return_value={"qb": True},
             ),
         ):
@@ -661,11 +661,11 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             }
         )
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
-            patch("app.agent.indexer_actions.download_indexer_result", dispatch),
+            patch("app.agent.domains.resources.indexer_actions.download_indexer_result", dispatch),
         ):
             result = _submit_resource({"result_id": _RESULT_ID, "target": "both"})
         self.assertTrue(result.ok)
@@ -714,13 +714,13 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         for payload, expected_status in outcomes:
             with (
                 self.subTest(expected_status=expected_status),
-                patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
                 patch(
-                    "app.agent.indexer_actions.get_indexer_service",
+                    "app.agent.domains.resources.indexer_actions.get_indexer_service",
                     return_value=service,
                 ),
                 patch(
-                    "app.agent.indexer_actions.download_indexer_result",
+                    "app.agent.domains.resources.indexer_actions.download_indexer_result",
                     AsyncMock(
                         return_value={**payload, "error": "private backend detail"}
                     ),
@@ -731,12 +731,12 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             self.assertEqual(result.status, expected_status)
             self.assertNotIn("private backend detail", str(result.to_dict()))
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
             patch(
-                "app.agent.indexer_actions.download_indexer_result",
+                "app.agent.domains.resources.indexer_actions.download_indexer_result",
                 AsyncMock(side_effect=RuntimeError("secret internal error")),
             ),
         ):
@@ -762,11 +762,11 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
             }
         )
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
-            patch("app.agent.indexer_actions.download_indexer_result", dispatch),
+            patch("app.agent.domains.resources.indexer_actions.download_indexer_result", dispatch),
         ):
             result = _submit_resource({"result_id": _RESULT_ID, "target": "guangya"})
         self.assertFalse(result.ok)
@@ -776,8 +776,8 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         self.assertNotIn("magnet:", str(result.to_dict()))
 
     def test_single_resource_preserves_safe_guangya_rejection_reason(self):
-        with patch("app.agent.indexer_actions.config.get_bool", return_value=True), patch(
-            "app.agent.indexer_actions.download_indexer_result", AsyncMock(return_value={
+        with patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True), patch(
+            "app.agent.domains.resources.indexer_actions.download_indexer_result", AsyncMock(return_value={
                 "ok": False, "result_id": _RESULT_ID, "request_id": 88, "created": True,
                 "target": "guangya", "status": "failed", "succeeded": [], "failed": ["guangya"],
                 "error": "上游文件违规 https://private.example/token=SECRET", "duplicate": False,
@@ -808,11 +808,11 @@ class AgentIndexerActionUnitTests(unittest.TestCase):
         dispatch = AsyncMock(return_value=public_result)
         result_ids = [_RESULT_ID, "opaque-result-5678"]
         with (
-            patch("app.agent.indexer_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.indexer_actions.get_indexer_service", return_value=service
+                "app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service
             ),
-            patch("app.agent.indexer_actions.download_indexer_result_public", dispatch),
+            patch("app.agent.domains.resources.indexer_actions.download_indexer_result_public", dispatch),
         ):
             result = _submit_resource_batch(
                 {"result_ids": result_ids, "target": "guangya"}
@@ -933,15 +933,19 @@ class IndexerReceivingSourceTests(unittest.TestCase):
                 submit.assert_not_called()
 
     def test_single_and_batch_confirmation_bind_actual_receiving_source(self):
-        from app.agent.indexer_actions import prepare_submit_resource_batch, submit_resource_confirmed, submit_resource_batch_confirmed
+        from app.agent.domains.resources.indexer_actions import (
+            prepare_submit_resource_batch,
+            submit_resource_batch_confirmed,
+            submit_resource_confirmed,
+        )
         for batch in (False, True):
             with (self.subTest(batch=batch),
-                patch("app.agent.indexer_actions.config.get_bool", return_value=True),
-                patch("app.agent.indexer_actions.get_indexer_service", return_value=FakeIndexerService(item=_resource_item(site_id="sukebei"))),
-                patch("app.agent.indexer_actions.download_target_readiness", return_value={"guangya": True}),
+                patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=FakeIndexerService(item=_resource_item(site_id="sukebei"))),
+                patch("app.agent.domains.resources.indexer_actions.download_target_readiness", return_value={"guangya": True}),
                 patch("app.modules.organize_sources.list_nsfw_download_sources", return_value=[{"id": "source-123", "name": "FixtureSpecial"}]) as sources,
-                patch("app.agent.indexer_actions._submit_resource") as single,
-                patch("app.agent.indexer_actions._submit_resource_batch") as multiple,
+                patch("app.agent.domains.resources.indexer_actions._submit_resource") as single,
+                patch("app.agent.domains.resources.indexer_actions._submit_resource_batch") as multiple,
             ):
                 arguments = {"result_ids": [_RESULT_ID], "target": "guangya"} if batch else {"result_id": _RESULT_ID, "target": "guangya"}
                 prepare = prepare_submit_resource_batch if batch else prepare_submit_resource
@@ -959,7 +963,7 @@ class IndexerReceivingSourceTests(unittest.TestCase):
                 multiple.assert_not_called()
 
     def test_receiving_summary_combines_selected_routes_without_false_default(self):
-        from app.agent.ingest_actions import _receiving_folders
+        from app.agent.domains.resources.ingest_actions import _receiving_folders
         from app.modules.offline import OfflineRules
         with patch("app.modules.offline.OfflineRules.from_config", return_value=replace(OfflineRules.from_config(), target_dir_id="normal", target_dir_name="Inbox", secondary_enabled=False)):
             self.assertEqual(_receiving_folders("guangya", []), _receiving_folders("guangya", [{}]))
@@ -970,6 +974,7 @@ class IndexerReceivingSourceTests(unittest.TestCase):
 
     def test_classification_survives_persisted_staging_and_retry_without_remote_writes(self):
         from types import SimpleNamespace
+
         from app import database as db
         from app.modules import download_dispatcher as dispatcher
         from app.modules.organize_rules import OrganizeRules
@@ -1009,8 +1014,8 @@ def test_explicit_quality_filters_before_limit_without_treating_unknown_as_sdr()
              _resource_item(title='Demo.S03E01.2160p.SDR', result_id='fourk-result-1234'),
              _resource_item(title='Demo.S03E01.1080p.SDR', result_id='matched-result-1234')]
     service = FakeIndexerService(items=items, partial=False)
-    with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
-          patch('app.agent.indexer_actions.get_indexer_service', return_value=service)):
+    with (patch('app.agent.domains.resources.indexer_actions.config.get_bool', return_value=True),
+          patch('app.agent.domains.resources.indexer_actions.get_indexer_service', return_value=service)):
         args = search_arguments({'title': 'Demo', 'resolution': '1080p', 'dynamic_range': 'SDR', 'limit': 1})
         result = search_resources(args)
         assert [row['result_id'] for row in result.data['items']] == ['matched-result-1234']
@@ -1051,8 +1056,8 @@ def test_quality_filter_keeps_combined_hdr_evidence_and_public_title_boundary():
         ('Demo.' + 'a' * 350 + '.1080p.SDR', 'SDR', False),
     ]:
         service = FakeIndexerService(item=_resource_item(title=title), partial=False)
-        with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
-              patch('app.agent.indexer_actions.get_indexer_service', return_value=service)):
+        with (patch('app.agent.domains.resources.indexer_actions.config.get_bool', return_value=True),
+              patch('app.agent.domains.resources.indexer_actions.get_indexer_service', return_value=service)):
             result = search_resources(search_arguments({'title': 'Demo', 'dynamic_range': desired}))
             assert bool(result.data['items']) is matched, (title, desired)
 
@@ -1063,8 +1068,8 @@ def test_refining_existing_candidates_reuses_search_evidence_without_network_or_
         'Demo.1080p.SDR', 'Demo.1080p.SDR.HDR10', 'Demo.2160p.DoVi.HDR10',
     ])]
     service = FakeIndexerService(items=items, partial=False)
-    with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
-          patch('app.agent.indexer_actions.get_indexer_service', return_value=service)):
+    with (patch('app.agent.domains.resources.indexer_actions.config.get_bool', return_value=True),
+          patch('app.agent.domains.resources.indexer_actions.get_indexer_service', return_value=service)):
         original = search_resources(search_arguments({'title': 'Demo'})).references[0].value
         before = deepcopy(original)
         for quality, expected in [
@@ -1076,7 +1081,7 @@ def test_refining_existing_candidates_reuses_search_evidence_without_network_or_
             ({'resolution': '', 'dynamic_range': ''}, [1, 2, 3, 4, 5, 6]),
         ]:
             fresh = search_resources(search_arguments({'title': 'Demo', **quality}))
-            with patch('app.agent.indexer_actions.get_indexer_service', side_effect=AssertionError('refinement must be offline')):
+            with patch('app.agent.domains.resources.indexer_actions.get_indexer_service', side_effect=AssertionError('refinement must be offline')):
                 presented = present_candidates({'resource_candidates': original, 'positions': list(range(1, 7)), **quality})
             assert presented.data['positions'] == expected
             assert {k: v for k, v in presented.references[0].value.items() if k != '_query_arguments'} == {k: v for k, v in before.items() if k != '_query_arguments'}
@@ -1125,8 +1130,8 @@ def test_query_refinement_normalizes_only_explicit_patch_and_rejects_invalid_val
 
 def test_empty_search_can_refine_filters_without_cross_query_state_or_snapshot_mutation():
     service = FakeIndexerService(items=[], partial=False)
-    with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
-          patch('app.agent.indexer_actions.get_indexer_service', return_value=service)):
+    with (patch('app.agent.domains.resources.indexer_actions.config.get_bool', return_value=True),
+          patch('app.agent.domains.resources.indexer_actions.get_indexer_service', return_value=service)):
         first = search_resources(search_arguments({
             'title': 'Black Mirror', 'original_title': '黑镜', 'year': 2011, 'media_type': 'tv',
             'season': 1, 'episode': 1, 'resolution': '1080p', 'sites': ['nyaa'], 'page': 3,
@@ -1164,7 +1169,7 @@ def test_present_inherits_only_the_selected_reference_and_updates_query_for_next
     original['candidates'][2]['title'] = 'Demo.S03E01.1080p.SDR'
     original['_query_arguments'] = search_arguments({'title': 'Demo', 'season': 3, 'episode': 1, 'resolution': '1080p'})
     before = deepcopy(original)
-    with patch('app.agent.indexer_actions.get_indexer_service', side_effect=AssertionError('offline refinement')):
+    with patch('app.agent.domains.resources.indexer_actions.get_indexer_service', side_effect=AssertionError('offline refinement')):
         first = present_candidates({'resource_candidates': original, 'positions': [1, 2, 3], 'dynamic_range': 'SDR'})
         assert first.data['positions'] == [3]
         second = present_candidates({'resource_candidates': first.references[0].value, 'positions': [1, 2, 3]})
@@ -1178,12 +1183,14 @@ def test_present_inherits_only_the_selected_reference_and_updates_query_for_next
 
 
 def test_legacy_and_combined_candidate_snapshots_cannot_guess_a_query_for_refinement():
-    from app.agent.recent_resource_candidates import restore_resource_candidate_reference
+    from app.agent.domains.resources.candidate_context import (
+        restore_resource_candidate_reference,
+    )
 
     legacy = {key: value for key, value in _candidate_snapshot().items() if not key.startswith('_private')}
     for snapshot in (legacy, {**legacy, '_query_arguments': []}):
-        with (patch('app.agent.indexer_actions.config.get_bool', return_value=True),
-              patch('app.agent.indexer_actions.get_indexer_service', side_effect=AssertionError('no implicit search')),
+        with (patch('app.agent.domains.resources.indexer_actions.config.get_bool', return_value=True),
+              patch('app.agent.domains.resources.indexer_actions.get_indexer_service', side_effect=AssertionError('no implicit search')),
               unittest.TestCase().assertRaises(AgentToolError)):
             search_resources({'resource_candidates': snapshot, 'resolution': '2160p'})
     # 历史候选正常展示/恢复；新查询元数据不能变成下载身份或权限。
@@ -1193,7 +1200,7 @@ def test_legacy_and_combined_candidate_snapshots_cannot_guess_a_query_for_refine
 
 
 def test_excluding_hdr_keeps_unknown_distinct_from_explicit_sdr():
-    from app.agent.indexer_actions import filter_technical_candidates
+    from app.agent.domains.resources.indexer_actions import filter_technical_candidates
 
     items = [{'title': f'Demo.1080p.{suffix}'} for suffix in ('H264', 'SDR', 'HDR10', 'DoVi', 'HLG', 'SDR.HDR10')]
     selected, stats = filter_technical_candidates(items, {'exclude_hdr': True})

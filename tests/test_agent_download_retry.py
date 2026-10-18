@@ -69,11 +69,11 @@ class DownloadRetryTests(IsolatedDatabaseTestCase):
         request_id = self._create_attention_request()
         with (
             patch(
-                "app.agent.download_retry_actions.download_resubmit_capabilities",
+                "app.agent.domains.downloads.retry_actions.download_resubmit_capabilities",
                 return_value=_CAPABILITIES,
             ),
             patch(
-                "app.agent.download_retry_actions.resubmit_download_request"
+                "app.agent.domains.downloads.retry_actions.resubmit_download_request"
             ) as dispatch,
         ):
             prepared = get_agent_service().prepare(
@@ -110,11 +110,11 @@ class DownloadRetryTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.download_retry_actions.download_resubmit_capabilities",
+                "app.agent.domains.downloads.retry_actions.download_resubmit_capabilities",
                 return_value=_CAPABILITIES,
             ),
             patch(
-                "app.agent.download_retry_actions.resubmit_download_request",
+                "app.agent.domains.downloads.retry_actions.resubmit_download_request",
                 return_value=result,
             ) as dispatch,
         ):
@@ -140,11 +140,11 @@ class DownloadRetryTests(IsolatedDatabaseTestCase):
         request_id = self._create_attention_request()
         with (
             patch(
-                "app.agent.download_retry_actions.download_resubmit_capabilities",
+                "app.agent.domains.downloads.retry_actions.download_resubmit_capabilities",
                 return_value=_CAPABILITIES,
             ),
             patch(
-                "app.agent.download_retry_actions.resubmit_download_request"
+                "app.agent.domains.downloads.retry_actions.resubmit_download_request"
             ) as dispatch,
         ):
             service = get_agent_service()
@@ -173,11 +173,11 @@ class DownloadRetryTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.download_retry_actions.download_resubmit_capabilities",
+                "app.agent.domains.downloads.retry_actions.download_resubmit_capabilities",
                 return_value=_CAPABILITIES,
             ),
             patch(
-                "app.agent.download_retry_actions.resubmit_download_request",
+                "app.agent.domains.downloads.retry_actions.resubmit_download_request",
                 return_value=partial_result,
             ),
         ):

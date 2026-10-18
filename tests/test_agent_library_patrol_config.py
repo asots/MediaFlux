@@ -9,12 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import config
-from app.agent.errors import AgentToolError
-from app.agent.library_patrol_config_actions import (
+from app.agent.domains.library.patrol_config_actions import (
     patrol_policy_arguments,
     prepare_patrol_policy_confirmation,
     summarize_patrol_policy,
 )
+from app.agent.errors import AgentToolError
 from app.modules.agent_library_patrol_scheduler import AgentLibraryPatrolScheduler
 
 _PATROL_KEYS = {

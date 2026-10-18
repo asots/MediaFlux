@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import time
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.local_media_task_actions import (
+from app.agent.domains.local_media.task_context import (
     LocalMediaAgentContextStore,
     _TaskRef,
-    reset_local_media_agent_context_for_tests,
 )
+from app.agent.errors import AgentToolError
 from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.agent.state_commit import AgentStateCommitBuffer, defer_agent_state_commits
 from app.modules.local_media_scheduler import LocalMediaScheduler
@@ -189,7 +188,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             "rules_snapshot": "PRIVATE-RULES",
         }
         with patch(
-            "app.agent.local_media_task_actions.get_local_media_service",
+            "app.agent.domains.local_media.task_actions.get_local_media_service",
             return_value=local_service,
         ):
             inspected = service.invoke(
@@ -237,7 +236,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         )
         scheduler = Mock()
         with patch(
-            "app.agent.local_media_task_actions.get_local_media_scheduler",
+            "app.agent.domains.local_media.task_actions.get_local_media_scheduler",
             return_value=scheduler,
         ):
             prepared = service.prepare(
@@ -318,10 +317,10 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         )
         scheduler.reload = Mock(wraps=scheduler.reload)
         with patch(
-            "app.agent.local_media_task_actions.get_local_media_scheduler",
+            "app.agent.domains.local_media.task_actions.get_local_media_scheduler",
             return_value=scheduler,
         ), patch(
-            "app.agent.local_media_task_actions.get_local_media_service",
+            "app.agent.domains.local_media.task_actions.get_local_media_service",
             return_value=self._remap_preview_service("digest-1"),
         ):
             prepared = service.prepare(
@@ -402,10 +401,10 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         )
         scheduler = Mock()
         with patch(
-            "app.agent.local_media_task_actions.get_local_media_scheduler",
+            "app.agent.domains.local_media.task_actions.get_local_media_scheduler",
             return_value=scheduler,
         ), patch(
-            "app.agent.local_media_task_actions.get_local_media_service",
+            "app.agent.domains.local_media.task_actions.get_local_media_service",
             return_value=self._remap_preview_service("confirmed-source-digest"),
         ):
             prepared = service.prepare(
@@ -440,7 +439,7 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             with self.assertRaisesRegex(AgentToolError, "必须同时提供"):
                 service.prepare("local_media.retry_task", invalid, owner="owner-a")
         with patch(
-            "app.agent.local_media_task_actions.get_local_media_service",
+            "app.agent.domains.local_media.task_actions.get_local_media_service",
             return_value=self._remap_preview_service(),
         ):
             prepared = service.prepare(
@@ -542,11 +541,11 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 return_value=[self._profile()],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
         ):
@@ -576,11 +575,11 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 return_value=[self._profile()],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
         ):
@@ -604,11 +603,11 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         client.list_virtual_folders.return_value = []
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 return_value=[self._profile()],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
             self.assertRaises(AgentToolError) as raised,
@@ -634,11 +633,11 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         client.has_tmdb_media.return_value = True
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 return_value=[self._profile()],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
         ):
@@ -688,13 +687,12 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
             },
         ]
         with patch(
-            "app.agent.local_media_task_actions.get_local_media_service",
+            "app.agent.domains.local_media.task_actions.get_local_media_service",
             return_value=local_service,
         ):
             inspected = service.invoke(
                 "local_media.inspect_task", {"task_number": 1}, owner="owner-a"
             )
-            reset_local_media_agent_context_for_tests()
             previewed = service.invoke(
                 "local_media.preview_task",
                 {"inspection_number": inspected["result"]["data"]["inspection_number"]},
@@ -916,14 +914,14 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 side_effect=[
                     [self._profile(url="http://server-a")],
                     [self._profile(url="http://server-b")],
                 ],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
         ):
@@ -958,15 +956,15 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 return_value=[self._profile()],
             ),
             patch(
-                "app.agent.local_media_task_actions.configured_media_server_refresh_options",
+                "app.agent.domains.local_media.task_library.configured_media_server_refresh_options",
                 side_effect=[first_options, second_options],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
         ):
@@ -996,11 +994,11 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 return_value=[self._profile()],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
         ):
@@ -1037,11 +1035,11 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 return_value=[self._profile()],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
         ):
@@ -1107,11 +1105,11 @@ class AgentLocalMediaTaskTests(IsolatedDatabaseTestCase):
         }
         with (
             patch(
-                "app.agent.local_media_task_actions.list_configured_profiles",
+                "app.agent.domains.local_media.task_library.list_configured_profiles",
                 return_value=[self._profile()],
             ),
             patch(
-                "app.agent.local_media_task_actions._client_for_provider",
+                "app.agent.domains.local_media.task_library._client_for_provider",
                 return_value=client,
             ),
         ):

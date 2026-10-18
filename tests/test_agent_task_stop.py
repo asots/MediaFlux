@@ -13,13 +13,16 @@ from unittest.mock import AsyncMock, patch
 from cryptography.fernet import Fernet
 
 from app.agent.effect_completion import (
-    EffectCompletionScope,
     current_session_effect_trackers,
     wait_for_effect_completion,
 )
 from app.agent.feature_gate import initialize_runtime_fence
 from app.agent.kernel.bootstrap import _capture_creation_binding
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
+from app.agent.kernel.completion_receipts import (
+    EffectCompletionScope,
+    _completion_cipher,
+)
 from app.agent.kernel.continuation import (
     _ContinuationAction,
     register_effect,
@@ -29,14 +32,13 @@ from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.session_guard import session_scope_guard
-from app.agent.kernel.state import (
+from app.agent.kernel.state import InMemorySessionStateStore, TurnCoordinator
+from app.agent.kernel.state_types import (
     CancellationToken,
-    InMemorySessionStateStore,
     PublicationLease,
     SessionBusyError,
     StalePublicationError,
     StateUpdate,
-    TurnCoordinator,
 )
 from app.agent.models import ToolContext, ToolResult
 from app.agent.task_stop import stop_agent_session
@@ -372,7 +374,7 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        with patch("app.agent.effect_completion._completion_cipher", return_value=cipher):
+        with patch("app.agent.kernel.completion_receipts._completion_cipher", return_value=cipher):
             records = await current_session_effect_trackers(
                 self.store, owner="owner", session_id="a"
             )
@@ -412,8 +414,8 @@ class AgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
             store=self.store, lease=lease, plan_id="wait-plan", channel="test"
         )
         context = ToolContext(owner="owner", session_id="wait", request_id="request")
-        with patch("app.agent.effect_completion._completion_cipher", return_value=cipher), patch(
-            "app.agent.effect_completion._poll",
+        with patch("app.agent.kernel.completion_receipts._completion_cipher", return_value=cipher), patch(
+            "app.agent.completion_observers._poll",
             new=AsyncMock(return_value=(
                 ToolResult(True, "running", "仍在执行"),
                 "running",
@@ -592,10 +594,7 @@ class SQLiteAgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         initialize_runtime_fence()
         self.binding = _capture_creation_binding()
         self.store = self._cold_store()
-        self.cipher = Fernet(Fernet.generate_key())
-        cipher_patch = patch("app.agent.effect_completion._completion_cipher", return_value=self.cipher)
-        cipher_patch.start()
-        self.addCleanup(cipher_patch.stop)
+        self.cipher = _completion_cipher()
         self.model = AsyncMock()
         self.runtime = self._runtime(self.store)
 
@@ -917,10 +916,10 @@ def test_native_completed_effect_stop_prevents_original_goal_resume(tmp_path):
     )
 
     async def run():
-        async with _ready_case(tmp_path) as (_store, candidate, client, reads, _stack, _users):
+        async with _ready_case(tmp_path) as (_store, candidate, client, reads, stack, _users):
             cold = SQLiteKernelStore()
             follow = FollowScript(resume=True)
-            resumed = _session(cold, follow, client, reads)
+            resumed = _session(cold, follow, client, reads, stack=stack)
             assert await resumed.coordinator.describe(owner=OWNER, session_id=SID) is None
             before = await cold.load(owner=OWNER, session_id=SID)
             result = await stop_agent_session(SimpleNamespace(store=cold, session=resumed), OWNER, SID)
@@ -963,7 +962,7 @@ def test_native_stop_revokes_delivery_approval_then_tg_sends_buttonless_facts(tm
                 approval_id = delivery["delivery_view"]["approval"]["plan_id"]
                 assert approval_id == before.pending_effect_plan_id and approval_id != candidate["wait_id"]
                 follow = cases.FollowScript(resume=True)
-                runtime = SimpleNamespace(store=cold, session=cases._session(cold, follow, client, reads))
+                runtime = SimpleNamespace(store=cold, session=cases._session(cold, follow, client, reads, stack=stack))
                 # 共享 fixture 的默认票据仓库在内存；显式复用同一原生签名仓库，不伪造 revoke。
                 runtime.session.pipeline.effect_store = session.pipeline.effect_store
                 assert (await runtime.session.pipeline.get_pending_plan(owner=OWNER, session_id=cases.SID)).plan_id == approval_id

@@ -7,18 +7,27 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agent.kernel import session as session_module
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel import model_rounds as model_rounds_module
 from app.agent.kernel.capabilities import ToolCatalog
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import ToolOutcome
 from app.agent.kernel.session import SessionLimits
-from app.agent.kernel.state import AgentInput, CancellationToken, StateUpdate
+from app.agent.kernel.state_types import AgentInput, CancellationToken, StateUpdate
+from app.agent.kernel.tool_calls import ToolCallContext
 from tests import test_agent_kernel_telegram_reference as o
 from tests.support import isolated_test_database
 from tests.test_agent_argument_fidelity import declaration, text_reply
 from tests.test_agent_capacity_recovery import (
-    OWNER, SESSION, assert_unknown, batch, collect, make_wire, reopened,
-    result_rows, session,
+    OWNER,
+    SESSION,
+    assert_unknown,
+    batch,
+    collect,
+    make_wire,
+    reopened,
+    result_rows,
+    session,
 )
 
 store = o.store
@@ -79,12 +88,12 @@ def test_normal_old_group_pruning_does_not_freeze_new_turn(store, window):
     assert send(store, first)[0].status == 'success'
     assert send(store, o.Message('最近独立任务：你好', chat_id=-987654, user_id=92, message_id=101))[0].status == 'success'
     observed = []
-    original = session_module.bounded_model_messages
+    original = model_rounds_module.bounded_model_messages
     def observe(*args, **kwargs):
         result = original(*args, **kwargs)
         observed.append(result)
         return result
-    with patch.object(session_module, 'bounded_model_messages', observe):
+    with patch.object(model_rounds_module, 'bounded_model_messages', observe):
         result, wire = send(store, o.Message('新的普通问题：你好', chat_id=-987654, user_id=92, message_id=102), window)
     assert observed
     if window == 16384:

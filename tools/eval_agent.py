@@ -30,6 +30,7 @@ from app.agent.kernel.capabilities import (
     ToolCatalog,
     ToolEffect,
 )
+from app.agent.kernel.conversation_context import capability_retrieval_context
 from app.agent.kernel.effects import PreparedEffect
 from app.agent.kernel.model import (
     ModelEvent,
@@ -40,7 +41,9 @@ from app.agent.kernel.model import (
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore, SessionState
+from app.agent.kernel.session_state import SessionState
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from app.agent.public_view import public_result_state
 
 DEFAULT_FIXTURE = Path("tests/fixtures/agent_kernel_capability_cases.jsonl")
@@ -1255,7 +1258,7 @@ def evaluate(
                 "session_id": state.session_id,
                 "channel": "eval",
                 "reference_kinds": (),
-                **AgentSession._capability_retrieval_context(state),
+                **capability_retrieval_context(state),
             },
         )
         selected = selection.names

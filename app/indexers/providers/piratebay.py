@@ -5,10 +5,17 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 
-from ..config import TPB_URL, TPB_API_URL
-from ..errors import IndexerInvalidResponse, IndexerRateLimited, IndexerUnavailable
+from app.clients.http import HttpInvalidResponse
+
+from ..config import TPB_API_URL, TPB_URL
+from ..errors import IndexerRateLimited, IndexerUnavailable
 from ..models import IndexerCapabilities, IndexerItem, IndexerPage, IndexerSearchRequest
-from .base import DirectResultAdapter, SearchRequestPacer, PUBLIC_TRACKERS, augment_public_magnet
+from .base import (
+    PUBLIC_TRACKERS,
+    DirectResultAdapter,
+    SearchRequestPacer,
+    augment_public_magnet,
+)
 
 _INFO_HASH = re.compile(r"^[0-9a-fA-F]{40}$")
 _CATEGORIES = {
@@ -118,16 +125,16 @@ class PirateBayAdapter(DirectResultAdapter):
     def _require_json_response(response) -> None:
         content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
-            raise IndexerInvalidResponse("The Pirate Bay returned a non-JSON response")
+            raise HttpInvalidResponse("The Pirate Bay returned a non-JSON response")
 
     @staticmethod
     def _parse_entries(body: bytes) -> list[dict]:
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise IndexerInvalidResponse("The Pirate Bay returned malformed JSON") from exc
+            raise HttpInvalidResponse("The Pirate Bay returned malformed JSON") from exc
         if not isinstance(payload, list) or not all(isinstance(entry, dict) for entry in payload):
-            raise IndexerInvalidResponse("The Pirate Bay JSON response must be a list of objects")
+            raise HttpInvalidResponse("The Pirate Bay JSON response must be a list of objects")
         return payload
 
     @staticmethod
@@ -137,7 +144,7 @@ class PirateBayAdapter(DirectResultAdapter):
         if status_code >= 500:
             raise IndexerUnavailable(f"The Pirate Bay returned HTTP {status_code}")
         if status_code != 200:
-            raise IndexerInvalidResponse(f"The Pirate Bay returned HTTP {status_code}")
+            raise HttpInvalidResponse(f"The Pirate Bay returned HTTP {status_code}")
 
 
 def _search_tokens(value: object) -> tuple[str, ...]:

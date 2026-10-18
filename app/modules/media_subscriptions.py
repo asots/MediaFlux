@@ -17,7 +17,7 @@ from typing import Any, Iterable
 
 from app import config
 from app import database as db
-from app.agent.resource_recommendation import rank_episode_search
+from app.agent.domains.resources.recommendation import rank_episode_search
 from app.clients.tmdb import TMDBClient, close_tmdb_client
 from app.discovery.models import ProviderError, ProviderNotConfigured
 from app.indexers.config import tmdb_detail_is_animation

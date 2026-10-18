@@ -5,22 +5,27 @@ import asyncio
 import socket
 import threading
 import time
+import unittest
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-import unittest
 
 import httpx
 
-from tests.support import isolated_test_database
+from app.clients.http import HttpSecurityError
 from app.discovery.cache import DiscoveryCache
-from app.indexers.errors import IndexerSecurityError
 from app.discovery.calendar.http import CalendarHttp
 from app.discovery.calendar.metadata import CalendarMetadata
-from app.discovery.calendar.models import CalendarEntry, CalendarEvent, SourceResult, SourceUnavailable
+from app.discovery.calendar.models import (
+    CalendarEntry,
+    CalendarEvent,
+    SourceResult,
+    SourceUnavailable,
+)
 from app.discovery.calendar.service import CalendarService, calendar_dates
+from tests.support import isolated_test_database
 
 
 def entry(**changes):
@@ -729,7 +734,7 @@ class CalendarHttpTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(asyncio.CancelledError):
                     await task
                 self.assertFalse(slot_returned.is_set())
-                with self.assertRaises(IndexerSecurityError):
+                with self.assertRaises(HttpSecurityError):
                     await second.get_json("https://v.qq.com/public")
                 fast.assert_not_called()
                 self.assertEqual(calls, [])
@@ -765,7 +770,7 @@ class CalendarHttpTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
     async def test_public_schedule_rejects_compression_before_reading_or_decoding(self):
-        from app.indexers.errors import IndexerInvalidResponse
+        from app.clients.http import HttpInvalidResponse
         class Wire(httpx.AsyncByteStream):
             started = False
             closed = False
@@ -782,7 +787,7 @@ class CalendarHttpTests(unittest.IsolatedAsyncioTestCase):
                 "Content-Type": "text/html", "Content-Encoding": "gzip",
             })))
         try:
-            with self.assertRaises(IndexerInvalidResponse):
+            with self.assertRaises(HttpInvalidResponse):
                 await client.get_text("https://www.youku.com/ku/webcomic")
             self.assertFalse(wire.started)
             self.assertTrue(wire.closed)
@@ -874,7 +879,7 @@ class CalendarHttpTests(unittest.IsolatedAsyncioTestCase):
         client = CalendarHttp({"v.qq.com"}, transport=httpx.MockTransport(lambda req: self.fail("transport called")),
                               resolver=lambda host, port: [(2, 1, 6, "", ("127.0.0.1", port))], min_interval=0)
         try:
-            with self.assertRaises(IndexerSecurityError):
+            with self.assertRaises(HttpSecurityError):
                 await client.get_json("https://v.qq.com/public")
         finally:
             await client.aclose()

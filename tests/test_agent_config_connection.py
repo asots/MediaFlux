@@ -8,10 +8,8 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from app.agent.config_actions import (
-    media_server_arguments,
-)
-from app.agent.config_actions import (
+from app.agent.domains.configuration.connection_actions import media_server_arguments
+from app.agent.domains.configuration.connection_actions import (
     test_media_server as run_media_server_test,
 )
 from app.agent.errors import AgentToolError
@@ -130,12 +128,12 @@ class AgentConfigConnectionTests(unittest.TestCase):
         for server_type, enabled, values, expected in cases:
             with (
                 self.subTest(server_type=server_type, expected=expected),
-                patch("app.agent.config_actions.config.get_bool", return_value=enabled),
+                patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=enabled),
                 patch(
-                    "app.agent.config_actions.config.get",
+                    "app.agent.domains.configuration.connection_actions.config.get",
                     side_effect=_config_get(values),
                 ),
-                patch("app.agent.config_actions.requests.get") as request_get,
+                patch("app.agent.domains.configuration.connection_actions.requests.get") as request_get,
             ):
                 result = run_media_server_test({"server_type": server_type})
             self.assertFalse(result.ok)
@@ -153,12 +151,12 @@ class AgentConfigConnectionTests(unittest.TestCase):
             "Secret": "must-not-leak",
         }
         with (
-            patch("app.agent.config_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.config_actions.config.get", side_effect=_config_get(values)
+                "app.agent.domains.configuration.connection_actions.config.get", side_effect=_config_get(values)
             ),
             patch(
-                "app.agent.config_actions.requests.get", return_value=response
+                "app.agent.domains.configuration.connection_actions.requests.get", return_value=response
             ) as request_get,
         ):
             result = run_media_server_test({"server_type": "jellyfin"})
@@ -189,12 +187,12 @@ class AgentConfigConnectionTests(unittest.TestCase):
             "Version": "10.11.11",
         }
         with (
-            patch("app.agent.config_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.config_actions.config.get", side_effect=_config_get(values)
+                "app.agent.domains.configuration.connection_actions.config.get", side_effect=_config_get(values)
             ),
             patch(
-                "app.agent.config_actions.requests.get", return_value=response
+                "app.agent.domains.configuration.connection_actions.requests.get", return_value=response
             ) as request_get,
         ):
             result = run_media_server_test({"server_type": "emby"})
@@ -217,11 +215,11 @@ class AgentConfigConnectionTests(unittest.TestCase):
             "Version": "4.9.0",
         }
         with (
-            patch("app.agent.config_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.config_actions.config.get", side_effect=_config_get(values)
+                "app.agent.domains.configuration.connection_actions.config.get", side_effect=_config_get(values)
             ),
-            patch("app.agent.config_actions.requests.get", return_value=response),
+            patch("app.agent.domains.configuration.connection_actions.requests.get", return_value=response),
         ):
             result = run_media_server_test({"server_type": "jellyfin"})
         self.assertTrue(result.ok)
@@ -240,11 +238,11 @@ class AgentConfigConnectionTests(unittest.TestCase):
             "Version": "12.0.1",
         }
         with (
-            patch("app.agent.config_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.config_actions.config.get", side_effect=_config_get(values)
+                "app.agent.domains.configuration.connection_actions.config.get", side_effect=_config_get(values)
             ),
-            patch("app.agent.config_actions.requests.get", return_value=response),
+            patch("app.agent.domains.configuration.connection_actions.requests.get", return_value=response),
         ):
             result = run_media_server_test({"server_type": "jellyfin"})
         self.assertTrue(result.ok)
@@ -257,11 +255,11 @@ class AgentConfigConnectionTests(unittest.TestCase):
         response.raise_for_status.return_value = None
         response.json.return_value = {"ServerName": "Media Room", "Version": "12.0.1"}
         with (
-            patch("app.agent.config_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.config_actions.config.get", side_effect=_config_get(values)
+                "app.agent.domains.configuration.connection_actions.config.get", side_effect=_config_get(values)
             ),
-            patch("app.agent.config_actions.requests.get", return_value=response),
+            patch("app.agent.domains.configuration.connection_actions.requests.get", return_value=response),
         ):
             result = run_media_server_test({"server_type": "jellyfin"})
         self.assertTrue(result.ok)
@@ -298,12 +296,12 @@ class AgentConfigConnectionTests(unittest.TestCase):
             response.raise_for_status.side_effect = error
             with (
                 self.subTest(expected=expected),
-                patch("app.agent.config_actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=True),
                 patch(
-                    "app.agent.config_actions.config.get",
+                    "app.agent.domains.configuration.connection_actions.config.get",
                     side_effect=_config_get(values),
                 ),
-                patch("app.agent.config_actions.requests.get", return_value=response),
+                patch("app.agent.domains.configuration.connection_actions.requests.get", return_value=response),
             ):
                 result = run_media_server_test({"server_type": "jellyfin"})
             self.assertFalse(result.ok)
@@ -317,12 +315,12 @@ class AgentConfigConnectionTests(unittest.TestCase):
         response = Mock(status_code=302)
         response.headers = {"Location": "http://169.254.169.254/latest/secret"}
         with (
-            patch("app.agent.config_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=True),
             patch(
-                "app.agent.config_actions.config.get", side_effect=_config_get(values)
+                "app.agent.domains.configuration.connection_actions.config.get", side_effect=_config_get(values)
             ),
             patch(
-                "app.agent.config_actions.requests.get", return_value=response
+                "app.agent.domains.configuration.connection_actions.requests.get", return_value=response
             ) as request_get,
         ):
             result = run_media_server_test({"server_type": "jellyfin"})
@@ -342,12 +340,12 @@ class AgentConfigConnectionTests(unittest.TestCase):
             else:
                 response.json.return_value = payload
             with (
-                patch("app.agent.config_actions.config.get_bool", return_value=True),
+                patch("app.agent.domains.configuration.connection_actions.config.get_bool", return_value=True),
                 patch(
-                    "app.agent.config_actions.config.get",
+                    "app.agent.domains.configuration.connection_actions.config.get",
                     side_effect=_config_get(values),
                 ),
-                patch("app.agent.config_actions.requests.get", return_value=response),
+                patch("app.agent.domains.configuration.connection_actions.requests.get", return_value=response),
             ):
                 result = run_media_server_test({"server_type": "jellyfin"})
             self.assertEqual(result.status, "invalid_response")

@@ -6,13 +6,13 @@ import json
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.local_media_actions import (
+from app.agent.domains.local_media.queries import (
     local_media_history_arguments,
     local_media_review_queue_arguments,
     summarize_local_media_history,
     summarize_local_media_review_queue,
 )
+from app.agent.errors import AgentToolError
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -164,11 +164,11 @@ class LocalMediaSummaryUnitTests(IsolatedDatabaseTestCase):
     def test_unavailable_results_are_stable(self):
         for target, action in (
             (
-                "app.agent.local_media_actions.db.get_local_media_review_queue_summary",
+                "app.agent.domains.local_media.queries.db.get_local_media_review_queue_summary",
                 summarize_local_media_review_queue,
             ),
             (
-                "app.agent.local_media_actions.db.get_local_media_history_summary",
+                "app.agent.domains.local_media.queries.db.get_local_media_history_summary",
                 summarize_local_media_history,
             ),
         ):

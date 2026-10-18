@@ -9,13 +9,20 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.agent.episode_resource_actions import (
+from app.agent.domains.library.episode_resource_actions import (
     missing_episode_resource_arguments,
     missing_season_resource_arguments,
     search_missing_episode_resources,
     search_missing_season_resources,
 )
-from app.agent.indexer_actions import search_arguments, search_resources
+from app.agent.domains.resources.indexer_actions import (
+    search_arguments,
+    search_resources,
+)
+from app.agent.domains.resources.presentation import (
+    MediaFluxProjector,
+    ResourceSelection,
+)
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     KernelToolSpec,
@@ -27,7 +34,8 @@ from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from app.indexers.models import AggregatedIndexerResult, IndexerProviderError
 from tests.test_agent_indexer_actions import (
     _SECRET_DETAIL_URL,
@@ -101,20 +109,20 @@ def real_dto(kind, *, titles=None, original_name="Example"):
     with (
         patch("socket.socket.connect", side_effect=AssertionError("network forbidden")),
         patch("sqlite3.connect", side_effect=AssertionError("database forbidden")),
-        patch("app.agent.indexer_actions.config.get_bool", return_value=True),
-        patch("app.agent.indexer_actions.get_indexer_service", return_value=service),
-        patch("app.agent.episode_resource_actions.get_indexer_service", return_value=service),
+        patch("app.agent.domains.resources.indexer_actions.config.get_bool", return_value=True),
+        patch("app.agent.domains.resources.indexer_actions.get_indexer_service", return_value=service),
+        patch("app.agent.domains.library.episode_resource_actions.get_indexer_service", return_value=service),
     ):
         if kind in {"search", "empty"}:
             return search_resources(search_arguments({"title": "Example S02E03", "page": 2, "limit": 10}))
         if kind in {"episode", "not_missing"}:
             audit = verified_audit(missing=[{"season": 2, "episode": 3}], target_missing=kind != "not_missing")
-            with patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=audit):
+            with patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=audit):
                 return search_missing_episode_resources(missing_episode_resource_arguments({
                     "query": "示例剧", "season": 2, "episode": 3, "as_of": "2026-08-15",
                 }))
         audit = verified_audit(missing=[{"season": 2, "episode": number} for number in (3, 4, 5, 6)])
-        with patch("app.agent.episode_resource_actions.audit_series_episodes", return_value=audit):
+        with patch("app.agent.domains.library.episode_resource_actions.audit_series_episodes", return_value=audit):
             arguments = {"query": "示例剧", "season": 2}
             return search_missing_season_resources(missing_season_resource_arguments({
                 **({"items": [arguments]} if kind == "batch" else arguments),
@@ -153,12 +161,16 @@ def next_model_round(dto, *, kind="search", maximum=24_000, tracked=False):
             effect=ToolEffect.READ, read=lambda _args, _context: dto,
             metadata={"source_kind": "resource_index"},
         )
-        catalog = ToolCatalog([tool])
+        catalog = ToolCatalog(
+            [tool],
+            projector=MediaFluxProjector(max_model_chars=maximum),
+            selection=ResourceSelection(),
+        )
         states = InMemorySessionStateStore()
         if tracked:
             lease, _ = await states.begin_turn(owner="ux-model-owner", session_id="ux-model-session", request_id="seed")
             await states.commit(lease, task_patch=control(declared()))
-        pipeline = ToolPipeline(catalog=catalog, state_store=states, projector=DefaultProjector(max_model_chars=maximum))
+        pipeline = ToolPipeline(catalog=catalog, state_store=states)
         model = NextRoundModel(name)
         session = AgentSession(model=model, catalog=catalog, retriever=CapabilityRetriever(), pipeline=pipeline, state_store=states)
         events = [event async for event in session.run(AgentInput(message="搜索资源", owner="ux-model-owner", session_id="ux-model-session"))]
@@ -227,7 +239,10 @@ def assert_original_facts_preserved(actual, expected):
 
 @pytest.mark.parametrize("count", [20, 50])
 def test_candidate_evidence_is_single_copy_without_losing_original_facts(count):
-    from app.agent.kernel.ux_selection import annotate_resource_candidates, candidate_item
+    from app.agent.domains.resources.selection import (
+        annotate_resource_candidates,
+        candidate_item,
+    )
 
     items = [{"position": number, "result_id": f"resource-{number:04d}",
               "title": f"Example.S01E{number:02d}.1080p", "seeders": 0,
@@ -253,7 +268,9 @@ def test_candidate_evidence_is_single_copy_without_losing_original_facts(count):
 
 
 def test_conflicting_search_hits_stay_in_frozen_scope_but_not_default_recommendation():
-    from app.agent.recent_resource_candidates import restore_resource_candidate_reference
+    from app.agent.domains.resources.candidate_context import (
+        restore_resource_candidate_reference,
+    )
     from app.indexers.models import IndexerMediaSearchRequest
     from app.indexers.ranking import rank_item
     from app.indexers.result_store import IndexerResultStore
@@ -266,7 +283,7 @@ def test_conflicting_search_hits_stay_in_frozen_scope_but_not_default_recommenda
     service.result_store = IndexerResultStore()
     for item in service.items:
         service.result_store.restore(item.result_id, item)
-    with patch('app.agent.indexer_actions.config.get_bool', return_value=True), patch('app.agent.indexer_actions.get_indexer_service', return_value=service):
+    with patch('app.agent.domains.resources.indexer_actions.config.get_bool', return_value=True), patch('app.agent.domains.resources.indexer_actions.get_indexer_service', return_value=service):
         dto = search_resources(search_arguments({"title": "Example", "year": 2026, "season": 2, "episode": 1}))
     assert [row['title'] for row in dto.data['items']] == titles
     assert [row['position'] for row in dto.model_data['items']] == [2, 3]

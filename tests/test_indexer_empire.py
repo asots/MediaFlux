@@ -7,10 +7,15 @@ from urllib.parse import unquote_to_bytes
 
 from bs4 import BeautifulSoup
 
-from app.indexers.errors import IndexerChallengeRequired, IndexerInvalidResponse, IndexerQueryRejected, IndexerRateLimited, IndexerUnavailable
-from app.indexers.http import IndexerHttpResponse
+from app.clients.http import HttpInvalidResponse, HttpResponse
+from app.indexers.errors import (
+    IndexerChallengeRequired,
+    IndexerQueryRejected,
+    IndexerRateLimited,
+    IndexerUnavailable,
+)
 from app.indexers.models import IndexerSearchRequest
-from app.indexers.providers.empire import EmpireAdapter, _DETAIL_TIMEOUT_SECONDS
+from app.indexers.providers.empire import _DETAIL_TIMEOUT_SECONDS, EmpireAdapter
 
 _DYGANG_RESULT = '''
 <html><body>
@@ -63,7 +68,7 @@ class _EmpireHttp:
 
 
 def _response(url: str, body: str, *, status=200, content_type="text/html; charset=gbk"):
-    return IndexerHttpResponse(
+    return HttpResponse(
         url=url,
         status_code=status,
         headers={"content-type": content_type},
@@ -257,7 +262,7 @@ class EmpireAdapterTests(unittest.IsolatedAsyncioTestCase):
             "<html><body>登录后查看</body></html>",
         ))
 
-        with self.assertRaises(IndexerInvalidResponse):
+        with self.assertRaises(HttpInvalidResponse):
             await _adapter("dygang", http).search(IndexerSearchRequest.create("测试"))
 
     async def test_search_http_error_is_raised(self):

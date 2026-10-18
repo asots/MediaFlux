@@ -6,7 +6,7 @@ import json
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.workspace_todo_actions import summarize_workspace_todo
+from app.agent.domains.workspace.todo_actions import summarize_workspace_todo
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -176,15 +176,15 @@ class WorkspaceTodoUnitTests(IsolatedDatabaseTestCase):
         )
         with (
             patch(
-                "app.agent.workspace_todo_actions.db.get_dashboard_automation_summary",
+                "app.agent.domains.workspace.todo_actions.db.get_dashboard_automation_summary",
                 return_value=automation,
             ),
             patch(
-                "app.agent.workspace_todo_actions.db.get_local_media_diagnostic_summary",
+                "app.agent.domains.workspace.todo_actions.db.get_local_media_diagnostic_summary",
                 return_value=local,
             ),
             patch(
-                "app.agent.workspace_todo_actions.db.get_agent_persistent_health_summary",
+                "app.agent.domains.workspace.todo_actions.db.get_agent_persistent_health_summary",
                 return_value=persistent,
             ),
         ):
@@ -310,11 +310,11 @@ class WorkspaceTodoUnitTests(IsolatedDatabaseTestCase):
             with (
                 self.subTest(status=status),
                 patch(
-                    "app.agent.workspace_todo_actions.db.get_dashboard_automation_summary",
+                    "app.agent.domains.workspace.todo_actions.db.get_dashboard_automation_summary",
                     return_value=automation,
                 ),
                 patch(
-                    "app.agent.workspace_todo_actions.db.get_local_media_diagnostic_summary",
+                    "app.agent.domains.workspace.todo_actions.db.get_local_media_diagnostic_summary",
                     return_value=local,
                 ),
             ):
@@ -334,11 +334,11 @@ class WorkspaceTodoUnitTests(IsolatedDatabaseTestCase):
             with (
                 self.subTest(last_status=last_status),
                 patch(
-                    "app.agent.workspace_todo_actions.db.get_dashboard_automation_summary",
+                    "app.agent.domains.workspace.todo_actions.db.get_dashboard_automation_summary",
                     return_value=_automation(strm_last_status=last_status),
                 ),
                 patch(
-                    "app.agent.workspace_todo_actions.db.get_local_media_diagnostic_summary",
+                    "app.agent.domains.workspace.todo_actions.db.get_local_media_diagnostic_summary",
                     return_value=_local_media(),
                 ),
             ):
@@ -358,13 +358,13 @@ class WorkspaceTodoUnitTests(IsolatedDatabaseTestCase):
             with (
                 self.subTest(last_status=last_status),
                 patch(
-                    "app.agent.workspace_todo_actions.db.get_dashboard_automation_summary",
+                    "app.agent.domains.workspace.todo_actions.db.get_dashboard_automation_summary",
                     return_value=_automation(
                         strm_failures=2, strm_last_status=last_status
                     ),
                 ),
                 patch(
-                    "app.agent.workspace_todo_actions.db.get_local_media_diagnostic_summary",
+                    "app.agent.domains.workspace.todo_actions.db.get_local_media_diagnostic_summary",
                     return_value=_local_media(),
                 ),
             ):
@@ -378,11 +378,11 @@ class WorkspaceTodoUnitTests(IsolatedDatabaseTestCase):
     def test_partial_and_total_failures_never_expose_exception_text(self):
         with (
             patch(
-                "app.agent.workspace_todo_actions.db.get_dashboard_automation_summary",
+                "app.agent.domains.workspace.todo_actions.db.get_dashboard_automation_summary",
                 side_effect=RuntimeError("token=PRIVATE-A /secret/a"),
             ),
             patch(
-                "app.agent.workspace_todo_actions.db.get_local_media_diagnostic_summary",
+                "app.agent.domains.workspace.todo_actions.db.get_local_media_diagnostic_summary",
                 return_value=_local_media(failed=2),
             ),
         ):
@@ -395,15 +395,15 @@ class WorkspaceTodoUnitTests(IsolatedDatabaseTestCase):
         self.assertEqual(partial.data["attention_total"], 2)
         with (
             patch(
-                "app.agent.workspace_todo_actions.db.get_dashboard_automation_summary",
+                "app.agent.domains.workspace.todo_actions.db.get_dashboard_automation_summary",
                 side_effect=RuntimeError("PRIVATE-A"),
             ),
             patch(
-                "app.agent.workspace_todo_actions.db.get_local_media_diagnostic_summary",
+                "app.agent.domains.workspace.todo_actions.db.get_local_media_diagnostic_summary",
                 side_effect=RuntimeError("PRIVATE-B"),
             ),
             patch(
-                "app.agent.workspace_todo_actions.db.get_agent_persistent_health_summary",
+                "app.agent.domains.workspace.todo_actions.db.get_agent_persistent_health_summary",
                 side_effect=RuntimeError("PRIVATE-C"),
             ),
         ):

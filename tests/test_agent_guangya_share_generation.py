@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import unittest
 from copy import deepcopy
+from functools import partial
 from unittest import mock
 
-from app.agent import guangya_share_actions as actions
+from app.agent.domains.guangya import share_actions as actions
+from app.agent.domains.guangya.workspace_actions import GuangyaWorkspaceActions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile
@@ -60,6 +62,7 @@ class _ShareClient:
 
 class GuangYaShareGenerationTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.workspace_actions = GuangyaWorkspaceActions()
         self.context = ToolContext(owner="generation-test", session_id="session")
         self.generation = 9
         self.observation_ref = "OBS" + "A" * 32
@@ -101,7 +104,10 @@ class GuangYaShareGenerationTests(unittest.TestCase):
 
     def _handlers(self, operation: str):
         if operation == "create":
-            return actions.prepare_create_guangya_share, actions.execute_create_guangya_share
+            return (
+                partial(actions.prepare_create_guangya_share, workspace_actions=self.workspace_actions),
+                partial(actions.execute_create_guangya_share, workspace_actions=self.workspace_actions),
+            )
         return actions.prepare_revoke_guangya_shares, actions.execute_revoke_guangya_shares
 
     def _assert_generation_change_blocked(self, operation: str) -> None:
@@ -180,10 +186,10 @@ class GuangYaShareGenerationTests(unittest.TestCase):
         with mock.patch.object(actions, "GuangYaClient", side_effect=clients):
             _preview, fingerprint = actions.prepare_create_guangya_share(
                 arguments, self.context
-            )
+            , workspace_actions=self.workspace_actions)
             result = actions.execute_create_guangya_share(
                 arguments, fingerprint, self.context
-            )
+            , workspace_actions=self.workspace_actions)
 
         self.assertEqual(result.status, "accepted")
         self.assertFalse(result.data["verified"])

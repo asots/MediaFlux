@@ -1,25 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 import httpx
 
-from app.indexers.errors import (
-    IndexerInvalidResponse,
-    IndexerResultExpired,
-    IndexerSecurityError,
-    IndexerUnavailable,
+from app.clients.http import (
+    BrowserImpersonatingHttpClient,
+    FixedHostHttpClient,
+    HttpInvalidResponse,
+    HttpResponse,
+    HttpSecurityError,
 )
-from app.indexers.http import BrowserImpersonatingHttpClient, FixedHostHttpClient, IndexerHttpResponse
+from app.indexers.errors import IndexerResultExpired, IndexerUnavailable
 from app.indexers.models import IndexerItem, IndexerSearchRequest
 from app.indexers.providers.btbtla import BTBtlaAdapter
 from app.indexers.providers.mikan import MikanAdapter
 from app.indexers.providers.nyaa import NyaaAdapter
 from app.indexers.providers.piratebay import PirateBayAdapter
 from app.indexers.registry import IndexerRegistry, build_default_registry
-
 
 _INDEXER_FIXTURES = Path(__file__).with_name("fixtures") / "indexers"
 NYAA_HTML = (_INDEXER_FIXTURES / "nyaa-search.html").read_bytes()
@@ -61,7 +61,7 @@ class FakeHttpClient:
         body = self.responses.pop(0) if self.responses else self.body
         status_code = self.status_codes.pop(0) if self.status_codes else self.status_code
         content_type = self.content_types.pop(0) if self.content_types else self.content_type
-        return IndexerHttpResponse(
+        return HttpResponse(
             url=url,
             status_code=status_code,
             headers={"content-type": content_type},
@@ -159,7 +159,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
             http=FakeHttpClient(b"{", content_type="application/json"),
         )
 
-        with self.assertRaises(IndexerInvalidResponse):
+        with self.assertRaises(HttpInvalidResponse):
             await adapter.search(IndexerSearchRequest.create("Frieren"))
 
     async def test_tpb_skips_invalid_info_hash(self):
@@ -380,7 +380,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
             async def get(self, url, *, params=None, headers=None, max_redirects=3):
                 self.calls.append({"url": url, "params": dict(params or {})})
                 status_code, body = self.outcomes.pop(0)
-                return IndexerHttpResponse(
+                return HttpResponse(
                     url=url,
                     status_code=status_code,
                     headers={"content-type": "text/html; charset=utf-8"},
@@ -425,7 +425,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.append({"url": url, "params": dict(params or {})})
                 if url.startswith("https://nyaa.si/"):
                     await asyncio.sleep(0.2)
-                return IndexerHttpResponse(
+                return HttpResponse(
                     url=url,
                     status_code=200,
                     headers={"content-type": "text/html; charset=utf-8"},
@@ -473,7 +473,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resolved.kind, "torrent")
         self.assertEqual(resolved.value, "https://nyaa.net/download/123.torrent")
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await adapter.resolve(IndexerItem(
                 site_id="nyaa",
                 site_name="Nyaa",
@@ -635,7 +635,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
             download_kinds=("torrent",),
         )
 
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await MikanAdapter(http=FakeHttpClient(MIKAN_HTML)).resolve(stored)
 
     async def test_btbtla_parses_redesigned_search_and_detail_layout(self):
@@ -841,7 +841,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
             download_state="resolvable", download_kinds=("magnet",),
         )
         http = FakeHttpClient('<a href="https://example.com/file">普通链接</a>'.encode())
-        with self.assertRaises(IndexerInvalidResponse):
+        with self.assertRaises(HttpInvalidResponse):
             await BTBtlaAdapter(http=http).resolve(stored)
 
         with self.assertRaises(IndexerUnavailable):
@@ -960,7 +960,7 @@ class IndexerProviderTests(unittest.IsolatedAsyncioTestCase):
             download_kinds=("magnet",),
         )
 
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await adapter.resolve(stored)
         self.assertEqual(seen, ["https://www.btbtlb.com/detail/frieren"])
 

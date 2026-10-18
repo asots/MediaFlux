@@ -4,22 +4,25 @@ import json
 from dataclasses import replace
 
 import httpx
+import pytest
 
+from app.agent.domain_catalog import build_tool_specs
+from app.agent.domain_tool_metadata import loaded_tool_guidance
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
 from app.agent.kernel.capabilities import CapabilityRetriever
 from app.agent.kernel.ports.existing_actions import adapt_tool_spec
-from app.agent.kernel.session import DEFAULT_SYSTEM_PROMPT, SessionLimits
-from app.agent.domain_catalog import build_tool_specs
-from app.agent.domain_tool_metadata import loaded_tool_guidance
+from app.agent.kernel.session import DEFAULT_SYSTEM_PROMPT
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolResult
-import pytest
-from app.agent.kernel.state import AgentInput
 from tests.test_agent_kernel_capability_discovery import session_for
-from tests.test_agent_task_entry import isolated_db as isolated_db, store
-from tests.test_agent_task_first_slice import NativeScript, OWNER
+from tests.test_agent_task_entry import (
+    isolated_db as isolated_db,  # noqa: PLC0414 - shared pytest fixture
+)
+from tests.test_agent_task_entry import store
+from tests.test_agent_task_first_slice import OWNER, NativeScript
 
 
-def capture_policy_windows(windows, tmp_path, *, tools_off=False):
+def capture_policy_windows(windows, tmp_path, *, tools_off=False, capability_window=None):
     class Script(NativeScript):
         async def respond(self, request):
             body = json.loads(request.content)
@@ -37,8 +40,10 @@ def capture_policy_windows(windows, tmp_path, *, tools_off=False):
     script = Script("tmdb")
     runtime = build_agent_kernel_runtime(model=script.adapter, store=store())
     runtime.session.retriever = CapabilityRetriever(minimum=1, maximum=1)
+    if capability_window is not None:
+        runtime.session.limits = replace(runtime.session.limits, capability_window=capability_window)
     if tools_off:
-        runtime.session.limits = SessionLimits(max_model_rounds=len(windows) + 1)
+        runtime.session.limits = replace(runtime.session.limits, max_model_rounds=len(windows) + 1)
 
     async def run():
         return [event async for event in runtime.session.run(AgentInput(
@@ -53,7 +58,8 @@ def capture_policy_windows(windows, tmp_path, *, tools_off=False):
 
 def test_domain_policy_follows_two_real_discovery_windows(isolated_db, tmp_path):
     cloud, calendar = capture_policy_windows(
-        [["guangya.fs.query"], ["discovery.anime_calendar", "bangumi.calendar"]], tmp_path
+        [["guangya.fs.query"], ["discovery.anime_calendar", "bangumi.calendar"]], tmp_path,
+        capability_window=2,
     )
     cloud_tools = {t["function"]["name"]: t["function"]["description"] for t in cloud["tools"]}
     calendar_tools = {t["function"]["name"]: t["function"]["description"] for t in calendar["tools"]}
@@ -84,6 +90,26 @@ def test_domain_policy_follows_two_real_discovery_windows(isolated_db, tmp_path)
     assert "本轮工具结果为 approval_required 时，清楚概括" not in DEFAULT_SYSTEM_PROMPT
 
 
+@pytest.mark.parametrize(("first_names", "next_names", "rules"), [
+    (["guangya.fs.query"], ["discovery.anime_calendar", "bangumi.calendar"],
+     ["先列出或递归观察父目录", "每项为一条排期事件"]),
+    (["media.create_subscription", "media.get_subscription_summary"],
+     ["media.recently_added", "library.search"],
+     ["RSS 规则、媒体追更订阅和下载请求是不同对象"]),
+    (["media.recently_played"], ["media.recently_added", "indexer.search_resources"],
+     ["不能用继续观看列表代替", "未限定本地且本地推荐为空"]),
+])
+def test_default_window_keeps_loaded_tools_and_their_guidance(
+    isolated_db, tmp_path, first_names, next_names, rules,
+):
+    _, expanded = capture_policy_windows([first_names, next_names], tmp_path)
+    names = {tool["function"]["name"] for tool in expanded["tools"]}
+    specs = {spec.name: adapt_tool_spec(spec) for spec in build_tool_specs()}
+    assert names >= {specs[name].model_name for name in first_names + next_names}
+    for rule in rules:
+        assert expanded["messages"][0]["content"].count(rule) == 1
+
+
 @pytest.mark.parametrize("tools_off", [False, True])
 def test_provider_alias_retains_loaded_guidance(isolated_db, tmp_path, tools_off):
     wire, = capture_policy_windows(
@@ -105,7 +131,7 @@ def test_provider_alias_retains_loaded_guidance(isolated_db, tmp_path, tools_off
 def test_subscription_guidance_follows_actual_window(isolated_db, tmp_path):
     subscription, unrelated = capture_policy_windows(
         [["media.create_subscription", "media.get_subscription_summary"],
-         ["media.recently_added", "library.search"]], tmp_path
+         ["media.recently_added", "library.search"]], tmp_path, capability_window=2,
     )
     names = {t["function"]["name"] for t in subscription["tools"]}
     assert names >= {"media__create_subscription", "media__get_subscription_summary"}
@@ -172,7 +198,7 @@ def test_playback_history_policy_does_not_leak_into_recent_additions(isolated_db
     history, resources, presentation = capture_policy_windows(
         [["media.recently_played"],
          ["media.recently_added", "indexer.search_resources"],
-         ["indexer.search_resources", "indexer.present_candidates"]], tmp_path
+         ["indexer.search_resources", "indexer.present_candidates"]], tmp_path, capability_window=2,
     )
     for wire, name, expected in ((history, "media.recently_played", True),
                                  (resources, "media.recently_added", False)):

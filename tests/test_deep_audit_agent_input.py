@@ -9,7 +9,7 @@ import pytest
 
 from app import config
 from app.agent.kernel.ports.mediaflux_policy import MediaFluxTurnAdmission
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.owner_routes import telegram_owner_route_is_currently_authorized
 from app.bot.agent_adapter import (
     telegram_agent_access,

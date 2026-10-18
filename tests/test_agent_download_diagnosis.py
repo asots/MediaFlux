@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from app import database as db
-from app.agent.download_actions import (
+from app.agent.domains.downloads.actions import (
     diagnose_download_queue,
     download_diagnosis_arguments,
     summarize_download_requests,
@@ -62,8 +62,8 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
 
     def test_not_configured_and_incomplete_do_not_create_client(self):
         with (
-            patch("app.agent.download_actions.config.get", return_value=""),
-            patch("app.agent.download_actions.QBittorrentClient") as client,
+            patch("app.agent.domains.downloads.actions.config.get", return_value=""),
+            patch("app.agent.domains.downloads.actions.QBittorrentClient") as client,
         ):
             missing = diagnose_download_queue({})
         self.assertTrue(missing.ok)
@@ -77,10 +77,10 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
         }
         with (
             patch(
-                "app.agent.download_actions.config.get",
+                "app.agent.domains.downloads.actions.config.get",
                 side_effect=lambda key, default="": values.get(key, default),
             ),
-            patch("app.agent.download_actions.QBittorrentClient") as client,
+            patch("app.agent.domains.downloads.actions.QBittorrentClient") as client,
         ):
             incomplete = diagnose_download_queue({})
         self.assertTrue(incomplete.ok)
@@ -114,9 +114,9 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.download_actions.config.get", side_effect=_configured_value
+                "app.agent.domains.downloads.actions.config.get", side_effect=_configured_value
             ),
-            patch("app.agent.download_actions.QBittorrentClient", return_value=client),
+            patch("app.agent.domains.downloads.actions.QBittorrentClient", return_value=client),
         ):
             result = diagnose_download_queue({})
         self.assertTrue(result.ok)
@@ -153,9 +153,9 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.download_actions.config.get", side_effect=_configured_value
+                "app.agent.domains.downloads.actions.config.get", side_effect=_configured_value
             ),
-            patch("app.agent.download_actions.QBittorrentClient", return_value=client),
+            patch("app.agent.domains.downloads.actions.QBittorrentClient", return_value=client),
         ):
             result = diagnose_download_queue({})
         self.assertTrue(result.ok)
@@ -182,11 +182,11 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
                 )
                 with (
                     patch(
-                        "app.agent.download_actions.config.get",
+                        "app.agent.domains.downloads.actions.config.get",
                         side_effect=_configured_value,
                     ),
                     patch(
-                        "app.agent.download_actions.QBittorrentClient",
+                        "app.agent.domains.downloads.actions.QBittorrentClient",
                         return_value=client,
                     ),
                 ):
@@ -203,9 +203,9 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.download_actions.config.get", side_effect=_configured_value
+                "app.agent.domains.downloads.actions.config.get", side_effect=_configured_value
             ),
-            patch("app.agent.download_actions.QBittorrentClient", return_value=client),
+            patch("app.agent.domains.downloads.actions.QBittorrentClient", return_value=client),
         ):
             result = diagnose_download_queue({})
         self.assertTrue(result.ok)
@@ -236,11 +236,11 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
                 )
                 with (
                     patch(
-                        "app.agent.download_actions.config.get",
+                        "app.agent.domains.downloads.actions.config.get",
                         side_effect=_configured_value,
                     ),
                     patch(
-                        "app.agent.download_actions.QBittorrentClient",
+                        "app.agent.domains.downloads.actions.QBittorrentClient",
                         return_value=client,
                     ),
                 ):
@@ -259,9 +259,9 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.download_actions.config.get", side_effect=_configured_value
+                "app.agent.domains.downloads.actions.config.get", side_effect=_configured_value
             ),
-            patch("app.agent.download_actions.QBittorrentClient", return_value=client),
+            patch("app.agent.domains.downloads.actions.QBittorrentClient", return_value=client),
         ):
             result = diagnose_download_queue({})
         self.assertEqual(result.data["attention_tasks"][0]["eta_seconds"], 31536000)
@@ -277,9 +277,9 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.download_actions.config.get", side_effect=_configured_value
+                "app.agent.domains.downloads.actions.config.get", side_effect=_configured_value
             ),
-            patch("app.agent.download_actions.QBittorrentClient", return_value=client),
+            patch("app.agent.domains.downloads.actions.QBittorrentClient", return_value=client),
         ):
             result = diagnose_download_queue({})
         self.assertEqual(result.data["summary"]["failed"], 25)
@@ -293,9 +293,9 @@ class DownloadDiagnosisUnitTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.agent.download_actions.config.get", side_effect=_configured_value
+                "app.agent.domains.downloads.actions.config.get", side_effect=_configured_value
             ),
-            patch("app.agent.download_actions.QBittorrentClient", return_value=client),
+            patch("app.agent.domains.downloads.actions.QBittorrentClient", return_value=client),
         ):
             result = diagnose_download_queue({})
         self.assertFalse(result.ok)

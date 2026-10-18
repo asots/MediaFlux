@@ -13,7 +13,7 @@ from app.agent.model_context_budget import compact_tool_content
 from app.agent.models import ToolReference
 from app.sensitive_data import is_sensitive_key, redact_sensitive_text
 
-from .state import StateUpdate
+from .state_types import StateUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +158,16 @@ class DefaultProjector:
 
     def __init__(self, *, max_model_chars: int = 24_000) -> None:
         self.max_model_chars = max(2_000, int(max_model_chars))
+
+    async def before_read(self, tool, context, state_store) -> None:
+        """领域可在读取开始前失效其展示快照；默认投影没有展示状态。"""
+
+    def project_read(self, tool, value: Any) -> ToolOutcome:
+        return self.project(value)
+
+    async def present_references(self, outcome: ToolOutcome, references, *, context, reference_store) -> ToolOutcome:
+        """引用已由执行层签发，领域只能补充展示与受控状态更新。"""
+        return outcome
 
     def project(self, value: Any) -> ToolOutcome:
         if isinstance(value, ToolOutcome):

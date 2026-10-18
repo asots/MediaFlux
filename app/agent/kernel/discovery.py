@@ -8,9 +8,10 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from app.agent.model_context_budget import estimated_tokens
+from app.agent.errors import ToolPipelineError
+from app.agent.model_context_budget import conservative_tokens, estimated_tokens
+
 from .capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog
-from .pipeline import ToolPipelineError
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +21,18 @@ WINDOW_UTILITIES = frozenset({DISCOVERY_TOOL, "agent.read_result", "agent.task",
 
 
 class CapabilityDiscovery:
-    """每回合独立。已批准范围、权限、工具执行仍由原 ToolPipeline 管理。"""
+    """每回合独立。已批准范围、权限、工具执行仍由原 ToolPipeline 管理。
+
+    ``maximum`` 是本回合可同时持有的业务工具上限，与首窗召回数量解耦：
+    首窗保持精简以保证精度，容量决定模型能否一次装载完整领域。
+    """
 
     def __init__(
-        self, catalog: ToolCatalog, *, context: Mapping[str, Any], maximum: int = 10
+        self, catalog: ToolCatalog, *, context: Mapping[str, Any], maximum: int = 24
     ):
         self.catalog = catalog
         self.context = dict(context)
-        self.maximum = max(2, min(12, maximum))
+        self.maximum = max(2, min(32, maximum))
         self.requests = 0
         # Cache selection facts only; permissions/status/window are always rechecked.
         self._cache: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
@@ -35,8 +40,9 @@ class CapabilityDiscovery:
         self._current: tuple[KernelToolSpec, ...] = ()
         self._retained: tuple[str, ...] = ()
 
-    def model_index(self, *, maximum_tokens: int) -> str:
+    def model_index(self, *, maximum_tokens: int, conservative: bool = False) -> str:
         """让词法漏召回不再等于能力不存在；目录不授予执行权限。"""
+        estimate = conservative_tokens if conservative else estimated_tokens
         visible = sorted(self._visible(), key=lambda tool: (tool.domain, tool.name))
         loaded = {tool.name for tool in self._current}
         if not any(tool.name == DISCOVERY_TOOL for tool in visible) or all(tool.name in loaded for tool in visible):
@@ -49,13 +55,13 @@ class CapabilityDiscovery:
                 tool.name + ("：" + tool.description.split("。")[0][:30] if describe else "")
                 for tool in visible
             )
-            if estimated_tokens(index) <= maximum_tokens:
+            if estimate(index) <= maximum_tokens:
                 return index
         # 小上下文保留完整领域入口，不截断Schema或半个工具名称。
         index = "\n能力领域（用agent.capabilities的catalog按domains读取目录）：" + ", ".join(
             f"{domain}({count})" for domain, count in sorted(Counter(t.domain for t in visible).items())
         )
-        return index if estimated_tokens(index) <= maximum_tokens else ""
+        return index if estimate(index) <= maximum_tokens else ""
 
     def _visible(self) -> tuple[KernelToolSpec, ...]:
         result = []
@@ -179,7 +185,7 @@ class CapabilityDiscovery:
             if any(name not in by_name or name not in loaded for name in window.get("retain", [])):
                 raise ToolPipelineError("只能保留当前已加载且获授权的canonical工具。", code="capability_window_unavailable")
             promised = set(retained) | {t.name for t in self._pending if t.name in by_name}
-            if len(retained) > 12 or len(promised - WINDOW_UTILITIES) > self.maximum:
+            if len(retained) > 32 or len(promised - WINDOW_UTILITIES) > self.maximum:
                 raise ToolPipelineError("保留工作集与同批已承诺工具超出窗口容量；请先释放或下一批重试。", code="capability_window_capacity")
             self._retained = retained
         elif catalog_scope is not None:
@@ -201,11 +207,11 @@ class CapabilityDiscovery:
         else:
             groups = [self._query(query, visible) for query in arguments.get("queries", [arguments.get("query", "")])]
             # Interleave ranks so the first query cannot monopolize the union.
-            for rank in range(6):
+            for rank in range(12):
                 for group in groups:
                     if rank < len(group) and group[rank] not in found:
                         found.append(group[rank])
-            found = found[:12]
+            found = found[:24]
         if not cache_hit:
             self.requests += 1
             self._cache[key] = (tuple(t.name for t in found), tuple(missing))

@@ -7,14 +7,14 @@ import json
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.rss_actions import (
+from app.agent.domains.subscriptions.rss_actions import (
     get_rss_recent_activity,
     get_rss_subscription_summary,
     list_rss_subscription_summaries,
     rss_subscription_summaries_arguments,
     rss_subscription_summary_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.repositories import rss as rss_repository
 from tests.support import IsolatedDatabaseTestCase
 
@@ -89,7 +89,7 @@ class RssSubscriptionSummaryTests(IsolatedDatabaseTestCase):
         )["id"]
         assert entry_id is not None
         _set_entry(entry_id, status="failed", created_at="2026-07-30 12:00:00")
-        with patch("app.agent.rss_actions.db.now", return_value=_SNAPSHOT):
+        with patch("app.agent.domains.subscriptions.rss_actions.db.now", return_value=_SNAPSHOT):
             listed = list_rss_subscription_summaries({})
             detail = get_rss_subscription_summary({"subscription_id": subscription_id})
         self.assertTrue(listed.ok)
@@ -124,7 +124,7 @@ class RssSubscriptionSummaryTests(IsolatedDatabaseTestCase):
                 processed=1,
                 processed_at="2026-08-01 11:00:00",
             )
-        with patch("app.agent.rss_actions.db.now", return_value=_SNAPSHOT):
+        with patch("app.agent.domains.subscriptions.rss_actions.db.now", return_value=_SNAPSHOT):
             recent = get_rss_recent_activity({})
         self.assertEqual(recent.data["downloaded"], 20)
         self.assertEqual(recent.data["subscriptions_returned"], 16)

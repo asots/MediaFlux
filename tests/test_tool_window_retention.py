@@ -6,15 +6,30 @@ from dataclasses import replace
 
 import pytest
 
-from app.agent.capability_discovery_actions import CAPABILITY_PARAMETERS, capability_arguments
-from app.agent.errors import AgentToolError
-from app.agent.kernel.capabilities import CapabilitySelection, CapabilityRetriever, ToolCatalog
+from app.agent.domains.system.capability_actions import (
+    CAPABILITY_PARAMETERS,
+    capability_arguments,
+)
+from app.agent.errors import AgentToolError, ToolPipelineError
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    CapabilitySelection,
+    ToolCatalog,
+)
 from app.agent.kernel.discovery import CapabilityDiscovery
-from app.agent.kernel.pipeline import ToolPipelineError
 from app.agent.kernel.projection import DefaultProjector
-from app.agent.kernel.provider_model import OpenAICompatibleModelAdapter, ProviderSettings
-from tests.test_agent_kernel_capability_discovery import capability_tool, session_for, request, call, final
-from tests.test_agent_kernel_core import read_tool, collect
+from app.agent.kernel.provider_model import (
+    OpenAICompatibleModelAdapter,
+    ProviderSettings,
+)
+from tests.test_agent_kernel_capability_discovery import (
+    call,
+    capability_tool,
+    final,
+    request,
+    session_for,
+)
+from tests.test_agent_kernel_core import collect, read_tool
 
 
 class Initial(CapabilityRetriever):
@@ -32,6 +47,7 @@ async def native_retention():
     others = [read_tool(f'phase.item{i}') for i in range(10)]
     session, _ = session_for([anchor, *others], [])
     session.retriever = Initial()
+    session.limits = replace(session.limits, capability_window=10)
 
     class Response:
         status_code = 200
@@ -66,7 +82,7 @@ async def native_retention():
     schema = next(t['function']['parameters'] for t in seen[0]['tools'] if t['function']['name'] == 'agent__capabilities')
     assert schema == CAPABILITY_PARAMETERS
     assert schema['maxProperties'] == 1
-    assert schema['properties']['window']['properties']['retain']['maxItems'] == 12
+    assert schema['properties']['window']['properties']['retain']['maxItems'] == 32
 
 
 def finder_for(*, authorized=None):
@@ -140,13 +156,13 @@ def test_window_array_schema_rejects_overflow_before_handler():
 
     trace = []
     with pytest.raises(ToolPipelineError, match=r'arguments\.window\.retain'):
-        asyncio.run(execute(CAPABILITY_PARAMETERS, {'window': {'retain': ['item.read0'] * 13}}, trace))
+        asyncio.run(execute(CAPABILITY_PARAMETERS, {'window': {'retain': ['item.read0'] * 33}}, trace))
     assert trace == []
 
 
 @pytest.mark.parametrize('arguments', [
     {'window': {'retain': 'item.read0'}},
-    {'window': {'retain': ['item.read0'] * 13}},
+    {'window': {'retain': ['item.read0'] * 33}},
     {'window': {'retain': ['item.read0'], 'release': ['item.read0']}},
     {'window': {'retain': [' item.read0']}},
     {'window': {'retain': ['']}},
@@ -179,6 +195,7 @@ def test_real_projection_failure_restores_retention_and_earlier_pending(operatio
               [call('agent.capabilities', {'tool_names': [t.name for t in others[7:]]}, 'phase2')], final()]
     session, model = session_for([anchor, *others], rounds, projector=FailWindow())
     session.retriever = Initial()
+    session.limits = replace(session.limits, capability_window=10)
     asyncio.run(collect(session.run(request())))
     assert observed == [operation]
     assert 'phase__item0' in {t['name'] for t in model.requests[2].tools}

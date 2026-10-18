@@ -15,10 +15,14 @@ from app.agent.kernel.capabilities import CapabilityRetriever
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.pipeline import ToolPipeline
-from app.agent.kernel.ports.existing_actions import adapt_tool_spec, catalog_from_tool_specs
+from app.agent.kernel.ports.existing_actions import (
+    adapt_tool_spec,
+    catalog_from_tool_specs,
+)
 from app.agent.kernel.ports.mediaflux_policy import MediaFluxAuthorizationPolicy
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from app.discovery.cache import DiscoveryCache
 from app.discovery.calendar.models import CalendarEntry, CalendarEvent, SourceResult
 from app.discovery.calendar.service import CalendarService
@@ -66,8 +70,8 @@ class AgentAnimeCalendarSessionTests(unittest.IsolatedAsyncioTestCase):
         self.data = snapshot()
         self.data["days"][3]["items"] = [card(title="离线回放动漫")]
         self.service = Mock(get_week=Mock(side_effect=lambda **kwargs: copy.deepcopy(self.data)))
-        self.getter = self.enterContext(patch("app.agent.calendar_actions.get_calendar_service", return_value=self.service))
-        self.enabled = self.enterContext(patch("app.agent.calendar_actions.config.get_bool", return_value=True))
+        self.getter = self.enterContext(patch("app.agent.domains.discovery.calendar_actions.get_calendar_service", return_value=self.service))
+        self.enabled = self.enterContext(patch("app.agent.domains.discovery.calendar_actions.config.get_bool", return_value=True))
         self.enterContext(patch("app.agent.kernel.ports.mediaflux_policy.is_agent_enabled", return_value=True))
         self.network_attempts = []
         def forbidden(*args, **kwargs):

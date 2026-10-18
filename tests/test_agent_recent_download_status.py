@@ -6,12 +6,12 @@ import unittest
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.models import Evidence, ToolResult
-from app.agent.recent_download_submissions import (
+from app.agent.domains.downloads.recent_submissions import (
     RecentDownloadSubmissionStore,
     build_recent_download_status,
     sanitize_submission_confirmation_result,
 )
+from app.agent.models import Evidence, ToolResult
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -336,7 +336,7 @@ class RecentDownloadStatusProjectionTests(IsolatedDatabaseTestCase):
             ),
         )
         with patch(
-            "app.agent.recent_download_submissions.db.get_download_request_status_snapshot"
+            "app.agent.domains.downloads.recent_submissions.db.get_download_request_status_snapshot"
         ) as reader:
             result = build_recent_download_status(
                 store.get(owner="session-a")[0], position=1
@@ -359,7 +359,7 @@ class RecentDownloadStatusProjectionTests(IsolatedDatabaseTestCase):
             ),
         )
         with patch(
-            "app.agent.recent_download_submissions.db.get_download_request_status_snapshot"
+            "app.agent.domains.downloads.recent_submissions.db.get_download_request_status_snapshot"
         ) as reader:
             record = store.get(owner="session-a")[0]
             result = build_recent_download_status(record, position=1)

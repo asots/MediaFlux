@@ -5,19 +5,28 @@ from dataclasses import replace
 from datetime import datetime
 from unittest.mock import patch
 
-import pytest
 import httpx
+import pytest
 
-from app import config, database as db
-from app.agent.kernel.bootstrap import build_agent_kernel_runtime, _capture_creation_binding
-from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.transports import QueryEnvelope
-from app.modules.agent_jobs_scheduler import AgentJobsScheduler
-from tests.test_agent_read_wait_lifecycle import (
-    GOAL, Quota, WaitScript, isolated_database as isolated_database,
+from app import config
+from app import database as db
+from app.agent.kernel.bootstrap import (
+    _capture_creation_binding,
+    build_agent_kernel_runtime,
 )
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.transports import QueryEnvelope
+from app.modules.agent_jobs_scheduler import AgentJobsScheduler
 from tests.test_agent_read_wait_contract_repair import resumed
 from tests.test_agent_read_wait_entry_exclusions import tg_config as tg_config
+from tests.test_agent_read_wait_lifecycle import (
+    GOAL,
+    Quota,
+    WaitScript,
+)
+from tests.test_agent_read_wait_lifecycle import (
+    isolated_database as isolated_database,
+)
 
 OWNER, SID = 'tg:v1:-100123\x1f7', 'read-wait-delivery'
 ROUTE = {'chat_id': '-100123', 'message_thread_id': 42}
@@ -45,7 +54,9 @@ def test_cold_read_terminal_uses_same_outbox_and_ack_retry_without_reexecution(t
         candidate = await park(clock, ROUTE)
         assert candidate.get('delivery_route') == ROUTE
         if policy_changed:
-            from app.modules.telegram_model_preferences import set_telegram_model_preference
+            from app.modules.telegram_model_preferences import (
+                set_telegram_model_preference,
+            )
             set_telegram_model_preference(OWNER, SID, 'changed-model')
         clock[0] = 110
         runtime, script, reads = resumed(clock)

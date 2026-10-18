@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.agent.confirmation import SQLiteConfirmationStore
+from app.agent.domains.resources.presentation import ResourceSelection
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import (
     CapabilityRetriever,
     KernelToolSpec,
@@ -19,9 +21,9 @@ from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.events import TERMINAL_EVENT_TYPES, AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
-from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.pipeline import ToolPipeline
+from app.agent.kernel.session import AgentSession, SessionLimits
+from app.agent.kernel.state_types import AgentInput
 from tests.support import isolated_test_database
 from tests.test_agent_kernel_core import ScriptedModel, collect
 
@@ -86,6 +88,7 @@ def test_confirm_readback_is_loaded_without_discovery_but_never_grants_permissio
             return AgentSession(
                 model=model, catalog=catalog, state_store=store,
                 retriever=MissedReadback(minimum=1, maximum=2),
+                limits=SessionLimits(capability_window=2),
                 pipeline=ToolPipeline(catalog=catalog, state_store=store, reference_store=store,
                     effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore())),
             )
@@ -299,7 +302,7 @@ def test_early_rejection_does_not_publish_a_late_terminal_or_poison_next_run(
 ) -> None:
     async def scenario() -> None:
         store = SQLiteKernelStore(secret_provider=lambda: "session-flow-test-secret")
-        catalog = ToolCatalog([])
+        catalog = ToolCatalog([], selection=ResourceSelection())
         model = ScriptedModel([[ModelEvent(ModelEventType.TEXT_DELTA, text="正常后续回答。"),
                                 ModelEvent(ModelEventType.FINISH, finish_reason="stop")]])
         session = AgentSession(

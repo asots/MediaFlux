@@ -6,11 +6,11 @@ import json
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.local_media_actions import (
+from app.agent.domains.local_media.queries import (
     diagnose_local_media,
     local_media_diagnosis_arguments,
 )
+from app.agent.errors import AgentToolError
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -117,7 +117,7 @@ class LocalMediaDiagnosisUnitTests(IsolatedDatabaseTestCase):
 
     def test_empty_and_inactive_states_are_explicit(self):
         with patch(
-            "app.agent.local_media_actions.peek_local_media_scheduler_status"
+            "app.agent.domains.local_media.queries.peek_local_media_scheduler_status"
         ) as scheduler:
             scheduler.return_value = {"running": False, "interval_seconds": 10}
             empty = diagnose_local_media({})
@@ -136,7 +136,7 @@ class LocalMediaDiagnosisUnitTests(IsolatedDatabaseTestCase):
         self._task(source, "planned", suffix="planned")
         self._task(source, "waiting_stable", suffix="waiting")
         with patch(
-            "app.agent.local_media_actions.peek_local_media_scheduler_status"
+            "app.agent.domains.local_media.queries.peek_local_media_scheduler_status"
         ) as scheduler:
             scheduler.return_value = {"running": True, "interval_seconds": 5}
             active = diagnose_local_media({})
@@ -149,7 +149,7 @@ class LocalMediaDiagnosisUnitTests(IsolatedDatabaseTestCase):
         source_without_target = self._source(suffix="unmapped")
         self.assertIsInstance(source_without_target, int)
         with patch(
-            "app.agent.local_media_actions.peek_local_media_scheduler_status"
+            "app.agent.domains.local_media.queries.peek_local_media_scheduler_status"
         ) as scheduler:
             scheduler.return_value = {"running": True, "interval_seconds": 5}
             attention = diagnose_local_media({})
@@ -173,7 +173,7 @@ class LocalMediaDiagnosisUnitTests(IsolatedDatabaseTestCase):
             source, "default", "/library/default", owner="admin"
         )
         with patch(
-            "app.agent.local_media_actions.peek_local_media_scheduler_status",
+            "app.agent.domains.local_media.queries.peek_local_media_scheduler_status",
             return_value={"running": False, "interval_seconds": 0},
         ):
             stopped = diagnose_local_media({})
@@ -186,7 +186,7 @@ class LocalMediaDiagnosisUnitTests(IsolatedDatabaseTestCase):
             conn.execute("UPDATE local_media_sources SET enabled=0 WHERE owner='admin'")
         self._task(source, "failed", suffix="inactive-failed")
         with patch(
-            "app.agent.local_media_actions.peek_local_media_scheduler_status",
+            "app.agent.domains.local_media.queries.peek_local_media_scheduler_status",
             return_value={"running": False, "interval_seconds": 0},
         ):
             inactive_failed = diagnose_local_media({})
@@ -211,7 +211,7 @@ class LocalMediaDiagnosisUnitTests(IsolatedDatabaseTestCase):
         source = self._source(suffix="leak")
         self._task(source, "failed", suffix="leak")
         with patch(
-            "app.agent.local_media_actions.peek_local_media_scheduler_status"
+            "app.agent.domains.local_media.queries.peek_local_media_scheduler_status"
         ) as scheduler:
             scheduler.return_value = {"running": False, "interval_seconds": 10}
             result = diagnose_local_media({})
@@ -241,7 +241,7 @@ class LocalMediaDiagnosisUnitTests(IsolatedDatabaseTestCase):
 
     def test_exception_returns_fixed_sanitized_error(self):
         with patch(
-            "app.agent.local_media_actions.db.get_local_media_diagnostic_summary",
+            "app.agent.domains.local_media.queries.db.get_local_media_diagnostic_summary",
             side_effect=RuntimeError("LOCAL_SECRET /private/path"),
         ):
             result = diagnose_local_media({})

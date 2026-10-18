@@ -4,13 +4,13 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from app.agent.episode_audit import (
+from app.agent.domains.library.episode_audit import (
     audit_series_episodes,
     invalidate_episode_audit_cache,
     reset_episode_audit_cache_for_tests,
 )
+from app.agent.domains.library.update_actions import check_library_updates
 from app.agent.models import ToolResult
-from app.agent.update_actions import check_library_updates
 from app.clients.base import SeriesCandidate, SeriesEpisodeInventory, SeriesSearchResult
 from app.discovery.models import ProviderNotConfigured, ProviderUnavailable
 from app.services import _series_source_payload
@@ -193,8 +193,8 @@ class EpisodeAuditTests(unittest.TestCase):
         }
 
     def _run(self, sources):
-        with patch("app.agent.episode_audit.inspect_series_episode_sources", return_value=sources), patch(
-            "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()
+        with patch("app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=sources), patch(
+            "app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()
         ):
             return audit_series_episodes(dict(self.arguments))
 
@@ -221,8 +221,8 @@ class EpisodeAuditTests(unittest.TestCase):
     def test_full_missing_list_survives_real_audit_to_batch_across_sparse_seasons(self):
         fake, source, missing = self._large_missing_fixture()
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources", return_value=[source],
-        ) as inspect, patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=[source],
+        ) as inspect, patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=fake):
             audit = audit_series_episodes(dict(self.arguments))
             # 不 mock audit_series_episodes：批量入口必须再次经过真实审计算法。
             batch = check_library_updates({
@@ -270,8 +270,8 @@ class EpisodeAuditTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 reset_episode_audit_cache_for_tests()
                 with patch(
-                    "app.agent.episode_audit.inspect_series_episode_sources", return_value=sources,
-                ), patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+                    "app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=sources,
+                ), patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=fake):
                     audit = audit_series_episodes(dict(self.arguments))
                     batch = check_library_updates({
                         "queries": ["The Show"], "media_type": "tv",
@@ -333,8 +333,8 @@ class EpisodeAuditTests(unittest.TestCase):
 
     def test_unpositioned_local_media_blocks_confirmed_missing_followups(self):
         source = {**_ready([(1, 1)]), "ignored_unknown": 1, "local_total": 2}
-        with patch("app.agent.episode_audit.inspect_series_episode_sources", return_value=[source]), patch(
-            "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()
+        with patch("app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=[source]), patch(
+            "app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()
         ):
             result = audit_series_episodes(dict(self.arguments))
         self.assertFalse(result.ok)
@@ -344,8 +344,8 @@ class EpisodeAuditTests(unittest.TestCase):
 
     def test_unpositioned_extra_does_not_hide_known_complete_inventory(self):
         source = {**_ready([(1, 1), (1, 2), (2, 1)]), "ignored_unknown": 1}
-        with patch("app.agent.episode_audit.inspect_series_episode_sources", return_value=[source]), patch(
-            "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()
+        with patch("app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=[source]), patch(
+            "app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()
         ):
             result = audit_series_episodes(dict(self.arguments))
         self.assertTrue(result.ok)
@@ -373,9 +373,9 @@ class EpisodeAuditTests(unittest.TestCase):
             },
         }
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             return_value=[_ready([(1, 1), (2, 1)])],
-        ), patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+        ), patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=fake):
             result = audit_series_episodes(dict(self.arguments))
 
         self.assertEqual(result.status, "updates_available")
@@ -414,9 +414,9 @@ class EpisodeAuditTests(unittest.TestCase):
         }
         source = {**_ready([(1, number) for number in range(1, 150)]), "library_name": "美女库"}
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             return_value=[source],
-        ) as inspect, patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+        ) as inspect, patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=fake):
             result = audit_series_episodes(arguments)
 
         self.assertEqual(result.status, "updates_available")
@@ -447,9 +447,9 @@ class EpisodeAuditTests(unittest.TestCase):
             }
         }
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             return_value=[_ready([])],
-        ), patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+        ), patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=fake):
             result = audit_series_episodes(dict(self.arguments))
 
         self.assertEqual(result.status, "updates_available")
@@ -506,9 +506,9 @@ class EpisodeAuditTests(unittest.TestCase):
             {"id": 2, "name": "The Show", "first_air_date": "2026-05-01"},
         ]
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             return_value=[source],
-        ), patch("app.agent.episode_audit.TMDBClient", return_value=fake):
+        ), patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=fake):
             result = audit_series_episodes(dict(self.arguments))
         self.assertEqual(result.status, "ambiguous")
 
@@ -568,8 +568,8 @@ class EpisodeAuditTests(unittest.TestCase):
             reset_episode_audit_cache_for_tests()
             fake = _FakeTMDB()
             fake.detail = lambda *_args, error=error: (_ for _ in ()).throw(error)
-            with patch("app.agent.episode_audit.inspect_series_episode_sources", return_value=[_ready([])]), patch(
-                "app.agent.episode_audit.TMDBClient", return_value=fake
+            with patch("app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=[_ready([])]), patch(
+                "app.agent.domains.library.episode_audit.TMDBClient", return_value=fake
             ):
                 result = audit_series_episodes(dict(self.arguments))
             self.assertEqual(result.status, status)
@@ -578,9 +578,9 @@ class EpisodeAuditTests(unittest.TestCase):
     def test_invalidate_cache_evicts_only_matching_normalized_key(self):
         other = {**self.arguments, "season": 2}
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             return_value=[_ready([])],
-        ) as inspect, patch("app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()):
+        ) as inspect, patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()):
             audit_series_episodes(dict(self.arguments))
             audit_series_episodes(dict(other))
             audit_series_episodes(dict(self.arguments))
@@ -598,9 +598,9 @@ class EpisodeAuditTests(unittest.TestCase):
         other_episode = {**scoped, "target_episode": 2}
         other_library = {**scoped, "library_name": "美女库"}
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             return_value=[_ready([])],
-        ) as inspect, patch("app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()):
+        ) as inspect, patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()):
             audit_series_episodes(dict(scoped))
             audit_series_episodes(dict(other_episode))
             audit_series_episodes(dict(other_library))
@@ -614,8 +614,8 @@ class EpisodeAuditTests(unittest.TestCase):
             self.assertEqual(inspect.call_count, 4)
 
     def test_cache_deduplicates_same_audit(self):
-        with patch("app.agent.episode_audit.inspect_series_episode_sources", return_value=[_ready([])]) as inspect, patch(
-            "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()
+        with patch("app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=[_ready([])]) as inspect, patch(
+            "app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()
         ):
             audit_series_episodes(dict(self.arguments))
             audit_series_episodes(dict(self.arguments))
@@ -628,10 +628,10 @@ class EpisodeAuditTests(unittest.TestCase):
             return [_ready(list(inventory))]
 
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             side_effect=inspect_inventory,
         ) as inspect, patch(
-            "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()
+            "app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()
         ):
             first = audit_series_episodes(dict(self.arguments))
             self.assertEqual(first.status, "updates_available")
@@ -676,7 +676,7 @@ class EpisodeAuditTests(unittest.TestCase):
 
     def test_explicit_refresh_replaces_only_target_cache_and_preserves_default_reuse(self):
         other = {**self.arguments, "query": "Other Show"}
-        with patch("app.agent.episode_audit._audit_uncached", side_effect=[
+        with patch("app.agent.domains.library.episode_audit._audit_uncached", side_effect=[
             ToolResult(True, "updates_available", "old"),
             ToolResult(True, "up_to_date", "other"),
             ToolResult(True, "up_to_date", "fresh"),
@@ -693,7 +693,7 @@ class EpisodeAuditTests(unittest.TestCase):
         import threading
         from concurrent.futures import ThreadPoolExecutor
 
-        from app.agent import episode_audit as module
+        from app.agent.domains.library import episode_audit as module
 
         for old_refresh, old_first in ((False, True), (False, False), (True, True), (True, False)):
             with self.subTest(old_refresh=old_refresh, old_first=old_first):
@@ -743,8 +743,8 @@ class EpisodeAuditTests(unittest.TestCase):
                             event.set()
 
     def test_unknown_air_dates_are_not_presented_as_definitively_current(self):
-        with patch("app.agent.episode_audit.inspect_series_episode_sources", return_value=[_ready([(1, 1), (1, 2), (2, 1)])]), patch(
-            "app.agent.episode_audit.TMDBClient", return_value=_FakeTMDB()
+        with patch("app.agent.domains.library.episode_audit.inspect_series_episode_sources", return_value=[_ready([(1, 1), (1, 2), (2, 1)])]), patch(
+            "app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()
         ):
             result = audit_series_episodes(dict(self.arguments))
         self.assertEqual(result.status, "up_to_date")
@@ -756,7 +756,7 @@ class EpisodeAuditTests(unittest.TestCase):
         import threading
         from concurrent.futures import ThreadPoolExecutor
 
-        from app.agent import episode_audit as module
+        from app.agent.domains.library import episode_audit as module
         old_started, new_started, old_release, new_release = (threading.Event() for _ in range(4))
         calls = []
         def audit(_arguments):
@@ -765,7 +765,7 @@ class EpisodeAuditTests(unittest.TestCase):
             (old_started if number == 1 else new_started).set()
             self.assertTrue((old_release if number == 1 else new_release).wait(3))
             return ToolResult(True, "up_to_date", "模拟库存", data={"local_episode_count": number})
-        with patch("app.agent.episode_audit._audit_uncached", side_effect=audit), ThreadPoolExecutor(max_workers=2) as pool:
+        with patch("app.agent.domains.library.episode_audit._audit_uncached", side_effect=audit), ThreadPoolExecutor(max_workers=2) as pool:
             try:
                 old = pool.submit(audit_series_episodes, dict(self.arguments))
                 self.assertTrue(old_started.wait(3))
@@ -811,9 +811,9 @@ class EpisodeAuditClientLifecycleTests(unittest.TestCase):
 
         client.close = close
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             return_value=[_ready([(1, 1)])],
-        ), patch("app.agent.episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=client):
             result = audit_series_episodes({
                 "query": "The Show",
                 "tmdb_id": "",
@@ -832,9 +832,9 @@ class EpisodeAuditClientLifecycleTests(unittest.TestCase):
         )
         client.close = lambda: (_ for _ in ()).throw(RuntimeError("close failed"))
         with patch(
-            "app.agent.episode_audit.inspect_series_episode_sources",
+            "app.agent.domains.library.episode_audit.inspect_series_episode_sources",
             return_value=[_ready([])],
-        ), patch("app.agent.episode_audit.TMDBClient", return_value=client):
+        ), patch("app.agent.domains.library.episode_audit.TMDBClient", return_value=client):
             result = audit_series_episodes({
                 "query": "The Show",
                 "tmdb_id": "",

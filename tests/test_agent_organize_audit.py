@@ -6,11 +6,11 @@ import json
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.organize_audit_actions import (
+from app.agent.domains.guangya.audit_actions import (
     audit_organize_logs,
     organize_audit_arguments,
 )
+from app.agent.errors import AgentToolError
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -189,7 +189,7 @@ class OrganizeAuditUnitTests(IsolatedDatabaseTestCase):
 
     def test_unavailable_result_is_stable_and_does_not_leak_exception(self):
         with patch(
-            "app.agent.organize_audit_actions.db.get_agent_organize_audit",
+            "app.agent.domains.guangya.audit_actions.db.get_agent_organize_audit",
             side_effect=RuntimeError("PRIVATE SQL /private/db.sqlite"),
         ):
             result = audit_organize_logs(

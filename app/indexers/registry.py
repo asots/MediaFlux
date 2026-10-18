@@ -3,16 +3,27 @@ from __future__ import annotations
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
+from app.clients.http import BrowserImpersonatingHttpClient, FixedHostHttpClient
+
 from .config import (
-    NYAA_URL, NYAA_MIRROR_URL, SUKEBEI_URL, MIKAN_URL, MIKAN_MIRROR_URL,
-    BTBTLA_URL, BTBTLA_MIRROR_URL, AIPAN_URL, DYGANG_URL, YS5266_URL, TPB_API_URL,
+    AIPAN_URL,
+    BTBTLA_MIRROR_URL,
+    BTBTLA_URL,
+    DYGANG_URL,
+    MIKAN_MIRROR_URL,
+    MIKAN_URL,
+    NYAA_MIRROR_URL,
+    NYAA_URL,
+    SUKEBEI_URL,
+    TPB_API_URL,
+    YS5266_URL,
 )
-from .http import BrowserImpersonatingHttpClient, FixedHostHttpClient
+from .providers.aipan import AipanAdapter
 from .providers.base import IndexerAdapter
 from .providers.btbtla import BTBtlaAdapter
-from .providers.aipan import AipanAdapter
 from .providers.empire import EmpireAdapter
-from .providers.kpkuang import KPkuangAdapter, KPKUANG_HOST_CONFIG, MAX_RESPONSE_BYTES as KPKUANG_MAX_BYTES
+from .providers.kpkuang import KPKUANG_HOST_CONFIG, KPkuangAdapter
+from .providers.kpkuang import MAX_RESPONSE_BYTES as KPKUANG_MAX_BYTES
 from .providers.mikan import MikanAdapter
 from .providers.nyaa import NyaaAdapter
 from .providers.piratebay import PirateBayAdapter

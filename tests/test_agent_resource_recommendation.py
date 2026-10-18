@@ -5,7 +5,7 @@ import copy
 import unittest
 from datetime import date, timedelta
 
-from app.agent.resource_recommendation import rank_episode_search
+from app.agent.domains.resources.recommendation import rank_episode_search
 
 
 def _item(

@@ -1,7 +1,6 @@
 """Kernel 会话、引用与事件的统一 SQLite 仓储。"""
 
 from __future__ import annotations
-from .task_state import TaskPatch, reduce_task
 
 import base64
 import hashlib
@@ -20,30 +19,41 @@ from app import database as db
 from app.modules.web_secret import get_web_secret
 
 from .conversation_codec import conversation_rows, state_json_value
-from .state import TRANSIENT_EXTRA_BYTES, state_capacity
-from .events import AgentEvent
+from .conversation_state import commit_conversation
+from .events import AgentEvent, AgentEventType
 from .references import OpaqueReference, ReferenceError
-from .session_guard import guarded_state_call, session_io, session_scope_guard
-from .state import (
+from .session_guard import (
+    continuation_execution_guard,
+    guarded_state_call,
+    session_io,
+    session_scope_guard,
+)
+from .session_state import (
+    TRANSIENT_EXTRA_BYTES,
     CandidateSelectionGuard,
-    PublicationLease,
-    SelectionInvalidError,
-    SessionBusyError,
-    SessionState,
-    StalePublicationError,
-    StateUpdate,
     PendingEffectGuard,
-    _apply_effect_state_change,
-    _begin_publication,
-    _record_stop_request,
-    _cancel_publication,
-    commit_conversation,
-    _consume_delivered_effect_receipts,
-    _effect_time_is_due,
+    SessionState,
     candidate_metadata_only,
     publication_commit_matches,
     publication_matches,
+    state_capacity,
 )
+from .state import (
+    _apply_effect_state_change,
+    _begin_publication,
+    _cancel_publication,
+    _consume_delivered_effect_receipts,
+    _effect_time_is_due,
+    _record_stop_request,
+)
+from .state_types import (
+    PublicationLease,
+    SelectionInvalidError,
+    SessionBusyError,
+    StalePublicationError,
+    StateUpdate,
+)
+from .task_state import TaskPatch, reduce_task
 from .ux_display import session_display_patch, session_summary
 
 _EFFECT_NEXT_POLL_AT_SQL = (
@@ -117,7 +127,7 @@ class SQLiteKernelStore:
             return True
 
     async def settle_cancelled_reads(self, receipts) -> bool:
-        from .state import _CancelledReadInline
+        from .state_types import _CancelledReadInline
         if not isinstance(receipts, tuple) or not receipts or type(receipts[0]) is not _CancelledReadInline:
             return False
         lease = receipts[0].lease
@@ -186,6 +196,9 @@ class SQLiteKernelStore:
     def _due_continuations_sync(self, limit):
         from .continuation import due_records
         maximum = max(0, min(16, int(limit)))
+        if not maximum:
+            return []
+        self._retire_interrupted_reads_sync()
         due = []
         with db.get_conn() as conn:
             rows = conn.execute(
@@ -213,6 +226,48 @@ class SQLiteKernelStore:
                 except (ValueError, KeyError, TypeError):
                     continue
         return sorted(due, key=lambda r: r["due_at"])[:maximum]
+
+    def _retire_interrupted_reads_sync(self):
+        from .continuation import interrupt_read_wait
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT owner_digest,session_digest,generation,state_json,state_hmac FROM agent_kernel_sessions "
+                "WHERE json_valid(state_json) AND json_extract(state_json,'$.metadata.read_wait.state')='running'",
+            ).fetchall()
+        for row in rows:
+            try:
+                payload = self._decode(row["state_json"], row["state_hmac"],
+                    domain=f"state:v1:{row['owner_digest']}:{row['session_digest']}:{row['generation']}".encode(), expected_type=dict)
+                record = payload["metadata"]["read_wait"]
+                owner, session_id = record["owner"], record["session_id"]
+                if self._scope(owner, session_id) != (row["owner_digest"], row["session_digest"]):
+                    continue
+            except (ValueError, KeyError, TypeError):
+                continue
+            with continuation_execution_guard(owner, session_id) as acquired:
+                if not acquired:
+                    continue
+                try:
+                    with session_scope_guard(owner, session_id, kind="commit"), db.get_conn() as conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        state = self._load_row(conn, owner, session_id)
+                        if not interrupt_read_wait(state, self._clock()):
+                            continue
+                        record = state.metadata["read_wait"]
+                        sequence = conn.execute(
+                            "SELECT COALESCE(MAX(sequence),0)+1 FROM agent_kernel_events "
+                            "WHERE owner_digest=? AND session_digest=? AND turn_id=?",
+                            (row["owner_digest"], row["session_digest"], record["resume_turn_id"]),
+                        ).fetchone()[0]
+                        event = AgentEvent(AgentEventType.TURN_FAILED, session_id, record["resume_turn_id"],
+                            record["source_request_id"], sequence, {
+                                "code": "continuation_interrupted", "turn_status": "failed",
+                                "message": "任务续行已中断，已保存的查询结果保留；不会自动重放。",
+                            })
+                        self._write_state(conn, state)
+                        self._write_event(conn, event, row["owner_digest"], row["session_digest"])
+                except SessionBusyError:
+                    continue
 
     async def request_stop_generation(self, *, owner: str, session_id: str, generation: int) -> bool:
         # Only an intent flag: no file-guard acquisition and no change of publication authority.
@@ -602,8 +657,9 @@ class SQLiteKernelStore:
 
     def _is_current_sync(self, lease: PublicationLease) -> bool:
         if lease.continuation_id:
-            from .continuation import check_claim
             from app.agent.feature_gate import RuntimeFenceError
+
+            from .continuation import check_claim
             with db.get_conn() as conn:
                 conn.execute("BEGIN")
                 state = self._load_row(conn, lease.owner, lease.session_id)
@@ -957,13 +1013,7 @@ class SQLiteKernelStore:
 
     def _append_event_sync(self, event: AgentEvent, owner: str, lease: PublicationLease | None = None) -> None:
         owner_digest, session_digest = self._scope(owner, event.session_id)
-        encoded, signature = self._encode(
-            event.to_dict(),
-            domain=f"event:v1:{event.event_id}:{owner_digest}:{session_digest}".encode(),
-            maximum=self.max_event_bytes,
-        )
         with db.get_conn() as conn:
-            now = self._clock()
             conn.execute("BEGIN IMMEDIATE")
             if lease is not None:
                 state = self._load_row(conn, owner, lease.session_id)
@@ -971,48 +1021,57 @@ class SQLiteKernelStore:
                     raise StalePublicationError("event publication revoked")
                 from .continuation import check_claim
                 check_claim(state, lease, self._clock(), conn, publication=True)
+            self._write_event(conn, event, owner_digest, session_digest)
+
+    def _write_event(self, conn, event, owner_digest, session_digest):
+        encoded, signature = self._encode(
+            event.to_dict(),
+            domain=f"event:v1:{event.event_id}:{owner_digest}:{session_digest}".encode(),
+            maximum=self.max_event_bytes,
+        )
+        now = self._clock()
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_kernel_events(event_id,owner_digest,session_digest,turn_id,request_id,sequence,event_type,event_json,event_hmac,occurred_at,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                event.event_id,
+                owner_digest,
+                session_digest,
+                event.turn_id,
+                event.request_id,
+                event.sequence,
+                event.type.value,
+                encoded,
+                signature,
+                event.occurred_at,
+                now,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM agent_kernel_events WHERE rowid IN ("
+            "SELECT rowid FROM agent_kernel_events "
+            "WHERE owner_digest=? AND session_digest=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET ?)",
+            (
+                owner_digest,
+                session_digest,
+                self.max_events_per_session,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM agent_kernel_events WHERE owner_digest=? "
+            "AND session_digest=? AND created_at<?",
+            (
+                owner_digest,
+                session_digest,
+                now - self.event_retention_seconds,
+            ),
+        )
+        if self._should_prune_all_events():
             conn.execute(
-                "INSERT OR IGNORE INTO agent_kernel_events(event_id,owner_digest,session_digest,turn_id,request_id,sequence,event_type,event_json,event_hmac,occurred_at,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    event.event_id,
-                    owner_digest,
-                    session_digest,
-                    event.turn_id,
-                    event.request_id,
-                    event.sequence,
-                    event.type.value,
-                    encoded,
-                    signature,
-                    event.occurred_at,
-                    now,
-                ),
+                "DELETE FROM agent_kernel_events WHERE created_at<?",
+                (now - self.event_retention_seconds,),
             )
-            conn.execute(
-                "DELETE FROM agent_kernel_events WHERE rowid IN ("
-                "SELECT rowid FROM agent_kernel_events "
-                "WHERE owner_digest=? AND session_digest=? "
-                "ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET ?)",
-                (
-                    owner_digest,
-                    session_digest,
-                    self.max_events_per_session,
-                ),
-            )
-            conn.execute(
-                "DELETE FROM agent_kernel_events WHERE owner_digest=? "
-                "AND session_digest=? AND created_at<?",
-                (
-                    owner_digest,
-                    session_digest,
-                    now - self.event_retention_seconds,
-                ),
-            )
-            if self._should_prune_all_events():
-                conn.execute(
-                    "DELETE FROM agent_kernel_events WHERE created_at<?",
-                    (now - self.event_retention_seconds,),
-                )
 
     def _list_events_sync(
         self, owner: str, session_id: str, limit: int

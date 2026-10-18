@@ -6,11 +6,13 @@ from dataclasses import replace
 
 import pytest
 
+from app.agent.errors import ToolPipelineError
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
-from app.agent.kernel.pipeline import ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession, SessionLimits
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from tests.test_agent_kernel_core import read_tool
 from tests.test_agent_task_read_observations import control, declared
 

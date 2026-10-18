@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from app import config
 from app import database as db
-from app.agent.activity_follow_actions import (
+from app.agent.domains.activity.follow_actions import (
     follow_arguments,
     follow_confirmed,
     list_follows,

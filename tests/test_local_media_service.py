@@ -24,7 +24,11 @@ from app.modules.local_media_service import (
 from app.modules.organize import OrganizeRules
 from app.modules.organize_scan import OrganizeScanResult, ScannedVideo
 from app.modules.scraper import MatchResult, TMDBScraper
-from tests.support import IsolatedDatabaseTestCase, isolated_test_database, release_parse_result
+from tests.support import (
+    IsolatedDatabaseTestCase,
+    isolated_test_database,
+    release_parse_result,
+)
 
 
 class FakeScraper:
@@ -199,7 +203,7 @@ class LocalMediaServiceTests(IsolatedDatabaseTestCase):
         )
 
     def test_planner_reuses_passed_source_position_result(self):
-        from app.modules.organize import OrganizeRules, Organizer
+        from app.modules.organize import Organizer, OrganizeRules
 
         class CountingPositionScraper(FakeScraper):
             def __init__(self, match):
@@ -1870,16 +1874,16 @@ class LocalMediaServiceTests(IsolatedDatabaseTestCase):
         return service, task_id
 
     def test_download_notification_uses_real_local_media_file_outcome(self):
+        from app.modules import telegram_notification_center as center
         from app.modules.local_media_outcomes import local_media_task_outcome
+        from app.modules.telegram_download_lifecycle import publish_download_lifecycle
         from app.modules.telegram_notification_center import (
             deserialize_notification_event,
             serialize_notification_event,
         )
-        from app.modules.telegram_download_lifecycle import publish_download_lifecycle
-        from app.modules import telegram_notification_center as center
+        from app.notifier import render_event
         from app.repositories.local_media import reconcile_local_media_downloads
         from app.repositories.telegram_notifications import get_notification
-        from app.notifier import render_event
 
         cases = (
             ("preview", ("Movie.2026.mkv",), "movie", "preview_only", (), "preview_only"),
@@ -1975,13 +1979,13 @@ class LocalMediaServiceTests(IsolatedDatabaseTestCase):
             self.assertEqual(dict(history_event.fields)["本地整理"], "完成")
 
     def test_download_notification_revision_tracks_local_task_completion(self):
-        from app.modules.telegram_notification_policy import NotificationTopic
+        from app.modules import telegram_notification_center as center
+        from app.modules.telegram_download_lifecycle import publish_download_lifecycle
         from app.modules.telegram_notification_center import (
             deserialize_notification_event,
             get_notification_thread_snapshot,
         )
-        from app.modules.telegram_download_lifecycle import publish_download_lifecycle
-        from app.modules import telegram_notification_center as center
+        from app.modules.telegram_notification_policy import NotificationTopic
         from app.repositories.local_media import reconcile_local_media_downloads
         from app.repositories.telegram_notifications import get_notification
 
@@ -2282,7 +2286,10 @@ def test_web_io_failure_preserves_diagnostic_instead_of_claiming_plan_changed(lo
 
 @pytest.mark.parametrize("change_after_claim", [False, True])
 def test_telegram_replaces_web_ticket_and_writer_checks_new_source_digest(local_preview, change_after_claim):
-    from app.modules.organize_confirmations import create_local_media_confirmation_actions, start_confirmation
+    from app.modules.organize_confirmations import (
+        create_local_media_confirmation_actions,
+        start_confirmation,
+    )
     case = local_preview
     task_id = create_web_task(case)
     db.update_local_media_task(task_id, status="requires_manual")
@@ -2335,9 +2342,13 @@ def test_telegram_replaces_web_ticket_and_writer_checks_new_source_digest(local_
 @pytest.mark.parametrize("confirmation_entry", ["web", "tg"])
 @pytest.mark.parametrize("change_at", [None, "before_prepare", "before_confirm", "queued", "retry"])
 def test_agent_explicit_remap_rebinds_confirmed_plan_through_writer(local_preview, confirmation_entry, change_at):
-    from app.agent.errors import AgentToolError
     from unittest.mock import Mock
-    from tests.agent_kernel_test_harness import get_kernel_test_service, reset_kernel_test_service
+
+    from app.agent.errors import AgentToolError
+    from tests.agent_kernel_test_harness import (
+        get_kernel_test_service,
+        reset_kernel_test_service,
+    )
     case = local_preview
     case.inspection = case.service.inspect_source("admin", case.source_id, case.video)
     case.preview = case.service.preview(
@@ -2357,8 +2368,8 @@ def test_agent_explicit_remap_rebinds_confirmed_plan_through_writer(local_previe
     try:
         agent = get_kernel_test_service()
         agent.invoke("local_media.task_summaries", {"scope": "attention", "limit": 12}, owner="remap-owner")
-        with patch("app.agent.local_media_task_actions.get_local_media_service", return_value=case.service), patch(
-            "app.agent.local_media_task_actions.get_local_media_scheduler", return_value=Mock()
+        with patch("app.agent.domains.local_media.task_actions.get_local_media_service", return_value=case.service), patch(
+            "app.agent.domains.local_media.task_actions.get_local_media_scheduler", return_value=Mock()
         ):
             added = case.source / "Example.Show.S01E01.zh.srt"
             if change_at == "before_prepare":

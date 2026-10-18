@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from app.agent.kernel.model import ModelEvent, ModelEventType
-from app.agent.kernel.transports import TelegramKernelTransport
+from app.agent.transports import TelegramKernelTransport
 from app.bot import agent_adapter, agent_candidates
 from tests import test_agent_ux_backend as ux
 from tests.test_agent_kernel_telegram_adapter import TELEBOT, FakeBot, Message
@@ -17,7 +17,7 @@ store = ux.store
 
 @pytest.mark.parametrize('kind', ['empty', 'text', 'caption', 'quote'])
 def test_signed_candidate_binding_reaches_current_model_message(store, monkeypatch, kind):
-    monkeypatch.setattr('app.agent.kernel.ux_selection._target_options', _target_options)
+    monkeypatch.setattr('app.agent.domains.resources.selection._target_options', _target_options)
 
     class Model:
         def __init__(self):
@@ -81,7 +81,8 @@ def test_signed_candidate_binding_reaches_current_model_message(store, monkeypat
 def test_reply_bound_batch_allows_refinement_token_but_not_rebinding(store, change):
     from copy import deepcopy
     from dataclasses import replace
-    from app.agent.kernel.pipeline import ToolPipelineError
+
+    from app.agent.errors import ToolPipelineError
     from tests.test_agent_resource_batch import _prepare_batch
 
     async def exercise():
@@ -110,7 +111,7 @@ def test_reply_bound_batch_allows_refinement_token_but_not_rebinding(store, chan
             changed = await store.put(owner=ux.OWNER, session_id=ux.SESSION, kind='resource_candidates', value=value, ttl_seconds=900)
             new_ref = changed.ref
         intent = {'source_type': 'resource_candidates', 'resource_candidates_ref': new_ref, 'positions': [1, 2], 'target': 'guangya'}
-        with patch('app.agent.indexer_candidate_actions.prepare_submit_resource_batch', side_effect=_prepare_batch) as prepare:
+        with patch('app.agent.domains.resources.candidate_actions.prepare_submit_resource_batch', side_effect=_prepare_batch) as prepare:
             if change == 'query_only':
                 # 只预检真实业务链，未确认前不执行下载；冻结的仍是原批次两个真实ID。
                 result = await pipeline.execute('ingest.submit', intent, context=context)

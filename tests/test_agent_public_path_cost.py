@@ -12,18 +12,31 @@ from time import process_time
 import pytest
 
 from app.agent import public_safety as safety
+from app.agent.domains.resources.candidate_context import (
+    new_resource_search_id,
+    safe_resource_snapshot,
+)
+from app.agent.domains.resources.presentation import (
+    MediaFluxProjector,
+    ResourceSelection,
+)
+from app.agent.domains.resources.selection import candidate_item
 from app.agent.kernel.adapters import TurnViewBuilder, iter_ndjson
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.events import AgentEvent, AgentEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolReference, ToolResult
 from app.agent.public_view import candidate_result_lines, public_conversation_messages
-from app.agent.kernel.ux_selection import candidate_item
-from app.agent.recent_resource_candidates import new_resource_search_id, safe_resource_snapshot
-from tests.test_agent_public_text_decoding import offline as offline, store as store
+from tests.test_agent_public_text_decoding import offline as offline
+from tests.test_agent_public_text_decoding import store as store
 from tests.test_agent_tool_argument_ingress import Wire, encode
 
 # Frozen short-input characterization oracle, never used for long cost cases.
@@ -165,7 +178,11 @@ def test_default_pipeline_long_title_cost_and_reopened_consumers(store, monkeypa
             input_schema={"type": "object", "properties": {"title": {"type": "string"}},
                           "required": ["title"], "additionalProperties": False}, read=read,
         )
-        catalog = ToolCatalog([tool])
+        # Match catalog_from_tool_specs: resource classification belongs to the
+        # production domain bindings, while the generic Kernel stays neutral.
+        catalog = ToolCatalog(
+            [tool], projector=MediaFluxProjector(), selection=ResourceSelection()
+        )
         responses = [{"choices": [{"message": {"tool_calls": [{"type": "function", "id": "call-0",
             "function": {"name": tool.model_name, "arguments": encode({"title": "测试作品"})}}]},
             "finish_reason": "tool_calls"}]},

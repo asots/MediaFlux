@@ -26,25 +26,28 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from app import database as db
+from app.agent import completion_observers as observers
 from app.agent import effect_completion as effects
-from app.agent import guangya_cleanup_actions as cleanup_actions
-from app.agent import guangya_directory_scrape_actions as scrape_actions
-from app.agent import guangya_fs_change_actions as fs_actions
-from app.agent import guangya_rename_actions as rename_actions
 from app.agent.confirmation import SQLiteConfirmationStore
-from app.agent.domain_catalog import build_tool_specs
+from app.agent.domain_catalog import DomainActions, build_tool_specs
+from app.agent.domains.guangya import cleanup_actions, rename_actions
+from app.agent.domains.guangya import directory_scrape_actions as scrape_actions
+from app.agent.domains.guangya import fs_change_actions as fs_actions
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel import completion_receipts as receipts
 from app.agent.kernel.capabilities import ToolCatalog
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports import existing_actions
-from app.agent.kernel.state import (
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import (
     CancellationToken,
-    InMemorySessionStateStore,
     StalePublicationError,
     StateUpdate,
     _PendingEffectTransition,
 )
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import RiskLevel, ToolContext, ToolResult, ToolSpec
 from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.modules import guangya_fs_change as fs
@@ -63,29 +66,10 @@ _OWNER = "effect-admission-owner"
 _SESSION = "effect-admission-session"
 _FS_TOOL = "guangya.fs.change.execute"
 _DOMAINS = {
-    "fs": (
-        _FS_TOOL, "agent_guangya_fs_change", fs_actions.guangya_fs_change_arguments,
-        fs_actions.prepare_guangya_fs_change_confirmation,
-        fs_actions.execute_guangya_fs_change_confirmed,
-    ),
-    "rename": (
-        "guangya.rename.execute", "agent_guangya_rename",
-        rename_actions.guangya_rename_execute_arguments,
-        rename_actions.prepare_guangya_rename_confirmation,
-        rename_actions.execute_guangya_rename_confirmed,
-    ),
-    "cleanup": (
-        "guangya.organize.cleanup.execute", "agent_guangya_cleanup",
-        cleanup_actions.guangya_cleanup_execute_arguments,
-        cleanup_actions.prepare_guangya_cleanup_confirmation,
-        cleanup_actions.execute_guangya_cleanup_confirmed,
-    ),
-    "scrape": (
-        "guangya.directory_scrape.run", "agent_directory_scrape",
-        scrape_actions.directory_scrape_run_arguments,
-        scrape_actions.prepare_run_directory_scrape,
-        scrape_actions.run_directory_scrape_confirmed,
-    ),
+    "fs": (_FS_TOOL, "agent_guangya_fs_change"),
+    "rename": ("guangya.rename.execute", "agent_guangya_rename"),
+    "cleanup": ("guangya.organize.cleanup.execute", "agent_guangya_cleanup"),
+    "scrape": ("guangya.directory_scrape.run", "agent_directory_scrape"),
 }
 
 
@@ -106,37 +90,26 @@ def _deny_network(*_args, **_kwargs):
 
 @contextmanager
 def _offline_runtime(root: Path, client: FakeGatewayClient):
-    resets = (
-        fs_actions.reset_guangya_fs_change_context_for_tests,
-        rename_actions.reset_guangya_rename_context_for_tests,
-        cleanup_actions.reset_guangya_cleanup_context_for_tests,
-        scrape_actions.reset_directory_scrape_context_for_tests,
-    )
-    for reset in resets:
-        reset()
-    try:
-        with ExitStack() as stack:
-            for method in ("connect", "connect_ex", "sendto"):
-                stack.enter_context(patch.object(socket.socket, method, _deny_network))
-            stack.enter_context(patch.object(socket, "create_connection", _deny_network))
-            stack.enter_context(patch.object(socket, "getaddrinfo", _deny_network))
-            for module, attribute, folder in (
-                (workspace, "_directory", "observations"),
-                (fs, "_directory", "fs-plans"),
-                (rename, "_plan_directory", "rename-plans"),
-                (cleanup, "_plan_directory", "cleanup-plans"),
-            ):
-                stack.enter_context(patch.object(module, attribute, lambda folder=folder: root / folder))
-            for module in (fs_actions, rename_actions, cleanup_actions, scrape_actions):
-                stack.enter_context(patch.object(module, "GuangYaClient", lambda: client))
-            stack.enter_context(patch.object(
-                fs_actions, "execute_fs_change_plan",
-                partial(fs.execute_fs_change_plan, client_factory=lambda: client),
-            ))
-            yield stack
-    finally:
-        for reset in resets:
-            reset()
+    with ExitStack() as stack:
+        stack.domain_actions = DomainActions()
+        for method in ("connect", "connect_ex", "sendto"):
+            stack.enter_context(patch.object(socket.socket, method, _deny_network))
+        stack.enter_context(patch.object(socket, "create_connection", _deny_network))
+        stack.enter_context(patch.object(socket, "getaddrinfo", _deny_network))
+        for module, attribute, folder in (
+            (workspace, "_directory", "observations"),
+            (fs, "_directory", "fs-plans"),
+            (rename, "_plan_directory", "rename-plans"),
+            (cleanup, "_plan_directory", "cleanup-plans"),
+        ):
+            stack.enter_context(patch.object(module, attribute, lambda folder=folder: root / folder))
+        for module in (fs_actions, rename_actions, cleanup_actions, scrape_actions):
+            stack.enter_context(patch.object(module, "GuangYaClient", lambda: client))
+        stack.enter_context(patch.object(
+            fs_actions, "execute_fs_change_plan",
+            partial(fs.execute_fs_change_plan, client_factory=lambda: client),
+        ))
+        yield stack
 
 
 @contextmanager
@@ -163,7 +136,7 @@ def _read_state(store, *, owner=_OWNER, session_id=_SESSION, conn=None):
 
 def _seed(state, plan_id):
     record = state.metadata["effect_waits"][plan_id]
-    return json.loads(effects._completion_cipher().decrypt(record["sealed"].encode()))
+    return json.loads(receipts._completion_cipher().decrypt(record["sealed"].encode()))
 
 
 def _confirmed_binding(scope):
@@ -176,7 +149,7 @@ def _confirmed_binding(scope):
 
 async def _confirmed_scope(store, *, owner=_OWNER, session_id=_SESSION, plan_id=None):
     lease, _ = await store.begin_turn(owner=owner, session_id=session_id, request_id="admit-request")
-    scope = effects.EffectCompletionScope(
+    scope = receipts.EffectCompletionScope(
         store=store, lease=lease, plan_id=plan_id or uuid4().hex, channel="web",
     )
     await store.commit(lease, updates=(StateUpdate("metadata.confirmed_publication", _confirmed_binding(scope)),))
@@ -209,17 +182,19 @@ def _admission(scope, *, tool=_FS_TOOL):
     return partial(effects.admit_organize_operation, tool=tool, scope=scope)
 
 
-def _spec(domain, *, verifier=None):
-    name, _kind, validator, prepare, execute = _DOMAINS[domain]
+def _spec(domain, *, actions, verifier=None):
+    name, _kind = _DOMAINS[domain]
+    source = next(spec for spec in build_tool_specs(domain_actions=actions) if spec.name == name)
     parameters = (
-        next(spec.parameters for spec in build_tool_specs() if spec.name == name)
+        source.parameters
         if domain == "fs" else {"type": "object", "properties": {}, "additionalProperties": False}
     )
     return ToolSpec(
         name=name, description="持久云盘队列准入回归", risk=RiskLevel.WRITE,
         parameters=parameters,
-        validator=validator, requires_confirmation=True,
-        context_confirmation_preparer=prepare, context_confirmed_handler=execute,
+        validator=source.validator, requires_confirmation=True,
+        context_confirmation_preparer=source.context_confirmation_preparer,
+        context_confirmed_handler=source.context_confirmed_handler,
         post_write_verifier=verifier,
     )
 
@@ -240,14 +215,14 @@ def _domain_arguments(domain, client, context, stack, *, new_name="admitted.mp4"
             "paths": ["/source"], "mode": "replace_text", "recursive": True,
             "limit": 100, "find": "广告-", "replace": "admitted-",
         })
-        preview = rename_actions.preview_guangya_rename(arguments, context)
+        preview = stack.domain_actions.rename.preview_guangya_rename(arguments, context)
         assert preview.ok, preview.to_dict()
         return {}
     if domain == "cleanup":
         arguments = cleanup_actions.guangya_cleanup_preview_arguments({
             "path": "/source", "scope": "empty_only", "max_candidates": 20,
         })
-        preview = cleanup_actions.preview_guangya_cleanup(arguments, context)
+        preview = stack.domain_actions.cleanup.preview_guangya_cleanup(arguments, context)
         assert preview.ok, preview.to_dict()
         return {}
     # 真正的 DirectoryScrapeService/preview；只有 TMDB 数据和云盘来自离线 Provider。
@@ -262,9 +237,9 @@ def _domain_arguments(domain, client, context, stack, *, new_name="admitted.mp4"
         client=client, scraper=_DirectoryScrapeTMDB(), store=DirectoryScrapeStore(), rules_loader=lambda: rules,
     )
     stack.enter_context(patch.object(scrape_actions, "get_directory_scrape_service", lambda: service))
-    scrape_actions.inspect_directory_scrape({"directory_id": "source"}, context)
-    scrape_actions.search_directory_scrape({"query": "Iron Man", "year": "2008", "media_type": "movie"}, context)
-    preview = scrape_actions.preview_directory_scrape(
+    stack.domain_actions.directory_scrape.inspect_directory_scrape({"directory_id": "source"}, context)
+    stack.domain_actions.directory_scrape.search_directory_scrape({"query": "Iron Man", "year": "2008", "media_type": "movie"}, context)
+    preview = stack.domain_actions.directory_scrape.preview_directory_scrape(
         scrape_actions.directory_scrape_preview_arguments({"candidate_number": 1}), context,
     )
     assert preview.ok, preview.to_dict()
@@ -288,7 +263,9 @@ async def _kernel_plan(domain, store, client, stack, *, owner=_OWNER, session_id
         lease=lease, cancellation=CancellationToken(), report_progress=progress,
         wait_for_completion=wait, channel="web",
     )
-    catalog = ToolCatalog([existing_actions.adapt_tool_spec(_spec(domain, verifier=verifier))])
+    catalog = ToolCatalog([existing_actions.adapt_tool_spec(
+        _spec(domain, actions=stack.domain_actions, verifier=verifier),
+    )])
     pipeline = ToolPipeline(catalog=catalog, state_store=store, effect_store=effect_store)
     prepared = await pipeline.execute(_DOMAINS[domain][0], arguments, context=context)
     assert prepared.effect_plan is not None
@@ -426,7 +403,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         before = _read_state(self.store)
         failure = ValueError("cannot seal effect seed")
         arguments = _enqueue_arguments(plan)
-        with patch.object(effects, "_completion_cipher", side_effect=failure), patch.object(
+        with patch.object(receipts, "_completion_cipher", side_effect=failure), patch.object(
             jobs, "_bind_fs_change_plan_to_job", wraps=jobs._bind_fs_change_plan_to_job,
         ) as bind:
             with self.assertRaises(jobs.OrganizeOperationAdmissionError) as raised:
@@ -521,7 +498,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_memory_kernel_rejects_durable_admission_and_cannot_fallback_to_accepted(self):
         memory = InMemorySessionStateStore()
         pipeline, context, plan, _ = await _kernel_plan("fs", memory, self.client, self.runtime)
-        flow = fs_actions._flow(_OWNER)
+        flow = self.runtime.domain_actions.fs_change._flow(_OWNER)
         with patch.object(jobs, "_bind_fs_change_plan_to_job", wraps=jobs._bind_fs_change_plan_to_job) as bind:
             with self.assertRaises(ToolPipelineError) as raised:
                 await pipeline.execute_confirmed(plan.plan_id, context=context)
@@ -542,11 +519,11 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_agent_confirmed_domain_can_enqueue_without_effect_scope(self):
         context = ToolContext(owner=_OWNER, session_id=_SESSION)
         arguments = _domain_arguments("fs", self.client, context, self.runtime)
-        prepared, fingerprint = fs_actions.prepare_guangya_fs_change_confirmation(arguments, context)
+        prepared, fingerprint = self.runtime.domain_actions.fs_change.prepare_guangya_fs_change_confirmation(arguments, context)
         self.assertTrue(prepared.ok)
         self.assertEqual(prepared.status, "confirmation_required")
         self.assertEqual(self._job_count(), 0)
-        result = fs_actions.execute_guangya_fs_change_confirmed({}, fingerprint, context)
+        result = self.runtime.domain_actions.fs_change.execute_guangya_fs_change_confirmed({}, fingerprint, context)
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "accepted")
         self.assertEqual(self._job_count(), 1)
@@ -556,12 +533,12 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM agent_kernel_sessions").fetchone()[0], 0)
 
     async def test_legacy_empty_arguments_card_cold_confirms_only_its_original_flow_once(self):
-        fs_actions.configure_guangya_fs_change_context(SQLiteAgentSessionContextRepository())
+        self.runtime.domain_actions = DomainActions(SQLiteAgentSessionContextRepository())
         pipeline, context, current, _ = await _kernel_plan(
             "fs", self.store, self.client, self.runtime,
             effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
         )
-        original_flow = fs_actions._flow(_OWNER)
+        original_flow = self.runtime.domain_actions.fs_change._flow(_OWNER)
         self.assertIsNotNone(original_flow)
         original = fs.load_fs_change_plan(original_flow.plan_id, owner=_OWNER)
         self.assertEqual(original["status"], "previewed")
@@ -584,8 +561,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         ),))
         self.assertEqual(legacy.arguments, {})
         workspace.discard_observation(current.arguments["observation_ref"])
-        fs_actions.clear_guangya_fs_change_context(owner=_OWNER)
-        fs_actions.configure_guangya_fs_change_context(SQLiteAgentSessionContextRepository())
+        cold_actions = DomainActions(SQLiteAgentSessionContextRepository())
 
         cold = SQLiteKernelStore()
         bound = await cold.load(owner=_OWNER, session_id=_SESSION)
@@ -594,7 +570,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(bound.metadata["pending_effect_goal"], before.metadata["pending_effect_goal"])
         forbidden_prepare = Mock(side_effect=AssertionError("旧冻结卡确认不得重新 prepare 或扩大范围"))
-        tool = replace(existing_actions.adapt_tool_spec(_spec("fs")), prepare=forbidden_prepare)
+        tool = replace(existing_actions.adapt_tool_spec(_spec("fs", actions=cold_actions)), prepare=forbidden_prepare)
         restored = ToolPipeline(
             catalog=ToolCatalog([tool]), state_store=cold,
             effect_store=ConfirmationEffectPlanStore(SQLiteConfirmationStore()),
@@ -605,7 +581,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending.arguments, {})
         self.assertEqual(pending.snapshot_fingerprint, current.snapshot_fingerprint)
         self.assertEqual(pending.metadata, current.metadata)
-        cold_flow = fs_actions._flow(_OWNER)
+        cold_flow = cold_actions.fs_change._flow(_OWNER)
         self.assertEqual((cold_flow.plan_id, cold_flow.fingerprint),
                          (original_flow.plan_id, original_flow.fingerprint))
         self.assertEqual(fs.load_fs_change_plan(cold_flow.plan_id, owner=_OWNER), original)
@@ -667,7 +643,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_confirmed_publication_does_not_admit_on_generation_match(self):
         lease, _ = await self.store.begin_turn(owner=_OWNER, session_id=_SESSION, request_id="ordinary-read")
-        scope = effects.EffectCompletionScope(self.store, lease, uuid4().hex, "web")
+        scope = receipts.EffectCompletionScope(self.store, lease, uuid4().hex, "web")
         plan = _signed_fs_plan(self.client)
         before = _read_state(self.store)
         with self.assertRaises(jobs.OrganizeOperationAdmissionError):
@@ -817,7 +793,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         legacy, _ = jobs.enqueue_organize_operation_job(**_enqueue_arguments(plan))
         reference = jobs.organize_operation_public_ref(legacy["job_id"])
         result = ToolResult(True, "accepted", "已提交", data={"operation_ref": reference})
-        tracker = effects._completion_tracker(result)
+        tracker = observers._completion_tracker(result)
         self.assertEqual(tracker.kind, "guangya_operation")
         before = _read_state(self.store)
         with self.assertRaises(StalePublicationError):
@@ -833,7 +809,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         result = ToolResult(True, "accepted", "领域细节", data={
             "operation_ref": jobs.organize_operation_public_ref(row["job_id"]), "rename_count": 1,
         })
-        await effects._register_effect_wait(result, effects._completion_tracker(result), _FS_TOOL, scope)
+        await effects._register_effect_wait(result, observers._completion_tracker(result), _FS_TOOL, scope)
         state = _read_state(self.store)
         after = state.metadata["effect_waits"][scope.plan_id]
         self.assertEqual({key: value for key, value in before.items() if key != "sealed"},
@@ -842,7 +818,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         mismatch = ToolResult(True, "accepted", "别的 job", data={"operation_ref": jobs.organize_operation_public_ref(uuid4().hex)})
         before_state = _read_state(self.store)
         with self.assertRaises(StalePublicationError):
-            await effects._register_effect_wait(mismatch, effects._completion_tracker(mismatch), _FS_TOOL, scope)
+            await effects._register_effect_wait(mismatch, observers._completion_tracker(mismatch), _FS_TOOL, scope)
         self.assertEqual(_read_state(self.store), before_state)
 
     async def test_admission_rejection_is_not_reported_as_provider_failure(self):
@@ -857,7 +833,7 @@ class AgentEffectAdmissionTests(unittest.IsolatedAsyncioTestCase):
         for kind in ("guangya_task", "guangya_organize_task", "local_media_task", "local_media_scan", "agent_job", "strm_run", "library_patrol"):
             with self.subTest(kind=kind):
                 scope = await _confirmed_scope(self.store)
-                tracker = effects._CompletionTracker(kind, {"task_id": f"offline-{kind}"})
+                tracker = observers._CompletionTracker(kind, {"task_id": f"offline-{kind}"})
                 result = ToolResult(True, "accepted", "非同队列后台任务", data={"accepted": True})
                 await effects._register_effect_wait(result, tracker, "offline.background", scope)
                 state = _read_state(self.store)

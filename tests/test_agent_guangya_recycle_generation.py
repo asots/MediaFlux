@@ -6,7 +6,7 @@ import unittest
 from copy import deepcopy
 from unittest import mock
 
-from app.agent import guangya_recycle_actions as actions
+from app.agent.domains.guangya import recycle_actions as actions
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import GuangYaFile

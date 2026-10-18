@@ -4,7 +4,7 @@ import pytest
 
 from app.agent.kernel.adapters import consume_events
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.support import isolated_test_database
 from tests.test_pending_explanation_transports import NativeRuntime
 

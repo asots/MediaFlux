@@ -7,9 +7,16 @@ import pytest
 from app.agent.kernel.model import ModelEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.provider_model import ModelProviderError
-from app.agent.kernel.state import AgentInput
+from app.agent.kernel.state_types import AgentInput
 from tests.test_agent_tool_argument_ingress import (
-    offline as offline, store as store, Wire, observe,
+    Wire,
+    observe,
+)
+from tests.test_agent_tool_argument_ingress import (
+    offline as offline,
+)
+from tests.test_agent_tool_argument_ingress import (
+    store as store,
 )
 from tests.test_agent_tool_argument_repair_replay import RAW, make_session, payload
 

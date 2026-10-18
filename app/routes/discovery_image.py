@@ -14,9 +14,12 @@ from itsdangerous import BadSignature, URLSafeSerializer
 from requests.adapters import HTTPAdapter
 
 from app import config
+from app.clients.http import HttpError
 from app.discovery.calendar.poster_http import fetch_platform_poster
-from app.discovery.calendar.posters import PLATFORM_IMAGE_HOSTS, canonical_platform_poster_key
-from app.indexers.errors import IndexerError
+from app.discovery.calendar.posters import (
+    PLATFORM_IMAGE_HOSTS,
+    canonical_platform_poster_key,
+)
 from app.logger import get_logger, log_throttled
 from app.modules.image_payload import ImagePayloadError, read_bounded_image
 from app.modules.web_secret import WebSecretUnavailable, get_web_secret
@@ -308,7 +311,7 @@ async def calendar_poster(request: Request, source: str, token: str):
     key = decode_poster_token("calendar-" + source, token)
     try:
         content, content_type = await fetch_platform_poster(source, key)
-    except (ImagePayloadError, IndexerError, httpx.HTTPError, TimeoutError) as exc:
+    except (ImagePayloadError, HttpError, httpx.HTTPError, TimeoutError) as exc:
         log_throttled(logger, logging.WARNING, f"calendar-image-error:{source}:{type(exc).__name__}",
                       "平台海报代理失败 source=%s type=%s", source, type(exc).__name__)
         raise HTTPException(status_code=502, detail="upstream platform image failed") from exc

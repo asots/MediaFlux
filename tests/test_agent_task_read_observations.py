@@ -13,13 +13,14 @@ import pytest
 from app.agent.kernel import bootstrap, task_state
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
 from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
+from app.agent.kernel.conversation_state import retain_conversation
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
 from app.agent.kernel.persistence import SQLiteKernelStore
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, retain_conversation
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolResult
 from app.agent.provider_actions import get_provider_gateway
 from app.agent.provider_models import ProviderProfileView

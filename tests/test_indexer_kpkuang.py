@@ -6,16 +6,18 @@ import json
 import unittest
 from urllib.parse import urljoin
 
+from app.clients.http import (
+    HttpInvalidResponse,
+    HttpResponse,
+    HttpResponseTooLarge,
+    HttpSecurityError,
+)
 from app.indexers.errors import (
     IndexerChallengeRequired,
-    IndexerInvalidResponse,
     IndexerQueryRejected,
     IndexerRateLimited,
-    IndexerResponseTooLarge,
-    IndexerSecurityError,
     IndexerTimeout,
 )
-from app.indexers.http import IndexerHttpResponse
 from app.indexers.models import IndexerMediaSearchRequest, IndexerSearchRequest
 from app.indexers.providers.base import magnet_infohash, page_observer
 from app.indexers.providers.kpkuang import (
@@ -34,7 +36,7 @@ VODDOWN = str(KPKUANG_HOST_CONFIG["voddown_path_prefix"])
 def response(url, body, status=200, content_type="text/html"):
     if isinstance(body, str):
         body = body.encode()
-    return IndexerHttpResponse(url, status, {"content-type": content_type}, body)
+    return HttpResponse(url, status, {"content-type": content_type}, body)
 
 
 def candidate(id, title, year, score=10):
@@ -303,7 +305,7 @@ class KPkuangTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(page.items, [])
         self.assertTrue(page.complete)
-        with self.assertRaises(IndexerInvalidResponse):
+        with self.assertRaises(HttpInvalidResponse):
             await KPkuangAdapter(http=FakeHttp({API: response(API, b"not jsonp")})).search(IndexerSearchRequest.create("三体"))
 
     async def test_partial_detail_timeout_keeps_collected_items(self):
@@ -332,7 +334,7 @@ class KPkuangTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(http.calls, [API, detail_url(id)])
 
     async def test_body_limit_and_nonfirst_page_do_not_expand_requests(self):
-        with self.assertRaises(IndexerResponseTooLarge):
+        with self.assertRaises(HttpResponseTooLarge):
             await KPkuangAdapter(http=FakeHttp({API: response(API, b"x" * (MAX_RESPONSE_BYTES + 1))})).search(
                 IndexerSearchRequest.create("三体")
             )
@@ -345,7 +347,7 @@ class KPkuangTests(unittest.IsolatedAsyncioTestCase):
     async def test_candidate_resolution_stops_after_rate_limit_challenge_or_security_error(self):
         first_hash = "1111111111111111111111111111111111111111"
         for stage in ("detail", "download"):
-            for error_type in (IndexerRateLimited, IndexerChallengeRequired, IndexerSecurityError):
+            for error_type in (IndexerRateLimited, IndexerChallengeRequired, HttpSecurityError):
                 with self.subTest(stage=stage, error=error_type.code):
                     values = [candidate(id, "边界测试剧集", 2024) for id in (801, 802, 803)]
                     routes = {

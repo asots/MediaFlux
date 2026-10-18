@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from app import database as db
-from app.agent.activity_actions import (
+from app.agent.domains.activity.actions import (
     attach_activity_reference,
     get_activity_timeline,
     search_activities,
@@ -147,7 +147,7 @@ class ActivityClosureTests(IsolatedDatabaseTestCase):
     def test_resolved_historical_failure_is_not_current_attention(self):
         from unittest.mock import patch
 
-        from app.agent.activity_actions import timeline_snapshot
+        from app.agent.domains.activity.actions import timeline_snapshot
 
         snapshot = {
             "record": {
@@ -170,7 +170,7 @@ class ActivityClosureTests(IsolatedDatabaseTestCase):
             ],
         }
         with patch(
-            "app.agent.activity_actions.activity.snapshot", return_value=snapshot
+            "app.agent.domains.activity.actions.activity.snapshot", return_value=snapshot
         ):
             result = timeline_snapshot({"kind": "organize", "id": 1})
         self.assertFalse(result.data["needs_attention"])
@@ -183,12 +183,12 @@ class ActivityClosureTests(IsolatedDatabaseTestCase):
     def test_manual_or_interrupted_is_actionable_not_normal_running(self):
         from unittest.mock import patch
 
-        from app.agent.activity_actions import timeline_snapshot
+        from app.agent.domains.activity.actions import timeline_snapshot
 
         for state in ("manual", "interrupted", "rollback_failed"):
             snapshot = {"record": {"status": state, "title": "示例"}, "steps": []}
             with patch(
-                "app.agent.activity_actions.activity.snapshot", return_value=snapshot
+                "app.agent.domains.activity.actions.activity.snapshot", return_value=snapshot
             ):
                 result = timeline_snapshot({"kind": "organize", "id": 1})
             self.assertTrue(result.data["needs_attention"])

@@ -1,7 +1,10 @@
 """Independent positive compatibility assertions; no production edits."""
 from collections import UserDict
 from types import MappingProxyType
+
 import pytest
+
+from app.agent.kernel.conversation_context import restore_messages
 from app.agent.kernel.model import ModelMessage, ModelToolCall
 
 MISSING=object()
@@ -70,13 +73,13 @@ def test_legacy_snapshot_is_shallow():
     assert restored.tool_calls[0].arguments['nested'] is nested
 
 from types import SimpleNamespace
-from app.agent.kernel.session import AgentSession
+
 
 def test_legacy_restore_keeps_empty_args_native_group():
     state=SimpleNamespace(conversation=[
         {'role':'assistant','tool_calls':[{'call_id':'legacy','name':'lookup'}]},
         {'role':'tool','tool_call_id':'legacy','tool_name':'lookup','content':'{"ok":true}'}])
-    result=AgentSession._restore_messages(state)
+    result=restore_messages(state)
     assert [m.role for m in result]==['assistant','tool']
     assert dict(result[0].tool_calls[0].arguments)=={}
     assert result[0].tool_calls[0].call_id==result[1].tool_call_id

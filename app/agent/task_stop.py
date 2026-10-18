@@ -8,9 +8,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from app.agent.effect_completion import current_session_effect_trackers
-from app.agent.kernel.continuation import EFFECT_PENDING
+from app.agent.kernel.completion_receipts import EFFECT_PENDING
 from app.agent.kernel.session_guard import session_scope_guard
-from app.agent.kernel.state import SessionBusyError
+from app.agent.kernel.state_types import SessionBusyError
 
 _AGENT_JOB_TYPE = "library_episode_audit"
 _AGENT_JOB_ACTIVE = frozenset({"pending", "running", "retry_wait"})

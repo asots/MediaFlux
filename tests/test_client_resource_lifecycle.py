@@ -11,18 +11,18 @@ from unittest.mock import Mock, patch
 
 import app.modules.directory_scrape as directory_scrape_module
 import app.modules.local_media_service as local_media_module
-from app.agent.guangya_schedule_config_actions import get_guangya_connection_status
-from app.agent.indexer_actions import download_target_readiness
-from app.agent.organize_actions import _run_guangya_organize_once
+from app.agent.domains.guangya.organize_actions import _run_guangya_organize_once
+from app.agent.domains.guangya.schedule_actions import get_guangya_connection_status
+from app.agent.domains.resources.indexer_actions import download_target_readiness
 from app.clients.guangya import GuangYaClient, close_guangya_client
-from app.clients.tmdb import TMDBClient
 from app.clients.qbittorrent import QBittorrentClient
+from app.clients.tmdb import TMDBClient
 from app.modules.directory_scrape import DirectoryScrapeService
 from app.modules.directory_scrape_errors import DirectoryScrapeRequestError
 from app.modules.local_media_scheduler import LocalMediaScheduler
 from app.modules.local_media_service import LocalMediaService, LocalMediaServiceError
 from app.modules.nsfw import MetaTubeClient
-from app.modules.organize import OrganizeRules, Organizer
+from app.modules.organize import Organizer, OrganizeRules
 from app.modules.scraper import TMDBScraper
 from app.modules.share_transfer import _guangya_client_scope
 from app.routes.logs_api import _closing_operation
@@ -756,7 +756,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
     def test_agent_readiness_checks_close_short_lived_guangya_clients(self) -> None:
         status_client = Mock(logged_in=False)
         with patch(
-            "app.agent.guangya_schedule_config_actions.GuangYaClient",
+            "app.agent.domains.guangya.schedule_actions.GuangYaClient",
             return_value=status_client,
         ):
             result = get_guangya_connection_status({})
@@ -765,7 +765,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
 
         indexer_client = Mock(logged_in=True)
         with patch(
-            "app.agent.indexer_actions.GuangYaClient",
+            "app.agent.domains.resources.indexer_actions.GuangYaClient",
             return_value=indexer_client,
         ):
             self.assertEqual(download_target_readiness("guangya"), {"guangya": True})
@@ -790,7 +790,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
         rejected_manager = Mock()
         rejected_manager.start.return_value = {"ok": False, "error": "busy"}
         with patch(
-            "app.agent.organize_actions.get_organize_manager",
+            "app.agent.domains.guangya.organize_actions.get_organize_manager",
             return_value=rejected_manager,
         ):
             result = _run_guangya_organize_once(
@@ -803,7 +803,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
         accepted_manager = Mock()
         accepted_manager.start.return_value = {"ok": True, "task_id": "task"}
         with patch(
-            "app.agent.organize_actions.get_organize_manager",
+            "app.agent.domains.guangya.organize_actions.get_organize_manager",
             return_value=accepted_manager,
         ):
             result = _run_guangya_organize_once(

@@ -6,12 +6,12 @@ import json
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.strm_retry_actions import (
+from app.agent.domains.strm.retry_actions import (
     prepare_strm_failure_retry,
     retry_strm_failure_records_confirmed,
     strm_failure_retry_arguments,
 )
+from app.agent.errors import AgentToolError
 from tests.agent_kernel_test_harness import (
     get_kernel_test_service as get_agent_service,
 )
@@ -158,10 +158,10 @@ class StrmFailureRetryUnitTests(IsolatedDatabaseTestCase):
 
     def test_prepare_binds_the_exact_preview_snapshot_without_a_second_capture(self):
         self._record(1)
-        from app.agent import strm_retry_actions
+        from app.agent.domains.strm import retry_actions as strm_retry_actions
 
         with patch(
-            "app.agent.strm_retry_actions._capture", wraps=strm_retry_actions._capture
+            "app.agent.domains.strm.retry_actions._capture", wraps=strm_retry_actions._capture
         ) as capture:
             prepared = get_agent_service().prepare(
                 "strm.retry_failures", {"scope": "all"}, owner="owner-token"

@@ -12,7 +12,13 @@ from typing import Any
 from unittest.mock import patch
 
 from app.agent.domain_catalog import build_tool_specs
-from app.agent.ingest_actions import AgentIngestSessionStore
+from app.agent.domains.resources.candidate_context import (
+    RecentResourceCandidateStore,
+    new_resource_search_id,
+    safe_resource_snapshot,
+    validate_safe_resource_snapshot,
+)
+from app.agent.domains.resources.ingest_actions import AgentIngestSessionStore
 from app.agent.kernel.capabilities import CapabilityRetriever
 from app.agent.kernel.events import AgentEventType
 from app.agent.kernel.model import (
@@ -24,14 +30,9 @@ from app.agent.kernel.model import (
 from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolReference, ToolResult
-from app.agent.recent_resource_candidates import (
-    RecentResourceCandidateStore,
-    new_resource_search_id,
-    safe_resource_snapshot,
-    validate_safe_resource_snapshot,
-)
 
 
 def _search_result() -> ToolResult:
@@ -376,8 +377,8 @@ class DownloadAllFromRecommendationModel:
 
 
 class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
-    @patch("app.agent.indexer_candidate_actions.submit_resource_confirmed")
-    @patch("app.agent.indexer_candidate_actions.prepare_submit_resource")
+    @patch("app.agent.domains.resources.candidate_actions.submit_resource_confirmed")
+    @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
     async def test_same_turn_search_can_preview_and_confirm_cloud_submit(
         self, prepare_resource, submit_resource
     ) -> None:
@@ -432,11 +433,13 @@ class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
             "green-lantern-4k-001:guangya",
         )
 
-    @patch("app.agent.indexer_candidate_actions.submit_resource_confirmed")
-    @patch("app.agent.indexer_candidate_actions.prepare_submit_resource")
+    @patch("app.agent.domains.resources.candidate_actions.submit_resource_confirmed")
+    @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
     async def test_review_seventh_candidate_survives_followup_and_only_previews(self, prepare_resource, submit_resource):
-        from app.agent.resource_recommendation import rank_episode_search
-        from app.agent.recent_resource_candidates import attach_resource_candidate_reference
+        from app.agent.domains.resources.candidate_context import (
+            attach_resource_candidate_reference,
+        )
+        from app.agent.domains.resources.recommendation import rank_episode_search
         items = [{"result_id": f"review-resource-{number:04d}", "title": f"理想禁区 {number:02d} 黑历史 1080P",
                   "site_id": "mikan", "site_name": "Mikan", "download_state": "ready", "download_kinds": ["magnet"]}
                  for number in range(1, 12)]
@@ -462,7 +465,7 @@ class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"candidate_numbers":', model_text)
         self.assertNotIn('"recommended_ingest_arguments":', model_text)
 
-    @patch("app.agent.indexer_candidate_actions.prepare_submit_resource")
+    @patch("app.agent.domains.resources.candidate_actions.prepare_submit_resource")
     async def test_followup_turn_reuses_persisted_resource_reference(
         self, prepare_resource
     ) -> None:
@@ -658,7 +661,7 @@ class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "app.agent.indexer_actions._capture_submit_resource_batch",
+                "app.agent.domains.resources.indexer_actions._capture_submit_resource_batch",
                 side_effect=fake_capture,
             ) as capture_batch,
             patch(
@@ -666,7 +669,7 @@ class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=fake_download,
             ) as download_result,
             patch(
-                "app.agent.ingest_actions._receiving_folders",
+                "app.agent.domains.resources.ingest_actions._receiving_folders",
                 return_value=( ["光鸭：测试接收目录"], "fixture-destination"),
             ),
         ):

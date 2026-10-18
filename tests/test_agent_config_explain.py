@@ -6,7 +6,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from app.agent.config_explain_actions import (
+from app.agent.domains.configuration.explanations import (
     config_component_arguments,
     explain_config_component,
 )
@@ -21,15 +21,15 @@ def _config_get(values: dict[str, object]):
 def _explain_with_values(component: str, values: dict[str, object]) -> ToolResult:
     with (
         patch(
-            "app.agent.config_explain_actions.config.all_items",
+            "app.agent.domains.configuration.explanations.config.all_items",
             return_value=dict(values),
         ),
         patch(
-            "app.agent.config_explain_actions.config.get",
+            "app.agent.domains.configuration.explanations.config.get",
             side_effect=_config_get(values),
         ),
         patch(
-            "app.agent.config_explain_actions.config.has_external_override",
+            "app.agent.domains.configuration.explanations.config.has_external_override",
             return_value=False,
         ),
     ):
@@ -110,15 +110,15 @@ class ConfigComponentExplainUnitTests(unittest.TestCase):
         }
         with (
             patch(
-                "app.agent.config_explain_actions.config.all_items",
+                "app.agent.domains.configuration.explanations.config.all_items",
                 return_value=dict(values),
             ),
             patch(
-                "app.agent.config_explain_actions.config.get",
+                "app.agent.domains.configuration.explanations.config.get",
                 side_effect=_config_get(values),
             ),
             patch(
-                "app.agent.config_explain_actions.config.has_external_override",
+                "app.agent.domains.configuration.explanations.config.has_external_override",
                 side_effect=lambda key: key == "JELLYFIN_API_KEY",
             ),
         ):
@@ -188,7 +188,7 @@ class ConfigComponentExplainUnitTests(unittest.TestCase):
             },
         )
         with patch(
-            "app.agent.config_explain_actions.summarize_feature_states",
+            "app.agent.domains.configuration.explanations.summarize_feature_states",
             return_value=feature_summary,
         ):
             result = explain_config_component({"component": "douban"})
@@ -224,7 +224,7 @@ class ConfigComponentExplainUnitTests(unittest.TestCase):
             },
         )
         with patch(
-            "app.agent.config_explain_actions.summarize_feature_states",
+            "app.agent.domains.configuration.explanations.summarize_feature_states",
             return_value=feature_summary,
         ):
             result = explain_config_component({"component": "douban"})
@@ -236,7 +236,7 @@ class ConfigComponentExplainUnitTests(unittest.TestCase):
 
 class ConfigDiagnosisConsistencyTests(unittest.TestCase):
     def test_strm_summary_and_explanation_share_native_source_validation(self):
-        from app.agent.config_diagnosis_actions import diagnose_config
+        from app.agent.domains.configuration.diagnosis import diagnose_config
 
         cases = [
             ("", "0", "not_configured"), ("[]", "0", "not_configured"),
@@ -250,8 +250,8 @@ class ConfigDiagnosisConsistencyTests(unittest.TestCase):
             values = {"GY_STRM_SOURCE_DIRS": sources, "STRM_SCHEDULE_ENABLED": scheduled,
                       "GY_STRM_BASE_URL": "http://private.invalid", "STRM_ROOT": "/private/strm"}
             with self.subTest(sources=sources, scheduled=scheduled), patch(
-                "app.agent.config_explain_actions.config.get", side_effect=_config_get(values)
-            ), patch("app.agent.config_explain_actions.config.has_external_override", return_value=False):
+                "app.agent.domains.configuration.explanations.config.get", side_effect=_config_get(values)
+            ), patch("app.agent.domains.configuration.explanations.config.has_external_override", return_value=False):
                 summary = diagnose_config({})
                 explanation = explain_config_component({"component": "strm"})
             entry = next(x for x in summary.data["components"] if x["name"] == "strm")
@@ -272,7 +272,7 @@ class ConfigDiagnosisConsistencyTests(unittest.TestCase):
 
     def test_summary_reads_one_configuration_snapshot_and_preserves_disabled_servers(self):
         from app import config
-        from app.agent.config_diagnosis_actions import diagnose_config
+        from app.agent.domains.configuration.diagnosis import diagnose_config
         from app.modules.strm import parse_strm_sources
 
         self.assertEqual(parse_strm_sources("[]", require_nonempty=False), ([], ""))
@@ -292,23 +292,23 @@ class ConfigDiagnosisConsistencyTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(summary.to_dict()))
 
     def test_manual_strm_incomplete_is_an_error_even_without_timer(self):
-        from app.agent.config_diagnosis_actions import diagnose_config
+        from app.agent.domains.configuration.diagnosis import diagnose_config
 
         values = {"GY_STRM_SOURCE_DIRS": '["source"]', "STRM_SCHEDULE_ENABLED": "0", "STRM_ROOT": "/private/strm"}
-        with patch("app.agent.config_explain_actions.config.get", side_effect=_config_get(values)), patch(
-            "app.agent.config_explain_actions.config.has_external_override", return_value=False
+        with patch("app.agent.domains.configuration.explanations.config.get", side_effect=_config_get(values)), patch(
+            "app.agent.domains.configuration.explanations.config.has_external_override", return_value=False
         ):
             result = diagnose_config({})
         self.assertEqual(result.status, "attention")
         self.assertTrue(any(i["code"] == "strm_incomplete" for i in result.data["issues"]))
 
     def test_diagnosis_reports_exact_missing_labels_without_values(self):
-        from app.agent.config_diagnosis_actions import diagnose_config
+        from app.agent.domains.configuration.diagnosis import diagnose_config
         for values, missing in (({"QB_API_KEY": "test-private-key"}, ["服务地址"]),
                                 ({"QB_URL": "https://private.invalid"}, ["API Key 或用户名/密码"])):
-            with patch("app.agent.config_explain_actions.config.all_items", return_value=values), patch(
-                "app.agent.config_explain_actions.config.get", side_effect=_config_get(values)
-            ), patch("app.agent.config_explain_actions.config.has_external_override", return_value=False):
+            with patch("app.agent.domains.configuration.explanations.config.all_items", return_value=values), patch(
+                "app.agent.domains.configuration.explanations.config.get", side_effect=_config_get(values)
+            ), patch("app.agent.domains.configuration.explanations.config.has_external_override", return_value=False):
                 result = diagnose_config({})
             qb = next(item for item in result.data["components"] if item["name"] == "qbittorrent")
             self.assertEqual(qb["missing_field_labels"], missing)

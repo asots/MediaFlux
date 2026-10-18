@@ -8,13 +8,26 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
-from app.agent.kernel.model import ModelEvent, ModelEventType, ModelMessage, ModelToolCall
+from app.agent.errors import ToolPipelineError
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
+from app.agent.kernel.conversation_state import retain_conversation
+from app.agent.kernel.model import (
+    ModelEvent,
+    ModelEventType,
+    ModelMessage,
+    ModelToolCall,
+)
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.projection import DefaultProjector
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, CancellationToken, retain_conversation
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.model_context_budget import _compact_chain, compact_tool_content
 from tests.support import isolated_test_database
 
@@ -146,7 +159,7 @@ def test_lossless_pretty_json_preserves_complete_semantics(metadata):
 
 
 def test_valid_arguments_survive_real_sqlite_retention_losslessly():
-    from app.agent.domain_catalog.shared import _library_update_arguments
+    from app.agent.domains.shared_arguments import _library_update_arguments
 
     arguments = {"queries": [str(i).zfill(2) + "x" * 92 for i in range(20)], "refresh": True}
     arguments["queries"][0] += "y" * 12

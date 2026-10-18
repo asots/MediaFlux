@@ -9,11 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.models import ToolResult
-from app.agent.rate_limit import AgentRateLimiter
-from app.agent.web_request_singleflight import web_request_singleflight
-from app.agent.web_search_actions import (
+from app.agent.domains.discovery.web_request_singleflight import (
+    web_request_singleflight,
+)
+from app.agent.domains.discovery.web_search_actions import (
     _map_response,
     _provider_error,
     _search_tavily,
@@ -21,6 +20,9 @@ from app.agent.web_search_actions import (
     search_web,
     web_search_arguments,
 )
+from app.agent.errors import AgentToolError
+from app.agent.models import ToolResult
+from app.agent.rate_limit import AgentRateLimiter
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -128,19 +130,19 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
     def test_disabled_or_missing_key_never_calls_provider(self):
         with (
             patch(
-                "app.agent.web_search_actions.get",
+                "app.agent.domains.discovery.web_search_actions.get",
                 side_effect=_config({"WEB_SEARCH_ENABLED": "0"}),
             ),
-            patch("app.agent.web_search_actions._search_tavily") as provider,
+            patch("app.agent.domains.discovery.web_search_actions._search_tavily") as provider,
         ):
             self.assertEqual(search_web({"query": "x"}).status, "disabled")
             provider.assert_not_called()
         with (
             patch(
-                "app.agent.web_search_actions.get",
+                "app.agent.domains.discovery.web_search_actions.get",
                 side_effect=_config({"WEB_SEARCH_ENABLED": "1", "TAVILY_API_KEY": ""}),
             ),
-            patch("app.agent.web_search_actions._search_tavily") as provider,
+            patch("app.agent.domains.discovery.web_search_actions._search_tavily") as provider,
         ):
             self.assertEqual(search_web({"query": "x"}).status, "configuration_missing")
             provider.assert_not_called()
@@ -153,8 +155,8 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
             "password=$abcdefgh123456",
         )
         with (
-            patch("app.agent.web_search_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_search_actions._search_tavily") as provider,
+            patch("app.agent.domains.discovery.web_search_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_search_actions._search_tavily") as provider,
         ):
             for message in messages:
                 with (
@@ -179,9 +181,9 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
             return result
 
         with (
-            patch("app.agent.web_search_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_search_actions.get", side_effect=_config(self.values)),
             patch(
-                "app.agent.web_search_actions._search_tavily", side_effect=provider
+                "app.agent.domains.discovery.web_search_actions._search_tavily", side_effect=provider
             ) as call,
         ):
             first = search_web({"query": "Jellyfin 12", "max_results": 10})
@@ -247,8 +249,8 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
             )
 
         with (
-            patch("app.agent.web_search_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_search_actions._search_tavily", side_effect=provider),
+            patch("app.agent.domains.discovery.web_search_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_search_actions._search_tavily", side_effect=provider),
             patch.object(web_request_singleflight, "reserve", side_effect=reserve),
         ):
             results = self._run_two_threads(lambda: search_web({"query": "same"}))
@@ -287,8 +289,8 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
             return ToolResult(False, "timeout", "网页搜索服务响应超时")
 
         with (
-            patch("app.agent.web_search_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_search_actions._search_tavily", side_effect=provider),
+            patch("app.agent.domains.discovery.web_search_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_search_actions._search_tavily", side_effect=provider),
             patch.object(web_request_singleflight, "reserve", side_effect=reserve),
         ):
             results = self._run_two_threads(lambda: search_web({"query": "failure"}))
@@ -308,8 +310,8 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
             return ToolResult(False, "timeout", "网页搜索服务响应超时")
 
         with (
-            patch("app.agent.web_search_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_search_actions._search_tavily", side_effect=provider),
+            patch("app.agent.domains.discovery.web_search_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_search_actions._search_tavily", side_effect=provider),
         ):
             result = search_web({"query": "temporary failure"})
         self.assertEqual(result.status, "timeout")
@@ -408,8 +410,8 @@ class WebSearchExecutionTests(IsolatedDatabaseTestCase):
             )
         )
         with (
-            patch("app.agent.web_search_actions.get", side_effect=_config(self.values)),
-            patch("app.agent.web_search_actions._search_tavily") as provider,
+            patch("app.agent.domains.discovery.web_search_actions.get", side_effect=_config(self.values)),
+            patch("app.agent.domains.discovery.web_search_actions._search_tavily") as provider,
         ):
             result = search_web({"query": "different"})
         self.assertEqual(result.status, "budget_exhausted")

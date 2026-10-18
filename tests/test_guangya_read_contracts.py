@@ -8,9 +8,9 @@ from unittest import mock
 
 import httpx
 
-from app.agent import guangya_recycle_actions as recycle
-from app.agent import guangya_share_actions as shares
-from app.agent import guangya_workspace_actions as workspace
+from app.agent.domains.guangya import recycle_actions as recycle
+from app.agent.domains.guangya import share_actions as shares
+from app.agent.domains.guangya import workspace_actions as workspace
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext
 from app.clients.guangya import (
@@ -615,8 +615,9 @@ class GuangYaAgentReadCompletionTests(unittest.TestCase):
                          "relative_parent": "scope", "media_kind": "video", "size": 456,
                          "extension": "mkv", "file_id": "private-provider-id"}],
         })
-        with mock.patch.object(workspace, "_read_observation_page", return_value=page):
-            result = workspace.query_guangya_filesystem({}, ToolContext())
+        workspace_actions = workspace.GuangyaWorkspaceActions()
+        with mock.patch.object(workspace_actions, "_read_observation_page", return_value=page):
+            result = workspace_actions.query_guangya_filesystem({}, ToolContext())
         entry = result.model_data["entries"][0]
         self.assertEqual((entry["kind"], entry["size"], entry["extension"]), ("video", 456, "mkv"))
         self.assertNotIn("file_id", entry)

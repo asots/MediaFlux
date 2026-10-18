@@ -19,13 +19,16 @@ import pytest
 from app import database as db
 from app.agent import rate_limit as rates
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.errors import ToolPipelineError, ToolRateLimitError
 from app.agent.kernel.capabilities import ToolCatalog
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline, ToolPipelineError, ToolRateLimitError
+from app.agent.kernel.conversation_context import tool_error_message
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports import mediaflux_policy as policy
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
 from app.agent.kernel.ports.mediaflux_policy import MediaFluxToolRateLimiter
-from app.agent.kernel.session import AgentSession as Session
-from app.agent.kernel.state import CancellationToken, InMemorySessionStateStore
+from app.agent.kernel.state import InMemorySessionStateStore
+from app.agent.kernel.state_types import CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.rate_limit import AgentRateLimiter
 from tests.support import isolated_test_database
 
@@ -48,8 +51,8 @@ def rows():
 snapshot = rows
 
 
-def test_rate_limit_error_is_kernel_owned_without_port_alias():
-    assert ToolRateLimitError.__module__ == "app.agent.kernel.pipeline"
+def test_rate_limit_error_has_one_contract_owner_without_port_alias():
+    assert ToolRateLimitError.__module__ == "app.agent.errors"
     assert issubclass(ToolRateLimitError, ToolPipelineError)
     assert not hasattr(policy, "ToolRateLimitError")
 
@@ -77,7 +80,7 @@ def test_real_pipeline_shared_owner_and_retry_payload():
         with pytest.raises(asyncio.CancelledError):await query(owner='cancelled-owner',cancel=True)
         assert len(calls)==10
         from app.agent.kernel.model import ModelToolCall
-        native=Session._tool_error_message(ModelToolCall(call_id='native-28',name=tool.name,arguments={}),exc.value)
+        native=tool_error_message(ModelToolCall(call_id='native-28',name=tool.name,arguments={}),exc.value)
         data=json.loads(native.content)
         print('PIPELINE_ERROR',vars(exc.value),'NATIVE_ERROR',data,'HANDLERS',calls)
         # Positive contract: BASE must fail on precise metadata, not fixture.
@@ -421,7 +424,7 @@ def test_local_watchlist_reads_share_existing_default_budget_across_workers_with
         assert other.effect_plan is None and other.outcome.public_content['data']['count'] == 1
         assert len(calls) == 31
 
-    with patch('app.agent.discovery_watchlist_actions.config.get_bool', return_value=True):
+    with patch('app.agent.domains.discovery.watchlist_actions.config.get_bool', return_value=True):
         asyncio.run(exercise())
     assert domain_snapshot() == before  # 限流桶可写，但收藏、订阅、下载及动作历史不变。
     with db.get_conn() as conn:

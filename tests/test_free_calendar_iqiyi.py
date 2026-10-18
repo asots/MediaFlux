@@ -16,10 +16,10 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 import tests  # noqa: F401 -- 应用导入前隔离 config/DB。
+from app.clients.http import HttpSecurityError
 from app.discovery.calendar.http import CalendarHttp
 from app.discovery.calendar.models import SourceUnavailable
 from app.discovery.calendar.providers.iqiyi import IqiyiCalendarProvider
-from app.indexers.errors import IndexerSecurityError
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "calendar" / "iqiyi"
 _URL = "https://mesh.if.iqiyi.com/portal/lw/v7/channel/page/tracking"
@@ -240,7 +240,7 @@ class IqiyiWeeklyCalendarTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_network_challenge_and_cancellation_stop_without_retries(self):
         for error in (SourceUnavailable("captcha token=secret"), httpx.ConnectError("secret"),
-                      TimeoutError("secret"), IndexerSecurityError("secret")):
+                      TimeoutError("secret"), HttpSecurityError("secret")):
             with self.subTest(error=type(error).__name__):
                 http = _http()
                 http.get_json.side_effect = error

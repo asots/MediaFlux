@@ -10,9 +10,9 @@ from app.agent.providers.media_server import MediaServerProviderTransport
 from app.agent.providers.qbittorrent import QBittorrentProviderTransport
 from app.clients.base import (
     MediaItem,
-    MediaSearchResult,
     MediaRecommendationCandidate,
     MediaRecommendationInventory,
+    MediaSearchResult,
     SeriesCandidate,
     SeriesEpisodeInventory,
     SeriesSearchResult,
@@ -932,9 +932,9 @@ def test_recent_added_granularity_through_domain_provider_and_shared_clients(
         url="http://media.invalid", credential="test", enabled=True, user_id="viewer",
     )
     monkeypatch.setattr("app.agent.providers.media_server.list_configured_profiles", lambda: [profile])
-    monkeypatch.setattr("app.agent.media_consumption_actions.list_configured_profiles", lambda: [profile])
+    monkeypatch.setattr("app.agent.domains.subscriptions.consumption_actions.list_configured_profiles", lambda: [profile])
     gateway = ProviderGateway(catalog=build_provider_catalog(), transports=[MediaServerProviderTransport()])
-    monkeypatch.setattr("app.agent.media_consumption_actions.get_provider_gateway", lambda: gateway)
+    monkeypatch.setattr("app.agent.domains.subscriptions.consumption_actions.get_provider_gateway", lambda: gateway)
     folders = [
         {"ItemId": "tv-library", "Name": "电视剧", "CollectionType": "tvshows"},
         {"ItemId": "anime-library", "Name": "动漫", "CollectionType": "tvshows"},

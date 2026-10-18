@@ -8,16 +8,17 @@ from unittest.mock import patch
 
 import pytest
 from starlette.requests import Request
-from tests.test_agent_task_first_slice import NativeScript, GOAL, OWNER
-from tests.support import isolated_test_database
-from app.agent.kernel.bootstrap import build_agent_kernel_runtime
-from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import AgentInput
+
 from app.agent.kernel.adapters import TurnViewBuilder
+from app.agent.kernel.bootstrap import build_agent_kernel_runtime
 from app.agent.kernel.metrics import KernelMetrics
+from app.agent.kernel.persistence import SQLiteKernelStore
+from app.agent.kernel.state_types import AgentInput
 from app.bot.agent_adapter import _render_turn
 from app.bot.telegram_markdown import render_telegram_markdown
 from app.routes import agent_api
+from tests.support import isolated_test_database
+from tests.test_agent_task_first_slice import GOAL, OWNER, NativeScript
 
 
 @pytest.fixture(scope="module")
@@ -101,16 +102,17 @@ def native_snapshots():
 def test_telegram_approval_callers_preserve_buttons_and_html(native_snapshots, task_mode):
     from dataclasses import replace
     from types import SimpleNamespace
-    from app.bot import agent_adapter as adapter
+
     from app.agent.kernel.adapters import ApprovalView
+    from app.bot import agent_adapter as adapter
     from app.bot.telegram_markdown import telegram_html_text_length
     from tests.test_agent_kernel_telegram_adapter import (
-        FakeTelegramTransport,
-        FakeStore,
-        FakeBot,
         TELEBOT,
-        Message,
         Call,
+        FakeBot,
+        FakeStore,
+        FakeTelegramTransport,
+        Message,
     )
 
     approval = ApprovalView(
@@ -192,6 +194,7 @@ def test_telegram_approval_callers_preserve_buttons_and_html(native_snapshots, t
 
 def test_native_untracked_qa_keeps_turn_success():
     from contextlib import contextmanager
+
     from app import database as db
 
     async def run():

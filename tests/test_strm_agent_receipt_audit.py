@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from app.agent.domain_catalog import strm_runtime
+from app.agent.domains.strm import runtime as strm_runtime
 from app.agent.errors import AgentToolError
 from app.modules.scheduler import STRMScheduler
 from tests.support import isolated_test_database

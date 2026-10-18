@@ -5,17 +5,20 @@ import base64
 import gzip
 import threading
 import unittest
-from unittest.mock import PropertyMock, patch
 import zlib
-
-import tests  # noqa: F401 -- 应用导入前隔离生产配置和 DB。
+from unittest.mock import PropertyMock, patch
 
 import httpx
 
-from app.indexers.errors import IndexerInvalidResponse, IndexerResponseTooLarge, IndexerSecurityError
-from app.indexers.http import BrowserImpersonatingHttpClient, FixedHostHttpClient
+import tests  # noqa: F401 -- 应用导入前隔离生产配置和 DB。
+from app.clients.http import (
+    BrowserImpersonatingHttpClient,
+    FixedHostHttpClient,
+    HttpInvalidResponse,
+    HttpResponseTooLarge,
+    HttpSecurityError,
+)
 from app.indexers.providers.btbtla import BTBtlaAdapter
-
 
 PUBLIC_DNS = lambda host, port: [(2, 1, 6, "", ("93.184.216.34", port))]
 PRIVATE_DNS = lambda host, port: [(2, 1, 6, "", ("127.0.0.1", port))]
@@ -134,6 +137,34 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         return self.client
 
+    async def test_get_retry_budget_and_post_idle_budget_are_explicit(self):
+        for retries, configured, expected in ((1, 10, 5), (0, 30, 30), (0, 120, 120)):
+            with self.subTest(retries=retries, configured=configured):
+                requests = []
+
+                def timed_out(request, requests=requests):
+                    requests.append(request)
+                    raise httpx.ReadTimeout("offline timeout", request=request)
+
+                client = FixedHostHttpClient(
+                    allowed_hosts={"nyaa.si"}, resolver=PUBLIC_DNS,
+                    transport=httpx.MockTransport(timed_out),
+                    timeout_seconds=configured, get_timeout_retries=retries,
+                )
+                self.addAsyncCleanup(client.aclose)
+                with self.assertRaises(httpx.ReadTimeout):
+                    await client.get("https://nyaa.si/search")
+                self.assertEqual(len(requests), retries + 1)
+                for request in requests:
+                    self.assertEqual(request.extensions["timeout"], {
+                        "connect": min(4.0, expected), "read": expected,
+                        "write": expected, "pool": expected,
+                    })
+                requests.clear()
+                with self.assertRaises(httpx.ReadTimeout):
+                    await client.post_json("https://nyaa.si/search", json={"query": "fixture"})
+                self.assertEqual(len(requests), 1)
+
     async def test_pinned_single_host_keeps_pool_but_multi_host_disables_reuse(self):
         single = FixedHostHttpClient(
             allowed_hosts={"nyaa.si"},
@@ -166,7 +197,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         for url in rejected:
             with self.subTest(url=url):
-                with self.assertRaises(IndexerSecurityError):
+                with self.assertRaises(HttpSecurityError):
                     await client.get(url)
 
         await client.aclose()
@@ -175,7 +206,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"ok")),
             resolver=PRIVATE_DNS,
         )
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await self.client.get("https://nyaa.si/")
 
     async def test_follows_relative_redirect_but_rejects_redirect_to_unregistered_host(self):
@@ -196,7 +227,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         client = self.make_client(
             lambda request: httpx.Response(302, headers={"Location": "https://evil.example/file"})
         )
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await client.get("https://nyaa.si/start")
 
     async def test_search_form_redirects_to_get_without_replaying_body(self):
@@ -215,11 +246,11 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_form_rejects_cross_host_redirect_and_json_stays_strict(self):
         client = self.make_client(lambda request: httpx.Response(302, headers={"Location": "https://evil.example/search"}))
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await client.post_form("https://nyaa.si/search", content=b"keyboard=test")
         await client.aclose()
         client = self.make_client(lambda request: httpx.Response(302, headers={"Location": "/result"}))
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await client.post_json("https://nyaa.si/search", json={})
 
     async def test_enforces_declared_and_streamed_response_size_limits(self):
@@ -227,7 +258,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
             lambda request: httpx.Response(200, headers={"Content-Length": "11"}, content=b"01234567890"),
             max_response_bytes=10,
         )
-        with self.assertRaises(IndexerResponseTooLarge):
+        with self.assertRaises(HttpResponseTooLarge):
             await client.get("https://nyaa.si/")
 
         await client.aclose()
@@ -235,7 +266,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
             lambda request: httpx.Response(200, content=b"01234567890"),
             max_response_bytes=10,
         )
-        with self.assertRaises(IndexerResponseTooLarge):
+        with self.assertRaises(HttpResponseTooLarge):
             await client.get("https://nyaa.si/")
 
     async def test_browser_client_rewrites_sni_keeps_host_and_impersonates_chrome(self):
@@ -348,7 +379,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = client
 
-        with self.assertRaises(IndexerResponseTooLarge):
+        with self.assertRaises(HttpResponseTooLarge):
             await client.get("https://www.example.com/search/demo")
 
     async def test_browser_client_rejects_unregistered_sni_host(self):
@@ -375,7 +406,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = client
 
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await client.get("https://www.btbtlb.com/search/demo")
         self.assertEqual(session.calls, [])
 
@@ -460,7 +491,7 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = client
 
-        with self.assertRaises(IndexerSecurityError):
+        with self.assertRaises(HttpSecurityError):
             await client.get("https://evil.example/search")
         self.assertEqual(session.calls, [])
 
@@ -596,7 +627,7 @@ class FixedHostPostJsonTests(unittest.IsolatedAsyncioTestCase):
             max_response_bytes=10,
         )
         try:
-            with self.assertRaises(IndexerResponseTooLarge):
+            with self.assertRaises(HttpResponseTooLarge):
                 async with client.stream_post_json(
                     "https://api.tavily.com/v1/responses", json={"stream": True}
                 ) as response:
@@ -614,9 +645,9 @@ class FixedHostPostJsonTests(unittest.IsolatedAsyncioTestCase):
             resolver=PUBLIC_DNS,
         )
         try:
-            with self.assertRaises(IndexerSecurityError):
+            with self.assertRaises(HttpSecurityError):
                 await client.post_json("https://api.tavily.com/search", json={}, max_redirects=0)
-            with self.assertRaises(IndexerSecurityError):
+            with self.assertRaises(HttpSecurityError):
                 await client.post_json("https://evil.example/search", json={})
         finally:
             await client.aclose()
@@ -672,7 +703,7 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
             self.stream_entries += 1
             return b"".join([chunk async for chunk in response.aiter_bytes()])
 
-    async def assert_rejected_before_read(self, method, headers, chunks, *, error=IndexerInvalidResponse):
+    async def assert_rejected_before_read(self, method, headers, chunks, *, error=HttpInvalidResponse):
         stream = ChunkStream(chunks)
         client, response, calls = self.make_client(stream, headers=headers)
         entries = self.stream_entries
@@ -738,9 +769,9 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_strict_enforces_declared_length_before_entering_body_or_stream_context(self):
         for method in self.METHODS:
-            for length, error in ((str(self.LIMIT + 1), IndexerResponseTooLarge),
-                                  ("-1", IndexerInvalidResponse), ("invalid", IndexerInvalidResponse),
-                                  ("1, 2", IndexerInvalidResponse)):
+            for length, error in ((str(self.LIMIT + 1), HttpResponseTooLarge),
+                                  ("-1", HttpInvalidResponse), ("invalid", HttpInvalidResponse),
+                                  ("1, 2", HttpInvalidResponse)):
                 with self.subTest(method=method, length=length):
                     await self.assert_rejected_before_read(method, {"Content-Length": length}, [self.PNG], error=error)
 
@@ -751,7 +782,7 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
                     count = self.LIMIT // self.CHUNK
                     stream = ChunkStream([b"x" * self.CHUNK] * (count + 1) + [b"must not be read"])
                     client, response, calls = self.make_client(stream, headers=headers)
-                    with self.assertRaises(IndexerResponseTooLarge):
+                    with self.assertRaises(HttpResponseTooLarge):
                         await self.read(client, method)
                     self.assertEqual(stream.read_chunks, count + 1)
                     self.assertEqual(stream.read_bytes, self.LIMIT + self.CHUNK)
@@ -820,7 +851,7 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
                 stream = ChunkStream([wire])
                 client, response, _ = self.make_client(stream, strict=None, maximum=1024,
                     headers={"Content-Encoding": "gzip", "Content-Length": str(len(wire))})
-                with self.assertRaises(IndexerResponseTooLarge):
+                with self.assertRaises(HttpResponseTooLarge):
                     await self.read(client, method)
                 self.assertTrue(stream.closed)
                 self.assertTrue(response.is_closed)
@@ -869,7 +900,7 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
                     client, _, _ = self.make_client(response=response, maximum=len(self.PNG) - 1)
                     with (patch.object(response, "aiter_bytes", side_effect=AssertionError("buffer decoded again")),
                           patch.object(response, "aiter_raw", side_effect=AssertionError("consumed stream reopened")),
-                          self.assertRaises(IndexerResponseTooLarge)):
+                          self.assertRaises(HttpResponseTooLarge)):
                         await self.read(client, method)
                     self.assertTrue(response.is_closed)
 
@@ -883,7 +914,7 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
                 entries = self.stream_entries
                 with (patch.object(httpx.Response, "content", new_callable=PropertyMock,
                                    side_effect=AssertionError("buffer accessed before encoding validation")),
-                      self.assertRaisesRegex(IndexerInvalidResponse, "Content-Encoding")):
+                      self.assertRaisesRegex(HttpInvalidResponse, "Content-Encoding")):
                     await self.read(client, method)
                 self.assertTrue(response.is_closed)
                 self.assertEqual(self.stream_entries, entries)
@@ -897,7 +928,7 @@ class FixedHostIdentityEncodingTests(unittest.IsolatedAsyncioTestCase):
                 _ = [chunk async for chunk in response.aiter_raw()]
                 self.assertTrue(response.is_stream_consumed)
                 client, _, _ = self.make_client(response=response)
-                with self.assertRaisesRegex(IndexerInvalidResponse, "no buffered body"):
+                with self.assertRaisesRegex(HttpInvalidResponse, "no buffered body"):
                     await self.read(client, method)
                 self.assertEqual(stream.read_chunks, 1)  # 不重读已被 transport 消费的流。
                 self.assertTrue(stream.closed)
@@ -908,6 +939,7 @@ class BuiltinIndexerAddressTests(unittest.TestCase):
     def test_builtin_hosts_are_encoded_in_runtime_sources(self):
         from pathlib import Path
         from urllib.parse import urlsplit
+
         from app.indexers import config as endpoints
         from app.indexers.providers.kpkuang import KPKUANG_HOST_CONFIG
 

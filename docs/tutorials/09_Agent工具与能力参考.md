@@ -42,7 +42,7 @@
 
 看板、健康状况、待办、下一步建议和全局搜索。
 
-定义：[`workspace.py`](../../app/agent/domain_catalog/workspace.py)。
+定义：[`domains/workspace/tools.py`](../../app/agent/domains/workspace/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -56,7 +56,7 @@
 
 当前运行条件、工具发现、Provider 网关、功能与索引站开关、任务状态。
 
-定义：[`system.py`](../../app/agent/domain_catalog/system.py)。
+定义：[`domains/system/tools.py`](../../app/agent/domains/system/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -88,7 +88,7 @@
 
 按媒体或任务查活动时间线；回退必须先检查支持范围，不能承诺任意操作可撤销。
 
-定义：[`activity.py`](../../app/agent/domain_catalog/activity.py)。
+定义：[`domains/activity/tools.py`](../../app/agent/domains/activity/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -104,7 +104,7 @@
 
 库存搜索、批量在库匹配、季集计数、缺集资源、巡检与复核工作流。
 
-定义：[`library.py`](../../app/agent/domain_catalog/library.py)。
+定义：[`domains/library/tools.py`](../../app/agent/domains/library/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -127,7 +127,7 @@
 
 读取服务器报告的质量和用户状态，受控修改已看、收藏和播放列表；不进行真实播放探测。
 
-定义：[`library_quality.py`](../../app/agent/domain_catalog/library_quality.py)。
+定义：[`domains/library/quality_tools.py`](../../app/agent/domains/library/quality_tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -147,7 +147,7 @@
 
 元数据详情与演职员、电影人作品列表、本地与外部推荐、网页搜索/正文及两类动漫日历。
 
-定义：[`discovery.py`](../../app/agent/domain_catalog/discovery.py)。
+定义：[`domains/discovery/tools.py`](../../app/agent/domains/discovery/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -172,7 +172,7 @@
 
 搜索得到候选引用，再检查、确认和提交资源；直接链接与分享也复用受控接入链路。
 
-定义：[`resource.py`](../../app/agent/domain_catalog/resource.py)。
+定义：[`domains/resources/tools.py`](../../app/agent/domains/resources/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -188,7 +188,7 @@
 
 查看下载队列及最近提交，重试前检查结果与幂等边界；实时 qB 操作另见 Provider 目录。
 
-定义：[`download.py`](../../app/agent/domain_catalog/download.py)。
+定义：[`domains/downloads/tools.py`](../../app/agent/domains/downloads/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -200,7 +200,7 @@
 
 RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下载偏好、最近播放与内容汇总。
 
-定义：[`subscription.py`](../../app/agent/domain_catalog/subscription.py)。
+定义：[`domains/subscriptions/tools.py`](../../app/agent/domains/subscriptions/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -241,7 +241,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 
 创建媒体规则、查询或配置定时摘要；配置变更仍需要确认。
 
-定义：[`automation_rules.py`](../../app/agent/domain_catalog/automation_rules.py)。
+定义：[`domains/automation/tools.py`](../../app/agent/domains/automation/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -253,7 +253,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 
 在白名单范围内管理识别知识、来源和媒体路径映射，复用现有配置服务。
 
-定义：[`configuration_management.py`](../../app/agent/domain_catalog/configuration_management.py)。
+定义：[`domains/configuration/tools.py`](../../app/agent/domains/configuration/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -273,7 +273,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 
 浏览与文件变更不同于刮削整理；预览可以是 READ，但实际执行入口仍受确认约束。
 
-定义：[`cloud.py`](../../app/agent/domain_catalog/cloud.py)。
+定义：[`domains/guangya/tools.py`](../../app/agent/domains/guangya/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -302,7 +302,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 
 账号容量、回收站恢复/全局清空、异步操作状态及分享管理；不开放本地上传。
 
-定义：[`cloud_sdk.py`](../../app/agent/domain_catalog/cloud_sdk.py)。
+定义：[`domains/guangya/sdk_tools.py`](../../app/agent/domains/guangya/sdk_tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -319,7 +319,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 
 只处理已配置来源和可核验任务，不开放任意本地路径操作；任务已索引不代表真实播放测试。
 
-定义：[`local_media.py`](../../app/agent/domain_catalog/local_media.py)。
+定义：[`domains/local_media/tools.py`](../../app/agent/domains/local_media/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -341,7 +341,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 
 状态、历史、失败诊断、受控重试及指定来源同步；不以排队成功冒充生成完成。
 
-定义：[`strm.py`](../../app/agent/domain_catalog/strm.py)。
+定义：[`domains/strm/tools.py`](../../app/agent/domains/strm/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -358,7 +358,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 
 管理 NFO 等伴随元数据同步及待处理队列，与视频 STRM 生成状态分开解释。
 
-定义：[`strm_metadata.py`](../../app/agent/domain_catalog/strm_metadata.py)。
+定义：[`domains/strm/metadata_tools.py`](../../app/agent/domains/strm/metadata_tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|
@@ -370,7 +370,7 @@ RSS 规则订阅和影视追更订阅是不同对象；本组也维护观看/下
 
 查看媒体链接相关状态、反代和播放准备情况；重启/修改反代策略属于写入。
 
-定义：[`playback.py`](../../app/agent/domain_catalog/playback.py)。
+定义：[`domains/playback/tools.py`](../../app/agent/domains/playback/tools.py)。
 
 | 工具 | Kernel 风险 | 用途 |
 |---|---|---|

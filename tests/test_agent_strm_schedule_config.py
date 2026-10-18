@@ -8,13 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import config
-from app.agent import strm_schedule_config_actions
-from app.agent.errors import AgentToolError
-from app.agent.strm_schedule_config_actions import (
+from app.agent.domains.strm import schedule_actions as strm_schedule_config_actions
+from app.agent.domains.strm.schedule_actions import (
     prepare_strm_schedule_policy_confirmation,
     strm_schedule_policy_arguments,
     summarize_strm_schedule_policy,
 )
+from app.agent.errors import AgentToolError
 from app.modules.scheduler import STRMScheduler
 from tests.agent_kernel_test_harness import get_kernel_test_service as get_agent_service
 

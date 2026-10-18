@@ -6,12 +6,14 @@ import json
 from unittest.mock import MagicMock, patch
 
 from app import database as db
-from app.agent.errors import AgentToolError
-from app.agent.rss_download_actions import (
+from app.agent.domains.subscriptions.rss_download_actions import (
     prepare_rss_pending_download,
     submit_pending_rss_to_qb_confirmed,
 )
-from app.agent.rss_entry_actions import build_rss_submission_result
+from app.agent.domains.subscriptions.rss_entry_actions import (
+    build_rss_submission_result,
+)
+from app.agent.errors import AgentToolError
 from app.clients.qbittorrent import QBittorrentClient, TorrentAddResult
 from app.modules.rss import RSSEngine
 from tests.support import IsolatedDatabaseTestCase, seed_rss_entry_state

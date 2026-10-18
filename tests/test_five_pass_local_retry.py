@@ -4,12 +4,14 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from app import database as db
-from app.agent import local_media_task_actions as actions
+from app.agent.domain_catalog import DomainActions
+from app.agent.domains.local_media import task_actions as actions
 from tests.support import IsolatedDatabaseTestCase, isolated_test_database
 
 
 class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
     def setUp(self):
+        self._domain_actions = DomainActions()
         self.enterContext(isolated_test_database())
         self.source_id = db.create_local_media_source(
             name=f"five-pass-{self._testMethodName}", qb_profile="", qb_path_prefix="",
@@ -93,9 +95,9 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
     def test_agent_preflight_explains_interrupted_write_before_confirming(self):
         task = self._task(interrupted=True)
         with patch.object(actions, "_require_owner", return_value="owner-a"), patch.object(
-            actions, "_current_task", return_value=(None, task)
+            self._domain_actions.local_media, "_current_task", return_value=(None, task)
         ):
-            result, fingerprint = actions.prepare_retry_local_media_task({"task_number": 1}, None)
+            result, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, None)
         self.assertTrue(fingerprint)
         self.assertTrue(result.data["interrupted_write"])
         self.assertIn("核验", " ".join(result.data["effects"]))
@@ -104,10 +106,10 @@ class UnifiedLocalRetryTests(IsolatedDatabaseTestCase):
     def test_agent_confirmed_interrupted_retry_uses_common_reset(self):
         task = self._task(interrupted=True)
         with patch.object(actions, "_require_owner", return_value="owner-a"), patch.object(
-            actions, "_current_task", return_value=(None, task)
+            self._domain_actions.local_media, "_current_task", return_value=(None, task)
         ), patch.object(actions, "get_local_media_scheduler") as scheduler:
-            _, fingerprint = actions.prepare_retry_local_media_task({"task_number": 1}, None)
-            result = actions.retry_local_media_task_confirmed({"task_number": 1}, fingerprint, None)
+            _, fingerprint = self._domain_actions.local_media.prepare_retry_local_media_task({"task_number": 1}, None)
+            result = self._domain_actions.local_media.retry_local_media_task_confirmed({"task_number": 1}, fingerprint, None)
         self.assertTrue(result.ok)
         self.assertEqual(
             result.effect_metadata["completion"],

@@ -8,9 +8,8 @@ import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
+from app.agent.kernel.session_state import SessionState
 from app.agent.public_safety import sanitize_public_text
-
-from .state import SessionState
 
 
 def display_text(value: Any, *, limit: int = 300) -> str:

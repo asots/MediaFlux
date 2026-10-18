@@ -10,8 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import database as db
+from app.clients.http import HttpInvalidResponse
 from app.indexers import downloads
-from app.indexers.errors import IndexerInvalidResponse
 from app.indexers.models import IndexerItem, IndexerPage, ResolvedDownload
 from app.indexers.registry import IndexerRegistry
 from app.indexers.result_store import IndexerResultStore
@@ -46,7 +46,7 @@ class OfflineSource:
         if self.before_resolve is not None:
             self.before_resolve(item)
         if item.title in self.fail_titles:
-            raise IndexerInvalidResponse("invalid private upstream response")
+            raise HttpInvalidResponse("invalid private upstream response")
         return self.resolved_by_title.get(item.title, ResolvedDownload("magnet", item.magnet))
 
     def http_client_for_result(self, _item):
@@ -212,7 +212,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         backend.assert_called_once()
         admission = self.admissions(subscription_id)[0]
         self.assertEqual((admission["status"], admission["request_id"]), ("failed", None))
-        self.assertEqual(admission["error"], IndexerInvalidResponse.default_public_message)
+        self.assertEqual(admission["error"], HttpInvalidResponse.default_public_message)
 
     def test_invalid_torrent_input_is_safe_to_try_next_candidate(self):
         subscription_id, source, _indexer, backend = self.scenario(failures=())
@@ -266,7 +266,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
 
     def test_exception_from_backend_remains_unknown_not_safe_failure(self):
         subscription_id, source, _indexer, backend = self.scenario(failures=())
-        backend.side_effect = IndexerInvalidResponse("backend raised after receiving input")
+        backend.side_effect = HttpInvalidResponse("backend raised after receiving input")
         checked = asyncio.run(MediaSubscriptionService().check_subscription(subscription_id))
         self.assertEqual(checked["result"]["auto_submitted"], 0)
         self.assertEqual(source.resolve_titles, [source.items[0].title])
@@ -296,7 +296,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
     def test_lost_public_result_after_backend_acceptance_does_not_switch_source(self):
         subscription_id, source, _indexer, backend = self.scenario(failures=())
         # 故障注入在受理后的展示映射；使用真实创建 / 准入绑定 / 后端提交。
-        with patch.object(downloads, "public_dispatch_summary", side_effect=IndexerInvalidResponse("late failure")):
+        with patch.object(downloads, "public_dispatch_summary", side_effect=HttpInvalidResponse("late failure")):
             admissions = self.assert_failure_stops_round(subscription_id, source, backend, submitted=True)
         self.assertEqual(len(admissions), 1)
         self.assertTrue(admissions[0]["request_id"])
@@ -405,7 +405,7 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
     def test_nonpublic_entry_preserves_resolver_exception_type(self):
         _subscription_id, source, indexer, backend = self.scenario()
         result_id = indexer.result_store.put(replace(source.items[0], result_id=None))
-        with self.assertRaises(IndexerInvalidResponse):
+        with self.assertRaises(HttpInvalidResponse):
             asyncio.run(downloads.download_indexer_result(indexer, result_id, "qb"))
         result = asyncio.run(downloads.download_indexer_result_public(indexer, result_id, "qb"))
         self.assertTrue(result["pre_submission_failure"])

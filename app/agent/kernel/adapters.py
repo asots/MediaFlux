@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .events import AgentEvent, AgentEventType
+from .events import AgentEvent, AgentEventType, terminal_turn_status
 from .projection import _model_safe
 
 EventObserver = Callable[[AgentEvent], Awaitable[None]]
@@ -197,22 +197,21 @@ class TurnViewBuilder:
             # 工具失败可由同一模型循环自愈；只有 turn.failed 才是终态。
             self._error_code = str(payload.get("code") or self._error_code)
             self._error_message = str(payload.get("message") or self._error_message)
-        elif event.type is AgentEventType.TURN_COMPLETED:
-            self._status = str(payload.get("status") or "success")
-            self._answer = str(payload.get("answer") or self._answer)
-            # tool.failed 是可自愈的中间事实；回合成功后不能把旧错误
-            # 泄漏成 API/TG 的终态错误。
-            self._error_code = ""
-            self._error_message = ""
-        elif event.type is AgentEventType.TURN_FAILED:
-            self._status = "failed"
-            if not self._effect_failed:
-                self._error_code = str(payload.get("code") or "turn_failed")
-                self._error_message = str(payload.get("message") or "Agent 运行失败")
-        elif event.type is AgentEventType.TURN_CANCELLED:
-            self._status = "cancelled"
-            self._error_code = "cancelled"
-            self._error_message = str(payload.get("reason") or "请求已取消")
+        elif (status := terminal_turn_status(event.type, payload)) is not None:
+            self._status = status
+            if event.type is AgentEventType.TURN_COMPLETED:
+                self._answer = str(payload.get("answer") or self._answer)
+                # tool.failed 是可自愈的中间事实；回合成功后不能把旧错误
+                # 泄漏成 API/TG 的终态错误。
+                self._error_code = ""
+                self._error_message = ""
+            elif event.type is AgentEventType.TURN_FAILED:
+                if not self._effect_failed:
+                    self._error_code = str(payload.get("code") or "turn_failed")
+                    self._error_message = str(payload.get("message") or "Agent 运行失败")
+            else:
+                self._error_code = "cancelled"
+                self._error_message = str(payload.get("reason") or "请求已取消")
 
     def build(self) -> TurnView:
         if self._identity is None:

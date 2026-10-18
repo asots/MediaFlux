@@ -6,11 +6,11 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
-from app.agent.errors import AgentToolError
-from app.agent.media_server_actions import (
+from app.agent.domains.system.media_server_actions import (
     diagnose_media_servers,
     media_server_diagnosis_arguments,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import ToolResult
 
 
@@ -52,7 +52,7 @@ class AgentMediaServerDiagnosisTests(unittest.TestCase):
 
     def test_disabled_nodes_return_fixed_safe_shape_without_network_claim(self):
         with patch(
-            "app.agent.media_server_actions._probe_all",
+            "app.agent.domains.system.media_server_actions._probe_all",
             return_value=[
                 _probe("jellyfin", status="disabled"),
                 _probe("emby", status="disabled"),
@@ -106,7 +106,7 @@ class AgentMediaServerDiagnosisTests(unittest.TestCase):
         for probes, reason in cases:
             with (
                 self.subTest(reason=reason),
-                patch("app.agent.media_server_actions._probe_all", return_value=probes),
+                patch("app.agent.domains.system.media_server_actions._probe_all", return_value=probes),
             ):
                 result = diagnose_media_servers({})
             self.assertTrue(result.ok)
@@ -151,7 +151,7 @@ class AgentMediaServerDiagnosisTests(unittest.TestCase):
         for probes, reason in cases:
             with (
                 self.subTest(reason=reason),
-                patch("app.agent.media_server_actions._probe_all", return_value=probes),
+                patch("app.agent.domains.system.media_server_actions._probe_all", return_value=probes),
             ):
                 result = diagnose_media_servers({})
             self.assertTrue(result.ok)
@@ -166,7 +166,7 @@ class AgentMediaServerDiagnosisTests(unittest.TestCase):
 
     def test_unverified_product_identity_never_fails_open_from_slot_fallback(self):
         with patch(
-            "app.agent.media_server_actions._probe_all",
+            "app.agent.domains.system.media_server_actions._probe_all",
             return_value=[
                 _probe(
                     "jellyfin",
@@ -199,7 +199,7 @@ class AgentMediaServerDiagnosisTests(unittest.TestCase):
             error="secret exception",
         )
         with patch(
-            "app.agent.media_server_actions._probe_all",
+            "app.agent.domains.system.media_server_actions._probe_all",
             return_value=[secret_result, _probe("emby", status="disabled")],
         ):
             result = diagnose_media_servers({})
@@ -217,7 +217,7 @@ class AgentMediaServerDiagnosisTests(unittest.TestCase):
             with (
                 self.subTest(version=unsafe),
                 patch(
-                    "app.agent.media_server_actions._probe_all",
+                    "app.agent.domains.system.media_server_actions._probe_all",
                     return_value=[
                         _probe("jellyfin", version=unsafe),
                         _probe("emby", status="disabled"),
@@ -235,13 +235,13 @@ class AgentMediaServerDiagnosisTests(unittest.TestCase):
     def test_busy_and_unexpected_probe_failures_use_safe_fixed_results(self):
         semaphore = Mock()
         semaphore.acquire.return_value = False
-        with patch("app.agent.media_server_actions._DIAGNOSTIC_SEMAPHORE", semaphore):
+        with patch("app.agent.domains.system.media_server_actions._DIAGNOSTIC_SEMAPHORE", semaphore):
             busy = diagnose_media_servers({})
         self.assertEqual(busy.status, "unavailable")
         self.assertFalse(busy.data["network_accessed"])
         semaphore.release.assert_not_called()
         with patch(
-            "app.agent.media_server_actions._probe_all",
+            "app.agent.domains.system.media_server_actions._probe_all",
             side_effect=RuntimeError("secret http://192.168.1.9"),
         ):
             failed = diagnose_media_servers({})
@@ -253,7 +253,7 @@ class AgentMediaServerDiagnosisTests(unittest.TestCase):
 
     def test_version_and_latency_are_strictly_bounded(self):
         with patch(
-            "app.agent.media_server_actions._probe_all",
+            "app.agent.domains.system.media_server_actions._probe_all",
             return_value=[
                 _probe("jellyfin", version="12.0.1", latency_ms=999999),
                 _probe("emby", product="Emby", version="4.9.0", latency_ms=True),

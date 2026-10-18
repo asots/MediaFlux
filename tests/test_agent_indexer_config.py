@@ -9,14 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import config
-from app.agent.errors import AgentToolError
-from app.agent.indexer_config_actions import (
+from app.agent.domains.resources.indexer_config_actions import (
     current_indexer_site_ids,
     indexer_sites_arguments,
     prepare_indexer_sites_confirmation,
     summarize_indexer_sites,
     verify_indexer_sites_write,
 )
+from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, RiskLevel, ToolReference, ToolResult
 from app.agent.public_view import format_public_result
 from app.indexers.config import (
@@ -77,10 +77,10 @@ class IndexerSiteConfigUnitTests(unittest.TestCase):
             "INDEXER_SITE_CONFIG_VERSION": "",
         }
         with patch(
-            "app.agent.indexer_config_actions.config.get",
+            "app.agent.domains.resources.indexer_config_actions.config.get",
             side_effect=lambda key, default="": values.get(key, default),
         ), patch(
-            "app.agent.indexer_config_actions.config.get_bool", return_value=False,
+            "app.agent.domains.resources.indexer_config_actions.config.get_bool", return_value=False,
         ):
             self.assertEqual(
                 current_indexer_site_ids(),

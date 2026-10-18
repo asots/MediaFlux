@@ -6,7 +6,7 @@ from app import database as db
 from app.agent.kernel.bootstrap import build_agent_kernel_runtime
 from app.agent.kernel.model import ModelEvent, ModelEventType
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.state import AgentInput, PublicationLease, StateUpdate
+from app.agent.kernel.state_types import AgentInput, PublicationLease, StateUpdate
 
 
 def test_cold_cancel_revokes_live_request_and_late_output():

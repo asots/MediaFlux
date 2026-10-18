@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agent.errors import AgentToolError
-from app.agent.library_episode_count import (
+from app.agent.domains.library.episode_count import (
     count_series_episodes,
     count_series_episodes_arguments,
 )
+from app.agent.errors import AgentToolError
 
 
 class LibraryEpisodeCountArgumentsTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class LibraryEpisodeCountArgumentsTests(unittest.TestCase):
 
 
 class LibraryEpisodeCountToolTests(unittest.TestCase):
-    @patch("app.agent.library_episode_count.inspect_series_episode_sources")
+    @patch("app.agent.domains.library.episode_count.inspect_series_episode_sources")
     def test_counts_unique_local_episode_coordinates_and_seasons(self, inspect_sources):
         inspect_sources.return_value = [
             {
@@ -108,7 +108,7 @@ class LibraryEpisodeCountToolTests(unittest.TestCase):
             include_specials=False,
         )
 
-    @patch("app.agent.library_episode_count.inspect_series_episode_sources")
+    @patch("app.agent.domains.library.episode_count.inspect_series_episode_sources")
     def test_limits_count_to_named_library_without_exposing_internal_id(
         self, inspect_sources
     ):
@@ -144,7 +144,7 @@ class LibraryEpisodeCountToolTests(unittest.TestCase):
         )
         self.assertNotIn("library-id", repr(result.to_dict()))
 
-    @patch("app.agent.library_episode_count.inspect_series_episode_sources")
+    @patch("app.agent.domains.library.episode_count.inspect_series_episode_sources")
     def test_does_not_report_zero_when_media_server_is_not_configured(
         self, inspect_sources
     ):
@@ -158,7 +158,7 @@ class LibraryEpisodeCountToolTests(unittest.TestCase):
         self.assertIs(result.data["inventory_complete"], False)
         self.assertNotIn("0 集", result.summary)
 
-    @patch("app.agent.library_episode_count.inspect_series_episode_sources")
+    @patch("app.agent.domains.library.episode_count.inspect_series_episode_sources")
     def test_not_found_returns_candidates_without_false_count(self, inspect_sources):
         inspect_sources.return_value = [
             {
@@ -183,7 +183,7 @@ class LibraryEpisodeCountToolTests(unittest.TestCase):
         )
         self.assertNotIn("id", result.data["candidates"][0])
 
-    @patch("app.agent.library_episode_count.inspect_series_episode_sources")
+    @patch("app.agent.domains.library.episode_count.inspect_series_episode_sources")
     def test_marks_unnumbered_or_truncated_inventory_as_partial(self, inspect_sources):
         inspect_sources.return_value = [
             {
@@ -217,7 +217,7 @@ class LibraryEpisodeCountToolTests(unittest.TestCase):
         )
         self.assertIn("下限", result.suggestions[0])
 
-    @patch("app.agent.library_episode_count.inspect_series_episode_sources")
+    @patch("app.agent.domains.library.episode_count.inspect_series_episode_sources")
     def test_preserves_normalized_legacy_input_and_serialized_output_fields(
         self, inspect_sources
     ):
@@ -330,7 +330,7 @@ def inventory_source(episodes=(), **fields):
 @pytest.fixture
 def inspect_inventory(monkeypatch):
     def inspect(sources):
-        monkeypatch.setattr("app.agent.library_episode_count.inspect_series_episode_sources", lambda *a, **kw: sources)
+        monkeypatch.setattr("app.agent.domains.library.episode_count.inspect_series_episode_sources", lambda *a, **kw: sources)
         return count_series_episodes({"query": "测试剧"})
     return inspect
 

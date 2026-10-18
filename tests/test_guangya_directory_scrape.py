@@ -1565,7 +1565,10 @@ class SingleFileInspectionTests(IsolatedDatabaseTestCase):
             self.inspector.inspect_file("small-video", rules)
 
     def test_source_inside_archive_sibling_branch_can_inspect_preview_and_execute(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         inbox = _dir("inbox", "inbox", "archive")
         movies = _dir("movies", "电影", "archive")
@@ -1793,7 +1796,10 @@ class TMDBCreditsDetailTests(unittest.TestCase):
 class DirectoryScrapeServiceTests(unittest.TestCase):
     def setUp(self):
         from app.modules.directory_media import DirectoryMediaInspector
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         self.tree = {
             "movie-dir": [
@@ -2093,7 +2099,10 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
         self.assertIn("类型", result["message"])
 
     def test_nsfw_single_file_auto_match_keeps_movie_identity(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         offline_root = _dir("offline-root", "离线")
         adult_dir = _dir("adult-dir", "ATID-675", "offline-root")
@@ -2160,7 +2169,10 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
 class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
     def setUp(self):
         from app.modules.directory_media import DirectoryMediaInspector
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         tree = {
             "movie-dir": [
@@ -2284,7 +2296,7 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
     def test_postwrite_receipt_error_survives_worker_archive_and_agent_status(self):
         import threading
 
-        from app.agent.domain_catalog.cloud_runtime import guangya_organize_status
+        from app.agent.domains.guangya.runtime import guangya_organize_status
         from app.agent.models import ToolContext
         from app.modules.organize_tasks import OrganizeTaskManager
         from app.repositories.organize_operation_jobs import (
@@ -2448,7 +2460,10 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
 
 class PartialDirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
     def setUp(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         source_items = [
             _file(f"e{episode}", f"Example.Show.S01E{episode:02d}.mkv", "show-dir")
@@ -2594,7 +2609,10 @@ class PartialDirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         self.assertIn(new_directory_id, self.client.infos)
 
     def test_video_specific_metadata_moves_while_pending_video_stays(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         episodes = [
             _file(f"m{episode}", f"Example.Show.S01E{episode:02d}.mkv", "show-dir")
@@ -2632,7 +2650,10 @@ class PartialDirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
         self.assertEqual(client.infos["metadata-unknown"].parent_id, "show-dir")
 
     def test_nested_pending_directory_is_preserved_during_empty_cleanup(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         season_dir = _dir("season", "Season 01", "show-dir")
         pending_dir = _dir("pending-dir", "待处理", "show-dir")
@@ -2675,7 +2696,10 @@ class PartialDirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
 
 class SingleFileScrapeScopeTests(IsolatedDatabaseTestCase):
     def setUp(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         source_items = [
             _file("supergirl", "Supergirl.2026.mkv", "source"),
@@ -2847,7 +2871,10 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
         source_items: list[GuangYaFile] | None = None,
         client_type: type[_MutableTreeClient] = _MutableTreeClient,
     ):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         directory_name = directory_name or (
             "[H-Enc] Arifureta Shokugyou de Sekai Saikyou "
@@ -3003,7 +3030,10 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
                 )
 
     def test_multi_season_subdirectories_preview_duplicate_episode_names_safely(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         tree = {
             "source": [
@@ -3281,7 +3311,10 @@ class DirectorySeasonOverrideTests(IsolatedDatabaseTestCase):
         self.assertIn("source", client.infos)
 
     def test_extra_files_preview_and_execute_into_specials(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         root_items = [
             _file(
@@ -3401,7 +3434,10 @@ class SingleEpisodeOverrideTests(IsolatedDatabaseTestCase):
             return super().get_detail_with_credits(tmdb_id, media_type)
 
     def _build(self, filename=None):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         filename = filename or "[LoliHouse] The Ghost in the Shell - 03 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv"
         episode = _file("episode-3", filename, "source")
@@ -3866,11 +3902,11 @@ class DirectoryScrapeSecretBoundaryTests(IsolatedDatabaseTestCase):
                 self.assertIn("RuntimeError", serialized)
 
     def test_preview_http_target_scan_failure_is_safe_and_fail_closed(self):
+        import app.routes.guangya_scrape_api as scrape_api
         from app.modules.directory_scrape import (
             DirectoryScrapeService,
             DirectoryScrapeStore,
         )
-        import app.routes.guangya_scrape_api as scrape_api
 
         video = _file("video", "Iron.Man.2008.mkv", "source")
 
@@ -3953,8 +3989,11 @@ class DirectoryScrapeSecretBoundaryTests(IsolatedDatabaseTestCase):
         self.assertIn("RuntimeError", serialized)
 
     def test_inspect_no_supported_video_returns_safe_http_400(self):
-        from app.modules.directory_scrape import DirectoryScrapeService, DirectoryScrapeStore
         import app.routes.guangya_scrape_api as scrape_api
+        from app.modules.directory_scrape import (
+            DirectoryScrapeService,
+            DirectoryScrapeStore,
+        )
 
         service = DirectoryScrapeService(
             client=_TreeClient(
@@ -4181,10 +4220,10 @@ class OrganizeScanSampleTests(unittest.TestCase):
         self.assertEqual(stats["skipped"], 2)
 
     def test_internal_group_file_ids_do_not_bypass_sample_filter(self):
-        from app.modules.organize_models import OrganizeContext
-        from app.modules.organize_scan import OrganizerScanner
         from app.modules.organize import Organizer
         from app.modules.organize_groups import enumerate_group_tasks
+        from app.modules.organize_models import OrganizeContext
+        from app.modules.organize_scan import OrganizerScanner
 
         sample = _file("sample-file", "Sample.mkv", "source", size=316_410_000)
         tree = {"source": [sample]}

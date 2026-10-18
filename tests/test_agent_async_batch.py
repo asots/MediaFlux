@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
+import app.agent.kernel.completion_receipts as completion_receipts
 from app import database as db
 from app.agent import effect_completion as effects
 from app.agent import rate_limit as rates
@@ -18,24 +19,35 @@ from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.feature_gate import initialize_runtime_fence
 from app.agent.kernel import batch_effects
 from app.agent.kernel.bootstrap import _capture_creation_binding
-from app.agent.kernel.capabilities import CapabilityRetriever, KernelToolSpec, ToolCatalog, ToolEffect
+from app.agent.kernel.capabilities import (
+    CapabilityRetriever,
+    KernelToolSpec,
+    ToolCatalog,
+    ToolEffect,
+)
 from app.agent.kernel.continuation import CLAIM_SECONDS
 from app.agent.kernel.effects import ConfirmationEffectPlanStore, PreparedEffect
 from app.agent.kernel.events import AgentEventType as Event
 from app.agent.kernel.persistence import SQLiteKernelStore
-from app.agent.kernel.pipeline import ToolCallContext, ToolPipeline
+from app.agent.kernel.pipeline import ToolPipeline
 from app.agent.kernel.ports import existing_actions
 from app.agent.kernel.session import AgentSession
-from app.agent.kernel.state import AgentInput, CancellationToken
+from app.agent.kernel.state_types import AgentInput, CancellationToken
+from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import ToolContext, ToolResult
 from app.modules import organize_tasks
 from app.repositories import organize_operation_jobs as jobs
 from tests.support import isolated_test_database
-from tests.test_agent_batch_confirmation import batch_quota as shared_batch_quota, capture
+from tests.test_agent_batch_confirmation import batch_quota as shared_batch_quota
+from tests.test_agent_batch_confirmation import capture
 from tests.test_agent_effect_continuation import (
-    _OfflineClient, _domain_arguments, _offline_runtime, _paused_manager, _run_real_worker, _spec,
+    _domain_arguments,
+    _offline_runtime,
+    _OfflineClient,
+    _paused_manager,
+    _run_real_worker,
+    _spec,
 )
-
 from tests.test_agent_task_first_slice import NativeScript
 
 batch_quota = shared_batch_quota
@@ -75,7 +87,7 @@ class AsyncBatchRig:
         self.rate_limiter, self.denied = None, set()
         self.tail_effect = ToolEffect.WRITE
         self.client.rename = Mock(wraps=self.client.rename)
-        spec = _spec("fs")
+        spec = _spec("fs", actions=self.stack.domain_actions)
         self.prepare = Mock(wraps=spec.context_confirmation_preparer)
         tracked = existing_actions.adapt_tool_spec(replace(spec, batch_mode="tracked",
             workflow="guangya_fs_change", workflow_stage=20, context_confirmation_preparer=self.prepare))
@@ -288,7 +300,7 @@ def test_pending_poll_cold_resume_preserves_frozen_parent_and_never_replays(rig,
         assert row["status"] == "pending" and rig.submit.call_count == 1
         assert not rig.client.rename.called and not rig.attempts
         state, wait = await rig.row()
-        seed = json.loads(effects._completion_cipher().decrypt(wait["sealed"].encode()))
+        seed = json.loads(completion_receipts._completion_cipher().decrypt(wait["sealed"].encode()))
         scope = rig.submit.call_args.args[2].completion_scope
         assert scope.plan_id == seed["plan_id"] == rig.plan.plan_id
         assert seed["tool"] == "agent.batch" and seed["origin"] == scope.origin

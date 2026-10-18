@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import database as db
-from app.agent.activity_actions import search_activities, timeline_snapshot
+from app.agent.domains.activity.actions import search_activities, timeline_snapshot
 from app.agent.models import ToolContext
 from app.modules import backup
 from app.runtime_paths import RuntimePaths

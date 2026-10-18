@@ -5,12 +5,15 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.agent.discovery_mapping_actions import get_discovery_detail
 from app.agent.domain_catalog import build_tool_specs
+from app.agent.domains.discovery.credits_actions import (
+    get_media_credits,
+    media_credits_arguments,
+)
+from app.agent.domains.discovery.mapping_actions import get_discovery_detail
 from app.agent.errors import AgentToolError
 from app.agent.kernel.capabilities import ToolEffect
 from app.agent.kernel.ports.existing_actions import catalog_from_tool_specs
-from app.agent.media_credits_actions import get_media_credits, media_credits_arguments
 from app.agent.models import ToolContext
 from app.clients.tmdb import TMDBClient
 from app.discovery.models import (
@@ -49,8 +52,8 @@ def _call(payload, args=None):
         session=session,
     )
     with (
-        patch("app.agent.media_credits_actions.config.get_bool", return_value=True),
-        patch("app.agent.media_credits_actions.TMDBClient", return_value=client),
+        patch("app.agent.domains.discovery.credits_actions.config.get_bool", return_value=True),
+        patch("app.agent.domains.discovery.credits_actions.TMDBClient", return_value=client),
     ):
         result = get_media_credits(args or {"tmdb_id": "272938", "media_type": "tv"})
     assert session.closed
@@ -211,8 +214,8 @@ def test_failures_are_factual_sanitized_and_close_client(exc, state, status):
     client = Mock()
     client.media_credits.side_effect = exc
     with (
-        patch("app.agent.media_credits_actions.config.get_bool", return_value=True),
-        patch("app.agent.media_credits_actions.TMDBClient", return_value=client),
+        patch("app.agent.domains.discovery.credits_actions.config.get_bool", return_value=True),
+        patch("app.agent.domains.discovery.credits_actions.TMDBClient", return_value=client),
     ):
         result = get_media_credits({"tmdb_id": "1", "media_type": "movie"})
     assert not result.ok and result.status == status
@@ -224,8 +227,8 @@ def test_failures_are_factual_sanitized_and_close_client(exc, state, status):
 
 def test_disabled_does_not_instantiate_provider_or_claim_empty_cast():
     with (
-        patch("app.agent.media_credits_actions.config.get_bool", return_value=False),
-        patch("app.agent.media_credits_actions.TMDBClient") as factory,
+        patch("app.agent.domains.discovery.credits_actions.config.get_bool", return_value=False),
+        patch("app.agent.domains.discovery.credits_actions.TMDBClient") as factory,
     ):
         result = get_media_credits({"tmdb_id": "1", "media_type": "movie"})
     factory.assert_not_called()
@@ -264,9 +267,9 @@ def test_detail_explicitly_marks_credits_as_not_queried():
         title="真人剧",
     )
     with (
-        patch("app.agent.discovery_mapping_actions.config.get_bool", return_value=True),
+        patch("app.agent.domains.discovery.mapping_actions.config.get_bool", return_value=True),
         patch(
-            "app.agent.discovery_mapping_actions.get_discovery_service",
+            "app.agent.domains.discovery.mapping_actions.get_discovery_service",
             return_value=service,
         ),
     ):

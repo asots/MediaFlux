@@ -11,28 +11,32 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import config
-from app.indexers.errors import (
-    IndexerError,
-    IndexerResultExpired,
-    IndexerResultNotFound,
-    IndexerValidationError,
-)
+from app.clients.http import HttpError
 from app.indexers.config import (
     INDEXER_SITE_LABELS,
     MANUAL_INDEXER_SITE_ORDER,
 )
-from app.indexers.models import IndexerMediaSearchRequest, indexer_site_status
-from app.indexers.ranking import match_priority
-from app.indexers.release import parse_indexer_release_position
-from app.indexers.service import IndexerService
-from app.indexers.runtime import get_indexer_service
 from app.indexers.downloads import (
     DownloadRequestCreationError as _DownloadRequestCreationError,
+)
+from app.indexers.downloads import (
     InvalidDownloadData as _InvalidDownloadData,
+)
+from app.indexers.downloads import (
     download_indexer_result,
     download_indexer_result_public,
     resubmit_indexer_download_request,
 )
+from app.indexers.errors import (
+    IndexerResultExpired,
+    IndexerResultNotFound,
+    IndexerValidationError,
+)
+from app.indexers.models import IndexerMediaSearchRequest, indexer_site_status
+from app.indexers.ranking import match_priority
+from app.indexers.release import parse_indexer_release_position
+from app.indexers.runtime import get_indexer_service
+from app.indexers.service import IndexerService
 from app.modules.download_dispatcher import public_dispatch_summary
 from app.web import api_error, api_response, require_api_login
 
@@ -78,7 +82,7 @@ def _public_source_url(service, item) -> str | None:
         adapter = service.registry.get(item.site_id)
         client = adapter.http_client_for_result(item)
         allowed_hosts = {str(host).rstrip(".").lower() for host in getattr(client, "allowed_hosts", ())}
-    except (IndexerError, KeyError, TypeError, ValueError):
+    except (HttpError, KeyError, TypeError, ValueError):
         return None
     try:
         host = (parsed.hostname or "").rstrip(".").lower()
@@ -102,7 +106,7 @@ def _public_search_item(item, service=None) -> dict[str, Any]:
     return payload
 
 
-def _error_response(exc: IndexerError):
+def _error_response(exc: HttpError):
     if isinstance(exc, IndexerResultExpired):
         status = 410
     elif isinstance(exc, IndexerResultNotFound):
@@ -244,7 +248,7 @@ async def _stream_search(request: Request, service, run_search):
                 update = asyncio.create_task(updates.get())
             elif not done:
                 yield ": keepalive\n\n"
-    except IndexerError as exc:
+    except HttpError as exc:
         yield "event: error\ndata: " + json.dumps({"error": exc.public_message, "code": exc.code}, ensure_ascii=False) + "\n\n"
     finally:
         for pending in (task, update):
@@ -342,7 +346,7 @@ async def search(
         result = await service.search(
             q, page, site_ids, scope="manual", sort_mode=sort
         )
-    except IndexerError as exc:
+    except HttpError as exc:
         return _error_response(exc)
     return api_response(_search_payload(service, result))
 
@@ -360,7 +364,7 @@ async def search_media(request: Request, payload: Any = Body(...)):
         result = await service.search_media(
             media_request, site_ids, scope="manual"
         )
-    except IndexerError as exc:
+    except HttpError as exc:
         return _error_response(exc)
     return api_response(_search_payload(service, result))
 
@@ -414,7 +418,7 @@ async def download(request: Request, data: Any = Body(default=None)):
     service = get_indexer_service()
     try:
         item = await download_indexer_result(service, result_id, target, scope="manual")
-    except IndexerError as exc:
+    except HttpError as exc:
         return _error_response(exc)
     except _InvalidDownloadData:
         return api_response({"error": "资源下载数据无效", "code": "invalid_download"}, 400)

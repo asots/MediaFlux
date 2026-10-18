@@ -7,8 +7,11 @@ import unittest
 from unittest.mock import patch
 
 from app import database as db
+from app.agent.domains.workspace.actions import (
+    search_workspace,
+    workspace_search_arguments,
+)
 from app.agent.errors import AgentToolError
-from app.agent.workspace_actions import search_workspace, workspace_search_arguments
 from app.clients.base import MediaItem
 from tests.support import IsolatedDatabaseTestCase
 
@@ -157,7 +160,7 @@ class WorkspaceSearchDataTests(IsolatedDatabaseTestCase):
             primary_image="PRIVATE-IMAGE",
         )
         with patch(
-            "app.agent.workspace_actions.search_media_servers",
+            "app.agent.domains.workspace.actions.search_media_servers",
             return_value=[
                 {
                     "server_type": "jellyfin",
@@ -220,21 +223,21 @@ class WorkspaceSearchDataTests(IsolatedDatabaseTestCase):
 
     def test_source_failure_is_isolated_and_error_detail_is_hidden(self):
         with (
-            patch("app.agent.workspace_actions.search_media_servers", return_value=[]),
+            patch("app.agent.domains.workspace.actions.search_media_servers", return_value=[]),
             patch(
-                "app.agent.workspace_actions.db.search_agent_workspace_rss",
+                "app.agent.domains.workspace.actions.db.search_agent_workspace_rss",
                 side_effect=RuntimeError("token=PRIVATE-SOURCE-ERROR"),
             ),
             patch(
-                "app.agent.workspace_actions.db.search_agent_workspace_downloads",
+                "app.agent.domains.workspace.actions.db.search_agent_workspace_downloads",
                 side_effect=_empty_records,
             ),
             patch(
-                "app.agent.workspace_actions.db.search_agent_workspace_organize",
+                "app.agent.domains.workspace.actions.db.search_agent_workspace_organize",
                 side_effect=_empty_records,
             ),
             patch(
-                "app.agent.workspace_actions.db.search_agent_workspace_local_media",
+                "app.agent.domains.workspace.actions.db.search_agent_workspace_local_media",
                 side_effect=_empty_records,
             ),
         ):
@@ -272,7 +275,7 @@ class WorkspaceSearchDataTests(IsolatedDatabaseTestCase):
             with (
                 self.subTest(title=title),
                 patch(
-                    "app.agent.workspace_actions.db.search_agent_workspace_rss",
+                    "app.agent.domains.workspace.actions.db.search_agent_workspace_rss",
                     return_value={
                         "items": [
                             {
@@ -299,7 +302,7 @@ class WorkspaceSearchDataTests(IsolatedDatabaseTestCase):
             id="safe-id", name="沙丘", type="Movie", year="2026token"
         )
         with patch(
-            "app.agent.workspace_actions.search_media_servers",
+            "app.agent.domains.workspace.actions.search_media_servers",
             return_value=[{"server_type": "jellyfin", "items": [media_item]}],
         ):
             result = search_workspace(
@@ -322,7 +325,7 @@ class WorkspaceSearchDataTests(IsolatedDatabaseTestCase):
             with (
                 self.subTest(status=status),
                 patch(
-                    "app.agent.workspace_actions.db.search_agent_workspace_organize",
+                    "app.agent.domains.workspace.actions.db.search_agent_workspace_organize",
                     return_value={
                         "items": [
                             {
