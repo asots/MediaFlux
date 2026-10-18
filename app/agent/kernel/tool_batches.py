@@ -46,6 +46,17 @@ logger = logging.getLogger(__name__)
 
 def admit_calls(turn: AgentTurn, reply: _ModelRound) -> None:
     calls, assistant_text, provider_state = reply.calls, reply.text, reply.provider_state
+    identities: set[str] = set()
+    try:
+        for call in calls:
+            if not isinstance(call.call_id, str) or not call.call_id.strip() or call.call_id in identities:
+                raise ValueError("empty or duplicate tool call identity")
+            call.call_id.encode("utf-8")
+            identities.add(call.call_id)
+    except ValueError as exc:
+        raise ToolPipelineError(
+            "模型工具调用标识无效或重复，本批调用未执行。", code="invalid_model_tool_calls",
+        ) from exc
     try:
         for call in calls:
             if call.argument_error is None:
