@@ -14,6 +14,7 @@ from app.agent.kernel.persistence import (
 )
 from app.agent.kernel.references import InMemoryReferenceStore, ReferenceError
 from app.agent.kernel.session_guard import session_scope_guard
+from app.agent.kernel.state import InMemorySessionStateStore
 from app.agent.kernel.state_types import StalePublicationError, StateUpdate
 
 
@@ -258,6 +259,33 @@ class SQLiteKernelStoreTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()
         self.assertIsNone(row)
         self.assertEqual(await store.due_effect_waits(), [])
+
+    async def test_delivered_receipts_do_not_fill_poll_limit_or_lose_continuations(self) -> None:
+        for store in (InMemorySessionStateStore(clock=lambda: 100),
+                      SQLiteKernelStore(secret_provider=lambda: "test-kernel-secret", clock=lambda: 100)):
+            with self.subTest(store=type(store).__name__):
+                await store.begin_turn(owner="owner", session_id="session", request_id="one")
+
+                def add_waits(state):
+                    state.metadata["effect_waits"] = {
+                        **{f"delivered-{index:02}": {
+                            "next_poll_at": index + 1, "delivered": True,
+                            "continuation": {"state": "pending", "wait_id": f"wait-{index}"},
+                            "receipt_message": {"content": f"receipt-{index}"},
+                        } for index in range(16)},
+                        "unfinished": {"next_poll_at": 99, "delivered": False, "sealed": "pending"},
+                        "future": {"next_poll_at": 101, "delivered": False, "sealed": "future"},
+                    }
+                    state.metadata["effect_next_poll_at"] = 99
+
+                await store.update_effect_state(owner="owner", session_id="session", change=add_waits)
+                before = await store.load(owner="owner", session_id="session")
+                for limit in (1, 16):
+                    self.assertEqual(
+                        [record["plan_id"] for record in await store.due_effect_waits(limit=limit)],
+                        ["unfinished"],
+                    )
+                self.assertEqual(await store.load(owner="owner", session_id="session"), before)
 
     async def test_due_query_uses_expression_index_and_limits_candidate_sessions(self) -> None:
         now = [100.0]

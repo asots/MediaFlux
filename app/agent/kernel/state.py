@@ -358,6 +358,7 @@ class InMemorySessionStateStore:
                 for plan_id, record in waits.items():
                     if (
                         not isinstance(record, Mapping)
+                        or record.get("delivered") is True
                         or not _effect_time_is_due(record.get("next_poll_at"), now)
                     ):
                         continue
