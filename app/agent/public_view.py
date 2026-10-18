@@ -716,9 +716,10 @@ def public_conversation_messages(
             if final_index in legacy_finals:
                 content = sanitize_confirmed_answer(content, legacy_finals[final_index][1])
             receipt = last_text.strip()
-            if content == receipt or content.startswith(receipt + "\n\n"):
+            before, matched, after = content.partition(receipt)
+            if matched and (not before or before.endswith("\n\n")) and (not after or after.startswith("\n\n")):
                 folded_result_index = final_index
-                candidate_followup = content[len(receipt):].strip()
+                candidate_followup = "\n\n".join(part.strip() for part in (before, after) if part.strip())
 
     def remember_tool(value: object) -> None:
         name = str(value or "").strip()

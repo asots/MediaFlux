@@ -222,8 +222,22 @@ def test_schema_errors_obey_existing_tool_budget(mode, store):
         events = await collect(session.run(AgentInput(message='只读核验', owner='owner', session_id='budget')))
         wire.verify(3)
         assert not executed
-        assert events[-1].payload['finish_reason'] == 'tool_budget_exceeded'
-        assert events[-1].payload['tool_calls'] == 2
+        assert events[-1].type.name == 'TURN_FAILED'
+        assert events[-1].payload['code'] == 'invalid_arguments'
+        assert not wire.requests[-1].get('tools')
+        failures = [event.payload for event in events if event.type.name == 'TOOL_FAILED']
+        assert [(event['call_id'], event['code']) for event in failures] == [
+            ('call-0', 'invalid_arguments'), ('call-1', 'invalid_arguments'),
+            ('call-2', 'tool_budget_exceeded'),
+        ]
+        cold = await SQLiteKernelStore(secret_provider=lambda: 'offline-tool-argument-test').load(
+            owner='owner', session_id='budget')
+        assert [call['call_id'] for row in cold.conversation for call in row.get('tool_calls', [])] == [
+            'call-0', 'call-1', 'call-2',
+        ]
+        assert [row['tool_call_id'] for row in cold.conversation if row['role'] == 'tool'] == [
+            'call-0', 'call-1', 'call-2',
+        ]
     asyncio.run(run())
 
 

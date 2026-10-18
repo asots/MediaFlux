@@ -106,6 +106,10 @@ def test_history_two_confirmations_keep_earlier_download_receipt_after_restart(i
         assert restored is not None
         assert f"下载请求 #{second_id}" in restored["last_result"]["text"]
         assert sum(bool(m.get("candidate_result_ref")) for m in messages) == 1
+        folded = next(m for m in messages if m.get("candidate_result_ref"))
+        assert "部分完成" in folded["candidate_followup"]
+        assert "未完成的查询" in folded["candidate_followup"]
+        assert f"下载请求 #{second_id}" not in folded["candidate_followup"]
     asyncio.run(exercise())
 
 

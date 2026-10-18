@@ -545,6 +545,33 @@ class AgentKernelPublicViewTests(unittest.TestCase):
         self.assertEqual(messages[0]["candidate_result_ref"], "r")
         self.assertEqual(messages[0]["candidate_followup"], "后续还有新事实。", "候选卡不能吞掉后续说明")
 
+    def test_folded_candidate_preserves_partial_failure_before_receipt(self):
+        receipt = {"role": "assistant", "tool_name": "ingest.submit", "effect_plan_id": "p", "candidate_result_ref": "r", "public_content": "已提交", "content": "internal"}
+        view = {"ref": "r", "last_result": {"text": "已提交"}}
+        for suffix in ("", "\n\n未完成的查询：服务不可用"):
+            with self.subTest(suffix=suffix):
+                final = {"role": "assistant", "effect_plan_id": "p", "content": "部分完成：查询失败\n\n已提交" + suffix}
+                messages = public_conversation_messages([receipt, final], candidate_view=view)
+                self.assertEqual(len(messages), 1)
+                self.assertEqual(messages[0]["candidate_result_ref"], "r")
+                self.assertEqual(messages[0]["candidate_followup"], "部分完成：查询失败" + suffix)
+                self.assertEqual(messages[0]["content"], final["content"])
+
+    def test_candidate_fold_requires_receipt_paragraph_and_matching_plan(self):
+        receipt = {"role": "assistant", "tool_name": "ingest.submit", "effect_plan_id": "p", "candidate_result_ref": "r", "public_content": "已提交", "content": "internal"}
+        view = {"ref": "r", "last_result": {"text": "已提交"}}
+        for content in ("尚未提交", "尚未已提交", "已提交状态待定", "状态：已提交\n\n后续说明"):
+            with self.subTest(content=content):
+                final = {"role": "assistant", "effect_plan_id": "p", "content": content}
+                messages = public_conversation_messages([receipt, final], candidate_view=view)
+                self.assertNotIn("candidate_result_ref", messages[-1])
+                self.assertEqual(messages[-1]["content"], content)
+        final = {"role": "assistant", "effect_plan_id": "other", "content": "部分完成\n\n已提交"}
+        messages = public_conversation_messages([receipt, final], candidate_view=view)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0]["candidate_result_ref"], "r")
+        self.assertNotIn("candidate_result_ref", messages[1])
+
     def test_legacy_submitted_history_merges_only_explicit_internal_receipt(self):
         result = {"ok": True, "status": "submitted", "summary": "下载请求 #276 已提交"}
         receipt = {"role": "assistant", "tool_name": "ingest.submit", "content": "已确认操作的可信系统结果（不是待执行计划）：\n" + json.dumps(result)}
