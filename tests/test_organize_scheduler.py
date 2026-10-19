@@ -16,6 +16,7 @@ except ModuleNotFoundError:
 
 from app.modules.organize import OrganizeRules, Organizer
 from app.modules.organize_tasks import OrganizeTaskManager
+from tests.support import isolated_test_database
 
 
 class FakeManager:
@@ -510,6 +511,7 @@ class OrganizeSchedulerTests(unittest.TestCase):
     def test_task_manager_exposes_cron_trigger_type(self):
         import inspect
 
+        self.enterContext(isolated_test_database())
         self.assertIn("trigger_type", inspect.signature(OrganizeTaskManager.start).parameters)
         manager = OrganizeTaskManager()
 
