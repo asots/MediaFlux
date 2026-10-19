@@ -1021,7 +1021,7 @@ class MediaServerClient:
         deadline_at: float | None = None,
         include_specials: bool = False,
     ) -> SeriesEpisodeInventory:
-        """分页枚举剧集集号；默认忽略 Season 0，显式开启时纳入特典。"""
+        """按文件记录分页、按季集去重；合并集展开，逻辑集数仍受上限约束。"""
         cap = max(1, min((max_episodes or 2000), 2000))
         page = max(1, min((page_size or 200), 200))
         seen: set[tuple[int, int]] = set()
@@ -1042,29 +1042,37 @@ class MediaServerClient:
             },
         )
         for item in items:
-            season_value = item.get("ParentIndexNumber")
-            episode_value = item.get("IndexNumber")
-            if season_value is None or episode_value is None:
-                ignored_unknown += 1
-                continue
+            start = item.get("IndexNumber")
+            end = item.get("IndexNumberEnd")
+            values = (item.get("ParentIndexNumber"), start)
             try:
-                season = int(season_value)
-                episode = int(episode_value)
+                if any(type(value) not in (int, str) for value in values):
+                    raise ValueError("季集编号不是整数")
+                season, start = (int(str(value)) for value in values)
+                if season < 0 or start <= 0:
+                    raise ValueError("季集范围无效")
+                if season == 0 and not include_specials:
+                    ignored_specials += 1
+                    continue
+                if end is not None and type(end) not in (int, str):
+                    raise ValueError("结束集号不是整数")
+                end = start if end is None else int(str(end))
+                if end < start:
+                    raise ValueError("季集范围无效")
             except (TypeError, ValueError):
                 ignored_unknown += 1
                 continue
-            if season == 0 and episode > 0:
-                if include_specials:
-                    seen.add((season, episode))
-                else:
-                    ignored_specials += 1
-            elif season > 0 and episode > 0:
+            # 最多观察 cap+1 个坐标即可证明截断，不能按异常结束集号无限展开。
+            for episode in range(start, min(end, start + cap) + 1):
                 seen.add((season, episode))
-            else:
-                ignored_unknown += 1
+                if len(seen) > cap:
+                    truncated = True
+                    break
+            if len(seen) > cap:
+                break
 
         return SeriesEpisodeInventory(
-            episodes=sorted(seen),
+            episodes=sorted(seen)[:cap],
             total=total,
             truncated=truncated,
             ignored_specials=ignored_specials,

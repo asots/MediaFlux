@@ -1215,6 +1215,8 @@ class MediaSubscriptionService:
             return False, "媒体服务器映射不完整，本次未执行资源搜索"
         if any(bool(source.get("truncated")) for source in sources):
             return False, "媒体服务器集数清单被截断，本次未执行资源搜索"
+        if not identity and any(source.get("ignored_unknown") for source in sources):
+            return False, "媒体服务器存在无法确认季集编号的记录，本次未执行资源搜索"
         if not statuses <= {"ready", "not_found"}:
             return False, "媒体服务器返回了无法确认的状态"
         return True, "媒体服务器审计完整"

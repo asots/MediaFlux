@@ -216,3 +216,87 @@ class MediaInventoryCompletenessTests(unittest.TestCase):
         self.assertEqual(inventory.episodes, [(1, 1)])
         self.assertEqual(inventory.total, 2)
         self.assertFalse(inventory.truncated)
+
+    def test_multi_episode_files_expand_ranges_without_changing_record_pagination(self):
+        for cls in (EmbyClient, JellyfinClient):
+            client = self.client(cls)
+            pages = [
+                {"Items": [{**self.item(1), "IndexNumberEnd": 3},
+                           {**self.item(2), "IndexNumber": 3, "IndexNumberEnd": 4}],
+                 "TotalRecordCount": 3},
+                {"Items": [{**self.item(3), "IndexNumber": 5, "IndexNumberEnd": None}],
+                 "TotalRecordCount": 3},
+            ]
+            with self.subTest(server=cls.__name__), patch.object(client, "_request", side_effect=pages) as request:
+                result = client.list_series_episode_inventory("series", page_size=2)
+            self.assertEqual(result.episodes, [(1, n) for n in range(1, 6)])
+            self.assertEqual(result.total, 3)  # 服务器文件记录数不等于逻辑集数。
+            self.assertFalse(result.truncated)
+            self.assertEqual(result.ignored_unknown, 0)
+            self.assertEqual([call.kwargs["params"]["StartIndex"] for call in request.call_args_list], [0, 2])
+
+    def test_multi_episode_specials_respect_explicit_scope(self):
+        client = self.client(JellyfinClient)
+        payload = {"Items": [{**self.item(1), "ParentIndexNumber": 0, "IndexNumberEnd": 3}],
+                   "TotalRecordCount": 1}
+        for include in (False, True):
+            with self.subTest(include=include), patch.object(client, "_request", return_value=payload):
+                result = client.list_series_episode_inventory("series", include_specials=include)
+            self.assertEqual(result.episodes, [(0, n) for n in range(1, 4)] if include else [])
+            self.assertEqual(result.ignored_specials, 0 if include else 1)
+
+    def test_episode_ranges_are_bounded_without_claiming_full_inventory(self):
+        client = self.client(JellyfinClient)
+        for end in (3, 4, 10**20):
+            with self.subTest(end=end), patch.object(client, "_request", return_value={
+                "Items": [{**self.item(1), "IndexNumberEnd": end}], "TotalRecordCount": 1,
+            }):
+                result = client.list_series_episode_inventory("series", max_episodes=3)
+            self.assertEqual(result.episodes, [(1, n) for n in range(1, 4)])
+            self.assertEqual(result.truncated, end > 3)
+
+    def test_excluded_specials_do_not_make_normal_episode_inventory_unknown(self):
+        client = self.client(JellyfinClient)
+        for end in (0, True, 2.5, "bad"):
+            for include in (False, True):
+                with self.subTest(end=end, include=include), patch.object(client, "_request", return_value={
+                    "Items": [{**self.item(1), "ParentIndexNumber": 0, "IndexNumberEnd": end}],
+                    "TotalRecordCount": 1,
+                }):
+                    result = client.list_series_episode_inventory("series", include_specials=include)
+                self.assertEqual(result.episodes, [])
+                self.assertEqual(result.ignored_unknown, int(include))
+                self.assertEqual(result.ignored_specials, int(not include))
+
+    def test_invalid_episode_ranges_are_unknown_not_coerced_into_present_episodes(self):
+        client = self.client(JellyfinClient)
+        for fields in ({"IndexNumberEnd": 0}, {"IndexNumberEnd": True}, {"IndexNumberEnd": 2.5},
+                       {"IndexNumberEnd": "bad"}, {"IndexNumber": True}, {"ParentIndexNumber": 1.5}):
+            with self.subTest(fields=fields), patch.object(client, "_request", return_value={
+                "Items": [{**self.item(1), **fields}], "TotalRecordCount": 1,
+            }):
+                result = client.list_series_episode_inventory("series")
+            self.assertEqual(result.episodes, [])
+            self.assertEqual(result.ignored_unknown, 1)
+
+    def test_episode_range_reaches_agent_count_and_subscription_completeness(self):
+        from app.agent.domains.library.episode_count import count_series_episodes
+        from app.clients.base import SeriesCandidate
+        from app.services import _series_inventory_source_result
+
+        client = self.client(JellyfinClient)
+        for end in (3, "bad"):
+            with self.subTest(end=end), patch.object(client, "_request", return_value={
+                "Items": [{**self.item(1), "IndexNumberEnd": end}], "TotalRecordCount": 1,
+            }):
+                source = _series_inventory_source_result(
+                    server_type="jellyfin", server_name="Synthetic", client=client,
+                    selected_items=[SeriesCandidate("series", "Synthetic", "2026", "1")],
+                    candidates=[], status="ready", mapping_status="mapped", max_episodes=2000,
+                    include_specials=False,
+                )
+            with patch("app.agent.domains.library.episode_count.inspect_series_episode_sources", return_value=[source]):
+                result = count_series_episodes({"query": "Synthetic", "tmdb_id": "1"})
+            self.assertEqual(result.data["local_episode_count"], 3 if end == 3 else 0)
+            self.assertEqual(result.data["inventory_complete"], end == 3)
+            self.assertEqual(MediaSubscriptionService._inventory_complete([source])[0], end == 3)
