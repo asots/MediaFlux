@@ -20,6 +20,7 @@ import threading
 import time
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
@@ -401,7 +402,11 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
 
     def test_safe_replacement_keeps_existing_until_incoming_succeeds(self):
         operations: list[tuple] = []
-        existing = GuangYaFile("old-file", "Movie (2026)(tmdb-1).mkv", False, 10)
+        original_name = "Movie (2026)(tmdb-1).mkv"
+        files = {
+            "old-file": GuangYaFile("old-file", original_name, False, 10, parent_id="target-id"),
+            "new-file": GuangYaFile("new-file", "Movie.Remux.mkv", False, 100, parent_id="source-id"),
+        }
 
         class FakeRaw:
             def fs_delete(self, file_ids):
@@ -411,10 +416,14 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
             raw = FakeRaw()
 
             def list_dir(self, dir_id):
-                return [existing]
+                return [replace(file) for file in files.values() if file.parent_id == dir_id]
+
+            def file_info(self, file_id):
+                return replace(files[file_id])
 
             def rename(self, file_id, name):
                 operations.append(("rename", file_id, name))
+                files[file_id].name = name
 
             def move(self, file_ids, target_id):
                 operations.append(("move", tuple(file_ids), target_id))
@@ -429,7 +438,7 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
             original_parent_id="source-id",
             size=100,
             match=match,
-            new_name=existing.name,
+            new_name=original_name,
             target_path="电影",
         )
         organizer = Organizer(client=cast(GuangYaClient, FakeClient()), scraper=cast(TMDBScraper, object()))
@@ -457,7 +466,9 @@ class ScraperAndOrganizerTests(IsolatedDatabaseTestCase):
             )
         self.assertEqual(stats["failed"], 1)
         self.assertNotIn(("delete", ("old-file",)), operations)
-        self.assertEqual(operations[-1], ("rename", "old-file", existing.name))
+        self.assertEqual(operations[-1], ("rename", "old-file", original_name))
+        self.assertEqual((files["old-file"].parent_id, files["old-file"].name), ("target-id", original_name))
+        self.assertEqual((files["new-file"].parent_id, files["new-file"].name), ("source-id", "Movie.Remux.mkv"))
 
 
 class MediaProxyTests(InitializedWebTestCase):
