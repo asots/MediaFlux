@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import cast
 from app.clients.guangya import GuangYaClient
 
+import os
 import subprocess
 import sqlite3
 import sys
@@ -18,6 +19,8 @@ from app import database as db
 from app.clients.guangya import GuangYaFile
 from app.modules import strm
 from app.modules.scheduler import STRMScheduler
+from app.modules.strm_metadata_worker import STRMMetadataWorker
+from app.repositories.strm import StrmRefreshPolicy
 from tests.support import isolated_test_database
 from tests.support import PagedDirectoryTestMixin
 
@@ -68,17 +71,172 @@ def crash(*args, **kwargs):
         real_delete(*args, **kwargs)
     os._exit(73)
 target = "app.modules.strm.db.upsert_strm_index" if sys.argv[3] == "before_index" else "app.modules.strm._delete_owned_file"
-with patch(target, side_effect=crash):
+with (
+    patch("socket.socket.connect", side_effect=AssertionError("network forbidden")),
+    patch("socket.socket.connect_ex", side_effect=AssertionError("network forbidden")),
+    patch("socket.create_connection", side_effect=AssertionError("network forbidden")),
+    patch("socket.getaddrinfo", side_effect=AssertionError("network forbidden")),
+    patch(target, side_effect=crash),
+):
     sync(sys.argv[2], "New")
 os._exit(74)
 """
-    result = subprocess.run(
-        [sys.executable, "-c", code, str(db_path), str(root), stage],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    # os._exit 不执行 tests 的 atexit；子进程的所有临时 runtime 由父进程回收。
+    with tempfile.TemporaryDirectory(prefix="strm-crash-runtime-") as runtime_root:
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(db_path), str(root), stage],
+            env={**os.environ, "TMPDIR": runtime_root, "TEMP": runtime_root, "TMP": runtime_root},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
     assert result.returncode == 73, (result.returncode, result.stdout, result.stderr)
+
+
+class StrmFirstInstallRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        for name in ("socket.socket.connect", "socket.socket.connect_ex",
+                     "socket.create_connection", "socket.getaddrinfo"):
+            self.enterContext(patch(name, side_effect=AssertionError("network forbidden")))
+        self.database_path = self.enterContext(isolated_test_database())
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.file = MoveCloud().file_info("video")
+        self.target = strm._strm_target(self.file, "New", str(self.root))
+        self.payload = strm.build_play_url(
+            BASE_URL, self.file.file_id, self.file.etag, self.file.size, self.file.name,
+        ).encode("utf-8")
+        self.policy = StrmRefreshPolicy(
+            media_root=str(self.root / strm.STRM_SUBDIR), allow_emby=False,
+        )
+
+    def _sync(self, incremental=False):
+        if not incremental:
+            return sync(self.root, "New", refresh_policy=self.policy)
+        change = {
+            "source_id": "source", "kind": "video", "action": "upsert",
+            "file_id": self.file.file_id, "rel_dir": "New", "name": self.file.name,
+            "etag": self.file.etag, "size": self.file.size, "parent_id": self.file.parent_id,
+        }
+        return strm.sync_strm_incremental(
+            "source", [change], BASE_URL, str(self.root),
+            client=cast(GuangYaClient, MoveCloud("New")), refresh_policy=self.policy,
+        )
+
+    def _crash_and_recover(self, *, incremental=False):
+        # 真正结束子进程：文件已原子替换，但首条索引及 outbox 尚未提交。
+        crash_move(self.database_path, self.root, "before_index")
+        self.assertEqual(self.target.read_bytes(), self.payload)
+        self.assertEqual(db.list_strm_index("guangya:source"), [])
+        self.assertEqual(db.count_strm_refresh_paths(), 0)
+        db.init_db()
+        stats = self._sync(incremental)
+        self.assertEqual(stats["failed"], 0, stats)
+        self.assertEqual(stats["generated"], 1, stats)
+        self.assertFalse(stats["clean_skipped"], stats)
+        rows = db.list_strm_index("guangya:source")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["strm_path"], str(self.target))
+        self.assertEqual(rows[0]["content_fingerprint"], strm._content_fingerprint(self.target))
+        entries = db.list_strm_refresh_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["path"], str(self.target.parent))
+        self.assertFalse(entries[0]["allow_emby"])
+        db.init_db()
+        again = self._sync(incremental)
+        self.assertEqual(again["generated"], 0, again)
+        self.assertEqual(db.list_strm_refresh_entries(), entries)
+        with patch(
+            "app.modules.media_refresh_coordinator.enqueue_media_refresh_paths",
+            return_value={"Jellyfin": "queued"},
+        ) as handoff:
+            STRMMetadataWorker()._flush_media_refresh(force=True)
+        handoff.assert_called_once_with(
+            [str(self.target.parent)], immediate=True, allow_emby=False,
+        )
+        self.assertEqual(db.count_strm_refresh_paths(), 0)
+
+    def test_first_install_process_exit_recovers_through_full_scan(self):
+        self._crash_and_recover()
+
+    def test_first_install_process_exit_recovers_through_incremental(self):
+        self._crash_and_recover(incremental=True)
+
+    def test_unindexed_different_content_is_not_claimed(self):
+        self.target.parent.mkdir(parents=True)
+        for payload in (b"http://foreign.invalid/video", self.payload + b"\n",
+                        b"x" + self.payload[1:]):
+            with self.subTest(payload=payload):
+                self.target.write_bytes(payload)
+                stats = self._sync()
+                self.assertEqual(stats["failed"], 1, stats)
+                self.assertEqual(self.target.read_bytes(), payload)
+                self.assertEqual(db.list_strm_index("guangya:source"), [])
+                self.assertEqual(db.count_strm_refresh_paths(), 0)
+
+    def test_exact_content_owned_by_another_namespace_is_not_claimed(self):
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(self.payload)
+        for source in ("guangya:other", "guangya-meta:source"):
+            with self.subTest(source=source):
+                db.upsert_strm_index(
+                    source, self.file.file_id, self.file.etag, self.file.size,
+                    self.file.name, str(self.target), strm._content_fingerprint(self.target),
+                )
+                owners = db.list_strm_path_owners(str(self.target))
+                stats = self._sync()
+                self.assertEqual(stats["failed"], 1, stats)
+                self.assertEqual(self.target.read_bytes(), self.payload)
+                self.assertEqual(db.list_strm_path_owners(str(self.target)), owners)
+                self.assertEqual(db.list_strm_index("guangya:source"), [])
+                self.assertEqual(db.count_strm_refresh_paths(), 0)
+                db.delete_strm_index_ids(source, [self.file.file_id])
+
+    def test_content_changed_after_recovery_proof_is_not_overwritten(self):
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(self.payload)
+        read_state = strm._read_strm_state
+
+        def changed_after_read(path, expected_url):
+            result = read_state(path, expected_url)
+            self.target.write_bytes(b"external edit during install")
+            return result
+
+        with patch.object(strm, "_read_strm_state", side_effect=changed_after_read) as proof:
+            stats = self._sync()
+        proof.assert_called_once()
+        self.assertEqual(stats["failed"], 1, stats)
+        self.assertEqual(self.target.read_bytes(), b"external edit during install")
+        self.assertEqual(db.list_strm_index("guangya:source"), [])
+        self.assertEqual(db.count_strm_refresh_paths(), 0)
+
+    def test_recovery_index_failure_preserves_file_and_can_retry(self):
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(self.payload)
+        # 在真实索引事务内令 outbox 写入失败，必须一起回滚，不能吞掉刷新意图。
+        with patch.object(StrmRefreshPolicy, "record", side_effect=sqlite3.OperationalError("isolated failure")) as commit:
+            stats = self._sync()
+        commit.assert_called_once()
+        self.assertEqual(stats["failed"], 1, stats)
+        self.assertEqual(self.target.read_bytes(), self.payload)
+        self.assertEqual(db.list_strm_index("guangya:source"), [])
+        self.assertEqual(db.count_strm_refresh_paths(), 0)
+        failures = db.list_strm_failures(status="open")
+        self.assertEqual(len(failures), 1)
+        result = strm.retry_strm_failures(
+            [int(failures[0]["id"])], "test",
+            client=cast(GuangYaClient, MoveCloud("New")),
+            runtime_config={
+                "sources": strm.plan_strm_sources([{"id": "source", "name": "Source"}]),
+                "strm_root": str(self.root), "base_url": BASE_URL,
+                "media_server_refresh": True, "allow_emby": False,
+            },
+        )
+        self.assertEqual(result["resolved"], 1, result)
+        self.assertEqual(result["failed"], 0, result)
+        self.assertEqual(len(db.list_strm_index("guangya:source")), 1)
+        self.assertEqual(db.count_strm_refresh_paths(), 1)
+        self.assertFalse(db.list_strm_refresh_entries()[0]["allow_emby"])
+        self.assertFalse(db.list_strm_failures(status="open"))
 
 
 class StrmMoveRecoveryTests(unittest.TestCase):

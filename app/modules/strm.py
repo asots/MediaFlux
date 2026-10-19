@@ -1002,27 +1002,18 @@ def _install_video_candidate(
         current
         and str(current.get("strm_path") or "") == str(expected)
     )
-    repair_fingerprint = ""
-    if (
-        current and previous_path and previous_path != expected
-        and expected.is_file() and not target_owners
-        and not db.list_strm_path_owners(str(expected))
-        and _fingerprint_matches(previous_path, current["content_fingerprint"])
-    ):
-        expected_url = build_play_url(base_url, file.file_id, file.etag, file.size, file.name)
-        matches, fingerprint = (
-            _read_strm_state(expected, expected_url)
-            if expected.stat().st_size == len(expected_url.encode("utf-8"))
-            else (False, "")
-        )
-        if matches and fingerprint == current["content_fingerprint"]:
-            target_owners = [current]
-    if expected.is_file() and indexed_target:
-        # 同 file_id、同目标路径的索引足以证明这是 MediaFlux 管理的 STRM。
-        # 指纹不一致表示文件被误改，应在完整/增量同步中自动修复；但仍记录
-        # 当前实际内容，原子替换前再次复核，避免覆盖同步期间的新外部写入。
-        repair_fingerprint = _content_fingerprint(expected)
-    else:
+    target_fingerprint = ""
+    if expected.is_file():
+        if indexed_target:
+            # 已索引文件可自动修复；替换前仍复核快照，保护并发外部写入。
+            target_fingerprint = _content_fingerprint(expected)
+        elif not target_owners and not db.list_strm_path_owners(str(expected)):
+            # 首次安装和迁移共用恢复判定：全局无所有者且逐字节等于本轮
+            # 签名 URL 才补索引与刷新，不能仅凭文件存在认领陌生内容。
+            expected_url = build_play_url(base_url, file.file_id, file.etag, file.size, file.name)
+            if expected.stat().st_size == len(expected_url.encode("utf-8")):
+                _, target_fingerprint = _read_strm_state(expected, expected_url)
+    if not target_fingerprint:
         _require_owned_file(expected, target_owners, "覆盖 STRM")
     if previous_path and previous_path != expected:
         _require_owned_file(previous_path, [current], "删除旧 STRM")
@@ -1039,9 +1030,9 @@ def _install_video_candidate(
             file, rel_dir, base_url, strm_root,
             before_replace=(
                 (lambda target: _require_file_snapshot(
-                    target, repair_fingerprint, "修复已索引 STRM"
+                    target, target_fingerprint, "安装 STRM"
                 ))
-                if repair_fingerprint
+                if target_fingerprint
                 else (lambda target: _require_owned_file(
                     target, target_owners, "覆盖 STRM"
                 ))
