@@ -174,7 +174,7 @@ class WebKernelTransport(_KernelTransport):
             return await consume_events(events)
 
     async def activity(self, *, owner: str, session_id: str) -> dict[str, Any] | None:
-        return await self.session.coordinator.describe(
+        return await self.session.activity(
             owner=_owner(owner), session_id=_scope(session_id, "session_id"),
         )
 

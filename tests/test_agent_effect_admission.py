@@ -161,7 +161,9 @@ async def _confirmed_scope(store, *, owner=_OWNER, session_id=_SESSION, plan_id=
     scope = receipts.EffectCompletionScope(
         store=store, lease=lease, plan_id=plan_id or uuid4().hex, channel="web",
     )
-    await store.commit(lease, updates=(StateUpdate("metadata.confirmed_publication", _confirmed_binding(scope)),))
+    from app.agent.kernel.state_types import _ConfirmationClaim
+    await store.commit(lease, updates=(StateUpdate("pending_effect_plan_id", scope.plan_id),))
+    await store.commit(lease, updates=(_ConfirmationClaim("", _confirmed_binding(scope), request_id=lease.request_id),))
     return scope
 
 

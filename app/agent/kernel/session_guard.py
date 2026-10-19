@@ -114,14 +114,25 @@ def foreground_execution_active(owner: str, session_id: str, lifecycle_id: str, 
     return False
 
 
-def publication_execution_active(state: SessionState) -> bool:
+def publication_execution_active(state: SessionState, *, include_continuation: bool = False) -> bool:
     """按当前发布 fence 探测执行者，忽略已被新确认接管的旧普通回合。"""
     active = state.metadata.get("active_publication") or {}
-    confirmed = state.metadata.get("confirmed_publication") or {}
-    turn_id = confirmed.get("turn_id", "") if confirmed.get("generation") == state.generation else ""
-    if active.get("generation") == state.generation and active.get("turn_id") == turn_id:
-        turn_id = ""  # 普通回合内自动预授权没有转移执行者，仍持普通 generation 锁。
-    return foreground_execution_active(state.owner, state.session_id, state.lifecycle_id, state.generation, turn_id=turn_id)
+    if active.get("generation") != state.generation:
+        return False
+    if foreground_execution_active(state.owner, state.session_id, state.lifecycle_id, state.generation,
+                                   turn_id=active.get("execution_turn_id", "")):
+        return True
+    if not include_continuation:
+        return False
+    records = [state.metadata.get("read_wait") or {}, *(
+        (row.get("continuation") or {}) for row in (state.metadata.get("effect_waits") or {}).values()
+    )]
+    if any(record.get("publication_generation") == state.generation
+           and record.get("resume_turn_id") == active.get("turn_id")
+           and record.get("state") in {"claimed", "running"} for record in records):
+        with continuation_execution_guard(state.owner, state.session_id) as acquired:
+            return not acquired
+    return False
 
 
 @contextmanager

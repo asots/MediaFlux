@@ -67,7 +67,7 @@ def test_pending_effect_wait_cannot_claim_a_live_direct_confirmation_tail(tmp_pa
                 assert writes == ["write"] and target.read_text() == "confirmed-once"
                 before = await cold.load(owner=OWNER, session_id=SID)
                 assert not before.pending_effect_plan_id
-                assert before.metadata["active_publication"]["status"] == "finished"
+                assert before.metadata["active_publication"]["status"] == "running"
                 candidates = await cold.due_continuations()
                 assert len(candidates) == 1 and candidates[0]["wait_id"] == original["wait_id"]
                 assert not await follow.resume_wait(candidate=candidates[0])

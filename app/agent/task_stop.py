@@ -222,6 +222,8 @@ async def _cancel_effect_continuations(
                 continue
             record.update(state="cancelled", terminal_reason="cancelled")
             cancelled.append(plan_id)
+        if cancelled:
+            state.metadata["stop_requested_generation"] = generation
         return cancelled
 
     return await store.update_effect_state(
@@ -229,9 +231,10 @@ async def _cancel_effect_continuations(
     )
 
 
-def _same_turn(active: Any, *, generation: int, request_id: str) -> bool:
+def _same_turn(active: Any, *, generation: int, turn_id: str, request_id: str) -> bool:
     return (isinstance(active, Mapping)
         and int(active.get("generation") or 0) == generation
+        and active.get("turn_id") == turn_id
         and str(active.get("request_id") or "") == request_id)
 
 
@@ -250,6 +253,7 @@ async def _stop_captured_turn(
     except (TypeError, ValueError):
         generation = 0
     request_id = str(active.get("request_id") or "").strip()
+    turn_id = str(active.get("turn_id") or "").strip()
     if generation <= 0 or not request_id:
         return "stop_unconfirmed", 0
 
@@ -263,12 +267,14 @@ async def _stop_captured_turn(
     was_cancelling = active.get("status") == "cancelling"
 
     # Effect 续行会复用 source request_id，必须同时复查 generation，不能仅凭 request_id。
-    current = await session.coordinator.describe(owner=owner, session_id=session_id)
+    current = await session.activity(owner=owner, session_id=session_id)
     state = await store.load(owner=owner, session_id=session_id)
     if (state.lifecycle_id, state.generation) != (lifecycle_id, generation) or (current is not None and not _same_turn(
-        current, generation=generation, request_id=request_id,
+        current, generation=generation, turn_id=turn_id, request_id=request_id,
     )):
         return "superseded", stop_generation
+    if current is not None and current.get("protected") is True:
+        return "critical_pending", stop_generation
     try:
         accepted = await session.cancel(
             owner=owner, session_id=session_id, request_id=request_id
@@ -277,12 +283,12 @@ async def _stop_captured_turn(
         # 原生 cancel 已尝试通知本地 coordinator；仍需复查保护及回合身份。
         accepted = False
         cancel_busy = True
-    current = await session.coordinator.describe(owner=owner, session_id=session_id)
+    current = await session.activity(owner=owner, session_id=session_id)
     if current is None:
         if accepted:
             return "stop_requested", stop_generation
         return ("stop_unconfirmed" if cancel_busy else "not_running"), stop_generation
-    if not _same_turn(current, generation=generation, request_id=request_id):
+    if not _same_turn(current, generation=generation, turn_id=turn_id, request_id=request_id):
         return "superseded", stop_generation
     if current.get("protected") is True:
         return "critical_pending", stop_generation
@@ -297,10 +303,10 @@ async def _stop_captured_turn(
         except SessionBusyError:
             accepted = False
             cancel_busy = True
-        current = await session.coordinator.describe(owner=owner, session_id=session_id)
+        current = await session.activity(owner=owner, session_id=session_id)
         if current is None:
             return ("stop_unconfirmed" if cancel_busy else "not_running"), stop_generation
-        if not _same_turn(current, generation=generation, request_id=request_id):
+        if not _same_turn(current, generation=generation, turn_id=turn_id, request_id=request_id):
             return "superseded", stop_generation
         if current.get("protected") is True:
             return "critical_pending", stop_generation
@@ -387,7 +393,7 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
         if confirmed.get("generation") == snapshot.generation and confirmed.get("plan_id"):
             late_plans.add(confirmed["plan_id"])
 
-        active = await session.coordinator.describe(owner=owner_key, session_id=session_key)
+        active = await session.activity(owner=owner_key, session_id=session_key)
         if active and active.get("generation") != snapshot.generation:
             model_turn = "superseded"
         elif active and active.get("protected") is True:
@@ -403,13 +409,6 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
                     if (state.lifecycle_id, state.generation) != (snapshot.lifecycle_id, snapshot.generation):
                         model_turn = "superseded"
                     else:
-                        if active is None:
-                            publication = state.metadata.get("active_publication")
-                            if (isinstance(publication, Mapping)
-                                    and publication.get("generation") == state.generation
-                                    and publication.get("status") == "running"
-                                    and (state.metadata.get("read_wait") or {}).get("state") != "pending"):
-                                active = publication
                         if active:
                             model_turn, stop_requested_generation = await _stop_captured_turn(
                                 session, store, owner=owner_key,
@@ -435,6 +434,8 @@ async def stop_agent_session(runtime: Any, owner: str, session_id: str) -> dict[
                                     model_turn = "superseded"
                                 else:
                                     cancelled_continuations.extend(cancelled)
+                                    if cancelled:
+                                        stop_requested_generation = state.generation
                             plan_id = str(state.pending_effect_plan_id or "").strip()
                             if plan_id and model_turn != "superseded":
                                 revoked = await session.cancel_effect(

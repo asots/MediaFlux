@@ -93,7 +93,7 @@ def test_cold_management_rejects_live_direct_confirmation_tail_without_losing_ca
             await asyncio.wait_for(journal.ready.wait(), 5)
             state = await rig.store.load(owner=OWNER, session_id=SESSION)
             second_id = state.pending_effect_plan_id
-            assert second_id != first_id and state.metadata["active_publication"]["status"] == "finished"
+            assert second_id != first_id and state.metadata["active_publication"]["status"] == "running"
             assert not prior.done() and [row["label"] for row in rig.writes] == ["A"]
             cold = native_session(rig, Wire(protocol, []), cold=True)
             assert await cold.coordinator.describe(owner=OWNER, session_id=SESSION) is None

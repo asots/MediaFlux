@@ -481,6 +481,8 @@ def claim_effect(state, candidate, now, binding, conn=None):
         "turn_id": record["resume_turn_id"], "request_id": record["source_request_id"], "status": "running"}
     state.metadata["confirmed_publication"] = {"generation": state.generation,
         "turn_id": record["resume_turn_id"], "plan_id": record["wait_id"]}
+    if payload["origin"].get("batch_plan"):
+        state.metadata["active_publication"]["protected"] = True
     return PublicationLease(state.owner, state.session_id, state.generation, record["resume_turn_id"],
         record["source_request_id"], record["wait_id"], record["claim_id"], "effect")
 

@@ -26,6 +26,7 @@ from app.agent.kernel.state_types import (
     StalePublicationError,
     _CancelledReadInline,
     _PublicationFinished,
+    _PublicationUnprotected,
 )
 from app.agent.kernel.tool_calls import PipelineResult, ToolCallContext
 from app.agent.public_safety import public_tool_label
@@ -430,6 +431,7 @@ class AgentTurn:
             await self.publish(AgentEventType.EFFECT_COMPLETED if result.outcome.public_content.get("ok") else AgentEventType.EFFECT_FAILED,
                 {"plan_id": plan.plan_id, "tool": result.tool.name,
                  "result": result.outcome.audit_result(), "receipt": format_public_result(result.outcome.public_content)})
+            self.state = await self.session.state_store.commit(lease, updates=(_PublicationUnprotected("", None),))
             self.scope.close()
             await self.session.coordinator.unprotect(lease, self.tool_context.cancellation)
             if not saved:
@@ -503,8 +505,9 @@ class AgentTurn:
                     from .continuation import confirmed_result as restore_confirmed
                     result = restore_confirmed(self.session.catalog, self.state, continuation_record(self.state, adopted.continuation_id, adopted.continuation_kind))
         # 写入及回执已完成：先解除保护，再读停止标记，关闭两者之间的竞态窗口。
-        self.scope.close()
         lease = self.tool_context.lease
+        self.state = await self.session.state_store.commit(lease, updates=(_PublicationUnprotected("", None),))
+        self.scope.close()
         await self.session.coordinator.unprotect(lease, self.tool_context.cancellation)
         stop_state = await self.session.state_store.load(owner=lease.owner, session_id=lease.session_id)
         if stop_state.metadata.get("stop_requested_generation") == lease.generation:

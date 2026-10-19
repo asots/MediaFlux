@@ -16,9 +16,11 @@ from .state_types import (
     PublicationLease,
     SelectionInvalidError,
     StateUpdate,
+    _ConfirmationClaim,
     _ExecutionCapacity,
     _PendingEffectTransition,
     _PublicationFinished,
+    _PublicationUnprotected,
     _ScopedTrustTransition,
 )
 
@@ -126,6 +128,28 @@ class SessionState:
 
     def apply(self, updates: Sequence[StateUpdate]) -> None:
         for update in updates:
+            if type(update) is _ConfirmationClaim:
+                confirmed = deepcopy(dict(update.value))
+                previous = self.metadata.get("active_publication") or {}
+                marker = {
+                    "generation": self.generation, "turn_id": confirmed["turn_id"],
+                    "request_id": update.request_id, "status": "running", "protected": True,
+                }
+                execution_turn_id = (previous.get("execution_turn_id", "")
+                                     if previous.get("turn_id") == confirmed["turn_id"] else confirmed["turn_id"])
+                if execution_turn_id:
+                    marker["execution_turn_id"] = execution_turn_id
+                self.metadata["confirmed_publication"] = confirmed
+                self.metadata["active_publication"] = marker
+                self.pending_effect_plan_id = ""
+                self.metadata.pop("pending_effect_binding", None)
+                self.metadata.pop("pending_effect_goal", None)
+                continue
+            if type(update) is _PublicationUnprotected:
+                marker = self.metadata.get("active_publication") or {}
+                if marker.get("generation") == self.generation:
+                    marker.pop("protected", None)
+                continue
             if type(update) is _ScopedTrustTransition:
                 if update.key != "metadata.scoped_trust" or update.mode != "set":
                     raise ValueError("invalid scoped trust transition")
@@ -169,7 +193,7 @@ class SessionState:
             if key == "lifecycle_id" or key.startswith("lifecycle_id."):
                 raise ValueError("session lifecycle identity is immutable")
             if any(key == "metadata." + field or key.startswith("metadata." + field + ".")
-                   for field in ("pending_effect_binding", "pending_effect_goal", "active_publication", "read_wait", "continuation_deliveries", "history_memory_version", "scoped_trust")):
+                   for field in ("pending_effect_binding", "pending_effect_goal", "confirmed_publication", "active_publication", "read_wait", "continuation_deliveries", "history_memory_version", "scoped_trust")):
                 raise ValueError("pending binding requires a typed transition")
             if key == "metadata" or key == "metadata.task" or key.startswith("metadata.task."):
                 raise ValueError("task namespace requires a typed patch")
@@ -248,27 +272,14 @@ def publication_commit_matches(
     updates: Sequence[StateUpdate],
 ) -> bool:
     """已原子领到当前待确认票据的下一步可接管发布权，旧读回合仍被隔离。"""
-    claim = (
-        conversation is None
-        and len(updates) == 2
-        and updates[0].mode == "set"
-        and updates[0].key == "metadata.confirmed_publication"
-        and updates[1].mode == "clear_if_equals"
-        and updates[1].key == "pending_effect_plan_id"
-        and (type(updates[1]) is _PendingEffectTransition or "pending_effect_binding" not in state.metadata)
-    )
-    value = updates[0].value if claim else None
-    handoff = (
-        isinstance(value, Mapping)
-        and bool(state.pending_effect_plan_id)
-        and str(updates[1].value or "") == state.pending_effect_plan_id
-        and value
-        == {
-            "generation": lease.generation,
-            "turn_id": lease.turn_id,
-            "plan_id": state.pending_effect_plan_id,
+    update = updates[0] if conversation is None and len(updates) == 1 else None
+    handoff = False
+    if type(update) is _ConfirmationClaim:
+        handoff = bool(state.pending_effect_plan_id) and update.request_id == lease.request_id and update.value == {
+            "generation": lease.generation, "turn_id": lease.turn_id, "plan_id": state.pending_effect_plan_id,
         }
-    )
+        if not handoff:
+            return False
     # 撤销/过期收束只做计划 ID 的原子条件清理，不接管已确认回执的发布权。
     pending_clear = (
         conversation is None and len(updates) == 1

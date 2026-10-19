@@ -98,6 +98,18 @@ class _PublicationFinished(StateUpdate):
 
 
 @dataclass(frozen=True, slots=True)
+class _ConfirmationClaim(StateUpdate):
+    """原子消费当前确认并接管执行身份；不能从业务 JSON 构造。"""
+
+    request_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicationUnprotected(StateUpdate):
+    """真实写入和回执落盘后解除当前执行者的保护。"""
+
+
+@dataclass(frozen=True, slots=True)
 class _PendingEffectTransition(StateUpdate):
     """Internal atomic ID/binding/goal transition; never built from business JSON."""
 

@@ -39,6 +39,8 @@ from app.agent.kernel.state_types import (
     SessionBusyError,
     StalePublicationError,
     StateUpdate,
+    _ConfirmationClaim,
+    _PublicationUnprotected,
 )
 from app.agent.models import ToolContext, ToolResult
 from app.agent.task_stop import stop_agent_session
@@ -52,6 +54,9 @@ class _Session:
         self._start_lock = asyncio.Lock()
         self.cancel_calls: list[tuple[str, str, str]] = []
         self.cancel_effect_calls: list[tuple[str, str, str]] = []
+
+    async def activity(self, *, owner: str, session_id: str):
+        return await self.coordinator.describe(owner=owner, session_id=session_id)
 
     async def cancel(
         self, *, owner: str, session_id: str, request_id: str = ""
@@ -618,11 +623,11 @@ class SQLiteAgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
         plan_id = f"plan:{session_id}"
         await self.store.commit(lease, updates=(StateUpdate("pending_effect_plan_id", plan_id),))
         await self.store.commit(lease, updates=(
-            StateUpdate("metadata.confirmed_publication", {
+            _ConfirmationClaim("", {
                 "generation": lease.generation, "turn_id": lease.turn_id, "plan_id": plan_id,
-            }),
-            StateUpdate("pending_effect_plan_id", plan_id, mode="clear_if_equals"),
+            }, request_id=lease.request_id),
         ))
+        await self.store.commit(lease, updates=(_PublicationUnprotected("", None),))
         origin = {
             "goal": {"role": "user", "content": "完成已确认操作后继续读取实际结果"},
             "arguments": {}, "owner": owner, "session_id": session_id,
@@ -674,9 +679,8 @@ class SQLiteAgentTaskStopTests(unittest.IsolatedAsyncioTestCase):
                                 "model_spent": 1, "tool_spent": 0,
                             }, binding=self.binding,
                         ),))
-                    # confirmed_publication 使通用 cancel 拒绝此租约；/stop 必须撤销续行本身。
                     self.assertFalse(await runtime.session.cancel(
-                        owner="owner", session_id=phase, request_id=resume_lease.request_id,
+                        owner="owner", session_id=phase, request_id="another-request",
                     ))
                 before = await cold.load(owner="owner", session_id=phase)
                 self.assertEqual(before.metadata["effect_waits"][plan_id]["continuation"]["state"], phase)

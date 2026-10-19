@@ -263,6 +263,21 @@ class AgentSession:
                                               request_id=request_id, reason="user_cancelled")
         return durable or local
 
+    async def activity(self, *, owner: str, session_id: str, include_continuation: bool = True) -> dict[str, Any] | None:
+        """当前持久执行身份与真实执行锁共同判活；coordinator 只提供本地信号。"""
+        state = await self.state_store.load(owner=owner, session_id=session_id)
+        marker = state.metadata.get("active_publication") or {}
+        local = await self.coordinator.describe(owner=owner, session_id=session_id)
+        if local is not None and local["generation"] == state.generation:
+            if local["turn_id"] == marker.get("turn_id") or local["protected"]:
+                return {**local, "protected": local["protected"] or marker.get("protected") is True}
+        if (marker.get("generation") != state.generation or marker.get("status") != "running"
+                or not publication_execution_active(state, include_continuation=include_continuation)):
+            return None
+        return {key: marker[key] for key in ("request_id", "turn_id", "generation", "status")} | {
+            "protected": marker.get("protected") is True,
+        }
+
     async def cancel_effect(
         self,
         *,
@@ -333,9 +348,8 @@ class AgentSession:
         # 确认后的只读续行可在同代生成下一张卡；管理该卡仍服从原发布 fence。
         confirmed = state.metadata.get("confirmed_publication") or {}
         turn_id = confirmed.get("turn_id") if confirmed.get("generation") == state.generation else None
-        local = await self.coordinator.describe(owner=owner, session_id=session_id) if idle else None
-        if idle and (publication_execution_active(state) or (local and local["generation"] == state.generation
-                     and (turn_id is None or local["turn_id"] == turn_id))):
+        # 管理入口已持 continuation 准入锁，不能把自己的锁误认成旧执行者。
+        if idle and await self.activity(owner=owner, session_id=session_id, include_continuation=False):
             raise SessionBusyError("session turn is running")
         lease = PublicationLease(owner, session_id, state.generation,
                                  turn_id or secrets.token_urlsafe(12), request_id or secrets.token_urlsafe(12))

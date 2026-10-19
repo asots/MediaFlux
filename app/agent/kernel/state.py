@@ -130,17 +130,26 @@ def _begin_publication(state: SessionState, request_id: str, turn_id: str) -> No
 
 def _cancel_publication(state: SessionState, request_id: str) -> bool:
     active = state.metadata.get("active_publication")
-    confirmed = state.metadata.get("confirmed_publication")
     if (not isinstance(active, dict) or active.get("generation") != state.generation
             or active.get("status") != "running"
             or (request_id and request_id != active.get("request_id"))
-            or (isinstance(confirmed, dict) and confirmed.get("generation") == state.generation)):
+            or active.get("protected") is True):
         return False
     state.metadata["active_publication"] = {**active, "status": "cancelled"}
     from .continuation import revoke
     revoke(state, "cancelled")
     state.generation += 1
     return True
+
+
+def cancelled_publication_matches(state: SessionState, lease: PublicationLease) -> bool:
+    marker = state.metadata.get("active_publication") or {}
+    return ((state.owner, state.session_id) == (lease.owner, lease.session_id)
+            and state.generation == lease.generation + 1
+            and marker.get("protected") is not True
+            and _exact_value({key: marker.get(key) for key in ("generation", "turn_id", "request_id", "status")})
+            == _exact_value({"generation": lease.generation, "turn_id": lease.turn_id,
+                             "request_id": lease.request_id, "status": "cancelled"}))
 
 
 def _settle_cancelled_reads(state, receipts, maximum=256 * 1024):
@@ -150,11 +159,7 @@ def _settle_cancelled_reads(state, receipts, maximum=256 * 1024):
     ):
         return None
     lease = receipts[0].lease
-    if ((state.owner, state.session_id) != (lease.owner, lease.session_id)
-            or state.generation != lease.generation + 1
-            or _exact_value(state.metadata.get("active_publication")) != _exact_value({
-                "generation": lease.generation, "turn_id": lease.turn_id,
-                "request_id": lease.request_id, "status": "cancelled"})):
+    if not cancelled_publication_matches(state, lease):
         return None
     expected = _exact_value(state.conversation)
     updated = state.clone()

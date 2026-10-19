@@ -26,6 +26,7 @@ from app.agent.kernel.state_types import (
     SessionBusyError,
     StalePublicationError,
     StateUpdate,
+    _ConfirmationClaim,
     _PendingEffectTransition,
 )
 from app.agent.model_context_budget import (
@@ -798,18 +799,14 @@ class ToolPipeline:
             await self.state_store.commit(
                 context.lease,
                 updates=(
-                    StateUpdate(
-                        "metadata.confirmed_publication",
+                    _ConfirmationClaim(
+                        "",
                         {
                             "generation": context.lease.generation,
                             "turn_id": context.lease.turn_id,
                             "plan_id": plan.plan_id,
                         },
-                    ),
-                    _PendingEffectTransition(
-                        "pending_effect_plan_id",
-                        plan.plan_id,
-                        mode="clear_if_equals",
+                        request_id=context.lease.request_id,
                     ),
                 ),
             )
