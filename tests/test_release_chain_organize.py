@@ -13,9 +13,11 @@ from unittest.mock import patch
 
 from app import database as db
 from app.clients.guangya import GuangYaFile
-from app.modules.organize import OrganizeRules, Organizer
+from app.modules.organize import OrganizePlan, OrganizeRules, Organizer
 from app.modules.organize_correction import OrganizeCorrectionService
+from app.modules.organize_execution import execute_organize_plans
 from app.modules.organize_probe_worker import OrganizeProbeWorker
+from app.modules.scraper import MatchResult
 from tests.support import IsolatedDatabaseTestCase
 
 
@@ -62,6 +64,108 @@ class MemoryCloud:
         if self.fail_operation == operation and not self.failed:
             self.failed = True
             raise TimeoutError("服务端已提交，但响应丢失")
+
+
+class ForegroundReplacementCompensationTests(IsolatedDatabaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch("socket.socket.connect", side_effect=AssertionError("禁止外联")))
+        self.enterContext(patch("socket.create_connection", side_effect=AssertionError("禁止外联")))
+
+    def _execute(self, cloud):
+        incoming = GuangYaFile("incoming", "Source.mkv", False, 200, "new-etag", "source")
+        cloud.files[incoming.file_id] = incoming
+        organizer = Organizer(client=cast(GuangYaClient, cloud), scraper=cast(TMDBScraper, object()))
+        self.addCleanup(organizer.close)
+        plan = OrganizePlan(
+            file_id=incoming.file_id, original_name=incoming.name,
+            original_path="incoming", original_parent_id=incoming.parent_id,
+            size=incoming.size, etag=incoming.etag,
+            match=MatchResult(tmdb_id="1", title="Archive", year="2025", media_type="movie"),
+            target_path="Archive", new_name="Archive.mkv",
+        )
+        stats = organizer._initial_stats()
+        with (
+            patch.object(organizer, "_ensure_dir_chain", return_value="target"),
+            patch.object(organizer, "_resolve_variant_conflict", return_value=(
+                replace(cloud.files["video"]), "replace", "同版本新文件胜出",
+            )),
+        ):
+            execute_organize_plans(
+                organizer, [plan], OrganizeRules(target_dir_id="target"), stats, {},
+            )
+        self.assertEqual((stats["failed"], stats["moved"]), (1, 0))
+        self.assertEqual(cloud.files["incoming"].parent_id, "source")
+        log = dict(db.list_organize_logs(limit=1)[0])
+        self.assertEqual(log["status"], "failed")
+        audit = db.list_organize_delete_audits(log["id"])[0]
+        self.assertEqual((audit["file_id"], audit["status"]), ("video", "blocked"))
+        return log, audit
+
+    def test_foreground_restores_old_backup_after_lost_response(self):
+        cloud = MemoryCloud("rename")
+        with patch.object(cloud, "file_info", wraps=cloud.file_info) as read:
+            log, audit = self._execute(cloud)
+        self.assertEqual(cloud.files["video"].name, "Archive.mkv")
+        self.assertEqual(cloud.calls, [
+            ("rename", "video", "Archive.mkv.mediaflux-backup-video"),
+            ("rename", "video", "Archive.mkv"),
+        ])
+        self.assertGreaterEqual(sum(call.args == ("video",) for call in read.call_args_list), 3)
+        self.assertFalse(log["legacy_incomplete"])
+        self.assertEqual(audit["file_name"], "Archive.mkv")
+
+    def test_foreground_backup_rejected_before_commit_is_read_without_blind_rename(self):
+        cloud = MemoryCloud()
+        with (
+            patch.object(cloud, "rename", side_effect=TimeoutError("请求未提交")) as rename,
+            patch.object(cloud, "file_info", wraps=cloud.file_info) as read,
+        ):
+            log, audit = self._execute(cloud)
+        self.assertEqual(cloud.files["video"].name, "Archive.mkv")
+        self.assertEqual(rename.call_count, 1)
+        self.assertGreaterEqual(sum(call.args == ("video",) for call in read.call_args_list), 2)
+        self.assertFalse(log["legacy_incomplete"])
+        self.assertEqual(audit["file_name"], "Archive.mkv")
+
+    def test_foreground_uncertain_backup_restore_requires_manual_review(self):
+        for failure in ("unreadable", "rollback_fails", "ineffective_ack"):
+            with self.subTest(failure=failure):
+                cloud = MemoryCloud("rename", **(
+                    {failure: True} if failure != "ineffective_ack" else {}
+                ))
+                original_rename = cloud.rename
+
+                def rename(file_id, name, *, failure=failure, cloud=cloud, original_rename=original_rename):
+                    if failure == "ineffective_ack" and cloud.failed:
+                        cloud.calls.append(("rename", file_id, name))
+                        return True  # ACK 到达，但云端文件名未恢复。
+                    return original_rename(file_id, name)
+
+                with (
+                    patch.object(cloud, "rename", side_effect=rename),
+                    patch("app.modules.guangya_compensation.time.sleep"),
+                ):
+                    log, audit = self._execute(cloud)
+                self.assertEqual(cloud.files["video"].name, "Archive.mkv.mediaflux-backup-video")
+                self.assertTrue(log["legacy_incomplete"])
+                self.assertEqual((log["current_parent_id"], log["current_name"]), ("", ""))
+                self.assertIn("回滚未完成", log["error"])
+                self.assertIn("人工核验", audit["reason"])
+                self.assertEqual(len(cloud.calls), 1 if failure == "unreadable" else 2)
+
+    def test_foreground_later_move_failure_restores_both_versions(self):
+        cloud = MemoryCloud("move")
+        log, audit = self._execute(cloud)
+        self.assertEqual(cloud.files["video"].name, "Archive.mkv")
+        self.assertFalse(log["legacy_incomplete"])
+        self.assertEqual(audit["file_name"], "Archive.mkv")
+        self.assertEqual(cloud.calls, [
+            ("rename", "video", "Archive.mkv.mediaflux-backup-video"),
+            ("move", ("incoming",), "target"),
+            ("move", ("incoming",), "source"),
+            ("rename", "video", "Archive.mkv"),
+        ])
 
 
 class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):

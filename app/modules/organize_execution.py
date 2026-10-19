@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from inspect import getattr_static
 from typing import TYPE_CHECKING, Any, Callable, TypedDict
 
@@ -415,9 +416,20 @@ def execute_organize_plans(
                         companion_names.append(name if rules.rename_enabled else item.name)
                     bind_target(p, target_id, companions=companions, target_names=[video_target_name, *companion_names])
                 write_guard(p, "conflict", target_files=target_files)
-            if existing:
-                if conflict_decision == "replace":
+            if existing and conflict_decision != "replace":
+                record_runtime_skip(
+                    p, target_id, conflict_note or "目标存在同媒体文件，按冲突策略跳过",
+                )
+                continue
+            video_move_attempted = False
+            video_moved_to_target = False
+            moved_metadata: list[tuple[GuangYaFile, str]] = []
+            actual_name = p.original_name
+            video_renamed = False
+            try:
+                if existing:
                     organizer._verify_remote_snapshot(existing, role="待替换旧文件")
+                    # 先登记备份意图；rename 响应丢失也必须回读云端并补偿。
                     replacement_backup_name = (
                         f"{existing.name}.mediaflux-backup-{existing.file_id[-8:]}"
                     )
@@ -425,18 +437,6 @@ def execute_organize_plans(
                     existing.name = replacement_backup_name
                     evidence_names[existing.file_id] = replacement_backup_name
                     stats["conflict"] += 1
-                else:
-                    runtime_skip_reason = (
-                        conflict_note or "目标存在同媒体文件，按冲突策略跳过"
-                    )
-                    record_runtime_skip(p, target_id, runtime_skip_reason)
-                    continue
-            video_move_attempted = False
-            video_moved_to_target = False
-            moved_metadata: list[tuple[GuangYaFile, str]] = []
-            actual_name = p.original_name
-            video_renamed = False
-            try:
                 # 目标目录创建和冲突判断也可能耗时；在真正移动前再次缩小
                 # 外部改名/移动造成的 TOCTOU 窗口。
                 organizer._verify_remote_snapshot(
@@ -519,17 +519,17 @@ def execute_organize_plans(
                         )
                 if existing and replacement_backup_name:
                     try:
-                        organizer.client.rename(existing.file_id, existing_original_name)
-                        existing.name = existing_original_name
-                        evidence_names[existing.file_id] = existing_original_name
+                        organizer._restore_remote_file(
+                            replace(existing, name=existing_original_name, parent_id=target_id),
+                            target_id, replacement_backup_name,
+                        )
+                        replacement_backup_name = ""
                     except Exception as restore_exc:
                         rollback_incomplete = True
                         logger.error(
                             "恢复旧文件名失败 file=%s type=%s",
                             existing_original_name, type(restore_exc).__name__,
                         )
-                if target_id:
-                    runtime.invalidate_inventory(target_id)
                 raise
             if existing and replacement_backup_name:
                 candidate = DeleteCandidate(
@@ -788,6 +788,8 @@ def execute_organize_plans(
             if target_id:
                 runtime.invalidate_inventory(target_id)
             failure_message = safe_organize_failure(e)
+            if existing and rollback_incomplete:
+                failure_message += "；替换回滚未完成，请人工核验新旧文件"
             logger.error(
                 "文件整理失败 file=%s type=%s",
                 p.original_name, type(e).__name__,
