@@ -588,6 +588,7 @@ class STRMScheduler:
                 self._worker = worker
             worker.start()
         except Exception:
+            logger.exception("启动 STRM 同步线程失败 trigger=%s", trigger_type)
             with self._state_lock:
                 self._worker = None
                 self._running = False
@@ -595,23 +596,25 @@ class STRMScheduler:
                 self._run_options = {}
             self._run_lock.release()
             self._run_released_event.set()
-            _update_strm_requests(
-                options, strm_status="failed", strm_error="STRM 同步任务启动失败",
-                strm_finished_at=db.now(),
-            )
-            _publish_linked_notification_threads(
-                options,
-                strm_status="启动失败",
-                media_refresh="未触发",
-                partial=True,
-                error="STRM 同步任务启动失败",
-            )
             if run_id:
                 try:
                     db.finish_task_run(run_id, "failed", error="STRM 同步任务启动失败")
                 except Exception:
                     logger.exception("保存 STRM 启动失败状态异常 run_id=%s", run_id)
-            logger.exception("启动 STRM 同步线程失败 trigger=%s", trigger_type)
+            try:
+                _update_strm_requests(
+                    options, strm_status="failed", strm_error="STRM 同步任务启动失败",
+                    strm_finished_at=db.now(),
+                )
+                _publish_linked_notification_threads(
+                    options,
+                    strm_status="启动失败",
+                    media_refresh="未触发",
+                    partial=True,
+                    error="STRM 同步任务启动失败",
+                )
+            except Exception:
+                logger.exception("更新 STRM 启动失败关联状态异常 run_id=%s", run_id)
             return {"ok": False, "error": "STRM 同步任务启动失败"}
         return {"ok": True, "message": "STRM 同步任务已启动", "run_id": run_id}
 
