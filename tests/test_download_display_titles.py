@@ -75,7 +75,8 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(download_requests)")}
         self.assertIn("display_title", columns)
-        self.assertEqual(db.SCHEMA_VERSION, 33)
+        with db.get_conn() as conn:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
 
     def test_log_enrichment_uses_request_index_instead_of_full_table_scan(self) -> None:
         with db.get_conn() as conn:
@@ -114,7 +115,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
                 "SELECT title,status,qb_status FROM download_requests WHERE id=?",
                 (request_id,),
             ).fetchone())
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 33)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
         self.assertEqual(after_columns, [*before_columns, "display_title"])
         self.assertEqual(migrated, before)
 
@@ -128,7 +129,7 @@ class DownloadDisplayTitleTests(IsolatedDatabaseTestCase):
                 "SELECT title,status,qb_status FROM download_requests WHERE id=?",
                 (request_id,),
             ).fetchone()), before)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 33)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
 
     def test_indexer_display_name_does_not_change_business_title_or_dispatch_input(self) -> None:
         magnet = "magnet:?xt=urn:btih:" + "a" * 40
