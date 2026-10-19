@@ -47,14 +47,14 @@ _TERMINAL_STATUSES = {
     ),
     "guangya_task": frozenset({"completed", "failed"}),
     "guangya_organize_task": frozenset(
-        {"completed", "partial", "failed", "cancelled", "manual_review", "stopped"}
+        {"completed", "partial", "failed", "cancelled", "manual_review", "stopped", "outcome_unknown"}
     ),
     "local_media_task": frozenset({"completed", "failed", "manual_review"}),
     "local_media_scan": frozenset({"completed", "partial", "failed", "requires_manual"}),
     "agent_job": frozenset(
         {"updates_available", "up_to_date", "inconclusive", "cancelled", "failed"}
     ),
-    "strm_run": frozenset({"completed", "partial", "failed"}),
+    "strm_run": frozenset({"completed", "partial", "failed", "outcome_unknown"}),
     "library_patrol": frozenset(
         {
             "cancelled",
@@ -64,6 +64,7 @@ _TERMINAL_STATUSES = {
             "not_configured",
             "unavailable",
             "failed",
+            "outcome_unknown",
         }
     ),
 }
@@ -424,6 +425,18 @@ def _patrol_status(tracker: _CompletionTracker) -> ToolResult:
 async def _poll(
     tracker: _CompletionTracker, context: ToolContext
 ) -> tuple[ToolResult, str, dict[str, Any]]:
+    requires_run_id = tracker.kind in {"strm_run", "library_patrol"} or (
+        tracker.kind == "guangya_organize_task"
+        and str(tracker.value.get("operation") or "").strip().casefold() == "run"
+    )
+    run_id = tracker.value.get("run_id")
+    if requires_run_id and (type(run_id) is not int or run_id <= 0):
+        snapshot = ToolResult(
+            False, "outcome_unknown", "后台任务结果无法核验，自动跟踪已结束",
+            error="缺少本次运行的可靠记录。",
+            suggestions=["请核对原任务状态；未确认结果前不要重复提交。"],
+        )
+        return snapshot, snapshot.status, {"status": snapshot.status}
     if tracker.kind == "guangya_operation":
         from app.agent.domains.guangya.runtime import guangya_organize_status
 
