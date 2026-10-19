@@ -282,6 +282,10 @@ _SAFE_FIELDS = {
     "local_media.scan_sources": {
         "operation",
         "source_numbers",
+        "scan_status",
+        "failed_sources",
+        "skipped_sources",
+        "enqueue_failures",
         "scanned_sources",
         "candidates",
         "queued_tasks",
@@ -456,6 +460,12 @@ _SAFE_ERROR_CODES = {
     "execution_interrupted",
 }
 _COUNT_FIELDS = {
+    "failed_sources",
+    "skipped_sources",
+    "enqueue_failures",
+    "scanned_sources",
+    "candidates",
+    "queued_tasks",
     "requested",
     "claimed",
     "submitted",
@@ -506,6 +516,7 @@ _COUNT_FIELDS = {
     "matched_paths",
 }
 _BOOL_FIELDS = {
+    "runtime_started",
     "accepted",
     "enabled",
     "runtime_refreshed",
@@ -529,6 +540,7 @@ _BOOL_FIELDS = {
     "allow_download",
 }
 _ENUM_FIELDS = {
+    "scan_status": {"completed", "partial", "failed"},
     "target": {"qb", "qbittorrent", "guangya", "both"},
     "feature": {
         "discovery",
@@ -565,6 +577,7 @@ _ENUM_FIELDS = {
     "media_type": {"movie", "tv"},
     "task_status": {"pending", "running", "retry_wait", "not_scheduled"},
     "operation": {
+        "scan_sources",
         "pause",
         "resume",
         "delete",

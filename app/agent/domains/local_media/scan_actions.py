@@ -10,6 +10,7 @@ from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolResult
 from app.agent.public_safety import sanitize_resource_title
 from app.modules.local_media_scheduler import get_local_media_scheduler
+from app.modules.local_media_scan_runs import local_media_scan_summary
 
 from . import common
 
@@ -158,18 +159,26 @@ def scan_local_media_sources_confirmed(
         candidate_query=normalized["query"],
     )
     queued = int(result.get("queued_count") or 0)
+    scan_summary = local_media_scan_summary(result)
+    scan_status = str(result["scan_status"])
+    failed_sources = int(result["failed_sources"])
     started = False
     if queued and not was_running:
         scheduler.start()
         started = True
     return ToolResult(
-        ok=True,
-        status="accepted" if queued else "completed",
+        ok=bool(queued) or scan_status == "completed",
+        status="accepted" if queued else scan_status,
         summary=(
-            f"已扫描 {int(result.get('scanned_sources') or 0)} 个来源，"
+            ("扫描部分完成，" if scan_status == "partial" else "扫描失败，")
+            + f"{failed_sources} 个来源扫描或入队失败；"
+            if failed_sources else ""
+        ) + (
+            f"已扫描 {int(result['scanned_sources'])} 个来源，"
             f"{queued} 个媒体候选已进入整理队列"
         ),
         data={
+            **scan_summary,
             "operation": "scan_sources",
             "scan_ref": str(result.get("scan_ref") or ""),
             "scan_recorded": bool(result.get("scan_recorded", bool(result.get("scan_ref")))),
@@ -182,7 +191,7 @@ def scan_local_media_sources_confirmed(
         evidence=[
             Evidence(
                 "local_media_scheduler",
-                "已按确认快照扫描配置来源并唤醒本地媒体调度器；未返回路径、文件名或任务内部标识。",
+                "已按确认快照检查配置来源并记录扫描结果；未返回路径、文件名或任务内部标识。",
                 common._now(),
             )
         ],
@@ -192,9 +201,11 @@ def scan_local_media_sources_confirmed(
                 "scan_ref": str(result.get("scan_ref") or ""),
             }
         } if queued else {},
+        error="扫描来源或入队失败，无法确认所选来源没有候选。" if failed_sources and not queued else "",
         suggestions=(
-            ["可继续查看本地媒体任务或待确认队列。"]
-            if queued
-            else ["当前所选来源没有发现可入队的媒体候选。"]
+            ["请检查扫描来源目录、挂载与服务状态后重新扫描。"] if failed_sources else []
+        ) + (
+            ["可继续查看本地媒体任务或待确认队列。"] if queued else
+            [] if failed_sources else ["当前所选来源没有发现可入队的媒体候选。"]
         ),
     )

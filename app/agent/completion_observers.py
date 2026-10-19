@@ -304,7 +304,10 @@ def _local_media_scan_status(tracker: _CompletionTracker) -> ToolResult:
     from app import database as db
     from app.modules.local_media_models import LOCAL_BUSY_TASK_STATUSES
     from app.modules.local_media_outcomes import local_media_task_outcome
-    from app.modules.local_media_scan_runs import resolve_local_media_scan
+    from app.modules.local_media_scan_runs import (
+        local_media_scan_summary,
+        resolve_local_media_scan,
+    )
 
     if "task_ids" not in tracker.value:
         scan_ref = str(tracker.value.get("scan_ref") or "").strip()
@@ -313,6 +316,7 @@ def _local_media_scan_status(tracker: _CompletionTracker) -> ToolResult:
             raise LookupError("缺少本次扫描回执")
         scan = resolve_local_media_scan(scan_ref, owner="admin")
         tracker.value["task_ids"] = tuple(scan["task_ids"])
+        tracker.value["scan_summary"] = local_media_scan_summary(scan["summary"])
     membership = tracker.value["task_ids"]
     if not membership:
         return ToolResult(False, "unknown", "本次入队扫描没有可核验的任务成员")
@@ -342,6 +346,8 @@ def _local_media_scan_status(tracker: _CompletionTracker) -> ToolResult:
         "requires_manual": 0, "failed": 0, "unknown": missing,
         "missing_tasks": missing, "archived_video_count": 0,
         "skipped_video_count": 0, "unknown_video_count": 0,
+        "failed_sources": _bounded_int(tracker.value.get("scan_summary", {}).get("failed_sources")),
+        "enqueue_failures": _bounded_int(tracker.value.get("scan_summary", {}).get("enqueue_failures")),
     }
     for task_id, task in tasks.items():
         raw_status = str(task["status"])
@@ -366,6 +372,8 @@ def _local_media_scan_status(tracker: _CompletionTracker) -> ToolResult:
     )
     if status in {"failed", "requires_manual"} and stats["archived_video_count"]:
         status = "partial"
+    if status == "completed" and stats["failed_sources"]:
+        status = "partial"
     heading = {
         "unknown": "本次扫描的整理结果仍有未知项",
         "running": "本次扫描的整理任务仍在运行",
@@ -381,6 +389,7 @@ def _local_media_scan_status(tracker: _CompletionTracker) -> ToolResult:
             f"{heading}：共 {stats['total']} 个任务，"
             f"归档 {stats['archived_video_count']} 个视频，"
             f"冲突跳过 {stats['skipped_video_count']} 个视频，"
+            f"来源失败 {stats['failed_sources']} 个，"
             f"失败 {stats['failed']} 个任务，待人工 {stats['requires_manual']} 个任务"
         ),
         data={"task": {"status": status, "stats": stats}},

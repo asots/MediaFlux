@@ -15,10 +15,35 @@ from app import database as db
 UNRECORDED_LOCAL_SCAN = "LM-UNRECORDED"
 _TASK_NAME = "local_media_scan"
 _SCAN_REF = re.compile(r"LM([1-9][0-9]{0,17})\Z")
-_COUNTS = (
+_SCAN_COUNTS = (
     "source_count", "scanned_sources", "candidate_count", "queued_count",
+    "failed_sources", "skipped_sources", "enqueue_failures",
+)
+_RESULT_COUNTS = (
     "completed", "requires_manual", "failed", "moved_items", "skipped_items",
 )
+SCAN_FAILURE_MESSAGES = {
+    "source_unavailable": "来源目录不可访问或配置无效，请检查目录与挂载。",
+    "scan_incomplete": "部分来源目录未能完整扫描，请检查读取权限后重试。",
+    "enqueue_failed": "部分媒体候选未能加入整理队列，请检查服务状态后重试。",
+}
+
+
+def local_media_scan_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """扫描阶段的唯一安全回执字段；不包含路径、来源名称或数据库标识。"""
+    result: dict[str, Any] = {
+        key: int(summary[key] or 0) for key in _SCAN_COUNTS if key in summary
+    }
+    status = summary.get("scan_status")
+    if status in {"completed", "partial", "failed"}:
+        result["scan_status"] = status
+    errors = summary.get("scan_errors", [])
+    result["scan_errors"] = [
+        {"code": code, "message": message}
+        for code, message in SCAN_FAILURE_MESSAGES.items()
+        if any(isinstance(item, dict) and item.get("code") == code for item in errors)
+    ]
+    return result
 
 
 def _payload(row: Any, *, owner: str) -> dict[str, Any] | None:
@@ -52,9 +77,9 @@ def record_local_media_scan(summary: dict[str, Any], *, owner: str = "admin") ->
     task_ids = list(dict.fromkeys(int(v) for v in summary.get("task_ids", [])))
     if any(v < 1 for v in task_ids):
         raise ValueError("扫描任务标识无效")
-    counts = {k: int(summary[k] or 0) for k in _COUNTS if k in summary}
+    scan_summary = local_media_scan_summary(summary)
     encoded = json.dumps(
-        {"version": 1, "owner": owner, "task_ids": task_ids, "summary": counts},
+        {"version": 1, "owner": owner, "task_ids": task_ids, "summary": scan_summary},
         ensure_ascii=False,
     )
     timestamp = db.now()
@@ -62,8 +87,12 @@ def record_local_media_scan(summary: dict[str, Any], *, owner: str = "admin") ->
     with db.get_conn() as conn:
         cursor = conn.execute(
             "INSERT INTO task_runs(task_name,trigger_type,status,started_at,finished_at,result) "
-            "VALUES(?,'manual','success',?,?,?)",
-            (_TASK_NAME, str(summary.get("scan_started_at") or timestamp), timestamp, encoded),
+            "VALUES(?,'manual',?,?,?,?)",
+            (
+                _TASK_NAME,
+                {"failed": "failed", "partial": "partial"}.get(str(scan_summary.get("scan_status") or ""), "success"),
+                str(summary.get("scan_started_at") or timestamp), timestamp, encoded,
+            ),
         )
         return f"LM{cursor.lastrowid}"
 
@@ -99,14 +128,6 @@ def finish_local_media_scan_report(
         dict(item) for item in summary.get("task_outcomes", [])
         if isinstance(item, dict) and item.get("task_id") in allowed
     ]
-    payload = {
-        "version": 1, "owner": owner, "task_ids": run["task_ids"],
-        "summary": {
-            **{k: int(summary[k] or 0) for k in _COUNTS if k in summary},
-            "task_outcomes": outcomes,
-            "reported_at": db.now(),
-        },
-    }
     with db.get_conn() as conn:
         # 同一批次只冻结第一次终态报告，避免后续任务变化覆盖已送达通知。
         row = conn.execute("SELECT * FROM task_runs WHERE id=?", (run["id"],)).fetchone()
@@ -115,6 +136,15 @@ def finish_local_media_scan_report(
             raise LookupError("本地扫描回执已移除")
         if current["summary"].get("reported_at"):
             return
+        payload = {
+            "version": 1, "owner": owner, "task_ids": run["task_ids"],
+            "summary": {
+                **current["summary"],
+                **{key: int(summary[key] or 0) for key in _RESULT_COUNTS if key in summary},
+                "task_outcomes": outcomes,
+                "reported_at": db.now(),
+            },
+        }
         conn.execute(
             "UPDATE task_runs SET result=? WHERE id=? AND task_name=?",
             (json.dumps(payload, ensure_ascii=False), run["id"], _TASK_NAME),

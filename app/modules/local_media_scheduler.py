@@ -26,6 +26,12 @@ from app.modules.local_media_models import (
     local_media_paths_overlap,
 )
 from app.modules.local_media_notifications import notify_local_media_task
+from app.modules.local_media_scan_runs import (
+    SCAN_FAILURE_MESSAGES,
+    UNRECORDED_LOCAL_SCAN,
+    local_media_scan_summary,
+    record_local_media_scan,
+)
 from app.modules.local_media_service import (
     LocalMediaPostMoveError,
     LocalMediaService,
@@ -329,6 +335,7 @@ class LocalMediaScheduler:
         scan_started_at = db.now()
         task_ids: list[int] = []
         source_results: list[dict[str, Any]] = []
+        error_codes: set[str] = set()
         selected_source_ids = (
             {item for item in source_ids} if source_ids is not None else None
         )
@@ -337,6 +344,7 @@ class LocalMediaScheduler:
                 continue
             source_error = _source_path_error(source)
             if source_error:
+                error_codes.add("source_unavailable")
                 source_results.append({
                     "id": source.id, "name": source.name, "candidates": 0,
                     "queued": 0, "skipped": True, "reason": "",
@@ -364,12 +372,16 @@ class LocalMediaScheduler:
                     if _candidate_matches_query(candidate, candidate_query)
                 ]
             if error and not candidates:
+                error_codes.add("source_unavailable")
                 source_results.append({
                     "id": source.id, "name": source.name, "candidates": 0,
                     "queued": 0, "skipped": True, "reason": "", "error": error,
                 })
                 continue
             source_task_ids: list[int] = []
+            enqueue_failures = 0
+            if error:
+                error_codes.add("scan_incomplete")
             for candidate in candidates:
                 try:
                     prefix = (
@@ -387,34 +399,51 @@ class LocalMediaScheduler:
                     source_task_ids.append(task_id)
                 except Exception as exc:
                     logger.warning("本地媒体手动扫描入队失败 %s: %s", candidate.name, exc)
+                    enqueue_failures += 1
+            if enqueue_failures:
+                error_codes.add("enqueue_failed")
+                error = error or SCAN_FAILURE_MESSAGES["enqueue_failed"]
             task_ids.extend(source_task_ids)
             source_results.append({
                 "id": source.id,
                 "name": source.name,
                 "candidates": len(candidates),
                 "queued": len(set(source_task_ids)),
+                "enqueue_failures": enqueue_failures,
                 "skipped": False,
                 "reason": "",
                 "error": error,
             })
         unique_task_ids = list(dict.fromkeys(task_ids))
+        failed_sources = sum(bool(item["error"]) for item in source_results)
+        useful_sources = sum(
+            not item["skipped"] and (not item["error"] or bool(item["queued"]))
+            for item in source_results
+        )
+        scan_status = (
+            "partial" if useful_sources else "failed"
+        ) if failed_sources else "completed"
         if capture_results and unique_task_ids:
             with self._guard:
                 self._capture_result_task_ids.update(unique_task_ids)
         summary = {
-            "ok": True,
+            "ok": scan_status == "completed",
+            "scan_status": scan_status,
             "scan_started_at": scan_started_at,
             "source_count": len(source_results),
             "scanned_sources": sum(1 for item in source_results if not item["skipped"]),
             "candidate_count": sum(int(item["candidates"]) for item in source_results),
             "queued_count": len(unique_task_ids),
+            "failed_sources": failed_sources,
+            "skipped_sources": sum(
+                bool(item["skipped"] and not item["error"]) for item in source_results
+            ),
+            "enqueue_failures": sum(int(item.get("enqueue_failures", 0)) for item in source_results),
+            "scan_errors": [{"code": code} for code in error_codes],
             "task_ids": unique_task_ids,
             "sources": source_results,
         }
-        from app.modules.local_media_scan_runs import (
-            UNRECORDED_LOCAL_SCAN,
-            record_local_media_scan,
-        )
+        summary.update(local_media_scan_summary(summary))
 
         try:
             summary["scan_ref"] = record_local_media_scan(summary, owner=self.owner)

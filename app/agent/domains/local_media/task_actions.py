@@ -190,6 +190,7 @@ class LocalMediaTaskActions:
         attention = sum(item["status"] in common._RETRYABLE for item in items)
         scan_data = (
             {
+                **local_media_scan_runs.local_media_scan_summary(scan["summary"]),
                 "scan_ref": scan.get("scan_ref"),
                 "scan_started_at": scan.get("started_at", ""),
                 "scan_finished_at": scan.get("finished_at", ""),
@@ -206,8 +207,11 @@ class LocalMediaTaskActions:
         )
         return ToolResult(
             True,
-            "attention" if attention or missing else "completed",
-            f"已列出本页 {len(items)} 个本地媒体任务" if items else "本页没有本地媒体任务",
+            "attention" if attention or missing or scan_data.get("failed_sources") else "completed",
+            f"已列出本页 {len(items)} 个本地媒体任务" if items else (
+                "本次扫描存在来源错误，没有可列出的整理任务"
+                if scan_data.get("failed_sources") else "本页没有本地媒体任务"
+            ),
             data={
                 "scope": scope,
                 "total": len(items),

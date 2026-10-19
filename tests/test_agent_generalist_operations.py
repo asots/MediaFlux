@@ -72,6 +72,7 @@ class AgentGeneralistOperationTests(IsolatedDatabaseTestCase):
             scheduler = Mock()
             scheduler.status.return_value = {"running": False}
             scheduler.enqueue_manual_scan_candidates.return_value = {
+                "scan_status": "completed", "failed_sources": 0,
                 "scanned_sources": 1,
                 "candidate_count": 2,
                 "queued_count": 2,

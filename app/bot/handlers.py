@@ -3851,11 +3851,7 @@ def _run_local_organize_stage(
         task_outcomes.append({"task_id": task_id, "status": status, **outcome})
         moved_items += int(outcome["archived_video_count"])
         skipped_items += int(outcome["skipped_video_count"])
-    source_errors = [
-        f"{item.get('name') or '未命名来源'!s}：{item.get('error') or ''!s}"
-        for item in (scan_result.get("sources") or [])
-        if isinstance(item, dict) and str(item.get("error") or "")
-    ]
+    source_errors = [item["message"] for item in scan_result.get("scan_errors", [])]
     summary = {
         **scan_result,
         "completed": completed,
@@ -3886,7 +3882,7 @@ def _local_organize_event(summary: dict) -> NotificationEvent:
         or summary.get("source_errors")
     )
     lines = [f"• {message}" for message in list(summary.get("source_errors") or [])[:5]]
-    if not int(summary.get("candidate_count", 0) or 0):
+    if not int(summary.get("candidate_count", 0) or 0) and not summary.get("source_errors"):
         lines.append("下载目录中暂未发现可整理的媒体候选。")
     labels = {
         "archived": "已归档",
@@ -3913,6 +3909,7 @@ def _local_organize_event(summary: dict) -> NotificationEvent:
         lines.append("本条通知的结果快照未保存，后续查询仅能读取任务当前状态。")
     scan_fields = (("本地扫描", str(summary["scan_ref"])),) if summary.get("scan_ref") else ()
     return NotificationEvent(
+        "本地下载扫描失败" if summary.get("scan_status") == "failed" else
         "本地下载整理部分完成" if attention else "本地下载整理完成",
         layout="relaxed",
         fields=(

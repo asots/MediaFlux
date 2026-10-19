@@ -88,7 +88,7 @@ class LocalMediaScanRunTests(IsolatedDatabaseTestCase):
             self.assertEqual(len(seen), 1)
             self.assertEqual(seen[0]["task_ids"], result["task_ids"])
             with patch(
-                "app.modules.local_media_scan_runs.record_local_media_scan",
+                "app.modules.local_media_scheduler.record_local_media_scan",
                 side_effect=OSError("receipt unavailable"),
             ):
                 failed_receipt = scheduler.enqueue_manual_scan_candidates(silent=True)

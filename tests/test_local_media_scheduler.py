@@ -1046,6 +1046,10 @@ class LocalMediaSchedulerTests(IsolatedDatabaseTestCase):
             self.assertEqual(result["candidate_count"], 0)
             self.assertEqual(result["queued_count"], 0)
             self.assertEqual(result["task_ids"], [])
+            self.assertEqual(result["scan_status"], "completed")
+            self.assertEqual(result["failed_sources"], 0)
+            self.assertEqual(result["skipped_sources"], 2)
+            self.assertEqual(result["scan_errors"], [])
             self.assertTrue(all(item["skipped"] for item in result["sources"]))
             self.assertTrue(all(not item["error"] for item in result["sources"]))
             self.assertEqual(
