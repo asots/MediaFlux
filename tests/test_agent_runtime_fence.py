@@ -174,6 +174,19 @@ def test_require_uses_caller_session_connection_and_blocks_competing_writer(runt
                 other.execute('UPDATE settings_kv SET value=value WHERE key=?', (gate.RUNTIME_FENCE_KEY,))
 
 
+def test_publication_updates_only_the_writers_scoped_snapshot(runtime_env):
+    from contextvars import copy_context
+    snapshot = config.capture_runtime_config_snapshot()
+    with config.use_runtime_config_snapshot(snapshot):
+        reader = copy_context()
+        config.set_and_save({'AGENT_LLM_MODEL': 'published'})
+        assert config.get('AGENT_LLM_MODEL') == 'published'
+        assert reader.run(config.get, 'AGENT_LLM_MODEL') == 'old'
+        assert snapshot.file_values['AGENT_LLM_MODEL'] == 'old'
+        config.set_and_save({'AGENT_STREAM_DISPLAY_ENABLED': '0'})
+        assert config.get('AGENT_STREAM_DISPLAY_ENABLED') == '0'
+
+
 def test_real_strm_api_enters_fence_before_sqlite_writer(runtime_env):
     from types import SimpleNamespace
     from app.routes import api

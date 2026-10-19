@@ -131,6 +131,41 @@ def test_zero_generation_old_confirmation_is_rejected_after_configuration_change
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("tool,updates,arguments", [
+    ("config.create_media_path_mapping", {"JELLYFIN_PATH_MAPPINGS": "[]"},
+     {"provider": "jellyfin", "local_path": "/media/strm/movies", "server_path": "/mnt/media/movies"}),
+    ("library.set_patrol_policy", {"AGENT_LIBRARY_PATROL_ENABLED": "0"}, {"enabled": True}),
+])
+def test_configuration_writer_verifies_and_reloads_its_committed_snapshot(tool, updates, arguments):
+    from app.modules.agent_library_patrol_scheduler import AgentLibraryPatrolScheduler
+
+    async def scenario():
+        with initialized_web_runtime():
+            config.set_and_save({**updates, "AGENT_LLM_API_URL": "http://model.invalid/v1", "AGENT_LLM_MODEL": "test-model"})
+            invalidate_agent_kernel_runtime()
+            try:
+                current = runtime()
+                context = await context_for(current.store, owner=OWNER, session="config-writer")
+                preview = await current.session.pipeline.execute(tool, arguments, context=context)
+                assert preview.effect_plan is not None
+                scheduler = AgentLibraryPatrolScheduler()
+                with patch("app.modules.agent_library_patrol_scheduler.get_agent_library_patrol_scheduler", return_value=scheduler):
+                    events = await confirm(current, "config-writer", preview.effect_plan.plan_id)
+                result = next(event["payload"]["result"] for event in events if event["type"] == "effect.completed")
+                assert result["ok"] and result["status"] == "completed"
+                values = config.read_env_snapshot(config.ENV_FILE)[1]
+                if tool == "library.set_patrol_policy":
+                    assert values["AGENT_LIBRARY_PATROL_ENABLED"] == "1"
+                    assert result["data"]["policy"]["enabled"] is True
+                    assert result["data"]["runtime_refreshed"] is True
+                else:
+                    assert len(json.loads(values["JELLYFIN_PATH_MAPPINGS"])) == 1
+                    assert result["data"]["count"] == 1
+            finally:
+                invalidate_agent_kernel_runtime()
+    asyncio.run(scenario())
+
+
 async def child(plan_id):
     # tests 包的默认隔离不能把子进程重定向到另一安装的数据库。
     os.environ["MEDIAFLUX_TEST_MODE"] = "0"

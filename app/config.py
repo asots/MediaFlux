@@ -288,6 +288,10 @@ def runtime_config_publication(updates: Mapping[str, str]):
                 with db.get_conn() as conn:
                     conn.execute("BEGIN IMMEDIATE")
                     finish_runtime_change(conn, changing, snapshot.config_digest)
+            if _runtime_snapshot.get() is not None:
+                # 写入者的后续核验/reload读取自己已提交的配置；其他上下文
+                # 仍持有原不可变快照，失败或未结束的嵌套发布不更新它。
+                _runtime_snapshot.set(capture_runtime_config_snapshot())
         finally:
             _runtime_guard.scope["publication"] = None
 
