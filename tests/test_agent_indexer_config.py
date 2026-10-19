@@ -28,7 +28,7 @@ from app.indexers.config import (
     normalize_indexer_site_ids,
     normalize_persisted_indexer_site_ids,
 )
-from app.routes.api import _normalize_indexer_sites, get_config
+from app.routes.api import _validate_indexer_updates, get_config
 from tests.agent_kernel_test_harness import (
     build_kernel_test_registry as build_tool_registry,
 )
@@ -148,12 +148,12 @@ class IndexerSiteConfigUnitTests(unittest.TestCase):
                 indexer_sites_arguments(arguments)
 
     def test_settings_route_keeps_legacy_string_input_contract(self):
-        self.assertEqual(_normalize_indexer_sites(None), "")
-        self.assertEqual(_normalize_indexer_sites(0), "")
-        self.assertEqual(_normalize_indexer_sites(False), "")
-        self.assertEqual(_normalize_indexer_sites("tpb,nyaa,tpb"), "nyaa,tpb")
+        discovery = {"DISCOVERY_RESOURCE_RESULTS_ENABLED": "0"}
+        for value, expected in ((None, ""), (0, ""), (False, ""), ("tpb,nyaa,tpb", "nyaa,tpb")):
+            updates = _validate_indexer_updates({"INDEXER_ENABLED_SITES": value}, discovery)
+            self.assertEqual(updates["INDEXER_ENABLED_SITES"], expected)
         with self.assertRaises(ValueError):
-            _normalize_indexer_sites(["nyaa", "tpb"])
+            _validate_indexer_updates({"INDEXER_ENABLED_SITES": ["nyaa", "tpb"]}, discovery)
 
     def test_registry_exposes_read_and_confirmation_gated_write(self):
         registry = build_tool_registry()

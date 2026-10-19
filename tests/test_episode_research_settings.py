@@ -8,7 +8,6 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import unittest
 from contextlib import nullcontext
@@ -29,6 +28,7 @@ class MemoryConfig:
     """只在内存发布；禁止依赖生产 ENV_FILE、密钥与数据库。"""
 
     AtomicPublishError = OSError
+    runtime_config_read_guard = staticmethod(nullcontext)
 
     def __init__(self):
         self.values = {}
@@ -57,7 +57,7 @@ def _module(name, **attributes):
 def _load_settings_api(config) -> dict[str, Any]:
     """执行真实路由/注册代码，剥离顶层导入和无关校验，防止启动业务服务。"""
     namespace: dict[str, Any] = {
-        "config": config, "threading": threading, "time": time, "re": re,
+        "config": config, "nullcontext": nullcontext, "time": time, "re": re,
         "logger": logging.getLogger(__name__), "Body": lambda **_: None,
         "require_api_login": Mock(), "redact_config": dict,
         "api_error": lambda message, status=400: SimpleNamespace(

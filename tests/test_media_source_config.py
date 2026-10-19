@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -221,6 +222,25 @@ class MediaConfigSaveTests(unittest.TestCase):
         self.assertEqual(save.call_args_list[1].args[0], {
             "GY_STRM_SOURCE_DIRS": old_sources,
         })
+
+    def test_runtime_invalidation_failure_rolls_back_source_retirement_and_config_together(self):
+        from app import config
+        from app import database as db
+
+        self.initialize_publisher()
+        self.enterContext(patch.dict(os.environ))
+        self.enterContext(patch.object(config, "_cache", None))
+        initial = {"GY_STRM_SOURCE_DIRS": '[{"id":"11","name":"旧来源"}]'}
+        config.set_and_save(initial)
+        with patch.object(self.api, "require_api_login"), patch(
+            "app.agent.feature_gate.invalidate_agent_runtime_generation",
+            side_effect=RuntimeError("runtime invalidation failed"),
+        ):
+            result = self.api.save_config(cast(Request, self.request), {"GY_STRM_SOURCE_DIRS": "[]"})
+        assert isinstance(result, JSONResponse)
+        self.assertEqual(result.status_code, 500)
+        self.assertEqual(config.read_env_snapshot(config.ENV_FILE)[1], initial)
+        self.assertEqual(db.list_strm_retired_sources(), [])
 
     def test_advanced_media_server_mapping_is_validated_and_canonicalized(self):
         result, save, _, _ = self._save({

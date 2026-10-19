@@ -9,7 +9,11 @@ import unittest
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from unittest import mock
+
+from starlette.requests import Request
 
 from app import config
 from app.modules import backup
@@ -92,6 +96,88 @@ def simultaneous_configuration_writers(directory, output):
 
 
 class ConfigLockOrderBusinessTests(unittest.TestCase):
+    def test_settings_validate_related_fields_against_the_committed_predecessor(self):
+        from app.agent import feature_gate
+        from app.agent.feature_gate import initialize_runtime_fence
+        from app.routes import api
+        from tests.support import isolated_test_database
+
+        first_saving, second_observed, first_saved = (threading.Event() for _ in range(3))
+        original_get = config.get
+        original_save = config.set_and_save
+        original_guard = config.runtime_config_read_guard
+        original_transition = feature_gate.agent_runtime_transition
+        outcomes: dict[str, Any] = {}
+        initial = {"DISCOVERY_CACHE_TTL_SECONDS": "60", "DISCOVERY_STALE_TTL_SECONDS": "600"}
+
+        @contextmanager
+        def observed_guard():
+            if threading.current_thread().name == "second-settings":
+                second_observed.set()
+            with original_guard():
+                yield
+
+        @contextmanager
+        def observed_transition():
+            if threading.current_thread().name == "second-settings":
+                second_observed.set()
+            with original_transition():
+                yield
+
+        def observed_get(key, default=""):
+            value = original_get(key, default)
+            if (threading.current_thread().name == "second-settings"
+                    and key == "DISCOVERY_CACHE_TTL_SECONDS" and not first_saved.is_set()):
+                # 旧实现会在第一个请求尚未发布时读取旧值；发布锁必须覆盖此验证。
+                second_observed.set()
+                if not first_saved.wait(5):
+                    raise RuntimeError("第一个设置请求没有结束")
+            return value
+
+        def delayed_save(updates):
+            if threading.current_thread().name == "first-settings":
+                first_saving.set()
+                if not second_observed.wait(5):
+                    raise RuntimeError("第二个设置请求没有进入")
+            original_save(updates)
+            if threading.current_thread().name == "first-settings":
+                first_saved.set()
+
+        def save(name, payload):
+            request = Request({"type": "http", "app": SimpleNamespace(state=SimpleNamespace(background_services_enabled=False))})
+            try:
+                outcomes[name] = api.save_config(request, payload)
+            except Exception as exc:
+                outcomes[name] = exc
+
+        with tempfile.TemporaryDirectory() as directory, isolated_test_database(), \
+                mock.patch.dict(os.environ, initial), \
+                mock.patch.object(config, "ENV_FILE", Path(directory) / "user.env"), \
+                mock.patch.object(config, "_cache", None):
+            config.write_env_file(config.ENV_FILE, initial, replace=False)
+            initialize_runtime_fence()
+            with mock.patch.object(api, "require_api_login"), \
+                    mock.patch.object(config, "get", side_effect=observed_get), \
+                    mock.patch.object(config, "set_and_save", side_effect=delayed_save), \
+                    mock.patch.object(config, "runtime_config_read_guard", side_effect=observed_guard), \
+                    mock.patch.object(feature_gate, "agent_runtime_transition", side_effect=observed_transition), \
+                    mock.patch("app.discovery.service.shutdown_discovery_service"), \
+                    mock.patch("app.discovery.search.shutdown_discovery_search_service"), \
+                    mock.patch("app.modules.recognition_hints.clear_recognition_hint_cache"), \
+                    mock.patch("app.services.clear_dashboard_cache"):
+                first = threading.Thread(target=save, name="first-settings", args=("first", {"DISCOVERY_CACHE_TTL_SECONDS": "500"}), daemon=True)
+                second = threading.Thread(target=save, name="second-settings", args=("second", {"DISCOVERY_STALE_TTL_SECONDS": "300"}), daemon=True)
+                first.start()
+                self.assertTrue(first_saving.wait(5))
+                second.start()
+                first.join(10)
+                second.join(10)
+                self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual(outcomes["first"], {"success": True})
+            self.assertEqual(getattr(outcomes["second"], "status_code", None), 400, outcomes)
+            _, values = config.read_env_snapshot(config.ENV_FILE)
+            self.assertEqual(values, {**initial, "DISCOVERY_CACHE_TTL_SECONDS": "500"})
+
     def test_concurrent_plain_and_policy_writes_finish_with_safe_cas_conflict(self):
         context = multiprocessing.get_context("spawn")
         output = context.Queue()

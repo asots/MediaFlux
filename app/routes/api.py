@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
+from contextlib import nullcontext
 from typing import Any
 
 import requests
@@ -41,7 +41,6 @@ logger = get_logger(__name__)
 
 
 _CONFIG_MASK = "********"
-_CONFIG_SAVE_TRANSACTION_LOCK = threading.RLock()
 _CLEARABLE_SECRET_KEYS = frozenset({
     "TG_BOT_TOKEN",
     "AGENT_LLM_API_KEY",
@@ -363,11 +362,6 @@ def _existing_ttl(key: str) -> int:
         return default
 
 
-def _normalize_indexer_sites(value: Any) -> str:
-    """兼容既有设置校验入口，实际白名单由 Indexer 共享模块维护。"""
-    return encode_indexer_site_ids(str(value or ""))
-
-
 def _validate_indexer_updates(
     data: dict[str, Any], discovery_updates: dict[str, str]
 ) -> dict[str, str]:
@@ -386,7 +380,7 @@ def _validate_indexer_updates(
             raise ValueError("BTBTLA 最小请求间隔必须在 0 到 60 秒之间")
         normalized[key] = str(interval)
     if "INDEXER_ENABLED_SITES" in data:
-        sites = _normalize_indexer_sites(data.get("INDEXER_ENABLED_SITES"))
+        sites = encode_indexer_site_ids(str(data.get("INDEXER_ENABLED_SITES") or ""))
         resource_enabled = discovery_updates.get(
             "DISCOVERY_RESOURCE_RESULTS_ENABLED",
             "1" if config.get_bool("DISCOVERY_RESOURCE_RESULTS_ENABLED", True) else "0",
@@ -1168,347 +1162,408 @@ def _reload_local_media_config() -> tuple[list[str], bool]:
 def save_config(request: Request, data: Any = Body(default=None)):
     request_started = time.perf_counter()
     require_api_login(request)
-    if not isinstance(data, dict):
-        return api_error("配置必须是 JSON 对象", 400)
-    data = dict(data)
-    clear_secrets = data.pop("__clear_secrets", [])
-    if clear_secrets is None:
-        clear_secrets = []
-    if not isinstance(clear_secrets, list):
-        return api_error("__clear_secrets 必须是数组", 400)
-    clear_keys = {str(key or "").strip() for key in clear_secrets}
-    invalid_clear_keys = sorted(clear_keys - _CLEARABLE_SECRET_KEYS)
-    if invalid_clear_keys:
-        return api_error(
-            f"包含不允许清除的敏感配置: {', '.join(invalid_clear_keys[:5])}",
-            400,
-        )
-    for key in clear_keys:
-        data[key] = ""
-    allowed = _CONFIG_UI_SAVEABLE_KEYS
-    unknown = sorted(set(data) - allowed)
-    if unknown:
-        return api_error(f"包含不允许的配置项: {', '.join(unknown[:5])}", 400)
-    managed_updates = {
-        key
-        for key, value in data.items()
-        if key in _CONFIG_UI_SAVEABLE_KEYS
-        and not _is_config_mask(value)
-        and config.has_external_override(key)
-    }
-    if (
-        "INDEXER_ENABLED_SITES" in data
-        and config.has_external_override(INDEXER_SITE_CONFIG_VERSION_KEY)
-    ):
-        managed_updates.add("INDEXER_ENABLED_SITES")
-    if managed_updates:
-        return api_error(
-            "以下配置由部署环境管理，不能在页面修改: "
-            + ", ".join(sorted(managed_updates)[:5]),
-            409,
-        )
+    from app.agent.feature_gate import agent_runtime_transition, invalidate_agent_runtime_generation
 
-    web_updates: dict[str, str] = {}
-    if {"ENV_WEB_PASSPORT", "ENV_WEB_PASSWORD"} & data.keys():
-        from app.modules.first_run import _validate_credentials
-
-        current_username, current_password = config.web_credentials()
-        raw_username = data.get("ENV_WEB_PASSPORT", _CONFIG_MASK)
-        raw_password = data.get("ENV_WEB_PASSWORD", _CONFIG_MASK)
-        username_masked = _is_config_mask(raw_username)
-        password_masked = _is_config_mask(raw_password)
-        username = current_username if username_masked else str(raw_username or "")
-        password_text = str(raw_password or "")
-        password_unchanged = password_masked or not password_text.strip()
-        password = current_password if password_unchanged else password_text
-        if not username_masked and not username.strip():
-            return api_error("管理员用户名不能为空", 400)
-        try:
-            normalized_username = _validate_credentials(username, password)
-        except ValueError as exc:
-            return api_error(str(exc), 400)
-        if (
-            config.get("APP_ENV", "development").strip().lower() == "production"
-            and password == "123456"
-        ):
-            return api_error("生产模式禁止使用默认 Web 密码", 400)
-        if not username_masked:
-            web_updates["ENV_WEB_PASSPORT"] = normalized_username
-        if not password_unchanged:
-            web_updates["ENV_WEB_PASSWORD"] = password
-
-    try:
-        telegram_agent_updates = _validate_telegram_agent_updates(data)
-        discovery_updates = _validate_discovery_updates(data)
-        indexer_updates = _validate_indexer_updates(data, discovery_updates)
-        ai_recognition_updates = _validate_ai_recognition_updates(data)
-        organize_tavily_updates = _validate_organize_tavily_updates(data)
-        organize_policy_updates = _validate_organize_policy_updates(data)
-        agent_llm_updates = _validate_agent_llm_updates(data)
-        episode_research_updates = _validate_agent_episode_research_updates(data)
-        web_search_updates = _validate_web_search_updates(data)
-        login_wallpaper_updates = _validate_login_wallpaper_updates(data)
-        nsfw_organize_updates = _validate_nsfw_organize_updates(data)
-    except ValueError as exc:
-        return api_error(str(exc), 400)
-    for key in ("JELLYFIN_USER_ID", "EMBY_USER_ID"):
-        if key not in data:
-            continue
-        raw_user_id = str(data[key] or "").strip()
-        if not raw_user_id:
-            data[key] = ""
-            continue
-        try:
-            from app.clients.base import normalize_explicit_media_user_id
-
-            data[key] = normalize_explicit_media_user_id(raw_user_id)
-        except ValueError as exc:
-            label = "Jellyfin" if key.startswith("JELLYFIN") else "Emby"
-            return api_error(f"{label} 共享用户 ID 无效: {exc}", 400)
-    media_server_refresh_updates: dict[str, str] = {}
-    for key in ("JELLYFIN_PATH_MAPPINGS", "EMBY_PATH_MAPPINGS"):
-        if key not in data:
-            continue
-        try:
-            from app.modules.media_server_path_mapping import (
-                encode_media_server_path_mappings,
-            )
-
-            media_server_refresh_updates[key] = encode_media_server_path_mappings(
-                data[key]
-            )
-        except ValueError as exc:
-            label = "Jellyfin" if key.startswith("JELLYFIN") else "Emby"
-            return api_error(f"{label} 路径映射无效: {exc}", 400)
-    agent_patrol_updates = {}
-    for key in (
-        "AGENT_LIBRARY_PATROL_ENABLED",
-        "AGENT_LIBRARY_PATROL_NOTIFY_ENABLED",
-        "AGENT_RECOGNITION_REVIEW_ENABLED",
-        "AGENT_NSFW_CLEAN_REVIEW_ENABLED",
-    ):
-        if key not in data:
-            continue
-        try:
-            agent_patrol_updates[key] = _normalize_discovery_boolean(key, data[key])
-        except ValueError as exc:
-            return api_error(str(exc), 400)
-    media_workflow_updates = {}
-    extension_keys = {"GY_ORGANIZE_VIDEO_EXTS", "GY_ORGANIZE_METADATA_EXTS"}
-    if extension_keys & data.keys():
-        try:
-            from app.modules.organize import (
-                DEFAULT_ORGANIZE_METADATA_EXTS,
-                DEFAULT_ORGANIZE_VIDEO_EXTS,
-                METADATA_EXTS,
-                VIDEO_EXTS,
-                Organizer,
-            )
-
-            if "GY_ORGANIZE_VIDEO_EXTS" in data:
-                media_workflow_updates["GY_ORGANIZE_VIDEO_EXTS"] = _normalize_organize_extensions(
-                    data["GY_ORGANIZE_VIDEO_EXTS"],
-                    defaults=DEFAULT_ORGANIZE_VIDEO_EXTS,
-                    label="视频文件类型",
-                )
-            if "GY_ORGANIZE_METADATA_EXTS" in data:
-                media_workflow_updates["GY_ORGANIZE_METADATA_EXTS"] = _normalize_organize_extensions(
-                    data["GY_ORGANIZE_METADATA_EXTS"],
-                    defaults=DEFAULT_ORGANIZE_METADATA_EXTS,
-                    label="伴随文件类型",
-                )
-            video_set = set(media_workflow_updates["GY_ORGANIZE_VIDEO_EXTS"].split(",")) if "GY_ORGANIZE_VIDEO_EXTS" in media_workflow_updates else Organizer._parse_exts(
-                config.get("GY_ORGANIZE_VIDEO_EXTS", ""), VIDEO_EXTS,
-            )
-            metadata_set = set(media_workflow_updates["GY_ORGANIZE_METADATA_EXTS"].split(",")) if "GY_ORGANIZE_METADATA_EXTS" in media_workflow_updates else Organizer._parse_exts(
-                config.get("GY_ORGANIZE_METADATA_EXTS", ""), METADATA_EXTS,
-            )
-            overlap = video_set & metadata_set
-            if overlap:
-                raise ValueError(f"视频与伴随文件类型不能重复: {', '.join(sorted(overlap))}")
-        except ValueError as exc:
-            return api_error(str(exc), 400)
-    old_strm_sources: list[dict[str, str]] = []
-    new_strm_sources: list[dict[str, str]] | None = None
-    old_strm_root = config.get("STRM_ROOT", "").strip()
-    strm_source_config_changed = "GY_STRM_SOURCE_DIRS" in data
-    if "GY_ORGANIZE_SOURCE_DIRS" in data:
-        from app.modules.organize_sources import (
-            encode_organize_source_ids,
-            encode_organize_sources,
-            normalize_organize_source_ids,
-            normalize_organize_sources,
-        )
-
-        sources, error = normalize_organize_sources(data["GY_ORGANIZE_SOURCE_DIRS"])
-        if error:
-            return api_error(error, 400)
-        media_workflow_updates["GY_ORGANIZE_SOURCE_DIRS"] = encode_organize_sources(sources)
-        if "GY_ORGANIZE_NSFW_SOURCE_IDS" not in nsfw_organize_updates:
-            current_scope, scope_error = normalize_organize_source_ids(
-                config.get("GY_ORGANIZE_NSFW_SOURCE_IDS", "")
-            )
-            if scope_error:
-                current_scope = []
-            allowed = {(item.get("id") or "").strip() for item in sources}
-            pruned_scope = [source_id for source_id in current_scope if source_id in allowed]
-            canonical_scope = encode_organize_source_ids(pruned_scope)
-            if canonical_scope != config.get("GY_ORGANIZE_NSFW_SOURCE_IDS", ""):
-                media_workflow_updates["GY_ORGANIZE_NSFW_SOURCE_IDS"] = canonical_scope
-    if strm_source_config_changed:
-        import json
-
-        from app.modules.strm import parse_strm_sources
-
-        current_canonical = config.get("GY_STRM_SOURCE_DIRS", "")
-        old_strm_sources, _ = parse_strm_sources(
-            current_canonical, require_nonempty=False,
-        )
-        prospective_canonical = data.get("GY_STRM_SOURCE_DIRS", current_canonical)
-        sources, error = parse_strm_sources(
-            prospective_canonical, require_nonempty=False
-        )
-        if error:
-            return api_error(error, 400)
-        new_strm_sources = sources
-        if "GY_STRM_SOURCE_DIRS" in data:
-            media_workflow_updates["GY_STRM_SOURCE_DIRS"] = json.dumps(
-                sources, ensure_ascii=False, separators=(",", ":")
-            )
-    if "GY_STRM_BASE_URL" in data:
-        raw_base_url = str(data.get("GY_STRM_BASE_URL") or "").strip()
-        if raw_base_url:
-            from app.modules.media_proxy import validate_upstream_url
-
-            try:
-                media_workflow_updates["GY_STRM_BASE_URL"] = validate_upstream_url(
-                    raw_base_url
-                )
-            except (TypeError, ValueError):
-                return api_error(
-                    "播放服务地址必须是安全有效的 HTTP(S) 地址，且不能使用 0.0.0.0",
-                    400,
-                )
-        else:
-            media_workflow_updates["GY_STRM_BASE_URL"] = ""
-    cron_validators = {
-        "STRM_SCHEDULE_CRON": ("app.modules.scheduler", "STRMScheduler"),
-        "GY_ORGANIZE_SCHEDULE_CRON": ("app.modules.organize_scheduler", "OrganizeScheduler"),
-    }
-    for key, (module_name, class_name) in cron_validators.items():
-        if key not in data:
-            continue
-        value = str(data[key] or "").strip()
-        if value:
-            import importlib
-
-            validator = getattr(importlib.import_module(module_name), class_name)
-            if not validator.validate_cron(value):
-                return api_error(f"{key} 必须是有效的 5 段 cron 表达式", 400)
-    integer_limits = {
-        "STRM_SKIP_THRESHOLD_MB": (0, None),
-        "GY_ORGANIZE_SMALL_FILE_MB": (0, None),
-        "AGENT_LIBRARY_PATROL_INTERVAL_HOURS": (1, 168),
-        "AGENT_LIBRARY_PATROL_MAX_SERIES": (1, 100),
-        "GY_ORGANIZE_NSFW_TIMEOUT_SECONDS": (2, 30),
-    }
-    for key, (minimum, maximum) in integer_limits.items():
-        if key not in data:
-            continue
-        if str(data[key] or "").strip() == "":
-            continue
-        try:
-            number = int(str(data[key]).strip())
-        except (TypeError, ValueError):
-            return api_error(f"{key} 必须是整数", 400)
-        if number < minimum or (maximum is not None and number > maximum):
-            scope = f"{minimum} 到 {maximum}" if maximum is not None else f"不小于 {minimum}"
-            return api_error(f"{key} 必须{scope}", 400)
-    torrent_retention_key = "DOWNLOAD_TORRENT_RETENTION_DAYS"
-    if torrent_retention_key in data:
-        raw_retention_days = str(data[torrent_retention_key] or "").strip()
-        if not raw_retention_days:
-            raw_retention_days = str(DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS)
-        try:
-            retention_days = int(raw_retention_days)
-        except (TypeError, ValueError):
-            return api_error(f"{torrent_retention_key} 必须是整数", 400)
-        if not 0 <= retention_days <= MAX_DOWNLOAD_TORRENT_RETENTION_DAYS:
+    # 与 Agent 写入使用同一锁顺序；关联校验、旧值和补偿必须属于同一次配置事务。
+    with agent_runtime_transition(), config.runtime_config_read_guard():
+        if not isinstance(data, dict):
+            return api_error("配置必须是 JSON 对象", 400)
+        data = dict(data)
+        clear_secrets = data.pop("__clear_secrets", [])
+        if clear_secrets is None:
+            clear_secrets = []
+        if not isinstance(clear_secrets, list):
+            return api_error("__clear_secrets 必须是数组", 400)
+        clear_keys = {str(key or "").strip() for key in clear_secrets}
+        invalid_clear_keys = sorted(clear_keys - _CLEARABLE_SECRET_KEYS)
+        if invalid_clear_keys:
             return api_error(
-                f"{torrent_retention_key} 必须是 0 到 "
-                f"{MAX_DOWNLOAD_TORRENT_RETENTION_DAYS} 的整数",
+                f"包含不允许清除的敏感配置: {', '.join(invalid_clear_keys[:5])}",
                 400,
             )
-        data[torrent_retention_key] = str(retention_days)
-    updates = dict(web_updates)
-    if "OFFLINE_ALLOWED_EXTS" in data:
-        try:
-            from app.modules.offline import DEFAULT_VIDEO_EXTS
-
-            normalized_exts = _normalize_organize_extensions(
-                data.get("OFFLINE_ALLOWED_EXTS"),
-                defaults=DEFAULT_VIDEO_EXTS,
-                label="离线允许扩展名",
+        for key in clear_keys:
+            data[key] = ""
+        allowed = _CONFIG_UI_SAVEABLE_KEYS
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            return api_error(f"包含不允许的配置项: {', '.join(unknown[:5])}", 400)
+        managed_updates = {
+            key
+            for key, value in data.items()
+            if key in _CONFIG_UI_SAVEABLE_KEYS
+            and not _is_config_mask(value)
+            and config.has_external_override(key)
+        }
+        if (
+            "INDEXER_ENABLED_SITES" in data
+            and config.has_external_override(INDEXER_SITE_CONFIG_VERSION_KEY)
+        ):
+            managed_updates.add("INDEXER_ENABLED_SITES")
+        if managed_updates:
+            return api_error(
+                "以下配置由部署环境管理，不能在页面修改: "
+                + ", ".join(sorted(managed_updates)[:5]),
+                409,
             )
-            unsupported = [
-                item for item in normalized_exts.split(",") if item not in DEFAULT_VIDEO_EXTS
-            ]
-            if unsupported:
-                raise ValueError(
-                    "离线转存仅允许视频扩展名，不支持: " + ", ".join(unsupported[:5])
-                )
-            data["OFFLINE_ALLOWED_EXTS"] = normalized_exts
+
+        web_updates: dict[str, str] = {}
+        if {"ENV_WEB_PASSPORT", "ENV_WEB_PASSWORD"} & data.keys():
+            from app.modules.first_run import _validate_credentials
+
+            current_username, current_password = config.web_credentials()
+            raw_username = data.get("ENV_WEB_PASSPORT", _CONFIG_MASK)
+            raw_password = data.get("ENV_WEB_PASSWORD", _CONFIG_MASK)
+            username_masked = _is_config_mask(raw_username)
+            password_masked = _is_config_mask(raw_password)
+            username = current_username if username_masked else str(raw_username or "")
+            password_text = str(raw_password or "")
+            password_unchanged = password_masked or not password_text.strip()
+            password = current_password if password_unchanged else password_text
+            if not username_masked and not username.strip():
+                return api_error("管理员用户名不能为空", 400)
+            try:
+                normalized_username = _validate_credentials(username, password)
+            except ValueError as exc:
+                return api_error(str(exc), 400)
+            if (
+                config.get("APP_ENV", "development").strip().lower() == "production"
+                and password == "123456"
+            ):
+                return api_error("生产模式禁止使用默认 Web 密码", 400)
+            if not username_masked:
+                web_updates["ENV_WEB_PASSPORT"] = normalized_username
+            if not password_unchanged:
+                web_updates["ENV_WEB_PASSWORD"] = password
+
+        try:
+            telegram_agent_updates = _validate_telegram_agent_updates(data)
+            discovery_updates = _validate_discovery_updates(data)
+            indexer_updates = _validate_indexer_updates(data, discovery_updates)
+            ai_recognition_updates = _validate_ai_recognition_updates(data)
+            organize_tavily_updates = _validate_organize_tavily_updates(data)
+            organize_policy_updates = _validate_organize_policy_updates(data)
+            agent_llm_updates = _validate_agent_llm_updates(data)
+            episode_research_updates = _validate_agent_episode_research_updates(data)
+            web_search_updates = _validate_web_search_updates(data)
+            login_wallpaper_updates = _validate_login_wallpaper_updates(data)
+            nsfw_organize_updates = _validate_nsfw_organize_updates(data)
         except ValueError as exc:
             return api_error(str(exc), 400)
-    special_updates: dict[str, str] = {}
-    for source in (
-        discovery_updates,
-        media_workflow_updates,
-        indexer_updates,
-        web_search_updates,
-        ai_recognition_updates,
-        organize_tavily_updates,
-        organize_policy_updates,
-        agent_llm_updates,
-        episode_research_updates,
-        login_wallpaper_updates,
-        nsfw_organize_updates,
-        agent_patrol_updates,
-        telegram_agent_updates,
-        media_server_refresh_updates,
-    ):
-        special_updates.update(source)
-    for key, value in data.items():
-        if key in {"ENV_WEB_PASSPORT", "ENV_WEB_PASSWORD"}:
-            continue
-        text = special_updates.get(key, str(value))
-        if _is_config_mask(text):
-            continue
-        if key not in {"AGENT_LLM_GENERATION_PROFILES", "AGENT_LLM_BUDGET_PROFILES"} and len(text) > 10_000:
-            return api_error(f"配置项 {key} 过长", 400)
-        normalized = text.replace("\r\n", ",").replace("\r", ",").replace("\n", ",")
-        updates[key] = normalized
-    for key, value in indexer_updates.items():
-        updates.setdefault(key, value)
-    # 允许从用户粘贴的完整 endpoint 派生协议，即使该请求未显式提交协议字段。
-    for key, value in agent_llm_updates.items():
-        updates.setdefault(key, value)
-    # 当整理来源被删除时，来源级成人识别范围会在上方自动裁剪。该派生
-    # 更新并不一定出现在原始请求 data 中，因此必须显式写回，避免遗留
-    # 一个已经不属于正式整理来源的目录 ID。
-    if "GY_ORGANIZE_NSFW_SOURCE_IDS" in media_workflow_updates:
-        updates.setdefault(
-            "GY_ORGANIZE_NSFW_SOURCE_IDS",
-            media_workflow_updates["GY_ORGANIZE_NSFW_SOURCE_IDS"],
-        )
-    from app.modules.local_media_service import LOCAL_MEDIA_RUNTIME_KEYS
+        for key in ("JELLYFIN_USER_ID", "EMBY_USER_ID"):
+            if key not in data:
+                continue
+            raw_user_id = str(data[key] or "").strip()
+            if not raw_user_id:
+                data[key] = ""
+                continue
+            try:
+                from app.clients.base import normalize_explicit_media_user_id
 
-    local_media_keys = set(LOCAL_MEDIA_RUNTIME_KEYS) & updates.keys()
-    persisted_updates = {
-        key: value
-        for key, value in updates.items()
-        if config.get(key, "") != value
-    }
+                data[key] = normalize_explicit_media_user_id(raw_user_id)
+            except ValueError as exc:
+                label = "Jellyfin" if key.startswith("JELLYFIN") else "Emby"
+                return api_error(f"{label} 共享用户 ID 无效: {exc}", 400)
+        media_server_refresh_updates: dict[str, str] = {}
+        for key in ("JELLYFIN_PATH_MAPPINGS", "EMBY_PATH_MAPPINGS"):
+            if key not in data:
+                continue
+            try:
+                from app.modules.media_server_path_mapping import (
+                    encode_media_server_path_mappings,
+                )
+
+                media_server_refresh_updates[key] = encode_media_server_path_mappings(
+                    data[key]
+                )
+            except ValueError as exc:
+                label = "Jellyfin" if key.startswith("JELLYFIN") else "Emby"
+                return api_error(f"{label} 路径映射无效: {exc}", 400)
+        agent_patrol_updates = {}
+        for key in (
+            "AGENT_LIBRARY_PATROL_ENABLED",
+            "AGENT_LIBRARY_PATROL_NOTIFY_ENABLED",
+            "AGENT_RECOGNITION_REVIEW_ENABLED",
+            "AGENT_NSFW_CLEAN_REVIEW_ENABLED",
+        ):
+            if key not in data:
+                continue
+            try:
+                agent_patrol_updates[key] = _normalize_discovery_boolean(key, data[key])
+            except ValueError as exc:
+                return api_error(str(exc), 400)
+        media_workflow_updates = {}
+        extension_keys = {"GY_ORGANIZE_VIDEO_EXTS", "GY_ORGANIZE_METADATA_EXTS"}
+        if extension_keys & data.keys():
+            try:
+                from app.modules.organize import (
+                    DEFAULT_ORGANIZE_METADATA_EXTS,
+                    DEFAULT_ORGANIZE_VIDEO_EXTS,
+                    METADATA_EXTS,
+                    VIDEO_EXTS,
+                    Organizer,
+                )
+
+                if "GY_ORGANIZE_VIDEO_EXTS" in data:
+                    media_workflow_updates["GY_ORGANIZE_VIDEO_EXTS"] = _normalize_organize_extensions(
+                        data["GY_ORGANIZE_VIDEO_EXTS"],
+                        defaults=DEFAULT_ORGANIZE_VIDEO_EXTS,
+                        label="视频文件类型",
+                    )
+                if "GY_ORGANIZE_METADATA_EXTS" in data:
+                    media_workflow_updates["GY_ORGANIZE_METADATA_EXTS"] = _normalize_organize_extensions(
+                        data["GY_ORGANIZE_METADATA_EXTS"],
+                        defaults=DEFAULT_ORGANIZE_METADATA_EXTS,
+                        label="伴随文件类型",
+                    )
+                video_set = set(media_workflow_updates["GY_ORGANIZE_VIDEO_EXTS"].split(",")) if "GY_ORGANIZE_VIDEO_EXTS" in media_workflow_updates else Organizer._parse_exts(
+                    config.get("GY_ORGANIZE_VIDEO_EXTS", ""), VIDEO_EXTS,
+                )
+                metadata_set = set(media_workflow_updates["GY_ORGANIZE_METADATA_EXTS"].split(",")) if "GY_ORGANIZE_METADATA_EXTS" in media_workflow_updates else Organizer._parse_exts(
+                    config.get("GY_ORGANIZE_METADATA_EXTS", ""), METADATA_EXTS,
+                )
+                overlap = video_set & metadata_set
+                if overlap:
+                    raise ValueError(f"视频与伴随文件类型不能重复: {', '.join(sorted(overlap))}")
+            except ValueError as exc:
+                return api_error(str(exc), 400)
+        old_strm_sources: list[dict[str, str]] = []
+        new_strm_sources: list[dict[str, str]] | None = None
+        old_strm_root = config.get("STRM_ROOT", "").strip()
+        strm_source_config_changed = "GY_STRM_SOURCE_DIRS" in data
+        if "GY_ORGANIZE_SOURCE_DIRS" in data:
+            from app.modules.organize_sources import (
+                encode_organize_source_ids,
+                encode_organize_sources,
+                normalize_organize_source_ids,
+                normalize_organize_sources,
+            )
+
+            sources, error = normalize_organize_sources(data["GY_ORGANIZE_SOURCE_DIRS"])
+            if error:
+                return api_error(error, 400)
+            media_workflow_updates["GY_ORGANIZE_SOURCE_DIRS"] = encode_organize_sources(sources)
+            if "GY_ORGANIZE_NSFW_SOURCE_IDS" not in nsfw_organize_updates:
+                current_scope, scope_error = normalize_organize_source_ids(
+                    config.get("GY_ORGANIZE_NSFW_SOURCE_IDS", "")
+                )
+                if scope_error:
+                    current_scope = []
+                allowed = {(item.get("id") or "").strip() for item in sources}
+                pruned_scope = [source_id for source_id in current_scope if source_id in allowed]
+                canonical_scope = encode_organize_source_ids(pruned_scope)
+                if canonical_scope != config.get("GY_ORGANIZE_NSFW_SOURCE_IDS", ""):
+                    media_workflow_updates["GY_ORGANIZE_NSFW_SOURCE_IDS"] = canonical_scope
+        if strm_source_config_changed:
+            import json
+
+            from app.modules.strm import parse_strm_sources
+
+            current_canonical = config.get("GY_STRM_SOURCE_DIRS", "")
+            old_strm_sources, _ = parse_strm_sources(
+                current_canonical, require_nonempty=False,
+            )
+            prospective_canonical = data.get("GY_STRM_SOURCE_DIRS", current_canonical)
+            sources, error = parse_strm_sources(
+                prospective_canonical, require_nonempty=False
+            )
+            if error:
+                return api_error(error, 400)
+            new_strm_sources = sources
+            if "GY_STRM_SOURCE_DIRS" in data:
+                media_workflow_updates["GY_STRM_SOURCE_DIRS"] = json.dumps(
+                    sources, ensure_ascii=False, separators=(",", ":")
+                )
+        if "GY_STRM_BASE_URL" in data:
+            raw_base_url = str(data.get("GY_STRM_BASE_URL") or "").strip()
+            if raw_base_url:
+                from app.modules.media_proxy import validate_upstream_url
+
+                try:
+                    media_workflow_updates["GY_STRM_BASE_URL"] = validate_upstream_url(
+                        raw_base_url
+                    )
+                except (TypeError, ValueError):
+                    return api_error(
+                        "播放服务地址必须是安全有效的 HTTP(S) 地址，且不能使用 0.0.0.0",
+                        400,
+                    )
+            else:
+                media_workflow_updates["GY_STRM_BASE_URL"] = ""
+        cron_validators = {
+            "STRM_SCHEDULE_CRON": ("app.modules.scheduler", "STRMScheduler"),
+            "GY_ORGANIZE_SCHEDULE_CRON": ("app.modules.organize_scheduler", "OrganizeScheduler"),
+        }
+        for key, (module_name, class_name) in cron_validators.items():
+            if key not in data:
+                continue
+            value = str(data[key] or "").strip()
+            if value:
+                import importlib
+
+                validator = getattr(importlib.import_module(module_name), class_name)
+                if not validator.validate_cron(value):
+                    return api_error(f"{key} 必须是有效的 5 段 cron 表达式", 400)
+        integer_limits = {
+            "STRM_SKIP_THRESHOLD_MB": (0, None),
+            "GY_ORGANIZE_SMALL_FILE_MB": (0, None),
+            "AGENT_LIBRARY_PATROL_INTERVAL_HOURS": (1, 168),
+            "AGENT_LIBRARY_PATROL_MAX_SERIES": (1, 100),
+            "GY_ORGANIZE_NSFW_TIMEOUT_SECONDS": (2, 30),
+        }
+        for key, (minimum, maximum) in integer_limits.items():
+            if key not in data:
+                continue
+            if str(data[key] or "").strip() == "":
+                continue
+            try:
+                number = int(str(data[key]).strip())
+            except (TypeError, ValueError):
+                return api_error(f"{key} 必须是整数", 400)
+            if number < minimum or (maximum is not None and number > maximum):
+                scope = f"{minimum} 到 {maximum}" if maximum is not None else f"不小于 {minimum}"
+                return api_error(f"{key} 必须{scope}", 400)
+        torrent_retention_key = "DOWNLOAD_TORRENT_RETENTION_DAYS"
+        if torrent_retention_key in data:
+            raw_retention_days = str(data[torrent_retention_key] or "").strip()
+            if not raw_retention_days:
+                raw_retention_days = str(DEFAULT_DOWNLOAD_TORRENT_RETENTION_DAYS)
+            try:
+                retention_days = int(raw_retention_days)
+            except (TypeError, ValueError):
+                return api_error(f"{torrent_retention_key} 必须是整数", 400)
+            if not 0 <= retention_days <= MAX_DOWNLOAD_TORRENT_RETENTION_DAYS:
+                return api_error(
+                    f"{torrent_retention_key} 必须是 0 到 "
+                    f"{MAX_DOWNLOAD_TORRENT_RETENTION_DAYS} 的整数",
+                    400,
+                )
+            data[torrent_retention_key] = str(retention_days)
+        updates = dict(web_updates)
+        if "OFFLINE_ALLOWED_EXTS" in data:
+            try:
+                from app.modules.offline import DEFAULT_VIDEO_EXTS
+
+                normalized_exts = _normalize_organize_extensions(
+                    data.get("OFFLINE_ALLOWED_EXTS"),
+                    defaults=DEFAULT_VIDEO_EXTS,
+                    label="离线允许扩展名",
+                )
+                unsupported = [
+                    item for item in normalized_exts.split(",") if item not in DEFAULT_VIDEO_EXTS
+                ]
+                if unsupported:
+                    raise ValueError(
+                        "离线转存仅允许视频扩展名，不支持: " + ", ".join(unsupported[:5])
+                    )
+                data["OFFLINE_ALLOWED_EXTS"] = normalized_exts
+            except ValueError as exc:
+                return api_error(str(exc), 400)
+        special_updates: dict[str, str] = {}
+        for source in (
+            discovery_updates,
+            media_workflow_updates,
+            indexer_updates,
+            web_search_updates,
+            ai_recognition_updates,
+            organize_tavily_updates,
+            organize_policy_updates,
+            agent_llm_updates,
+            episode_research_updates,
+            login_wallpaper_updates,
+            nsfw_organize_updates,
+            agent_patrol_updates,
+            telegram_agent_updates,
+            media_server_refresh_updates,
+        ):
+            special_updates.update(source)
+        for key, value in data.items():
+            if key in {"ENV_WEB_PASSPORT", "ENV_WEB_PASSWORD"}:
+                continue
+            text = special_updates.get(key, str(value))
+            if _is_config_mask(text):
+                continue
+            if key not in {"AGENT_LLM_GENERATION_PROFILES", "AGENT_LLM_BUDGET_PROFILES"} and len(text) > 10_000:
+                return api_error(f"配置项 {key} 过长", 400)
+            normalized = text.replace("\r\n", ",").replace("\r", ",").replace("\n", ",")
+            updates[key] = normalized
+        for key, value in indexer_updates.items():
+            updates.setdefault(key, value)
+        # 允许从用户粘贴的完整 endpoint 派生协议，即使该请求未显式提交协议字段。
+        for key, value in agent_llm_updates.items():
+            updates.setdefault(key, value)
+        # 当整理来源被删除时，来源级成人识别范围会在上方自动裁剪。该派生
+        # 更新并不一定出现在原始请求 data 中，因此必须显式写回，避免遗留
+        # 一个已经不属于正式整理来源的目录 ID。
+        if "GY_ORGANIZE_NSFW_SOURCE_IDS" in media_workflow_updates:
+            updates.setdefault(
+                "GY_ORGANIZE_NSFW_SOURCE_IDS",
+                media_workflow_updates["GY_ORGANIZE_NSFW_SOURCE_IDS"],
+            )
+        from app.modules.local_media_service import LOCAL_MEDIA_RUNTIME_KEYS
+
+        local_media_keys = set(LOCAL_MEDIA_RUNTIME_KEYS) & updates.keys()
+        persisted_updates = {
+            key: value
+            for key, value in updates.items()
+            if config.get(key, "") != value
+        }
+        changed_keys = frozenset(persisted_updates)
+        retired_source_ids: list[str] = []
+        persist_ms = 0
+        if persisted_updates:
+            previous_values = {key: config.get(key, "") for key in changed_keys}
+            persist_started = time.perf_counter()
+            strm_reconcile_required = new_strm_sources is not None and "GY_STRM_SOURCE_DIRS" in changed_keys
+            retirement = nullcontext([])
+            publication = nullcontext()
+            if strm_reconcile_required:
+                from app import database as db
+
+                new_ids = {item["id"] for item in new_strm_sources or []}
+                retired_sources = [
+                    (source["id"], source.get("name") or source["id"], old_strm_root)
+                    for source in old_strm_sources if source["id"] not in new_ids
+                ]
+                retirement = db.reconcile_strm_retired_sources_transaction(
+                    sorted(new_ids), retired_sources,
+                    configured_sources=new_strm_sources or [],
+                    configured_strm_root=persisted_updates.get("STRM_ROOT", old_strm_root) or "",
+                )
+                publication = config.runtime_config_publication(persisted_updates)
+            config_persisted = False
+            try:
+                with publication:
+                    try:
+                        with retirement as retired_source_ids:
+                            config.set_and_save(persisted_updates)
+                            config_persisted = True
+                            # 代次切换也属于发布；失败时来源事务与配置一起补偿。
+                            if changed_keys - {"AGENT_STREAM_DISPLAY_ENABLED"}:
+                                invalidate_agent_runtime_generation()
+                            if _AGENT_LLM_KEYS & changed_keys:
+                                from app.agent.kernel.bootstrap import invalidate_agent_kernel_runtime
+
+                                invalidate_agent_kernel_runtime()
+                    except Exception:
+                        if config_persisted:
+                            config.set_and_save(previous_values)
+                            config_persisted = False
+                        raise
+            except Exception as exc:
+                if not config_persisted and isinstance(exc, (config.AtomicPublishError, OSError)):
+                    return config_write_api_error(exc, logger=logger, operation="save_settings")
+                operation = "STRM 来源退役状态" if strm_reconcile_required else "配置"
+                logger.error(
+                    "%s保存失败 type=%s config_rolled_back=%s",
+                    operation, type(exc).__name__, not config_persisted,
+                )
+                if not config_persisted:
+                    return api_error(f"{operation}保存失败，配置未变更，请稍后重试", 500)
+                return api_error(
+                    "配置与 STRM 来源状态可能不一致，自动回滚失败；请重启服务并重新保存", 500,
+                )
+            persist_ms = max(1, round((time.perf_counter() - persist_started) * 1000))
+
     if not persisted_updates:
         logger.info(
             "配置保存完成 changed=0 total_ms=%s",
@@ -1522,103 +1577,6 @@ def save_config(request: Request, data: Any = Body(default=None)):
             if restart_required:
                 unchanged_result["restart_required"] = True
         return unchanged_result
-
-    changed_keys = frozenset(persisted_updates)
-    previous_values = {key: config.get(key, "") for key in changed_keys}
-    persist_started = time.perf_counter()
-    strm_reconcile_required = (new_strm_sources is not None and "GY_STRM_SOURCE_DIRS" in changed_keys)
-
-    def publish_config_updates() -> list[str]:
-        nonlocal config_persisted
-        if strm_reconcile_required:
-            from app import database as db
-
-            new_ids = {item["id"] for item in new_strm_sources or []}
-            retired_sources = [
-                (
-                    source["id"],
-                    (source.get("name") or source["id"]),
-                    old_strm_root,
-                )
-                for source in old_strm_sources
-                if source["id"] not in new_ids
-            ]
-            with config.runtime_config_publication(persisted_updates):
-                try:
-                    with db.reconcile_strm_retired_sources_transaction(
-                        sorted(new_ids),
-                        retired_sources,
-                        configured_sources=new_strm_sources or [],
-                        configured_strm_root=(persisted_updates.get("STRM_ROOT", old_strm_root) or ""),
-                    ) as reconciled_ids:
-                        config.set_and_save(persisted_updates)
-                        config_persisted = True
-                except Exception:
-                    if config_persisted:
-                        # Compensate inside the same revocation; never stabilize a
-                        # failed DB/file transaction by publishing a fresh epoch.
-                        config.set_and_save(previous_values)
-                        config_persisted = False
-                    raise
-            return list(reconciled_ids)
-        config.set_and_save(persisted_updates)
-        config_persisted = True
-        return []
-
-    retired_source_ids: list[str] = []
-    config_persisted = False
-    try:
-        with _CONFIG_SAVE_TRANSACTION_LOCK:
-            from app.agent.feature_gate import (
-                agent_runtime_transition,
-                invalidate_agent_runtime_generation,
-            )
-
-            with agent_runtime_transition():
-                retired_source_ids = publish_config_updates()
-                # Agent 的只读结论、行动计划和外部连接都可能依赖项目配置；
-                # 纯展示偏好不改变当前回合语义，因此不推进运行代次。
-                if changed_keys - {"AGENT_STREAM_DISPLAY_ENABLED"}:
-                    invalidate_agent_runtime_generation()
-                if _AGENT_LLM_KEYS & changed_keys:
-                    from app.agent.kernel.bootstrap import (
-                        invalidate_agent_kernel_runtime,
-                    )
-
-                    invalidate_agent_kernel_runtime()
-    except (config.AtomicPublishError, OSError) as exc:
-        return config_write_api_error(
-            exc,
-            logger=logger,
-            operation="save_settings",
-        )
-    except Exception as exc:
-        rollback_succeeded = not config_persisted
-        if config_persisted:
-            try:
-                with _CONFIG_SAVE_TRANSACTION_LOCK:
-                    config.set_and_save(previous_values)
-                rollback_succeeded = True
-            except Exception as rollback_exc:
-                logger.critical(
-                    "STRM 来源配置一致性回滚失败 db_error=%s rollback_error=%s",
-                    type(exc).__name__,
-                    type(rollback_exc).__name__,
-                )
-        operation = "STRM 来源退役状态" if strm_reconcile_required else "配置"
-        logger.error(
-            "%s保存失败 type=%s config_rolled_back=%s",
-            operation,
-            type(exc).__name__,
-            rollback_succeeded,
-        )
-        if rollback_succeeded:
-            return api_error(f"{operation}保存失败，配置未变更，请稍后重试", 500)
-        return api_error(
-            "配置与 STRM 来源状态可能不一致，自动回滚失败；请重启服务并重新保存",
-            500,
-        )
-    persist_ms = max(1, round((time.perf_counter() - persist_started) * 1000))
 
     warnings: list[str] = []
     restart_required = False
