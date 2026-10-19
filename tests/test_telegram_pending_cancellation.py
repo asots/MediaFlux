@@ -208,7 +208,7 @@ class LegacyPendingCancellationRecoveryTests(unittest.TestCase):
                 unknown, _ = db.create_download_request("unknown-work", "magnet")
                 with db.get_conn() as conn:
                     conn.execute(
-                        "UPDATE download_requests SET status='submitting',targets='cancelled',updated_at='2000-01-01 00:00:00' WHERE id IN (?,?)",
+                        "UPDATE download_requests SET status='submitting',targets='cancelled',created_at='2000-01-01 00:00:00',updated_at='2000-01-01 00:00:00' WHERE id IN (?,?)",
                         (cancelled, unknown),
                     )
                     conn.execute(
@@ -230,7 +230,7 @@ class LegacyPendingCancellationRecoveryTests(unittest.TestCase):
                 )
                 with db.get_conn() as conn:
                     conn.execute(
-                        "UPDATE download_requests SET updated_at='2000-01-01 00:00:00' WHERE id=?",
+                        "UPDATE download_requests SET created_at='2000-01-01 00:00:00',updated_at='2000-01-01 00:00:00' WHERE id=?",
                         (identity_only,),
                     )
                 if boot:

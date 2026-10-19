@@ -1580,6 +1580,25 @@ def _migrate_agent_library_patrol_cycle_runs_v34(conn: sqlite3.Connection) -> No
         conn.execute("UPDATE agent_library_patrol SET cycle_run_id=? WHERE patrol_key=?", (cur.lastrowid, row[0]))
 
 
+def _migrate_download_submission_clocks_v35(conn: sqlite3.Connection) -> None:
+    """补齐独立后端提交时钟；历史时间仅回填一次，后续进度不能延长提交租约。"""
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(download_requests)")}
+    if not columns:
+        return
+    for prefix in ("qb", "gy"):
+        clock = f"{prefix}_submitting_at"
+        if clock not in columns:
+            conn.execute(f"ALTER TABLE download_requests ADD COLUMN {clock} TEXT")
+        pending = f"{prefix}_status='submitting'"
+        if prefix == "gy":
+            pending += " OR (kind='guangya_share' AND status IN ('pending','submitting'))"
+        conn.execute(
+            f"UPDATE download_requests SET {clock}=COALESCE(NULLIF(updated_at,''),NULLIF(created_at,''),?) "
+            f"WHERE COALESCE({clock},'')='' AND ({pending})",
+            (now(),),
+        )
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1615,4 +1634,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     31: _migrate_download_display_title_v32,
     32: _migrate_agent_kernel_effect_next_poll_index_v33,
     33: _migrate_agent_library_patrol_cycle_runs_v34,
+    34: _migrate_download_submission_clocks_v35,
 }

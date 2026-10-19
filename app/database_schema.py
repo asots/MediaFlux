@@ -273,6 +273,8 @@ CREATE TABLE IF NOT EXISTS download_requests (
     gy_unverified_manifest INTEGER NOT NULL DEFAULT 0,
     qb_status TEXT DEFAULT '',
     gy_status TEXT DEFAULT '',
+    qb_submitting_at TEXT,
+    gy_submitting_at TEXT,
     qb_task_missing_since TEXT,
     gy_task_missing_since TEXT,
     gy_target_dir TEXT DEFAULT '',

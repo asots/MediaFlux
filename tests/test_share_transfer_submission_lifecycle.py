@@ -120,7 +120,7 @@ class ShareTransferSubmissionLifecycleTests(unittest.TestCase):
             row = self.request()
             with db.get_conn() as conn:
                 conn.execute(
-                    "UPDATE download_requests SET updated_at=? WHERE id=?",
+                    "UPDATE download_requests SET gy_submitting_at=? WHERE id=?",
                     ("2000-01-01 00:00:00", row["id"]),
                 )
             recovered_counts.append(db.recover_stale_submitting_download_requests())

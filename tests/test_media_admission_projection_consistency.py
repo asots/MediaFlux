@@ -104,7 +104,7 @@ class MediaAdmissionProjectionConsistencyTests(unittest.TestCase):
         self.assertTrue(db.claim_download_request(request, "qb"))
         with db.get_conn() as conn:
             conn.execute(
-                "UPDATE download_requests SET updated_at='2000-01-01 00:00:00' WHERE id=?",
+                "UPDATE download_requests SET qb_submitting_at='2000-01-01 00:00:00' WHERE id=?",
                 (request,),
             )
         self.assertEqual(db.recover_stale_submitting_download_requests(), 1)
@@ -187,7 +187,7 @@ socket.socket.connect = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("
 db.configure_database(sys.argv[1], test_mode=True)
 assert db.claim_download_request(int(sys.argv[2]), "qb")
 with db.get_conn() as conn:
- conn.execute("UPDATE download_requests SET updated_at='2000-01-01 00:00:00' WHERE id=?", (int(sys.argv[2]),))
+ conn.execute("UPDATE download_requests SET qb_submitting_at='2000-01-01 00:00:00' WHERE id=?", (int(sys.argv[2]),))
 assert db.recover_stale_submitting_download_requests() == 1
 os._exit(43)
 """

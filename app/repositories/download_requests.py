@@ -575,13 +575,14 @@ def create_share_transfer_request(
 
 def claim_failed_share_transfer_request(request_id: int) -> bool:
     """显式重试一次明确失败的分享转存；不确定结果禁止重新云写。"""
+    timestamp = db.now()
     with db.get_conn() as conn:
         cur = conn.execute(
             "UPDATE download_requests SET status='submitting',gy_status='submitting',error='',"
-            "completed_at=NULL,updated_at=? WHERE id=? AND kind='guangya_share' "
+            "gy_submitting_at=?,completed_at=NULL,updated_at=? WHERE id=? AND kind='guangya_share' "
             "AND status='failed' AND (SELECT COUNT(*) FROM download_log "
             "WHERE request_id=download_requests.id AND source='guangya_share')=1",
-            (db.now(), request_id),
+            (timestamp, timestamp, request_id),
         )
         return cur.rowcount == 1
 
@@ -886,14 +887,15 @@ def claim_download_request_targets(request_id: int, targets: str) -> tuple[str, 
         values: list[object] = [merged_targets, timestamp]
         if "qb" in missing:
             sets.extend([
-                "qb_status='submitting'", "qb_task_id=''", "qb_task_missing_since=NULL",
+                "qb_status='submitting'", "qb_submitting_at=?", "qb_task_id=''", "qb_task_missing_since=NULL",
                 "qb_content_path=''",
                 "local_import_status=''", "local_import_attempts=0", "local_import_error=''",
                 "local_import_target=''", "local_import_started_at=NULL", "local_import_completed_at=NULL",
             ])
+            values.append(timestamp)
         if "guangya" in missing:
             sets.extend([
-                "gy_status='submitting'", "gy_task_id=''", "gy_task_ids='[]'", "gy_batch_count=0",
+                "gy_status='submitting'", "gy_submitting_at=?", "gy_task_id=''", "gy_task_ids='[]'", "gy_batch_count=0",
                 "gy_task_missing_since=NULL", "gy_isolated=0", "gy_staging_parent_dir=''", "gy_staging_name=''",
                 "gy_staging_cleanup_status=''", "gy_staging_cleanup_error=''",
                 "gy_expected_file_count=0", "gy_settle_observed_file_count=0",
@@ -904,6 +906,7 @@ def claim_download_request_targets(request_id: int, targets: str) -> tuple[str, 
                 "organize_error=''", "organize_finished_at=NULL", "strm_run_id=NULL",
                 "strm_status=''", "strm_error=''", "strm_finished_at=NULL",
             ])
+            values.append(timestamp)
         conn.execute(
             f"UPDATE download_requests SET {','.join(sets)} WHERE id=?",
             (*values, request_id),
@@ -975,6 +978,7 @@ def _claim_download_request_conn(
     cur = conn.execute(
         "UPDATE download_requests SET targets=?,status='submitting',"
         "qb_status=?,gy_status=?,qb_task_id='',gy_task_id='',gy_task_ids='[]',gy_batch_count=0,"
+        "qb_submitting_at=?,gy_submitting_at=?,"
         "gy_expected_file_count=0,gy_settle_observed_file_count=0,gy_settle_attempts=0,"
         "gy_settle_snapshot='',gy_settle_stable_count=0,gy_selection_mode='',gy_unverified_manifest=0,"
         "organize_started=0,organize_attempts=0,organize_next_retry_at=NULL,"
@@ -982,7 +986,8 @@ def _claim_download_request_conn(
         "strm_run_id=NULL,strm_status='',strm_error='',strm_finished_at=NULL,"
         "completed_at=NULL,error='',attention_cleared_at=NULL,attention_clear_note='',updated_at=? "
         "WHERE id=? AND status='pending'",
-        (targets, qb_status, gy_status, timestamp, request_id),
+        (targets, qb_status, gy_status, timestamp if qb_status else None,
+         timestamp if gy_status else None, timestamp, request_id),
     )
     return cur.rowcount > 0
 
@@ -1597,39 +1602,52 @@ def _recover_interrupted_download_submissions_conn(
     """唯一恢复策略：只隔离未确认的提交，不丢弃已持久化的后端事实。"""
     # 已知未写后端的旧取消先归位，不计入“需要核验”的数量。
     _recover_legacy_pending_cancellations_conn(conn, timestamp)
-    age_clause = ""
-    age_params: tuple[str, ...] = ()
-    if stale_minutes is not None:
-        age_clause = (
-            " AND datetime(COALESCE(NULLIF(updated_at,''),created_at)) "
-            "< datetime('now','localtime', ?)"
+    def overdue(clock: str) -> str:
+        if stale_minutes is None:
+            return ""
+        # 旧记录缺少时钟时只用不可变创建时间兜底；绝不能回退到进度/通知更新时间。
+        return (
+            f" AND datetime(COALESCE(NULLIF({clock},''),created_at)) "
+            "< datetime(:timestamp,:age)"
         )
-        age_params = (f"-{max(1, (stale_minutes or 15))} minutes",)
+
+    qb_due = f"(qb_status='submitting'{overdue('qb_submitting_at')})"
+    gy_due = f"(gy_status='submitting'{overdue('gy_submitting_at')})"
+    # 历史根状态可能未收尾，但已确认的后端事实仍必须保留。
+    root_due = (
+        "(status='submitting' AND COALESCE(qb_status,'')<>'submitting' "
+        f"AND COALESCE(gy_status,'')<>'submitting'{overdue('created_at')})"
+    )
+    share_due = (
+        "(kind='guangya_share' AND status IN ('pending','submitting')"
+        f"{overdue('gy_submitting_at')})"
+    )
     recovered = 0
     for predicate, message in (
         (
             "COALESCE(kind,'')<>'guangya_share' AND "
-            "(status='submitting' OR qb_status='submitting' OR gy_status='submitting')",
+            f"({qb_due} OR {gy_due} OR {root_due})",
             "下载后端提交未完成，远端接收结果未知；请先核对对应下载器，勿直接重复提交",
         ),
         (
-            "kind='guangya_share' AND status IN ('pending','submitting')",
+            share_due,
             "光鸭分享转存收尾未确认；若云端写入结果未知，请先核对目标目录，勿直接重试",
         ),
     ):
         cur = conn.execute(
             "UPDATE download_requests SET status='manual_review',"
-            "qb_status=CASE WHEN qb_status='submitting' THEN 'manual_review' ELSE qb_status END,"
-            "gy_status=CASE WHEN gy_status='submitting' OR "
-            "(kind='guangya_share' AND COALESCE(gy_status,'')='') "
+            f"qb_status=CASE WHEN {qb_due} THEN 'manual_review' ELSE qb_status END,"
+            f"gy_status=CASE WHEN {gy_due} OR "
+            f"({share_due} AND COALESCE(gy_status,'')='') "
             "THEN 'manual_review' ELSE gy_status END,"
             "error=CASE "
-            "WHEN instr(COALESCE(error,''),?)>0 THEN error "
-            "WHEN COALESCE(error,'')='' THEN ? "
-            "ELSE substr(error || char(10) || ?,1,1000) END,"
-            "completed_at=COALESCE(completed_at,?),updated_at=? WHERE "
-            + predicate + age_clause,
-            (message, message, message, timestamp, timestamp, *age_params),
+            "WHEN instr(COALESCE(error,''),:message)>0 THEN error "
+            "WHEN COALESCE(error,'')='' THEN :message "
+            "ELSE substr(error || char(10) || :message,1,1000) END,"
+            "completed_at=COALESCE(completed_at,:timestamp),updated_at=:timestamp WHERE "
+            + predicate,
+            {"message": message, "timestamp": timestamp,
+             "age": f"-{max(1, (stale_minutes or 15))} minutes"},
         )
         recovered += (cur.rowcount or 0)
     return recovered

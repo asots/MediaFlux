@@ -74,7 +74,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE download_requests SET qb_status='submitted',"
-                "updated_at=datetime('now','localtime','-30 minutes') WHERE id=?",
+                "gy_submitting_at=datetime('now','localtime','-30 minutes') WHERE id=?",
                 (request_id,),
             )
 
@@ -140,7 +140,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
                 self.assertTrue(started.wait(timeout=3))
                 with db.get_conn() as conn:
                     conn.execute(
-                        "UPDATE download_requests SET updated_at="
+                        "UPDATE download_requests SET qb_submitting_at="
                         "datetime('now','localtime','-30 minutes') WHERE id=?",
                         (request_id,),
                     )
@@ -204,7 +204,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
                 self.assertTrue(started.wait(timeout=3))
                 with db.get_conn() as conn:
                     conn.execute(
-                        "UPDATE download_requests SET updated_at="
+                        "UPDATE download_requests SET gy_submitting_at="
                         "datetime('now','localtime','-30 minutes') WHERE id=?",
                         (request_id,),
                     )
@@ -248,7 +248,7 @@ class PipelineResilienceIncrementalTests(IsolatedDatabaseTestCase):
         self.assertEqual(claimed["gy_status"], "submitting")
         with db.get_conn() as conn:
             conn.execute(
-                "UPDATE download_requests SET updated_at="
+                "UPDATE download_requests SET gy_submitting_at="
                 "datetime('now','localtime','-30 minutes') WHERE id=?",
                 (request_id,),
             )

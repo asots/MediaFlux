@@ -37,7 +37,7 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
         if stale:
             with db.get_conn() as conn:
                 conn.execute(
-                    "UPDATE download_requests SET updated_at='2000-01-01 00:00:00' WHERE id=?",
+                    "UPDATE download_requests SET gy_submitting_at='2000-01-01 00:00:00' WHERE id=?",
                     (request,),
                 )
         return request
@@ -95,7 +95,7 @@ class DownloadRecoveryUnificationTests(unittest.TestCase):
         db.update_download_request(rid, qb_status="completed", qb_task_id="known-qb")
         with db.get_conn() as conn:
             conn.execute(
-                "UPDATE download_requests SET updated_at='2000-01-01 00:00:00' WHERE id=?",
+                "UPDATE download_requests SET gy_submitting_at='2000-01-01 00:00:00' WHERE id=?",
                 (rid,),
             )
         return rid
