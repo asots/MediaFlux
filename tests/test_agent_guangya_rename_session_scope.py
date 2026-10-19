@@ -20,7 +20,7 @@ from app.agent.session_context import SQLiteAgentSessionContextRepository
 from app.clients.guangya import GuangYaClient
 from app.modules import guangya_rename
 from app.repositories import organize_operation_jobs as jobs
-from tests.support import isolated_test_database
+from tests.support import initialized_web_runtime, isolated_test_database
 from tests.test_agent_effect_admission import _offline_runtime, _paused_manager, _run_real_worker
 from tests.test_agent_guangya_fs_gateway import FakeGatewayClient
 from tests.test_agent_task_first_slice import NativeScript, OWNER
@@ -89,7 +89,7 @@ def test_preview_requires_a_session(sid):
 def test_native_rename_never_rebinds_another_session_preview(tmp_path, operation):
     async def scenario():
         client = CountingClient()
-        with isolated_test_database(), _offline_runtime(tmp_path, client), _paused_manager():
+        with initialized_web_runtime(), _offline_runtime(tmp_path, client), _paused_manager():
             first = build_agent_kernel_runtime(model=Script("guangya.rename.preview", {
                 "paths": ["/source"], "mode": "replace_text", "recursive": True,
                 "find": "广告-", "replace": "review-",
@@ -161,7 +161,7 @@ def test_reset_invalidates_warm_and_cold_preview_but_other_session_can_execute(t
 
     async def scenario():
         client = CountingClient()
-        with isolated_test_database(), _offline_runtime(tmp_path, client), _paused_manager(), patch.object(
+        with initialized_web_runtime(), _offline_runtime(tmp_path, client), _paused_manager(), patch.object(
             guangya_rename, "execute_rename_plan", partial(guangya_rename.execute_rename_plan,
                 client_factory=lambda: cast(GuangYaClient, client)),
         ):
