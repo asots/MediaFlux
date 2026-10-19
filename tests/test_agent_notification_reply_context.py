@@ -235,6 +235,9 @@ def test_notice_is_saved_before_turn_started_journal_yields_to_next_request():
         started = asyncio.Event()
         release = asyncio.Event()
         class BlockingJournal:
+            async def append_for_turn(self, event, lease):
+                await self.append(event, owner=lease.owner)
+
             async def append(self, event, *, owner):
                 assert owner == "owner"
                 if event.request_id == "notice" and event.type == AgentEventType.TURN_STARTED:

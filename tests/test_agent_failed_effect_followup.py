@@ -742,7 +742,12 @@ def test_new_user_supersedes_failed_diagnosis_and_preserves_publication_facts(ca
             old_events, _ = await asyncio.wait_for(confirming, 10)
             assert old_events[-1].type is AgentEventType.TURN_CANCELLED
             assert old_events[-1].request_id == "confirm-turn"
-            await case.assert_cancelled_publication_event(old_events[-1])
+            persisted = await case.cold_store().list_events(owner=case.owner, session_id=case.sid)
+            assert not any(row["event_id"] == old_events[-1].event_id for row in persisted), (
+                f"{OFFLINE}：已被新用户抢占的旧取消事件不得污染当前会话日志"
+            )
+            failed = next(event for event in old_events if event.type is AgentEventType.EFFECT_FAILED)
+            assert [row for row in persisted if row["event_id"] == failed.event_id] == [failed.to_dict()]
             current = await case.cold_store().load(owner=case.owner, session_id=case.sid)
             publication = dict(current.metadata["active_publication"])
             assert current.generation == before.generation + 1
@@ -752,6 +757,7 @@ def test_new_user_supersedes_failed_diagnosis_and_preserves_publication_facts(ca
                                    "request_id": "new-user-turn", "status": "running"}
             assert current.metadata["confirmed_publication"] == before.metadata["confirmed_publication"]
             assert live["request_id"] == "new-user-turn" and live["generation"] == current.generation
+            assert persisted[-1]["turn_id"] == live["turn_id"]
             cancelled = None
             if cancel_new_publication:
                 # 真正撤销新 publication；旧确认事实不能使新的停止失效。
@@ -776,6 +782,9 @@ def test_new_user_supersedes_failed_diagnosis_and_preserves_publication_facts(ca
                 assert newer[-1].type is AgentEventType.TURN_COMPLETED
                 assert saved.generation == current.generation
                 assert saved.metadata["active_publication"] == {**publication, "status": "finished"}
+            final_journal = await case.cold_store().list_events(owner=case.owner, session_id=case.sid)
+            assert final_journal[-1] == newer[-1].to_dict()
+            assert not any(row["event_id"] == old_events[-1].event_id for row in final_journal)
             case.assert_io(prepares=["A"], executions=["A"], reads=0, requests=2)
             case.assert_failure(old_events, saved, plan_a)
             users = case.users(saved)

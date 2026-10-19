@@ -2464,6 +2464,9 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         cancelled: list[bool] = []
 
         class CancellingJournal:
+            async def append_for_turn(self, event, lease):
+                await self.append(event, owner=lease.owner)
+
             async def append(self, event, *, owner):
                 del owner
                 if event.type is AgentEventType.TURN_STARTED:

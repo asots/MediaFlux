@@ -74,6 +74,9 @@ async def capture_session_contract(case):
             return result
 
     class Journal:
+        async def append_for_turn(self, event, lease):
+            await self.append(event, owner=lease.owner)
+
         async def append(self, event, *, owner):
             current = await store.load(owner=owner, session_id=event.session_id)
             timeline.append([event.type.value, deepcopy(dict(event.payload)),

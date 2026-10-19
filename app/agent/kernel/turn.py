@@ -211,8 +211,12 @@ class AgentTurn:
                     AgentEventType.TURN_CANCELLED,
                     {"reason": str(exc) or (self.token.reason if self.token else "cancelled"), **settlement, **await self.terminal_task("cancelled")},
                 )
+                assert self.lease is not None
                 if self.session.journal is not None:
-                    await self.session.journal.append(event, owner=self.agent_input.owner)
+                    try:
+                        await self.session.journal.append_for_turn(event, self.lease)
+                    except StalePublicationError:
+                        pass  # 旧消费者仍收取消终态，但不得写入新会话日志。
                 if self.lease is not None and self.lease.continuation_id:
                     try:
                         await self.record_continuation_event(event)
@@ -738,12 +742,10 @@ class AgentTurn:
             marker = latest.metadata.get("active_publication") or {}
             if self.resume_context is not None or (marker.get("status") == "cancelled" and marker.get("request_id") == self.lease.request_id):
                 return
-        guarded_failure = self.lease is not None and self.token is not None and not self.confirming
         try:
             if self.session.journal is not None:
-                append_for_turn = getattr(self.session.journal, "append_for_turn", None)
-                if guarded_failure and append_for_turn is not None:
-                    await append_for_turn(event, self.lease)
+                if self.lease is not None and self.token is not None and not self.confirming:
+                    await self.session.journal.append_for_turn(event, self.lease)
                 else:
                     # Early admission/confirmation rejection has no executor
                     # ownership, but must still return its failure display.
@@ -791,9 +793,8 @@ class AgentTurn:
                        "task": task_projection(self.state.metadata.get("task"))}
         event = self.factory.create(event_type, payload, **extra)
         if self.session.journal is not None:
-            append_for_turn = getattr(self.session.journal, "append_for_turn", None)
-            if not self.confirming and append_for_turn is not None:
-                await append_for_turn(event, self.lease)
+            if not self.confirming:
+                await self.session.journal.append_for_turn(event, self.lease)
             else:
                 await self.session.journal.append(event, owner=self.agent_input.owner)
         if (not self.confirming and event_type is not AgentEventType.TURN_STARTED

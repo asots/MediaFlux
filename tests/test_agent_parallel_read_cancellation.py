@@ -329,8 +329,11 @@ def test_cancel_after_first_result_cas_keeps_unconsumed_second_result(stores):
 
         # 内存状态没有 journal 方法；事件仍委托真实的隔离 SQLite journal，不伪造完成事件。
         durable_journal = store if isinstance(store, SQLiteKernelStore) else _sqlite_store()
-        journal = durable_journal if isinstance(store, SQLiteKernelStore) else SimpleNamespace(append=durable_journal.append)
-        method = "append_for_turn" if isinstance(store, SQLiteKernelStore) else "append"
+        async def append_for_turn(event, lease):
+            await durable_journal.append(event, owner=lease.owner)
+        journal = durable_journal if isinstance(store, SQLiteKernelStore) else SimpleNamespace(
+            append=durable_journal.append, append_for_turn=append_for_turn)
+        method = "append_for_turn"
         original_append = getattr(journal, method)
 
         async def blocked_append(event, *args, **kwargs):

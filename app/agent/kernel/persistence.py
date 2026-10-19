@@ -45,6 +45,7 @@ from .state import (
     _consume_delivered_effect_receipts,
     _effect_time_is_due,
     _record_stop_request,
+    cancelled_publication_matches,
 )
 from .state_types import (
     PublicationLease,
@@ -1034,10 +1035,13 @@ class SQLiteKernelStore:
             conn.execute("BEGIN IMMEDIATE")
             if lease is not None:
                 state = self._load_row(conn, owner, lease.session_id)
-                if event.session_id != lease.session_id or not publication_commit_matches(lease, state, None, ()):
+                if (event.session_id, event.turn_id, event.request_id) != (lease.session_id, lease.turn_id, lease.request_id):
                     raise StalePublicationError("event publication revoked")
-                from .continuation import check_claim
-                check_claim(state, lease, self._clock(), conn, publication=True)
+                if not (event.type is AgentEventType.TURN_CANCELLED and cancelled_publication_matches(state, lease)):
+                    if not publication_commit_matches(lease, state, None, ()):
+                        raise StalePublicationError("event publication revoked")
+                    from .continuation import check_claim
+                    check_claim(state, lease, self._clock(), conn, publication=True)
             self._write_event(conn, event, owner_digest, session_digest)
 
     def _write_event(self, conn, event, owner_digest, session_digest):
