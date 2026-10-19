@@ -803,7 +803,7 @@ class ClientResourceLifecycleTests(unittest.TestCase):
 
         accepted_client = Mock(logged_in=True, credential_generation=4)
         accepted_manager = Mock()
-        accepted_manager.start.return_value = {"ok": True, "task_id": "task"}
+        accepted_manager.start.return_value = {"ok": True, "task_id": "task", "run_id": 1}
         with patch(
             "app.agent.domains.guangya.organize_actions.get_organize_manager",
             return_value=accepted_manager,
