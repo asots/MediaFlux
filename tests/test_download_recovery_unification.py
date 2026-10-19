@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from tests.support import assert_present
 
+import socket
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
 from app import database as db
+from app.clients.guangya import GuangYaFile
+from app.modules import download_dispatcher
+from app.modules.download_tracker import DownloadTracker
+from app.modules.organize_rules import OrganizeRules
 from tests.support import isolated_test_database
 
 
@@ -253,3 +261,139 @@ raise AssertionError("recovery window not reached")
             expected,
         )
         self.assertEqual(db.recover_stale_submitting_download_requests(), 0)
+
+
+class DownloadOrganizeHandoffRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        for owner, name in (
+            (socket.socket, "connect"), (socket.socket, "connect_ex"), (socket, "getaddrinfo"),
+        ):
+            self.enterContext(patch.object(owner, name, side_effect=AssertionError("禁止外联")))
+        self.enterContext(isolated_test_database("download-handoff.db"))
+        self.serial = 0
+
+    def completed_request(self, **fields):
+        self.serial += 1
+        request_id, _ = db.create_download_request(f"handoff-{self.serial}", "magnet")
+        db.update_download_request(
+            request_id, targets="guangya", status="completed", gy_status="completed",
+            gy_task_id="cloud-task", gy_target_dir="stage", gy_isolated=1,
+            gy_staging_parent_dir="parent", gy_staging_name="MF-Audit",
+        )
+        if fields:
+            db.update_download_request(request_id, **fields)
+        self.assertTrue(db.claim_download_request_organize(request_id))
+        return request_id
+
+    def test_boot_requeues_claimed_handoff_and_tracker_starts_once(self):
+        request_id = download_dispatcher.create_request(
+            download_dispatcher.DownloadInput(
+                "magnet", "Audit", "magnet:?xt=urn:btih:" + "a" * 40,
+            ), "", "", origin="test",
+        )["id"]
+        with patch.object(download_dispatcher, "_submit_guangya", return_value={
+            "ok": True, "task_id": "cloud-task", "task_ids": ["cloud-task"], "selected_count": 1,
+            "decision": {"target_dir_id": "stage", "target_dir_name": "MF-Audit"},
+            "staging": {"isolated": True, "parent_id": "parent", "name": "MF-Audit"},
+        }) as backend:
+            self.assertTrue(download_dispatcher.dispatch_request(request_id, "guangya")["ok"])
+            backend.assert_called_once()
+
+        tracker = DownloadTracker()
+        client = SimpleNamespace(
+            logged_in=True,
+            file_info=lambda _id: GuangYaFile("stage", "MF-Audit", True, parent_id="parent"),
+            list_dir=lambda _id: [GuangYaFile("video", "Audit.mkv", False, size=1000, parent_id="stage")],
+            close=lambda: None,
+        )
+        manager = SimpleNamespace(start=Mock(side_effect=SystemExit("交接窗口进程中断")))
+        with (
+            patch("app.modules.download_tracker.GuangYaClient", return_value=client),
+            patch.object(DownloadTracker, "_publish_lifecycle", return_value=True),
+            patch("app.modules.download_tracker.get", side_effect=lambda key, default="":
+                  "dest" if key == "GY_ORGANIZE_TARGET_DIR" else default),
+            patch("app.modules.download_tracker.get_organize_manager", return_value=manager),
+            patch.object(OrganizeRules, "from_config", return_value=OrganizeRules(target_dir_id="dest")),
+        ):
+            tracker._update_request(
+                db.get_download_request(request_id), [], [{"id": "cloud-task", "status": 2}],
+            )
+            self.assertEqual(assert_present(db.get_download_request(request_id))["notification_delivery_status"], "sent")
+            db.update_download_request(request_id, organize_next_retry_at=None, organize_attempts=2)
+            with self.assertRaises(SystemExit):
+                tracker._update_request(db.get_download_request(request_id), [], [])
+            manager.start.assert_called_once()
+            before = dict(assert_present(db.get_download_request(request_id)))
+            self.assertEqual((before["organize_started"], before["organize_status"]), (1, "starting"))
+
+            db.init_db()
+            recovered = dict(assert_present(db.get_download_request(request_id)))
+            self.assertEqual((recovered["organize_started"], recovered["organize_status"]), (0, "queued"))
+            self.assertIsNone(recovered["organize_next_retry_at"])
+            for field in ("status", "gy_status", "gy_task_id", "gy_target_dir", "gy_isolated",
+                          "gy_staging_parent_dir", "gy_staging_name", "gy_settle_snapshot", "organize_attempts"):
+                self.assertEqual(recovered[field], before[field], field)
+            self.assertIn(request_id, [row["id"] for row in db.list_active_download_requests()])
+            self.assertEqual(db.count_download_requests_requiring_attention(request_id), 0)
+            db.init_db()
+            self.assertEqual(dict(assert_present(db.get_download_request(request_id))), recovered)
+
+            def start(*_args, **_kwargs):
+                row = assert_present(db.get_download_request(request_id))
+                self.assertEqual((row["organize_started"], row["organize_status"]), (1, "starting"))
+                db.update_download_request(
+                    request_id, organize_status="running", organize_task_id="resumed-task",
+                )
+                return {"ok": True}
+
+            manager.start.reset_mock()
+            manager.start.side_effect = start
+            for _ in range(2):
+                tracker._update_request(db.get_download_request(request_id), [], [])
+            manager.start.assert_called_once()
+            self.assertEqual(manager.start.call_args.kwargs["download_request_ids"], [request_id])
+
+    def test_boot_keeps_running_interruption_for_review_without_replay(self):
+        request_id = self.completed_request()
+        db.update_download_request(request_id, organize_status="running", organize_task_id="existing-task")
+        db.init_db()
+        row = dict(assert_present(db.get_download_request(request_id)))
+        self.assertEqual((row["organize_started"], row["organize_status"]), (-1, "failed"))
+        self.assertEqual(row["organize_task_id"], "existing-task")
+        self.assertIn("需人工核验", row["organize_error"])
+        self.assertEqual(db.count_download_requests_requiring_attention(request_id), 1)
+        self.assertNotIn(request_id, [item["id"] for item in db.list_active_download_requests()])
+        self.assertFalse(db.claim_download_request_organize(request_id))
+        db.init_db()
+        self.assertEqual(dict(assert_present(db.get_download_request(request_id))), row)
+
+    def test_boot_does_not_requeue_a_handoff_that_lost_admission(self):
+        for fields in (
+            {"status": "cancelled"},
+            {"status": "resubmitted", "qb_status": "completed"},
+            {"attention_cleared_at": "2026-01-01 00:00:00"},
+            {"gy_status": "failed"},
+            {"organize_started": -1},
+            {"organize_status": "requires_manual"},
+        ):
+            with self.subTest(fields=fields):
+                request_id = self.completed_request()
+                with db.get_conn() as conn:
+                    conn.execute(
+                        "UPDATE download_requests SET " + ",".join(f"{key}=?" for key in fields) + " WHERE id=?",
+                        (*fields.values(), request_id),
+                    )
+                before = dict(assert_present(db.get_download_request(request_id)))
+                db.init_db()
+                self.assertEqual(dict(assert_present(db.get_download_request(request_id))), before)
+                self.assertFalse(db.claim_download_request_organize(request_id))
+
+    def test_boot_preserves_cloud_handoff_when_only_qb_was_resubmitted(self):
+        request_id = self.completed_request(targets="both", status="resubmitted", qb_status="resubmitted")
+        db.init_db()
+        row = assert_present(db.get_download_request(request_id))
+        self.assertEqual((row["status"], row["qb_status"]), ("resubmitted", "resubmitted"))
+        self.assertEqual((row["organize_started"], row["organize_status"]), (0, "queued"))
+        self.assertIn(request_id, [item["id"] for item in db.list_active_download_requests()])
+        self.assertTrue(db.claim_download_request_organize(request_id))
+        self.assertFalse(db.claim_download_request_organize(request_id))

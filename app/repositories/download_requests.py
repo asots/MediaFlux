@@ -993,15 +993,15 @@ def claim_download_request(request_id: int, targets: str) -> bool:
         return _claim_download_request_conn(conn, request_id, targets, db.now())
 
 
-# 轮询补偿、整理认领、未配置整理时的目录收口必须消费同一份后端准入事实。
-_GUANGYA_FOLLOWUP_READY_SQL = (
+# 启动恢复、轮询补偿及整理/目录收口认领共用同一份后端准入事实。
+_GUANGYA_FOLLOWUP_ALLOWED_SQL = (
     "targets IN ('guangya','both') AND gy_status='completed' "
     "AND (status IN ('submitted','downloading','completed','manual_review') "
     "OR (status='resubmitted' AND qb_status='resubmitted')) "
-    "AND organize_started=0 "
     "AND COALESCE(organize_status,'') NOT IN ('resubmitted','cleared') "
     "AND COALESCE(attention_cleared_at,'')=''"
 )
+_GUANGYA_FOLLOWUP_READY_SQL = _GUANGYA_FOLLOWUP_ALLOWED_SQL + " AND organize_started=0"
 
 
 def claim_download_request_organize(request_id: int) -> bool:
@@ -1688,6 +1688,15 @@ def list_active_download_requests(
 
 def _recover_after_restart(conn, timestamp: str) -> None:
     """同事务恢复请求、STRM 归属凭据、提交意图与通知租约。"""
+    # manager 必须先持久化 running 才启动执行线程；starting 尚未执行云端整理，
+    # 只重排仍有准入的交接，保留后端身份与重试次数。running 仍需人工核验。
+    conn.execute(
+        "UPDATE download_requests SET organize_started=0,organize_status='queued',"
+        "organize_next_retry_at=NULL,organize_error='',organize_finished_at=NULL,updated_at=? "
+        "WHERE organize_status='starting' AND organize_started=1 "
+        f"AND {_GUANGYA_FOLLOWUP_ALLOWED_SQL}",
+        (timestamp,),
+    )
     conn.execute(
         "UPDATE download_requests SET organize_started=-1,organize_status='failed',"
         "organize_error=CASE WHEN COALESCE(organize_error,'')='' "
