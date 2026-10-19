@@ -396,7 +396,8 @@ class ResourceConfirmLayerBrowserTests(unittest.TestCase):
                 page.route('**/api/indexers/download', duplicate)
                 page.route('**/api/indexers/download/resubmit', hold_resubmit)
                 page.locator('[data-resource-submit-target="guangya"]').first.click()
-                page.get_by_role('button', name='重新提交', exact=True).click()
+                with page.expect_request('**/api/indexers/download/resubmit'):
+                    page.get_by_role('button', name='重新提交', exact=True).click()
                 self.assertEqual(len(pending), 1)
                 self.assertEqual(writes[-1], {'request_id': 71, 'target': 'guangya'})
                 page.keyboard.press('Escape')
