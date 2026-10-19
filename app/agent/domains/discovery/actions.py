@@ -31,6 +31,7 @@ _RECOMMEND_ARGUMENTS = {
     "provider",
     "media_type",
     "page",
+    "offset",
     "limit",
     "year",
     "region",
@@ -292,6 +293,9 @@ def recommend_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         raise AgentToolError("media_type 仅支持 movie 或 tv")
 
     page = _positive_int(arguments.get("page"), name="page", default=1, maximum=100)
+    offset = arguments.get("offset", 0)
+    if type(offset) is not int or offset < 0:
+        raise AgentToolError("offset 必须是非负整数")
     limit = _positive_int(arguments.get("limit"), name="limit", default=10, maximum=20)
     years = {key: str(arguments.get(key) or "").strip() for key in ("year", "year_from", "year_to")}
     for key, year in years.items():
@@ -314,6 +318,8 @@ def recommend_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         "page": page,
         "limit": limit,
     }
+    if offset:
+        normalized["offset"] = offset
     normalized.update({key: value for key, value in {**years, "region": region, "genre": genre}.items() if value})
     if "exclude_library" in arguments:
         normalized["exclude_library"] = arguments["exclude_library"]
@@ -604,6 +610,7 @@ def recommend_discovery(
         payload.update(collect_discovery_recommendations(
             get_discovery_service, provider=normalized["provider"],
             media_type=normalized["media_type"], page=normalized["page"], limit=normalized["limit"],
+            offset=normalized.get("offset", 0),
             filters=_recommend_provider_filters(normalized),
             year_from=normalized.get("year") or normalized.get("year_from", ""),
             year_to=normalized.get("year") or normalized.get("year_to", ""),

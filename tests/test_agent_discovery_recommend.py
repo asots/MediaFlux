@@ -89,6 +89,57 @@ def _recommend_fixture(service, inventory=None):
 
 
 class AgentRecommendationCompletionTests(unittest.TestCase):
+    def test_continuation_consumes_every_card_including_last_source_page_remainder(self):
+        for exclude_library in (False, True):
+            with self.subTest(exclude_library=exclude_library):
+                service = PagedDiscoveryService({
+                    1: _page([_card(i) for i in range(1, 21)], has_more=True),
+                    2: _page([_card(i) for i in range(21, 41)], number=2),
+                })
+                results = []
+                arguments = {"exclude_library": exclude_library}
+                with _recommend_fixture(service):
+                    for _ in range(4):
+                        result = recommend_discovery(arguments)
+                        self.assertEqual(result.data["returned"], 10)
+                        results.extend(item["tmdb_id"] for item in result.data["items"])
+                        scope = result.data["scope"]
+                        arguments.update(page=scope["next_page"], offset=scope.get("next_offset", 0))
+                self.assertEqual(results, [str(2000 + i) for i in range(1, 41)])
+                self.assertIsNone(scope["next_page"])
+                self.assertFalse(result.data["has_more"])
+                self.assertEqual([call[3] for call in service.calls], [1, 1, 2, 2])
+
+    def test_continuation_offset_uses_source_positions_not_filtered_positions(self):
+        service = PagedDiscoveryService({1: _page([
+            _card(1, year="2010"), _card(2), _card(3), _card(3),
+            _card(4, media_type="tv"), _card(5), _card(6),
+        ])})
+        inventory = MediaIdentityInventory(candidates=[MediaIdentityCandidate(
+            name="推荐影片 2", tmdb_id="2002", media_type="movie")], total=1)
+        with _recommend_fixture(service, inventory):
+            first = recommend_discovery({"limit": 1, "year_from": "2020", "exclude_library": True})
+            self.assertEqual(first.data["scope"]["next_page"], 1)
+            second = recommend_discovery({
+                "limit": 2, "year_from": "2020", "exclude_library": True,
+                "page": 1, "offset": first.data["scope"]["next_offset"],
+            })
+        self.assertEqual([i["tmdb_id"] for i in first.data["items"]], ["2003"])
+        self.assertEqual([i["tmdb_id"] for i in second.data["items"]], ["2005", "2006"])
+        self.assertIsNone(second.data["scope"]["next_page"])
+
+    def test_continuation_retries_failed_page_without_dropping_offset(self):
+        service = PagedDiscoveryService({1: ProviderTimeout("timeout")})
+        with _recommend_fixture(service):
+            result = recommend_discovery({"page": 1, "offset": 10})
+        self.assertEqual(result.data["scope"]["next_page"], 1)
+        self.assertEqual(result.data["scope"]["next_offset"], 10)
+
+    def test_recommendation_offset_rejects_invalid_values(self):
+        for offset in (-1, True, "10", 0.5, None):
+            with self.subTest(offset=offset), self.assertRaises(AgentToolError):
+                recommend_arguments({"offset": offset})
+
     def test_named_region_is_origin_country_not_original_language(self):
         for region, country in (("中国大陆", "CN"), ("台湾", "TW"), ("香港", "HK"),
                                 ("英国", "GB"), ("美国", "US"), ("日本", "JP")):
@@ -366,7 +417,7 @@ class AgentRecommendationDeclarationTests(unittest.TestCase):
 
         spec = next(tool for tool in build_tool_specs() if tool.name == "discovery.recommend")
         properties = spec.parameters["properties"]
-        self.assertEqual(set(properties), {"provider", "media_type", "page", "limit", "year",
+        self.assertEqual(set(properties), {"provider", "media_type", "page", "offset", "limit", "year",
                                           "year_from", "year_to", "exclude_library", "region", "genre"})
         limit = properties["limit"]
         self.assertEqual((limit["minimum"], limit["maximum"], limit["default"]), (1, 20, 10))

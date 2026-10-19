@@ -586,7 +586,7 @@ def register_specs(registry, *, mapping_actions) -> None:
                 "读取已启用的 TMDB 或豆瓣推荐列表；按年份或年份范围、地区和题材筛选，服务有界续页补足目标数量。"
                 "返回覆盖范围 scope（coverage），含 requested/returned/shortfall/pages_read/stop_reason 和 scope.next_page；"
                 "scope.complete=true 或 scope.returned>=scope.requested 即本次数量已完成；"
-                "has_more 仅表示来源仍有候选，不代表任务未完成，不自动追加调用；用户明确要求更多时可从 scope.next_page 续取。"
+                "has_more 仅表示来源仍有候选，不代表任务未完成，不自动追加调用；用户明确要求更多时将 scope.next_page/next_offset 分别传入 page/offset 续取，并保留筛选条件。"
                 "只说明实际结果与缺口，不把上限停止当作来源穷尽。不返回配置值。"
             ),
             risk=RiskLevel.READ,
@@ -610,6 +610,10 @@ def register_specs(registry, *, mapping_actions) -> None:
                         "maximum": 100,
                         "default": 1,
                         "description": "候选来源的起始页；工具自动有界续页，不是最终推荐结果的页码。",
+                    },
+                    "offset": {
+                        "type": "integer", "minimum": 0, "default": 0,
+                        "description": "起始页内已消费条数；续取时使用上次 scope.next_offset，避免跳过同页余量。",
                     },
                     "limit": {
                         "type": "integer",

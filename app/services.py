@@ -1240,7 +1240,7 @@ def summarize_media_identity_batch(
 
 def collect_discovery_recommendations(
     service_factory: Callable[[], Any], *, provider: str, media_type: str,
-    page: int, limit: int, filters: dict[str, str],
+    page: int, limit: int, filters: dict[str, str], offset: int = 0,
     year_from: str = "", year_to: str = "", exclude_library: bool = False,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -1252,6 +1252,7 @@ def collect_discovery_recommendations(
     cards: list[MediaCard] = []
     accepted: list[MediaCard] = []
     seen: set[tuple[str, str]] = set()
+    positions: dict[tuple[str, str], tuple[int, int]] = {}
     pages_read: list[int] = []
     candidates_seen = duplicates = retry_after = 0
     cached, stale, has_more = True, False, False
@@ -1286,11 +1287,14 @@ def collect_discovery_recommendations(
         if source_page.provider.status != "healthy":
             provider_status = source_page.provider.status
         retry_after = max(retry_after, source_page.provider.retry_after)
-        for card in source_page.items:
+        for index, card in enumerate(source_page.items):
             if not isinstance(card, MediaCard) or card.media_type != media_type:
                 continue
-            candidates_seen += 1
             key = (card.media_type, card.tmdb_id or card.stable_id)
+            if index < offset:
+                seen.add(key)
+                continue
+            candidates_seen += 1
             if key in seen:
                 duplicates += 1
                 continue
@@ -1300,6 +1304,7 @@ def collect_discovery_recommendations(
                     or (year_from and year < year_from) or (year_to and year > year_to)):
                 continue
             cards.append(card)
+            positions[key] = (page, index + 1)
         stop_reason = interrupted()
         if exclude_library:
             identities = [{"tmdb_id": card.tmdb_id, "media_type": card.media_type,
@@ -1326,11 +1331,17 @@ def collect_discovery_recommendations(
             "source_exhausted" if not has_more else "page_limit" if len(pages_read) >= 8 or page >= 100 else "")
         if not stop_reason:
             page += 1
+            offset = 0
 
     returned = min(len(accepted), limit)
     next_page = pages_read[-1] + 1 if pages_read else page
+    next_offset = offset if not pages_read else 0
     if next_page > 100 or (pages_read and not has_more):
         next_page = None
+    if len(accepted) > limit:
+        last = accepted[returned - 1]
+        # 续取必须从最后返回条目的源位置开始，而非跳过已读取但未返回的半页。
+        next_page, next_offset = positions[(last.media_type, last.tmdb_id or last.stable_id)]
     return {
         "items": accepted[:limit], "total": len(accepted), "returned": returned,
         "has_more": has_more or len(accepted) > limit,
@@ -1342,7 +1353,7 @@ def collect_discovery_recommendations(
             "requested": limit, "returned": returned, "shortfall": limit - returned,
             "pages_read": pages_read, "candidates_seen": candidates_seen, "duplicates": duplicates,
             "stop_reason": stop_reason, "complete": stop_reason == "target_reached",
-            "next_page": next_page,
+            "next_page": next_page, "next_offset": next_offset,
             "max_pages": 8, "timeout_seconds": 20,
         },
     }
