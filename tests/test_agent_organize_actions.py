@@ -462,6 +462,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
         manager.start.return_value = {
             "ok": True,
             "task_id": "secret-task-id",
+            "run_id": 73,
             "message": "/private/path",
         }
         client = _atomic_clean_client(credential_generation=7)
@@ -489,6 +490,7 @@ class GuangYaOrganizeActionTests(unittest.TestCase):
             {
                 "kind": "guangya_organize_task",
                 "task_id": "secret-task-id",
+                "run_id": 73,
                 "operation": "run",
             },
         )

@@ -563,6 +563,39 @@ class OrganizeTaskFailureTests(unittest.TestCase):
         self.assertTrue(manager._admission_lock.acquire(blocking=False))
         manager._admission_lock.release()
 
+    def test_run_admission_write_failure_never_starts_business_and_releases_resources(self):
+        manager = OrganizeTaskManager()
+        organizer = MagicMock()
+        client = MagicMock()
+        client.credential_generation = 7
+        organizer.client = client
+        with patch(
+            "app.modules.organize_tasks.count_pending_organize_operation_jobs", return_value=0,
+        ), patch(
+            "app.modules.organize_tasks.Organizer", return_value=organizer,
+        ), patch(
+            "app.modules.organize_tasks.db.add_task_run", side_effect=sqlite3.OperationalError("disk full"),
+        ), patch(
+            "app.modules.organize_tasks.threading.Thread",
+        ) as thread_factory, patch.object(manager, "_run") as run:
+            result = manager.start(
+                [{"id": "source", "name": "源目录"}],
+                OrganizeRules(target_dir_id="target"),
+                client=client, take_client_ownership=True,
+            )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["retryable"])
+        self.assertEqual(manager.task_status()["status"], "idle")
+        thread_factory.assert_not_called()
+        run.assert_not_called()
+        organizer.organize.assert_not_called()
+        organizer.close.assert_called_once_with()
+        client.close.assert_called_once_with()
+        self.assertTrue(manager._lock.acquire(blocking=False))
+        manager._lock.release()
+        self.assertTrue(manager._admission_lock.acquire(blocking=False))
+        manager._admission_lock.release()
+
     def test_per_file_failure_persists_partial_state(self):
         manager = OrganizeTaskManager()
         organizer = MagicMock()

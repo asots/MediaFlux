@@ -233,6 +233,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
                 _tracked_accepted(
                     "guangya_organize_task",
                     task_id="private-organize-task",
+                    run_id=7,
                     operation="run",
                 ),
                 "app.agent.domains.guangya.runtime.guangya_organize_task_status",
@@ -371,7 +372,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
         cases = (
             (
                 "guangya_organize_task",
-                {"task_id": "private-organize-task", "operation": "run"},
+                {"task_id": "private-organize-task", "run_id": 7, "operation": "run"},
                 "app.agent.domains.guangya.runtime.guangya_organize_task_status",
                 (_snapshot("queued"), _snapshot("completed")),
                 "completed",

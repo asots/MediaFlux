@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from app import database as db
 from app.agent.domains.shared_arguments import (
     _bounded_int,
     _now,
@@ -11,6 +13,7 @@ from app.agent.domains.shared_arguments import (
     _safe_timestamp,
 )
 from app.agent.models import Evidence, ToolContext, ToolResult
+from app.modules.organize_results import read_organize_result
 from app.repositories.organize_operation_jobs import (
     CLOUD_COPY_PENDING_CODE,
     sanitize_organize_operation_result,
@@ -213,12 +216,36 @@ def guangya_organize_status(
     )
 
 
-def guangya_organize_task_status(task_id: str) -> ToolResult:
-    """按 Kernel 私有任务 ID 读取普通整理任务终态，不公开该 ID。"""
-    from app.modules.organize_tasks import get_organize_manager
+def guangya_organize_task_status(completion: dict[str, Any]) -> ToolResult:
+    """普通整理只读精确持久运行；停止、回退各自读取其任务。"""
+    task_id = str(completion.get("task_id") or "").strip()
+    operation = str(completion.get("operation") or "")
+    raw = None
+    overview: dict[str, Any] = {}
+    if operation == "run" and task_id:
+        row = db.get_task_run(_bounded_int(completion.get("run_id")))
+        if row is not None and str(row["task_name"]) == "guangya_organize":
+            try:
+                payload = json.loads(str(row["result"] or "{}"))
+            except ValueError:
+                payload = {}
+            result = read_organize_result(payload)
+            status = {
+                "queued": "queued", "running": "running", "success": "completed",
+                "partial": "partial", "skipped": "stopped", "failed": "failed",
+            }.get(str(row["status"]))
+            if result["task_id"] == task_id and status:
+                raw = {
+                    "status": status, "result": result,
+                    "trigger_type": row["trigger_type"],
+                    "started_at": row["started_at"], "finished_at": row["finished_at"],
+                }
+    elif operation in {"stop", "undo"} and task_id:
+        from app.modules.organize_tasks import get_organize_manager
 
-    manager = get_organize_manager()
-    raw = manager.task_result((task_id or "").strip())
+        manager = get_organize_manager()
+        raw = manager.task_result(task_id)
+        overview = manager.status()
     if raw is None:
         return ToolResult(
             ok=False,
@@ -226,4 +253,4 @@ def guangya_organize_task_status(task_id: str) -> ToolResult:
             summary="光鸭整理任务状态暂时无法确认",
             error="未找到对应的后台任务快照。",
         )
-    return _project_guangya_status(raw, overview=manager.status())
+    return _project_guangya_status(raw, overview=overview)

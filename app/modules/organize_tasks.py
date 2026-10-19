@@ -519,17 +519,9 @@ class OrganizeTaskManager:
             )
             initial_result["source_count"] = len(sources)
             run_payload = json.dumps(initial_result, ensure_ascii=False, default=str)
-            try:
-                run_id = db.add_task_run(
-                    "guangya_organize", trigger_type, result=run_payload
-                )
-            except Exception as exc:
-                run_id = 0
-                logger.warning(
-                    "创建整理任务运行记录失败 task_id=%s type=%s",
-                    task_id,
-                    type(exc).__name__,
-                )
+            run_id = db.add_task_run(
+                "guangya_organize", trigger_type, result=run_payload
+            )
             self._cancel_event.clear()
             with self._state_lock:
                 self._task = {

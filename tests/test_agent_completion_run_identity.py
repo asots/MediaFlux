@@ -8,8 +8,9 @@ import time
 import unittest
 from contextlib import ExitStack
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 
@@ -20,6 +21,7 @@ from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import DomainActions, build_tool_specs
 from app.agent.domains.library import patrol_trigger_actions
 from app.agent.domains.library.patrol_status import get_library_patrol_status
+from app.agent.domains.guangya import organize_actions, runtime as guangya_runtime
 from app.agent.effect_completion import wait_for_effect_completion
 from app.agent.feature_gate import initialize_runtime_fence
 from app.agent.kernel.bootstrap import _capture_creation_binding
@@ -33,9 +35,12 @@ from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state_types import AgentInput
 from app.modules.process_lock import CrossProcessLock
-from app.agent.models import ToolResult
+from app.agent.models import ToolContext, ToolResult
 from app.modules.agent_library_patrol_scheduler import AgentLibraryPatrolScheduler
 from app.modules.scheduler import STRMScheduler
+from app.modules.organize import OrganizeRules, Organizer
+from app.modules.organize_results import build_organize_result
+from app.modules.organize_tasks import OrganizeTaskManager
 from tests.support import isolated_test_database
 from tests.test_agent_task_first_slice import NativeScript
 
@@ -250,6 +255,101 @@ async def assert_patrol_outcome(status: str):
         assert read.ok and read.status == status
 
 
+async def assert_organize_identity(status: str, later_count: int):
+    with isolated_test_database(), ExitStack() as stack:
+        initialize_runtime_fence()
+        manager = OrganizeTaskManager()
+        active = {"manager": manager, "status": status}
+        sources = [{"id": "source", "name": "Source"}]
+        rules = OrganizeRules(target_dir_id="target", clean_empty=False,
+            link_strm=False, notify_enabled=False, library_notify=False)
+        client = Mock()
+        client.logged_in = True
+        client.credential_generation = 0
+        client.file_info.return_value = SimpleNamespace(is_dir=True, parent_id="0")
+        stack.enter_context(patch.object(organize_actions, "_configured_inputs", return_value=(sources, rules, "")))
+        stack.enter_context(patch.object(organize_actions, "GuangYaClient", return_value=client))
+        stack.enter_context(patch.object(organize_actions, "get_organize_manager", side_effect=lambda: active["manager"]))
+        stack.enter_context(patch("app.modules.organize_tasks.get_organize_manager", side_effect=lambda: active["manager"]))
+        stack.enter_context(patch("app.modules.telegram_organize_lifecycle.publish_organize_lifecycle", return_value=False))
+        def remote_observation(_self, _source, _rules, **options):
+            if options.get("dry_run"):
+                return [], {"total": 1, "matched": 1, "failed": 0, "scan_errors": []}
+            if active["status"] == "failed":
+                raise OSError("transient provider list unavailable")
+            return [], {"total": 1, "matched": 1, "skipped": 1, "failed": 0, "scan_errors": []}
+        stack.enter_context(patch.object(Organizer, "organize", remote_observation))
+        write = "guangya.organize.run_once"
+        session, store, _ = completion_session([write], [(write, {})])
+        context = {"owner": "organize-identity-owner", "session_id": "organize-identity-session"}
+        preview = [e async for e in session.run(AgentInput(**context,
+            request_id="organize-preview", message="执行一次光鸭整理并核验结果。", channel="web"))]
+        assert preview[-1].payload["status"] == "approval_required", preview[-1].payload
+        plan_id = (await store.load(**context)).pending_effect_plan_id
+        async def first_read_fails(accepted, **options):
+            worker = manager._worker
+            if worker:
+                worker.join(5)
+                assert not worker.is_alive()
+            with patch.object(observers, "_poll", side_effect=RuntimeError("temporary reader failure")):
+                return await wait_for_effect_completion(accepted, timeout_seconds=0, **options)
+        with patch.object(existing_actions, "wait_for_effect_completion", first_read_fails):
+            confirmed = [e async for e in session.confirm(**context, plan_id=plan_id,
+                request_id="organize-confirm", channel="web")]
+        assert confirmed[-1].payload["status"] == "waiting"
+        wait = (await store.load(**context)).metadata["effect_waits"][plan_id]
+        assert wait["state"] == "pending" and not wait["delivered"] and "final_result" not in wait
+        seed = json.loads(_completion_cipher().decrypt(wait["sealed"].encode()))
+        tracker = observers._CompletionTracker(seed["tracker"]["kind"], seed["tracker"]["value"])
+        task_id = tracker.value["task_id"]
+        persisted = db.get_task_run(tracker.value["run_id"])
+        assert persisted is not None
+        assert json.loads(persisted["result"])["task_id"] == task_id
+        assert persisted["status"] == ("failed" if status == "failed" else "success")
+        _, warm_status, _ = await observers._poll(tracker, ToolContext(**context))
+        assert warm_status == status
+        active["status"] = "completed"
+        for _ in range(later_count):
+            accepted = manager.start(sources, rules, client=client)
+            assert accepted["ok"]
+            worker = manager._worker
+            if worker:
+                worker.join(5)
+                assert not worker.is_alive()
+        if later_count:
+            assert manager.task_result(task_id) is None
+            _, after_eviction, _ = await observers._poll(tracker, ToolContext(**context))
+            assert after_eviction == status
+        cold_manager = OrganizeTaskManager()
+        active["manager"] = cold_manager
+        # Run the actual startup recovery; no synthetic task_runs/operation_jobs mirror.
+        db.init_db()
+        cold_manager.resume()
+        try:
+            assert cold_manager.task_result(task_id) is None
+            cold_snapshot = guangya_runtime.guangya_organize_task_status(tracker.value)
+            assert cold_snapshot.data["task"]["status"] == status
+            with db.get_conn() as conn:
+                assert conn.execute("SELECT COUNT(*) FROM organize_operation_jobs").fetchone()[0] == 0
+            future = time.time() + 11
+            cold_store = SQLiteKernelStore(clock=lambda: future)
+            with patch.object(effects.time, "time", return_value=future):
+                delivered = await effects.poll_effect_receipts(cold_store)
+            assert delivered == 1
+            saved = await cold_store.load(**context)
+            final = saved.metadata["effect_waits"][plan_id]["final_result"]
+            assert final["status"] == status and final["ok"] == (status == "completed")
+            assert saved.metadata["effect_waits"][plan_id]["delivered"]
+            native_tool = next(r for r in saved.conversation if r.get("role") == "tool" and r.get("effect_plan_id") == plan_id)
+            assert json.loads(native_tool["content"]) == final
+            assert task_id not in json.dumps(final)
+        finally:
+            assert cold_manager.shutdown(timeout=1)
+            if cold_manager._operation_dispatcher:
+                cold_manager._operation_dispatcher.join(2)
+                assert not cold_manager._operation_dispatcher.is_alive()
+
+
 class AgentCompletionIdentityTests(unittest.TestCase):
     def test_strm_failed_run_survives_later_runs_and_cold_receipt(self):
         for later_count, later_source in ((0, "a"), (19, "a"), (20, "a"), (20, "b")):
@@ -265,3 +365,34 @@ class AgentCompletionIdentityTests(unittest.TestCase):
         for status in ("not_configured", "unavailable", "failed", "inconclusive", "up_to_date", "updates_available"):
             with self.subTest(status=status):
                 asyncio.run(assert_patrol_outcome(status))
+
+    def test_organize_result_survives_process_restart_and_history_eviction(self):
+        for status, later_count in (("failed", 0), ("completed", 0), ("failed", 33)):
+            with self.subTest(status=status, later_count=later_count):
+                asyncio.run(assert_organize_identity(status, later_count))
+
+    def test_organize_completion_requires_matching_run_and_task_identity(self):
+        with isolated_test_database():
+            payload = build_organize_result({"moved": 1}, status="completed", task_id="exact-task")
+            run_id = db.add_task_run("guangya_organize", "manual", result=json.dumps(payload))
+            db.finish_task_run(run_id, "success", result=json.dumps(payload))
+            other = db.add_task_run("strm_sync", "manual", result=json.dumps(payload))
+            for completion in (
+                {"task_id": "another-task", "run_id": run_id, "operation": "run"},
+                {"task_id": "exact-task", "run_id": other, "operation": "run"},
+                {"task_id": "exact-task", "operation": "run"},
+            ):
+                with self.subTest(completion=completion):
+                    result = guangya_runtime.guangya_organize_task_status(completion)
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.status, "unknown")
+
+    def test_interrupted_organize_result_is_recovered_by_exact_run(self):
+        with isolated_test_database():
+            payload = build_organize_result({}, status="running", task_id="interrupted-task")
+            run_id = db.add_task_run("guangya_organize", "manual", result=json.dumps(payload))
+            db.init_db()
+            result = guangya_runtime.guangya_organize_task_status({
+                "task_id": "interrupted-task", "run_id": run_id, "operation": "run"})
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["task"]["status"], "failed")

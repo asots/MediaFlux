@@ -514,6 +514,7 @@ def _run_guangya_organize_once(
                     "completion": {
                         "kind": "guangya_organize_task",
                         "task_id": task_id,
+                        "run_id": result["run_id"],
                         "operation": "run",
                     }
                 }

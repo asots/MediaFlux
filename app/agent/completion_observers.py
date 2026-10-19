@@ -442,7 +442,7 @@ async def _poll(
         from app.agent.domains.guangya.runtime import guangya_organize_task_status
 
         snapshot = await asyncio.to_thread(
-            guangya_organize_task_status, str(tracker.value.get("task_id") or "")
+            guangya_organize_task_status, tracker.value
         )
         status, task = _snapshot_task(snapshot)
         return snapshot, status, task
