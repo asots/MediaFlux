@@ -210,7 +210,8 @@ def get_media_credits(arguments: dict[str, Any]) -> ToolResult:
     state = "empty" if empty else "available" if complete else "partial"
     return ToolResult(
         True,
-        "partial" if not complete else "completed",
+        # 展示限量不等于查询失败；源数据缺损才是部分完成。
+        "partial" if "partial" in (cast_info["state"], crew_info["state"]) else "completed",
         "TMDB 本次返回空演职员表"
         if empty
         else f"已读取 TMDB 演职员：演员 {len(cast)} 位、主创 {len(crew)} 项",

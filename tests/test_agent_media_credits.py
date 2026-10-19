@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -192,6 +193,74 @@ def test_projection_is_bounded_and_marks_invalid_unknown_and_truncated():
     assert result.data["cast"][0]["roles_truncated"]
     assert result.data["cast"][1]["roles"][0]["episode_count"] is None
     assert result.data["crew_coverage"]["state"] == "partial"
+
+
+@pytest.mark.parametrize("bounded", ["cast", "crew", "roles"])
+def test_display_limit_does_not_make_successful_credits_query_partial(bounded):
+    payload: dict[str, list[dict[str, Any]]] = {
+        "cast": [{"name": "演员", "character": "主角"}],
+        "crew": [{"name": "导演", "job": "Director"}],
+    }
+    args: dict[str, Any] = {"tmdb_id": "1", "media_type": "tv"}
+    if bounded == "roles":
+        payload["cast"][0]["roles"] = [{"character": f"角色{i}"} for i in range(25)]
+    else:
+        payload[bounded] *= 3
+        args[f"{bounded}_limit"] = 2
+    result, _ = _call(payload, args)
+    assert result.ok and result.status == "completed"
+    assert result.data["truncated"] and not result.data["complete"]
+    coverage = result.data[f"{'cast' if bounded == 'roles' else bounded}_coverage"]
+    assert coverage["state"] == "available" and coverage["truncated"]
+
+
+@pytest.mark.parametrize("limits", [(2,), (2, 50)])
+def test_limited_credits_and_expanded_read_finish_without_spurious_failure(limits):
+    import asyncio
+
+    from app.agent.kernel.capabilities import CapabilityRetriever, ToolCatalog
+    from app.agent.kernel.model import ModelEvent, ModelEventType, ModelToolCall
+    from app.agent.kernel.pipeline import ToolPipeline
+    from app.agent.kernel.session import AgentSession
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.agent.kernel.state_types import AgentInput
+    from tests.test_agent_kernel_core import ScriptedModel, collect
+
+    async def scenario():
+        payload = {"cast": [{"name": f"演员{i}", "character": f"角色{i}"} for i in range(30)], "crew": []}
+        wires = [_Session(payload) for _ in limits]
+        clients = [TMDBClient(api_key="test", base_url="https://api.themoviedb.org/3", proxy_url="", session=wire) for wire in wires]
+        tool = catalog_from_tool_specs(build_tool_specs()).get("discovery.credits")
+        catalog = ToolCatalog([tool])
+        model = ScriptedModel([
+            *[[ModelEvent(ModelEventType.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(
+                f"credits-{limit}", tool.model_name, {"tmdb_id": "1", "media_type": "movie", "cast_limit": limit})),
+               ModelEvent(ModelEventType.FINISH, finish_reason="tool_calls")] for limit in limits],
+            [ModelEvent(ModelEventType.TEXT_DELTA, text="两位主演是演员0和演员1。"),
+             ModelEvent(ModelEventType.FINISH, finish_reason="stop")],
+        ])
+        store = InMemorySessionStateStore()
+        session = AgentSession(model=model, catalog=catalog, state_store=store,
+            pipeline=ToolPipeline(catalog=catalog, state_store=store),
+            retriever=CapabilityRetriever(minimum=1, maximum=1))
+        with (
+            patch("app.agent.domains.discovery.credits_actions.config.get_bool", return_value=True),
+            patch("app.agent.domains.discovery.credits_actions.TMDBClient", side_effect=clients),
+        ):
+            events = await collect(session.run(AgentInput(owner="owner", session_id="credits", message="只需要电影的前两位演员")))
+        assert all(len(wire.calls) == 1 and wire.closed for wire in wires)
+        assert events[-1].payload["status"] == "success", events[-1].payload
+        assert events[-1].payload["answer"] == "两位主演是演员0和演员1。"
+        saved = await store.load(owner="owner", session_id="credits")
+        results = [json.loads(row["content"]) for row in saved.conversation if row["role"] == "tool"]
+        assert len(results) == len(limits)
+        assert results[0]["data"]["cast_coverage"]["returned"] == 2
+        assert results[0]["data"]["truncated"]
+        if len(limits) > 1:
+            assert results[-1]["data"]["cast_coverage"]["returned"] == 30
+            assert results[-1]["data"]["complete"]
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
