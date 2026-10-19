@@ -56,12 +56,12 @@ def record_result(turn: AgentTurn,
     turn.last_business_tool = name
     attempt = (name, 0 if arguments else turn.context_revision,
                "unparsed:" + rejected_call if rejected_call else json.dumps(dict(arguments), ensure_ascii=False, sort_keys=True, default=str))
-    # DTO 可同时提供部分结果和限流事实；保留已取得的结果，再登记未完成部分。
+    # 聚合 DTO 可同时提供部分结果和失败事实；保留已取得的结果，再登记未完成部分。
     turn.has_tool_result = turn.has_tool_result or (error is None and result.get("ok") is not False)
     status = result.get("status")
     if error is None and isinstance(status, str) and (
-        status == "rate_limited" or (result.get("ok") is False and tool is not None
-            and tool.effect is ToolEffect.READ and status in _READ_FAILURE_STATUSES)
+        status == "rate_limited" or (tool is not None and tool.effect is ToolEffect.READ
+            and (status == "partial" or (result.get("ok") is False and status in _READ_FAILURE_STATUSES)))
     ):
         error = ToolPipelineError(
             sanitize_public_text(result.get("error") or result.get("summary") or "工具查询未取得结果"), code=status,

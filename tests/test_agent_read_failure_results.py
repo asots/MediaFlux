@@ -136,26 +136,37 @@ def test_negative_business_observation_is_not_a_service_exception(status, store)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("first_kind", ["dto", "exception"])
+@pytest.mark.parametrize("first_kind", ["dto", "exception", "partial-failed", "partial-mixed"])
 @pytest.mark.parametrize("later_status", ["not_found", "loading"])
 def test_another_failed_result_for_same_arguments_cannot_erase_service_failure(first_kind, later_status, store):
     async def scenario():
         first = (ToolResult(False, "provider_timeout", "对象x查询超时") if first_kind == "dto"
                  else ToolPipelineError("对象x查询超时", code="provider_timeout"))
+        if first_kind.startswith("partial-"):
+            first = ToolResult(first_kind == "partial-mixed", "partial", "对象x来源未全部核验")
         events, _, _ = await run_steps(store, [
             ("object-x", first), ("object-x", ToolResult(False, later_status, "尚未取得该对象的完整查询结果")),
         ])
-        assert events[-1].type.value == "turn.failed"
-        assert events[-1].payload["code"] == "provider_timeout"
-        assert events[-1].payload["message"] == "对象x查询超时"
+        if first_kind.startswith("partial-"):
+            if first_kind == "partial-mixed":
+                assert events[-1].payload["status"] == "partial"
+                assert events[-1].payload["finish_reason"] == "partial"
+            else:
+                assert events[-1].type.value == "turn.failed"
+                assert events[-1].payload["code"] == "partial"
+        else:
+            assert events[-1].type.value == "turn.failed"
+            assert events[-1].payload["code"] == "provider_timeout"
+            assert events[-1].payload["message"] == "对象x查询超时"
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("status", ["ok", "empty"])
-def test_success_for_same_arguments_recovers_failed_read_including_successful_empty_result(status, store):
+@pytest.mark.parametrize("first_ok,first_status", [(False, "unavailable"), (False, "partial"), (True, "partial")])
+def test_success_for_same_arguments_recovers_failed_read_including_successful_empty_result(status, first_ok, first_status, store):
     async def scenario():
         events, _, _ = await run_steps(store, [
-            ("object-x", ToolResult(False, "unavailable", "对象x服务暂不可用")),
+            ("object-x", ToolResult(first_ok, first_status, "对象x查询未全部完成")),
             ("object-x", ToolResult(True, status, "已核验对象x", data={"results": []})),
         ])
         assert events[-1].payload["status"] == "success"
@@ -163,14 +174,15 @@ def test_success_for_same_arguments_recovers_failed_read_including_successful_em
     asyncio.run(scenario())
 
 
-def test_success_for_other_arguments_does_not_recover_failed_object(store):
+@pytest.mark.parametrize("first_ok,first_status", [(False, "unavailable"), (False, "partial"), (True, "partial")])
+def test_success_for_other_arguments_does_not_recover_failed_object(first_ok, first_status, store):
     async def scenario():
         events, _, _ = await run_steps(store, [
-            ("object-x", ToolResult(False, "unavailable", "对象x服务暂不可用")),
+            ("object-x", ToolResult(first_ok, first_status, "对象x服务暂不可用")),
             ("object-y", ToolResult(True, "ok", "已核验对象y", data={"query": "object-y"})),
         ])
         terminal = events[-1].payload
-        assert terminal["status"] == "partial" and terminal["finish_reason"] == "unavailable"
+        assert terminal["status"] == "partial" and terminal["finish_reason"] == first_status
         assert "已核验对象y" in terminal["answer"]
         assert "对象x服务暂不可用" in terminal["answer"]
         assert "未完成的查询不能据此判断没有内容" in terminal["answer"]
