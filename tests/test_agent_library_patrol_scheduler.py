@@ -1023,3 +1023,96 @@ class AgentLibraryPatrolSchedulerTests(IsolatedDatabaseTestCase):
         self.assertEqual(result.data["checked_series_count"], 0)
         self.assertIn("覆盖不完整", result.summary)
         self.assertNotIn("SECRET", repr(result.to_dict()))
+
+
+class AgentLibraryPatrolCycleIdentityTests(IsolatedDatabaseTestCase):
+    def setUp(self):
+        with db.get_conn() as conn:
+            conn.execute("DROP TRIGGER IF EXISTS fail_patrol_notice")
+            conn.execute("DELETE FROM agent_library_patrol_notification_outbox")
+            conn.execute("DELETE FROM agent_library_patrol")
+            conn.execute("DELETE FROM task_runs WHERE task_name='agent_library_patrol'")
+
+    def test_trigger_reserves_one_identity_for_queued_and_running_cycle(self):
+        current = "2026-08-03 12:00:00"
+        first = db.trigger_agent_library_patrol(next_run_at=current)
+        second = db.trigger_agent_library_patrol(next_run_at=current)
+        self.assertEqual(first["run_id"], second["run_id"])
+        self.assertEqual(first["status"], "queued")
+        job = db.claim_due_agent_library_patrol(current_time=current)
+        assert job is not None
+        self.assertEqual(job["cycle_run_id"], first["run_id"])
+        reused = db.trigger_agent_library_patrol(next_run_at=current)
+        self.assertEqual(reused["status"], "already_running")
+        self.assertEqual(reused["run_id"], first["run_id"])
+
+    def test_cycle_survives_batches_restart_and_rejects_old_lease_terminal(self):
+        from app.agent.domains.library.patrol_status import serialize_patrol_projection
+        current = "2026-08-03 12:00:00"
+        first = db.trigger_agent_library_patrol(next_run_at=current)
+        initial = db.claim_due_agent_library_patrol(current_time=current)
+        assert initial is not None
+        raw, _projection = serialize_patrol_projection(_patrol_result())
+        self.assertTrue(db.continue_agent_library_patrol(
+            expected_lease_generation=int(initial["lease_generation"]), next_run_at=current,
+            cycle_as_of="2026-08-03", cycle_cursor_tmdb_id="12345", cycle_accumulator_json=raw,
+        ))
+        second = db.claim_due_agent_library_patrol(current_time=current)
+        assert second is not None
+        self.assertEqual(second["cycle_run_id"], first["run_id"])
+        db.init_db()
+        recovered = db.claim_due_agent_library_patrol(current_time=db.now())
+        assert recovered is not None
+        self.assertEqual(recovered["cycle_run_id"], first["run_id"])
+        self.assertFalse(db.update_agent_library_patrol(
+            status="pending", outcome="failed", attempts=0, next_run_at=current,
+            expected_lease_generation=int(initial["lease_generation"]), projection_json=raw,
+        ))
+        run = db.get_task_run(int(first["run_id"]))
+        assert run is not None
+        self.assertEqual(run["status"], "running")
+        self.assertTrue(db.update_agent_library_patrol(
+            status="pending", outcome="up_to_date", attempts=0, next_run_at=current,
+            expected_lease_generation=int(recovered["lease_generation"]), projection_json=raw,
+        ))
+        run = db.get_task_run(int(first["run_id"]))
+        assert run is not None
+        self.assertEqual(run["status"], "up_to_date")
+        next_cycle = db.trigger_agent_library_patrol(next_run_at=current)
+        self.assertNotEqual(next_cycle["run_id"], first["run_id"])
+
+    def test_cancel_queued_cycle_closes_exact_run_before_reusing_singleton(self):
+        current = "2026-08-03 12:00:00"
+        first = db.trigger_agent_library_patrol(next_run_at=current)
+        self.assertTrue(db.cancel_agent_library_patrol_lease(next_run_at=current))
+        run = db.get_task_run(int(first["run_id"]))
+        assert run is not None
+        self.assertEqual(run["status"], "cancelled")
+        next_cycle = db.trigger_agent_library_patrol(next_run_at=current)
+        self.assertNotEqual(next_cycle["run_id"], first["run_id"])
+
+    def test_notification_failure_rolls_back_cycle_and_task_terminal_together(self):
+        import sqlite3
+        current = "2026-08-03 12:00:00"
+        admitted = db.trigger_agent_library_patrol(next_run_at=current)
+        job = db.claim_due_agent_library_patrol(current_time=current)
+        assert job is not None
+        with db.get_conn() as conn:
+            conn.execute("CREATE TRIGGER fail_patrol_notice BEFORE INSERT ON agent_library_patrol_notification_outbox BEGIN SELECT RAISE(ABORT,'notice unavailable'); END")
+        def remove_fault():
+            with db.get_conn() as conn:
+                conn.execute("DROP TRIGGER IF EXISTS fail_patrol_notice")
+        self.addCleanup(remove_fault)
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.update_agent_library_patrol(
+                status="pending", outcome="updates_available", attempts=0, next_run_at=current,
+                expected_lease_generation=int(job["lease_generation"]),
+                result_fingerprint="a" * 64, notification_payload_json="{}", enqueue_notification=True,
+            )
+        row = db.get_agent_library_patrol()
+        run = db.get_task_run(int(admitted["run_id"]))
+        assert row is not None and run is not None
+        self.assertEqual(row["status"], "running")
+        self.assertEqual(row["cycle_run_id"], admitted["run_id"])
+        self.assertEqual(run["status"], "running")
+        self.assertEqual(db.list_agent_library_patrol_notifications(), [])

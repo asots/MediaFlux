@@ -25,6 +25,33 @@ def ensure_agent_library_patrol(*, next_run_at: str | None = None) -> sqlite3.Ro
     return row
 
 
+def _reserve_cycle_run(conn: sqlite3.Connection, row: sqlite3.Row, timestamp: str, trigger_type: str) -> int:
+    run_id = int(row["cycle_run_id"] or 0)
+    if not run_id:
+        cur = conn.execute(
+            "INSERT INTO task_runs(task_name,trigger_type,status,started_at,result) "
+            "VALUES('agent_library_patrol',?,'queued',?,'{}')", (trigger_type, timestamp),
+        )
+        assert cur.lastrowid is not None
+        run_id = cur.lastrowid
+        conn.execute("UPDATE agent_library_patrol SET cycle_run_id=? WHERE patrol_key='default'", (run_id,))
+    return run_id
+
+
+def trigger_agent_library_patrol(*, next_run_at: str) -> dict[str, int | str | bool]:
+    """原子预留或复用逻辑周期，返回的身份不受后继批次/周期覆盖。"""
+    ensure_agent_library_patrol(next_run_at=next_run_at)
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM agent_library_patrol WHERE patrol_key='default'").fetchone()
+        assert row is not None
+        run_id = _reserve_cycle_run(conn, row, next_run_at, "manual")
+        running = row["status"] == "running"
+        if not running:
+            conn.execute("UPDATE agent_library_patrol SET next_run_at=?,updated_at=? WHERE patrol_key='default'", (next_run_at, db.now()))
+        return {"ok": True, "status": "already_running" if running else "queued", "task_status": str(row["status"]), "run_id": run_id}
+
+
 def reschedule_agent_library_patrol(*, next_run_at: str | None = None) -> bool:
     """将非运行中的全库巡检重新排到指定时间，用于配置热加载。"""
     timestamp = db.now()
@@ -54,20 +81,26 @@ def cancel_agent_library_patrol_lease(
     """禁用巡检时释放运行租约，并递增 generation 使旧 worker 写入失效。"""
     timestamp = db.now()
     due_at = (next_run_at or timestamp)
-    sql = (
-        "UPDATE agent_library_patrol SET status='pending',"
-        "lease_generation=lease_generation+1,next_run_at=?,cycle_as_of='',"
-        "cycle_cursor_tmdb_id='',cycle_accumulator_json='{}',"
-        "cycle_stall_attempts=0,cycle_started_at=NULL,cycle_updated_at=NULL,updated_at=? "
-        "WHERE patrol_key='default' AND status='running'"
-    )
-    params: list[object] = [due_at, timestamp]
+    where = "patrol_key='default' AND (status='running' OR cycle_run_id IS NOT NULL)"
+    params: list[object] = []
     if expected_lease_generation is not None:
-        sql += " AND lease_generation=?"
+        where += " AND lease_generation=?"
         params.append(max(0, expected_lease_generation))
     with db.get_conn() as conn:
-        cur = conn.execute(sql, tuple(params))
-        return cur.rowcount == 1
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(f"SELECT cycle_run_id FROM agent_library_patrol WHERE {where}", params).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            "UPDATE agent_library_patrol SET status='pending',"
+            "lease_generation=lease_generation+1,next_run_at=?,cycle_run_id=NULL,cycle_as_of='',"
+            "cycle_cursor_tmdb_id='',cycle_accumulator_json='{}',"
+            "cycle_stall_attempts=0,cycle_started_at=NULL,cycle_updated_at=NULL,updated_at=? "
+            f"WHERE {where}", [due_at, timestamp, *params],
+        )
+        if row["cycle_run_id"] is not None:
+            conn.execute("UPDATE task_runs SET status='cancelled',finished_at=? WHERE id=?", (timestamp, row["cycle_run_id"]))
+        return True
 
 
 def claim_due_agent_library_patrol(
@@ -95,9 +128,11 @@ def claim_due_agent_library_patrol(
         )
         if cur.rowcount != 1:
             return None
-        return conn.execute(
-            "SELECT * FROM agent_library_patrol WHERE patrol_key='default'"
-        ).fetchone()
+        row = conn.execute("SELECT * FROM agent_library_patrol WHERE patrol_key='default'").fetchone()
+        assert row is not None
+        run_id = _reserve_cycle_run(conn, row, timestamp, "cron")
+        conn.execute("UPDATE task_runs SET status='running' WHERE id=?", (run_id,))
+        return conn.execute("SELECT * FROM agent_library_patrol WHERE patrol_key='default'").fetchone()
 
 
 def continue_agent_library_patrol(
@@ -170,7 +205,13 @@ def continue_agent_library_patrol(
                 max(0, expected_lease_generation),
             ),
         )
-        return cur.rowcount == 1
+        if cur.rowcount == 1:
+            conn.execute(
+                "UPDATE task_runs SET status='queued',result=? WHERE id=(SELECT cycle_run_id FROM agent_library_patrol WHERE patrol_key='default')",
+                (raw,),
+            )
+            return True
+        return False
 
 
 def retry_agent_library_patrol_cycle(
@@ -252,7 +293,7 @@ def update_agent_library_patrol(
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT result_revision,result_fingerprint FROM agent_library_patrol "
+            "SELECT result_revision,result_fingerprint,cycle_run_id FROM agent_library_patrol "
             "WHERE patrol_key='default' AND status='running' AND lease_generation=?",
             (max(0, expected_lease_generation),),
         ).fetchone()
@@ -288,7 +329,7 @@ def update_agent_library_patrol(
             "result_fingerprint=?,attempts=?,next_run_at=?,last_finished_at=?,as_of=?,"
             "checked_series_count=?,updates_available_count=?,missing_episode_count=?,"
             "inconclusive_count=?,unmapped_series_count=?,projection_json=?,"
-            "findings_truncated=?,error_type=?,cycle_as_of='',"
+            "findings_truncated=?,error_type=?,cycle_run_id=NULL,cycle_as_of='',"
             "cycle_cursor_tmdb_id='',cycle_accumulator_json='{}',"
             "cycle_stall_attempts=0,cycle_started_at=NULL,cycle_updated_at=NULL,updated_at=? "
             "WHERE patrol_key='default' AND status='running' AND lease_generation=?",
@@ -296,6 +337,10 @@ def update_agent_library_patrol(
         )
         if cur.rowcount != 1:
             return False
+        conn.execute(
+            "UPDATE task_runs SET status=?,finished_at=?,result=?,error=? WHERE id=?",
+            (outcome or "failed", last_finished_at or timestamp, projection_json or "{}", safe_error_type, row["cycle_run_id"]),
+        )
         should_enqueue = bool(
             enqueue_notification
             and changed

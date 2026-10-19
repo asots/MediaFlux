@@ -90,6 +90,41 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
             finally:
                 conn.close()
 
+    def test_v33_patrol_cycle_migration_preserves_progress_and_cold_identity(self) -> None:
+        previous_path = db.DB_PATH
+        previous_test_mode = bool(getattr(db, "_configured_test_mode", False))
+        with tempfile.TemporaryDirectory(prefix="mediaflux-patrol-cycle-v34-") as root:
+            path = Path(root) / "v33.db"
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(db._SCHEMA.replace("    cycle_run_id INTEGER,\n", ""))
+                conn.execute(
+                    "INSERT INTO agent_library_patrol(patrol_key,status,next_run_at,cycle_as_of,"
+                    "cycle_cursor_tmdb_id,cycle_accumulator_json,cycle_started_at,created_at,updated_at) "
+                    "VALUES('default','running',?,'2026-08-03','12345',?, ?,?,?)",
+                    ("2026-08-03 12:00:00", '{"kept":"progress"}', *("2026-08-03 12:00:00",) * 3),
+                )
+                conn.execute("PRAGMA user_version=33")
+                conn.commit()
+            finally:
+                conn.close()
+            db.configure_database(path, test_mode=True)
+            try:
+                db.init_db()
+                row = db.get_agent_library_patrol()
+                assert row is not None
+                self.assertEqual(row["cycle_cursor_tmdb_id"], "12345")
+                self.assertEqual(row["cycle_accumulator_json"], '{"kept":"progress"}')
+                run = db.get_task_run(int(row["cycle_run_id"]))
+                assert run is not None
+                self.assertEqual(run["task_name"], "agent_library_patrol")
+                self.assertEqual(run["result"], row["cycle_accumulator_json"])
+                claimed = db.claim_due_agent_library_patrol(current_time=db.now())
+                assert claimed is not None
+                self.assertEqual(claimed["cycle_run_id"], run["id"])
+            finally:
+                db.configure_database(previous_path, test_mode=previous_test_mode)
+
     def test_v32_database_migrates_agent_kernel_due_expression_index(self) -> None:
         previous_path = db.DB_PATH
         previous_test_mode = bool(getattr(db, "_configured_test_mode", False))
@@ -124,7 +159,7 @@ with patch("app.modules.strm_metadata_worker.get_bool", return_value=True), \
                         "SELECT generation,state_json,state_hmac FROM agent_kernel_sessions "
                         "WHERE owner_digest='owner-digest' AND session_digest='session-digest'"
                     ).fetchone()
-                self.assertEqual(version, 33)
+                self.assertEqual(version, db.SCHEMA_VERSION)
                 assert (index) is not None
                 self.assertIn("json_valid(state_json)", index["sql"])
                 self.assertIn("$.metadata.effect_next_poll_at", index["sql"])

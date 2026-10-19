@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from contextlib import ExitStack
+from datetime import datetime, timedelta
 from typing import cast
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from app.agent import completion_observers as observers
 from app.agent import effect_completion as effects
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import DomainActions, build_tool_specs
+from app.agent.domains.library import patrol_trigger_actions
 from app.agent.effect_completion import wait_for_effect_completion
 from app.agent.feature_gate import initialize_runtime_fence
 from app.agent.kernel.bootstrap import _capture_creation_binding
@@ -30,6 +32,8 @@ from app.agent.kernel.ports.mediaflux_effects import MediaFluxEffectLifecycle
 from app.agent.kernel.session import AgentSession
 from app.agent.kernel.state_types import AgentInput
 from app.modules.process_lock import CrossProcessLock
+from app.agent.models import ToolResult
+from app.modules.agent_library_patrol_scheduler import AgentLibraryPatrolScheduler
 from app.modules.scheduler import STRMScheduler
 from tests.support import isolated_test_database
 from tests.test_agent_task_first_slice import NativeScript
@@ -140,8 +144,77 @@ async def assert_strm_identity(later_count: int, later_source: str):
         assert seed["tracker"]["value"]["run_id"] == original["id"]
 
 
+async def assert_patrol_identity(case):
+    with isolated_test_database(), ExitStack() as stack:
+        initialize_runtime_fence()
+        state = {"clock": datetime.now().replace(microsecond=0), "status": "up_to_date"}
+        def observation(_arguments):
+            status = state["status"]
+            return ToolResult(status == "up_to_date", status, status,
+                data={"checked_series_count": 0, "findings": []}), 0
+        scheduler = AgentLibraryPatrolScheduler(clock=lambda: state["clock"], audit_executor=observation)
+        get_bool = patrol_trigger_actions.config.get_bool
+        stack.enter_context(patch.object(patrol_trigger_actions.config, "get_bool",
+            side_effect=lambda key, default=False: True if key == "AGENT_LIBRARY_PATROL_ENABLED" else get_bool(key, default)))
+        stack.enter_context(patch("app.modules.agent_library_patrol_scheduler.get_agent_library_patrol_scheduler", return_value=scheduler))
+        if case != "overwritten-cycle":
+            _, fingerprint = patrol_trigger_actions.prepare_trigger_patrol_now({})
+            patrol_trigger_actions.trigger_patrol_now_confirmed({}, fingerprint)
+            assert scheduler.run_once() == 1
+            prior_row = db.get_agent_library_patrol()
+            assert prior_row is not None
+            prior = dict(prior_row)
+        else:
+            prior = None
+            state["status"] = "not_configured"
+        write = "library.trigger_patrol_now"
+        session, store, script = completion_session([write], [(write, {})])
+        context = {"owner": "patrol-identity-owner", "session_id": "patrol-identity-session"}
+        preview = [e async for e in session.run(AgentInput(**context, request_id="patrol-preview",
+            message="立即执行一次全库巡检并核验本次结果。", channel="web"))]
+        assert preview[-1].payload["status"] == "approval_required", preview[-1].payload
+        plan_id = (await store.load(**context)).pending_effect_plan_id
+        original = {}
+        async def run_before_observe(accepted, **options):
+            if case == "separate-second":
+                state["clock"] += timedelta(seconds=2)
+            assert scheduler.run_once() == 1
+            original_row = db.get_agent_library_patrol()
+            assert original_row is not None
+            original.update(dict(original_row))
+            if case == "overwritten-cycle":
+                assert original["outcome"] == "not_configured"
+                state["clock"] += timedelta(seconds=2)
+                state["status"] = "up_to_date"
+                _, fingerprint = patrol_trigger_actions.prepare_trigger_patrol_now({})
+                patrol_trigger_actions.trigger_patrol_now_confirmed({}, fingerprint)
+                assert scheduler.run_once() == 1
+            return await wait_for_effect_completion(accepted, timeout_seconds=0, **options)
+        with patch.object(existing_actions, "wait_for_effect_completion", run_before_observe):
+            confirmed = [e async for e in session.confirm(**context, plan_id=plan_id,
+                request_id="patrol-confirm", channel="web")]
+        current_row = db.get_agent_library_patrol()
+        assert current_row is not None
+        current = dict(current_row)
+        saved = await store.load(**context)
+        wait = saved.metadata["effect_waits"][plan_id]
+        final = wait.get("final_result")
+        assert final and wait["delivered"]
+        assert final["status"] == ("not_configured" if case == "overwritten-cycle" else "up_to_date")
+        if case == "same-second":
+            assert prior is not None
+            assert current["last_finished_at"] == prior["last_finished_at"]
+            assert current["lease_generation"] == prior["lease_generation"] + 1
+        assert confirmed[-1].payload["status"] == "success"  # 08 separately corrects business failure semantics.
+
+
 class AgentCompletionIdentityTests(unittest.TestCase):
     def test_strm_failed_run_survives_later_runs_and_cold_receipt(self):
         for later_count, later_source in ((0, "a"), (19, "a"), (20, "a"), (20, "b")):
             with self.subTest(later_count=later_count, later_source=later_source):
                 asyncio.run(assert_strm_identity(later_count, later_source))
+
+    def test_patrol_cycle_is_exact_when_same_second_or_overwritten(self):
+        for case in ("same-second", "separate-second", "overwritten-cycle"):
+            with self.subTest(case=case):
+                asyncio.run(assert_patrol_identity(case))

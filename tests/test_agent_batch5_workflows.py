@@ -1063,8 +1063,8 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
             patch.object(scheduler, "_enabled", return_value=True),
             patch.object(scheduler, "_now", return_value="2026-08-23 12:00:00"),
             patch(
-                "app.modules.agent_library_patrol_scheduler.db.reschedule_agent_library_patrol",
-                return_value=True,
+                "app.modules.agent_library_patrol_scheduler.db.trigger_agent_library_patrol",
+                return_value={"ok": True, "status": "queued", "task_status": "pending", "run_id": 7},
             ) as reschedule,
             patch(
                 "app.modules.agent_library_patrol_scheduler.db.get_agent_library_patrol",
@@ -1087,7 +1087,7 @@ class Batch5AgentWorkflowTests(IsolatedDatabaseTestCase):
         ):
             preview, fingerprint = prepare_trigger_patrol_now({})
             fake = Mock()
-            fake.trigger_now.return_value = {"ok": True, "status": "queued"}
+            fake.trigger_now.return_value = {"ok": True, "status": "queued", "run_id": 7}
             with patch(
                 "app.modules.agent_library_patrol_scheduler.get_agent_library_patrol_scheduler",
                 return_value=fake,

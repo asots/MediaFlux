@@ -1561,6 +1561,25 @@ def _migrate_agent_kernel_effect_next_poll_index_v33(
     )
 
 
+def _migrate_agent_library_patrol_cycle_runs_v34(conn: sqlite3.Connection) -> None:
+    """巡检逻辑周期复用 task_runs，旧批次进度保留同一持久身份。"""
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(agent_library_patrol)")}
+    if not columns:
+        return  # 更早的精简安装由最终基线DDL一次创建。
+    if "cycle_run_id" not in columns:
+        conn.execute("ALTER TABLE agent_library_patrol ADD COLUMN cycle_run_id INTEGER")
+    rows = conn.execute(
+        "SELECT patrol_key,status,cycle_started_at,cycle_accumulator_json,updated_at "
+        "FROM agent_library_patrol WHERE cycle_run_id IS NULL AND (status='running' OR cycle_as_of<>'')"
+    ).fetchall()
+    for row in rows:
+        cur = conn.execute(
+            "INSERT INTO task_runs(task_name,trigger_type,status,started_at,result) VALUES('agent_library_patrol','recovery',?,?,?)",
+            ("running" if row[1] == "running" else "queued", row[2] or row[4], row[3]),
+        )
+        conn.execute("UPDATE agent_library_patrol SET cycle_run_id=? WHERE patrol_key=?", (cur.lastrowid, row[0]))
+
+
 # 正式 schema 升级按“当前版本 -> 下一版本”登记迁移函数。
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_agent_session_context_v2,
@@ -1595,4 +1614,5 @@ _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     30: _migrate_recognition_format_rules_v31,
     31: _migrate_download_display_title_v32,
     32: _migrate_agent_kernel_effect_next_poll_index_v33,
+    33: _migrate_agent_library_patrol_cycle_runs_v34,
 }

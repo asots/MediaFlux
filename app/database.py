@@ -47,7 +47,7 @@ _lock = threading.RLock()
 _wal_setup_lock = threading.Lock()
 _wal_mode_cache: dict[str, tuple[int, int, int]] = {}
 _configured_test_mode = False
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 LOCAL_MEDIA_INTERRUPTED_WRITE_ERROR_PREFIX = "上次进程在本地媒体写操作期间中断"
 _LOCAL_MEDIA_INTERRUPTED_PREWRITE_ERROR = (
@@ -2008,6 +2008,7 @@ from app.repositories.agent_library_patrol import (  # noqa: E402,F401
     list_agent_library_patrol_notifications,
     release_agent_library_patrol_notification,
     reschedule_agent_library_patrol,
+    trigger_agent_library_patrol,
     retry_agent_library_patrol_cycle,
     retry_agent_library_patrol_notification,
     update_agent_library_patrol,

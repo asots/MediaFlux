@@ -159,6 +159,11 @@ def get_library_patrol_status(_arguments: dict[str, Any]) -> ToolResult:
             ],
         )
 
+    return project_library_patrol_status(row, enabled=enabled)
+
+
+def project_library_patrol_status(row: Any, *, enabled: bool) -> ToolResult:
+    """按明确持久事实生成唯一安全展示，不在领域投影中另读最近状态。"""
     projection: dict[str, Any] | None = _load_projection(row["projection_json"])
     projection_valid = projection is not None
     if projection is None:
@@ -183,7 +188,7 @@ def get_library_patrol_status(_arguments: dict[str, Any]) -> ToolResult:
     )
     outcome = (
         str(row["outcome"] or projection["patrol_status"] or "")
-        if projection_valid
+        if projection_valid or row["outcome"] == "cancelled"
         else "inconclusive"
     )
     public_status = "running" if task_status == "running" else (outcome or "pending")
@@ -198,6 +203,8 @@ def get_library_patrol_status(_arguments: dict[str, Any]) -> ToolResult:
         summary = f"最近一次自动缺集巡检已核对 {checked} 部剧集，发现 {updates} 部共缺 {missing} 集"
     elif outcome == "up_to_date":
         summary = f"最近一次自动缺集巡检已核对 {checked} 部剧集，暂未发现已播缺集"
+    elif outcome == "cancelled":
+        summary = "本次自动缺集巡检已取消"
     elif outcome == "not_configured":
         summary = "最近一次自动缺集巡检未开始：媒体服务器或 TMDB 配置不完整"
     elif outcome == "unavailable":

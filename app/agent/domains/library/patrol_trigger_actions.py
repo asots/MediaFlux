@@ -116,9 +116,7 @@ def trigger_patrol_now_confirmed(
             effect_metadata={
                 "completion": {
                     "kind": "library_patrol",
-                    "lease_generation": int(current["state"]["lease_generation"]),
-                    "task_status": str(current["state"]["task_status"]),
-                    "last_finished_at": str(current["state"]["last_finished_at"]),
+                    "run_id": int(outcome["run_id"]),
                     "operation": "run",
                 }
             },
@@ -136,9 +134,7 @@ def trigger_patrol_now_confirmed(
             effect_metadata={
                 "completion": {
                     "kind": "library_patrol",
-                    "lease_generation": int(current["state"]["lease_generation"]),
-                    "task_status": str(current["state"]["task_status"]),
-                    "last_finished_at": str(current["state"]["last_finished_at"]),
+                    "run_id": int(outcome["run_id"]),
                     "operation": "run",
                 }
             },

@@ -57,6 +57,7 @@ _TERMINAL_STATUSES = {
     "strm_run": frozenset({"completed", "partial", "failed"}),
     "library_patrol": frozenset(
         {
+            "cancelled",
             "updates_available",
             "up_to_date",
             "inconclusive",
@@ -378,51 +379,32 @@ def _local_media_scan_status(tracker: _CompletionTracker) -> ToolResult:
 
 
 def _patrol_status(tracker: _CompletionTracker) -> ToolResult:
-    from app import database as db
-    from app.agent.domains.library.patrol_status import get_library_patrol_status
+    from app import config, database as db
+    from app.agent.domains.library.patrol_status import project_library_patrol_status
 
-    row = db.get_agent_library_patrol()
-    if row is None:
+    row = db.get_task_run(_bounded_int(tracker.value.get("run_id")))
+    if row is None or str(row["task_name"]) != "agent_library_patrol":
         return ToolResult(False, "unknown", "全库巡检状态暂时无法确认")
-    baseline_generation = _bounded_int(tracker.value.get("lease_generation"))
-    baseline_status = str(tracker.value.get("task_status") or "")
-    baseline_finished = str(tracker.value.get("last_finished_at") or "")
-    current_generation = _bounded_int(row["lease_generation"])
-    current_status = str(row["status"] or "pending")
-    current_finished = str(row["last_finished_at"] or "")
-    finished = bool(
-        current_finished
-        and current_finished != baseline_finished
-        and current_status != "running"
-        and (current_generation > baseline_generation or baseline_status == "running")
-    )
-    if not finished:
-        status = "running" if current_status == "running" else "queued"
+    status = str(row["status"])
+    if status in {"queued", "running"}:
         return ToolResult(
-            True,
-            status,
+            True, status,
             "全库缺集巡检正在运行" if status == "running" else "全库缺集巡检正在排队",
-            data={
-                "task": {
-                    "status": status,
-                    "started_at": str(row["last_started_at"] or ""),
-                    "finished_at": "",
-                    "stats": {
-                        "checked_series": _bounded_int(row["checked_series_count"]),
-                    },
-                }
-            },
+            data={"task": {"status": status, "started_at": str(row["started_at"] or ""), "stats": {}}},
         )
-    result = get_library_patrol_status({})
-    data = dict(result.data) if isinstance(result.data, dict) else {}
+    result = project_library_patrol_status({
+        "projection_json": row["result"], "status": "pending", "outcome": status,
+        "cycle_accumulator_json": "{}", "cycle_as_of": "",
+        "last_finished_at": row["finished_at"], "next_run_at": "",
+    }, enabled=config.get_bool("AGENT_LIBRARY_PATROL_ENABLED", False))
+    data = dict(result.data)
     data["task"] = {
-        "status": (result.status or ""),
-        "started_at": str(row["last_started_at"] or ""),
-        "finished_at": current_finished,
+        "status": result.status, "started_at": str(row["started_at"] or ""),
+        "finished_at": str(row["finished_at"] or ""),
         "stats": {
-            "checked_series": _bounded_int(row["checked_series_count"]),
-            "updates_available": _bounded_int(row["updates_available_count"]),
-            "missing_episodes": _bounded_int(row["missing_episode_count"]),
+            "checked_series": _bounded_int(data.get("checked_series_count")),
+            "updates_available": _bounded_int(data.get("updates_available_count")),
+            "missing_episodes": _bounded_int(data.get("missing_episode_count")),
         },
     }
     return replace(result, data=data)

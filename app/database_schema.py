@@ -417,6 +417,7 @@ CREATE TABLE IF NOT EXISTS agent_library_patrol (
     findings_truncated INTEGER NOT NULL DEFAULT 0
         CHECK(findings_truncated IN (0,1)),
     error_type TEXT NOT NULL DEFAULT '',
+    cycle_run_id INTEGER,
     cycle_as_of TEXT NOT NULL DEFAULT '',
     cycle_cursor_tmdb_id TEXT NOT NULL DEFAULT '',
     cycle_accumulator_json TEXT NOT NULL DEFAULT '{}',

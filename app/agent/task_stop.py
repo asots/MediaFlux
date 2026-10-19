@@ -34,7 +34,7 @@ _TRACKER_TERMINAL = {
     ),
     "strm_run": frozenset({"completed", "partial", "failed"}),
     "library_patrol": frozenset(
-        {"updates_available", "up_to_date", "inconclusive", "not_configured", "unavailable", "failed"}
+        {"updates_available", "up_to_date", "inconclusive", "not_configured", "unavailable", "failed", "cancelled"}
     ),
 }
 

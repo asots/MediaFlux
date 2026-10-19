@@ -402,7 +402,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             ),
             (
                 "library_patrol",
-                {"lease_generation": 3, "task_status": "pending", "operation": "run"},
+                {"run_id": 3, "operation": "run"},
                 "app.agent.completion_observers._patrol_status",
                 (
                     _snapshot("queued"),
@@ -502,36 +502,12 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("run_id", str(result.to_dict()))
 
     def test_patrol_tracker_does_not_treat_intermediate_batch_as_terminal(self) -> None:
-        baseline_finished = "2026-09-19 23:00:00"
-        row = {
-            "lease_generation": 4,
-            "status": "pending",
-            "last_started_at": "2026-09-20 01:00:00",
-            "last_finished_at": baseline_finished,
-            "checked_series_count": 50,
-            "updates_available_count": 0,
-            "missing_episode_count": 0,
-        }
-        tracker = _CompletionTracker(
-            "library_patrol",
-            {
-                "lease_generation": 3,
-                "task_status": "running",
-                "last_finished_at": baseline_finished,
-                "operation": "run",
-            },
-        )
-        with (
-            patch("app.database.get_agent_library_patrol", return_value=row),
-            patch(
-                "app.agent.domains.library.patrol_status.get_library_patrol_status"
-            ) as terminal_status,
-        ):
+        with isolated_test_database():
+            admitted = db.trigger_agent_library_patrol(next_run_at="2026-09-20 01:00:00")
+            tracker = _CompletionTracker("library_patrol", {"run_id": admitted["run_id"], "operation": "run"})
             result = _patrol_status(tracker)
-
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "queued")
-        terminal_status.assert_not_called()
 
     async def test_completed_cloud_write_keeps_optional_sync_warning(self):
         snapshot = _snapshot("completed", stats={"renamed": 1, "strm_scope_unknown": 1})
