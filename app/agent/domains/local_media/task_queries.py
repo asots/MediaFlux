@@ -206,6 +206,7 @@ def local_media_completion_status(
     task = db.get_local_media_task(task_id, owner=common._WORKSPACE_OWNER)
     if task is None:
         return ToolResult(False, "unknown", "本地媒体任务状态暂时无法确认")
+    public_task = _task_public(task, task_number)
     raw_status = str(task.status or "")
     if raw_status in LOCAL_BUSY_TASK_STATUSES:
         status, ok, summary = (
@@ -214,11 +215,18 @@ def local_media_completion_status(
             f"本地媒体任务 {task_number} 正在处理",
         )
     elif raw_status == "completed":
-        status, ok, summary = (
-            "completed",
-            True,
-            f"本地媒体任务 {task_number} 已完成整理",
-        )
+        status = "completed"
+        outcome = public_task["file_outcome"]
+        archived = public_task["archived_video_count"]
+        skipped = public_task["skipped_video_count"]
+        unknown = public_task["unknown_video_count"]
+        if outcome == "preview_only":
+            ok, summary = True, f"本地媒体任务 {task_number} 预览已完成，未移动文件，归档 0 个视频"
+        else:
+            ok = outcome in {"archived", "conflict_skipped", "partial"} and unknown == 0
+            summary = f"本地媒体任务 {task_number} 已结束：归档 {archived} 个视频，冲突跳过 {skipped} 个视频"
+            if not ok:
+                summary += f"，{unknown} 个视频结果待核验" if unknown else "，缺少可核验的视频整理记录"
     elif raw_status == "requires_manual":
         status, ok, summary = (
             "manual_review",
@@ -237,7 +245,6 @@ def local_media_completion_status(
             False,
             f"本地媒体任务 {task_number} 状态暂时无法确认",
         )
-    public_task = _task_public(task, task_number)
     public_task["source_status"] = public_task["status"]
     public_task["status"] = status
     return ToolResult(
@@ -256,8 +263,11 @@ def local_media_completion_status(
             ["请在本地媒体待确认页继续处理。"]
             if status == "manual_review"
             else ["可查看本地媒体任务详情后再决定是否重试。"]
-            if status == "failed"
+            if status == "failed" or (status == "completed" and not ok)
             else []
         ),
-        error="本地媒体任务未成功完成。" if status in {"manual_review", "failed"} else "",
+        error=(
+            "本地媒体任务未成功完成。" if status in {"manual_review", "failed"}
+            else "视频归档结果尚无法核验。" if status == "completed" and not ok else ""
+        ),
     )

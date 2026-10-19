@@ -91,6 +91,11 @@ _STRM_STAT_FIELDS = frozenset(
     }
 )
 
+_LOCAL_MEDIA_OUTCOME_FIELDS = (
+    "file_outcome", "video_count", "archived_video_count",
+    "skipped_video_count", "unknown_video_count",
+)
+
 
 @dataclass(frozen=True)
 class _CompletionTracker:
@@ -169,6 +174,10 @@ def _background_data(
         data["stats"] = dict(task["stats"])
     if isinstance(task.get("operation_items"), list):
         data["operation_items"] = task["operation_items"]
+    if tracker.kind == "local_media_task":
+        for key in _LOCAL_MEDIA_OUTCOME_FIELDS:
+            if key in task:
+                data[key] = job[key] = task[key]
     data["background_job"] = job
     if tracker.kind == "guangya_task":
         data["verified"] = status == "completed"
@@ -191,6 +200,7 @@ def _background_model_data(
         "verified",
         "verification_pending",
         "scope_note",
+        *_LOCAL_MEDIA_OUTCOME_FIELDS,
     ):
         if key in data:
             model_data[key] = data[key]

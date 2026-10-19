@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,7 +14,8 @@ from app.agent.domains.local_media.task_arguments import (
     local_media_task_summaries_arguments,
 )
 from app.agent.errors import AgentToolError
-from app.agent.models import ToolContext
+from app.agent.effect_completion import wait_for_effect_completion
+from app.agent.models import ToolContext, ToolResult
 from app.modules.local_media_outcomes import local_media_task_outcome
 from tests.support import IsolatedDatabaseTestCase
 
@@ -136,6 +138,49 @@ class LocalMediaTaskOutcomeTests(IsolatedDatabaseTestCase):
             "finished_at": "2026-09-12 14:22:00",
             "summary": {"task_outcomes": outcomes or []},
         }
+
+    def test_completed_receipt_preserves_real_file_outcome_in_public_and_model_data(self):
+        cases = (
+            (["move"], "archived", 1, 0, 0, True),
+            (["skip"], "conflict_skipped", 0, 1, 0, True),
+            (["move", "skip"], "partial", 1, 1, 0, True),
+            ([], "unknown", 0, 0, 0, False),
+            (["move", "unrecognized"], "partial", 1, 0, 1, False),
+            (["move"], "preview_only", 0, 0, 1, True),
+        )
+        for actions, outcome, archived, skipped, unknown, ok in cases:
+            with self.subTest(outcome=outcome, unknown=unknown):
+                task_id = self._task(action=actions[0] if actions else "")
+                for index, action in enumerate(actions[1:], 1):
+                    db.add_local_media_task_item(task_id,
+                        f"/private/downloads/本集-{index}.mkv", f"/private/library/本集-{index}.mkv",
+                        role="video", action=action, owner="admin")
+                if outcome == "preview_only":
+                    db.update_local_media_task(task_id, warning="仅预览模式：未移动文件", owner="admin")
+                accepted = ToolResult(True, "accepted", "任务已重新排队",
+                    data={"task_number": 1}, model_data={"task_number": 1}, effect_metadata={
+                        "completion": {"kind": "local_media_task", "task_id": task_id,
+                            "task_number": 1, "operation": "retry"}})
+                result = asyncio.run(wait_for_effect_completion(accepted,
+                    tool="local_media.retry_task", context=ToolContext(), timeout_seconds=0))
+                expected = {"file_outcome": outcome, "video_count": len(actions),
+                    "archived_video_count": archived, "skipped_video_count": skipped,
+                    "unknown_video_count": unknown}
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(result.ok, ok)
+                for key, value in expected.items():
+                    self.assertEqual(result.data[key], value)
+                    self.assertEqual(result.data["background_job"][key], value)
+                    self.assertEqual(result.to_model_dict()["data"][key], value)
+                self.assertIn(f"归档 {archived} 个视频", result.summary)
+                if outcome == "preview_only":
+                    self.assertIn("预览已完成", result.summary)
+                    self.assertIn("未移动文件", result.summary)
+                else:
+                    self.assertIn(f"冲突跳过 {skipped} 个视频", result.summary)
+                if not ok:
+                    self.assertTrue(result.error)
+                self.assertNotIn("/private/", repr(result.to_dict()))
 
     def test_list_exposes_safe_original_name_and_conflict_result(self):
         self._task()

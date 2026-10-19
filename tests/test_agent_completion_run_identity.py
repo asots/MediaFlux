@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import threading
 import time
 import unittest
 from contextlib import ExitStack
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock, patch
@@ -41,8 +43,11 @@ from app.modules.scheduler import STRMScheduler
 from app.modules.organize import OrganizeRules, Organizer
 from app.modules.organize_results import build_organize_result
 from app.modules.organize_tasks import OrganizeTaskManager
+from app.modules.local_media_service import LocalMediaService
+from app.modules.scraper import MatchResult, TMDBScraper
 from tests.support import isolated_test_database
 from tests.test_agent_task_first_slice import NativeScript
+from tests.test_local_media_service import FakeScraper
 
 class CompletionScript(NativeScript):
     def __init__(self, calls):
@@ -350,6 +355,67 @@ async def assert_organize_identity(status: str, later_count: int):
                 assert not cold_manager._operation_dispatcher.is_alive()
 
 
+async def assert_local_file_outcome(root: Path, mode: str):
+    with isolated_test_database():
+        initialize_runtime_fence()
+        source_root, target_root = root / "downloads", root / "library"
+        source_root.mkdir()
+        target_root.mkdir()
+        movie = source_root / "Movie.2026.mkv"
+        movie.write_bytes(b"video")
+        source_id = db.create_local_media_source(name="source", qb_profile="", qb_path_prefix="",
+            local_root=str(source_root), stable_seconds=0, mode=mode, owner="admin")
+        db.upsert_local_library_target(source_id, "movie", str(target_root), owner="admin")
+        service = LocalMediaService(scraper=cast(TMDBScraper, FakeScraper(MatchResult(
+            tmdb_id="1", title="Movie", year="2026", media_type="movie", confidence=1.0))))
+        try:
+            inspection = service.inspect_source("admin", source_id, movie)
+            preview = service.preview("admin", inspection["inspection_id"], tmdb_id="1", media_type="movie")
+            task_id = service.create_manual_task("admin", inspection["inspection_id"], preview_digest=preview["preview_digest"])
+            db.update_local_media_task(task_id, status="failed", error="transient prewrite failure")
+            read, write = "local_media.task_summaries", "local_media.retry_task"
+            session, store, script = completion_session([read, write], [
+                (read, {"scope": "attention", "limit": 12}), (write, {"task_number": 1})])
+            context = {"owner": "local-outcome-owner", "session_id": "local-outcome-session"}
+            events = [e async for e in session.run(AgentInput(**context,
+                request_id="local-preview", message="重试第一个本地媒体失败任务并回报实际文件结果。", channel="web"))]
+            assert events[-1].payload["status"] == "approval_required", events[-1].payload
+            plan_id = (await store.load(**context)).pending_effect_plan_id
+            async def finish_before_wait(result, **options):
+                assert db.claim_local_media_task(task_id, owner="admin")
+                service.execute_task("admin", task_id)
+                return await wait_for_effect_completion(result, timeout_seconds=0, **options)
+            with patch("app.agent.domains.local_media.task_actions.get_local_media_scheduler"), patch.object(
+                    existing_actions, "wait_for_effect_completion", finish_before_wait):
+                confirmed = [e async for e in session.confirm(**context, plan_id=plan_id,
+                    request_id="local-confirm", channel="web")]
+            effect = next(e for e in confirmed if e.type.value == "effect.completed")
+            saved = await SQLiteKernelStore().load(**context)
+            native_tool = next(r for r in saved.conversation if r.get("role") == "tool" and r.get("effect_plan_id") == plan_id)
+            final = json.loads(native_tool["content"])
+            assert final == effect.payload["result"]
+            assert final["status"] == "completed" and final["ok"]
+            expected_outcome, archived = ("preview_only", 0) if mode == "preview_only" else ("archived", 1)
+            assert final["data"]["file_outcome"] == expected_outcome
+            assert final["data"]["archived_video_count"] == archived
+            assert final["data"]["background_job"]["file_outcome"] == expected_outcome
+            assert f"归档 {archived} 个视频" in final["summary"]
+            assert str(root) not in json.dumps(final)
+            model_tools = [row for row in script.requests[-1]["messages"] if row.get("role") == "tool"]
+            model_final = json.loads(model_tools[-1]["content"])
+            assert model_final["data"]["file_outcome"] == expected_outcome
+            assert model_final["data"]["archived_video_count"] == archived
+            assert saved.metadata["effect_waits"][plan_id]["final_result"] == final
+            assert confirmed[-1].payload["status"] == "success"
+            if mode == "preview_only":
+                assert movie.exists() and not list(target_root.rglob("*.mkv"))
+                assert "预览已完成" in final["summary"] and "未移动文件" in final["summary"]
+            else:
+                assert not movie.exists() and len(list(target_root.rglob("*.mkv"))) == 1
+        finally:
+            assert service.close()
+
+
 class AgentCompletionIdentityTests(unittest.TestCase):
     def test_strm_failed_run_survives_later_runs_and_cold_receipt(self):
         for later_count, later_source in ((0, "a"), (19, "a"), (20, "a"), (20, "b")):
@@ -396,3 +462,8 @@ class AgentCompletionIdentityTests(unittest.TestCase):
                 "task_id": "interrupted-task", "run_id": run_id, "operation": "run"})
             self.assertFalse(result.ok)
             self.assertEqual(result.data["task"]["status"], "failed")
+
+    def test_local_preview_and_actual_move_receipts_match_real_files(self):
+        for mode in ("preview_only", "move"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                asyncio.run(assert_local_file_outcome(Path(directory), mode))
