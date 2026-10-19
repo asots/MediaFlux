@@ -255,33 +255,11 @@ def _strm_status(tracker: _CompletionTracker) -> ToolResult:
     from app import database as db
     from app.modules.scheduler import get_scheduler
 
-    after_run_id = _bounded_int(tracker.value.get("after_run_id"))
-    trigger_type = str(tracker.value.get("trigger_type") or "manual")
-    rows = [
-        item
-        for item in db.list_task_runs("strm_sync", limit=20)
-        if _bounded_int(item["id"]) > after_run_id
-        and str(item["trigger_type"] or "") == trigger_type
-    ]
-    # trigger() 成功取得全局执行锁后，本次运行必然是基线后的第一条同类记录；
-    # 选择最早记录，避免任务很快结束后另一轮人工同步被误认成本次任务。
-    row = min(rows, key=lambda item: _bounded_int(item["id"]), default=None)
-    runtime = get_scheduler().status()
-    if row is None:
-        status = "running" if bool(runtime.get("running")) else "queued"
-        return ToolResult(
-            True,
-            status,
-            "STRM 同步任务正在运行" if status == "running" else "STRM 同步任务正在排队",
-            data={
-                "task": {
-                    "status": status,
-                    "progress": dict(runtime.get("progress") or {}),
-                    "stats": {},
-                }
-            },
-        )
-
+    run_id = _bounded_int(tracker.value.get("run_id"))
+    row = db.get_task_run(run_id)
+    if row is None or str(row["task_name"]) != "strm_sync":
+        return ToolResult(False, "unknown", "STRM 同步状态暂时无法确认")
+    runtime = get_scheduler().status() if str(row["status"]) == "running" else {}
     status, stats = _safe_strm_result(dict(row))
     summary = {
         "running": "STRM 同步任务正在运行",
@@ -300,7 +278,7 @@ def _strm_status(tracker: _CompletionTracker) -> ToolResult:
                 "started_at": str(row["started_at"] or ""),
                 "finished_at": str(row["finished_at"] or ""),
                 "progress": dict(runtime.get("progress") or {})
-                if status == "running"
+                if status == "running" and _bounded_int(runtime.get("current_run_id")) == run_id
                 else {},
                 "stats": stats,
             }

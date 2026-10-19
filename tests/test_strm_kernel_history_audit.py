@@ -134,7 +134,7 @@ class STRMKernelHistoryAuditTests(unittest.IsolatedAsyncioTestCase):
                 return_value=([{"id": "source-a", "name": "Alpha"}], ""),
             ),
             patch.object(
-                self.scheduler, "trigger", return_value={"ok": True}
+                self.scheduler, "trigger", return_value={"ok": True, "run_id": 7}
             ) as trigger,
             patch(
                 "app.agent.kernel.ports.mediaflux_effects.invalidate_agent_runtime_generation"

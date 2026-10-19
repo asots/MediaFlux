@@ -568,17 +568,19 @@ class STRMScheduler:
     def _start_locked_worker(
         self, trigger_type: str, options: dict[str, Any]
     ) -> dict:
-        with self._state_lock:
-            self._running = True
-            self._current_trigger = trigger_type
-            self._run_options = dict(options)
+        run_id: int = 0
         try:
+            run_id = db.add_task_run(TASK_NAME, trigger_type)
+            with self._state_lock:
+                self._running = True
+                self._current_trigger = trigger_type
+                self._run_options = {**options, "run_id": run_id}
             _update_strm_requests(
-                options, strm_status="running", strm_error="", strm_finished_at=None
+                options, strm_run_id=run_id, strm_status="running", strm_error="", strm_finished_at=None
             )
             worker = threading.Thread(
                 target=self._execute_locked,
-                args=(trigger_type,),
+                args=(trigger_type, run_id),
                 name=f"strm-sync-{trigger_type}",
                 daemon=False,
             )
@@ -604,9 +606,14 @@ class STRMScheduler:
                 partial=True,
                 error="STRM 同步任务启动失败",
             )
+            if run_id:
+                try:
+                    db.finish_task_run(run_id, "failed", error="STRM 同步任务启动失败")
+                except Exception:
+                    logger.exception("保存 STRM 启动失败状态异常 run_id=%s", run_id)
             logger.exception("启动 STRM 同步线程失败 trigger=%s", trigger_type)
             return {"ok": False, "error": "STRM 同步任务启动失败"}
-        return {"ok": True, "message": "STRM 同步任务已启动"}
+        return {"ok": True, "message": "STRM 同步任务已启动", "run_id": run_id}
 
     def _wait_and_run_pending_organize(self) -> None:
         while not self._stop_event.is_set():
@@ -935,10 +942,18 @@ class STRMScheduler:
                 return {"ok": False, "error": "STRM 同步模式无效"}
             if force_full:
                 normalized_mode = "full"
+            try:
+                run_id = db.add_task_run(TASK_NAME, trigger_type)
+            except Exception as exc:
+                self._run_lock.release()
+                self._run_released_event.set()
+                logger.exception("创建 STRM 同步运行记录失败 trigger=%s", trigger_type)
+                return {"ok": False, "error": str(exc)}
             with self._state_lock:
                 self._running = True
                 self._current_trigger = trigger_type
                 self._run_options = {
+                    "run_id": run_id,
                     "on_progress": on_progress,
                     "organize_changes": normalized_changes,
                     "force_full": force_full,
@@ -947,7 +962,7 @@ class STRMScheduler:
                 # CLI/TG 同步执行也纳入 stop() 的工作线程追踪，避免应用
                 # 关闭时只等待 scheduler 自建线程而漏掉调用方线程。
                 self._worker = threading.current_thread()
-        return self._execute_locked(trigger_type)
+        return self._execute_locked(trigger_type, run_id)
 
     def _persist_change_targets(
         self, organize_changes: Iterable[object] | None, *, not_before_seconds: float | None = 0.0,
@@ -1049,6 +1064,7 @@ class STRMScheduler:
         last = db.get_last_task_run(TASK_NAME)
         with self._state_lock:
             running = self._running
+            current_run_id = int(self._run_options.get("run_id") or 0)
             current_trigger = self._current_trigger
             progress = dict(self._progress)
             source_runtime = [dict(row) for row in self._source_runtime]
@@ -1089,6 +1105,7 @@ class STRMScheduler:
             "cron_valid": self.validate_cron(cron_expr),
             "config_error": error,
             "running": running,
+            "current_run_id": current_run_id,
             "current_trigger": current_trigger,
             "pending_organize": pending_organize,
             "pending_organize_changes": pending_change_count,
@@ -1706,17 +1723,13 @@ class STRMScheduler:
             )
         return aggregate, source_results, stopped
 
-    def _execute_locked(self, trigger_type: str) -> dict:
+    def _execute_locked(self, trigger_type: str, run_id: int) -> dict:
         options = dict(self._run_options)
         request_ids = _request_ids(options)
-        run_id: int = 0
         claimed_targets: list[dict] = []
         lease_heartbeat: _ChangeTargetLeaseHeartbeat | None = None
         started = datetime.now()
         try:
-            # 任务记录初始化也属于持锁执行阶段。数据库异常必须经过 finally
-            # 释放全局 STRM 锁，否则后续 Web、Telegram 与调度请求都会永久 busy。
-            run_id = db.add_task_run(TASK_NAME, trigger_type)
             _update_strm_requests(
                 options, strm_run_id=run_id, strm_status="running",
                 strm_error="", strm_finished_at=None,

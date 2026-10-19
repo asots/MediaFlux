@@ -358,8 +358,7 @@ def _run_strm_once_state(
         effect_metadata={
             "completion": {
                 "kind": "strm_run",
-                "after_run_id": int(state.get("last_run_id") or 0),
-                "trigger_type": "manual",
+                "run_id": int(triggered["run_id"]),
                 "operation": "run",
             }
         },

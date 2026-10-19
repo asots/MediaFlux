@@ -65,9 +65,9 @@ def _run(root, *, mode="full", enabled=True, allow_emby=True, tree=None,
         stack.enter_context(patch.object(scheduler_module, "sync_strm_incremental", side_effect=lambda **kw: strm.sync_strm_incremental(client=cast(GuangYaClient, client), **kw)))
         execute = scheduler._execute_locked
 
-        def execute_with_policy(trigger):
+        def execute_with_policy(trigger, run_id):
             scheduler._run_options.update(media_server_refresh_override=enabled, emby_refresh_override=allow_emby)
-            return execute(trigger)
+            return execute(trigger, run_id)
 
         stack.enter_context(patch.object(scheduler, "_execute_locked", side_effect=execute_with_policy))
         changes = [{"source_id": "s", "kind": "video", "action": "upsert", "file_id": "v",

@@ -395,7 +395,7 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             ),
             (
                 "strm_run",
-                {"after_run_id": 8, "trigger_type": "manual", "operation": "run"},
+                {"run_id": 8, "operation": "run"},
                 "app.agent.completion_observers._strm_status",
                 (_snapshot("running"), _snapshot("completed")),
                 "completed",
@@ -481,50 +481,25 @@ class GuangYaOperationTrackingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.summary, summary)
             self.assertEqual(result.data["background_job"]["status"], raw_status)
 
-    async def test_strm_tracker_binds_to_first_manual_run_after_frozen_baseline(
-        self,
-    ) -> None:
-        rows = [
-            {
-                "id": 12,
-                "trigger_type": "manual",
-                "status": "running",
-                "started_at": "2026-09-20 01:00:02",
-                "finished_at": "",
-                "result": "{}",
-            },
-            {
-                "id": 11,
-                "trigger_type": "manual",
-                "status": "success",
-                "started_at": "2026-09-20 01:00:00",
-                "finished_at": "2026-09-20 01:00:01",
-                "result": '{"stats":{"created":3}}',
-            },
-        ]
-        scheduler = Mock()
-        scheduler.status.return_value = {"running": True, "progress": {"percent": 5}}
-        with (
-            patch("app.database.list_task_runs", return_value=rows),
-            patch("app.modules.scheduler.get_scheduler", return_value=scheduler),
-        ):
+    async def test_strm_tracker_reads_exact_run_without_borrowing_later_success(self) -> None:
+        from app import database as db
+        from tests.support import isolated_test_database
+        with isolated_test_database():
+            with db.get_conn() as conn:
+                conn.execute("DELETE FROM task_runs")
+            original = db.add_task_run("strm_sync", "manual")
+            db.finish_task_run(original, "failed")
+            for _index in range(25):
+                later = db.add_task_run("strm_sync", "manual")
+                db.finish_task_run(later, "success", result='{"stats":{"created":3}}')
             result = await wait_for_effect_completion(
-                _tracked_accepted(
-                    "strm_run",
-                    after_run_id=10,
-                    trigger_type="manual",
-                    operation="run",
-                ),
-                tool="strm.run_once",
-                context=ToolContext(owner="tg:v1:owner-safe"),
+                _tracked_accepted("strm_run", run_id=original, operation="run"),
+                tool="strm.run_once", context=ToolContext(owner="tg:v1:owner-safe"),
             )
-
-        self.assertTrue(result.ok)
-        self.assertEqual(result.status, "completed")
-        self.assertEqual(
-            result.data["background_job"]["started_at"], rows[1]["started_at"]
-        )
-        self.assertEqual(result.data["background_job"]["stats"], {"created": 3})
+            self.assertFalse(result.ok)
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.data["background_job"]["stats"], {})
+            self.assertNotIn("run_id", str(result.to_dict()))
 
     def test_patrol_tracker_does_not_treat_intermediate_batch_as_terminal(self) -> None:
         baseline_finished = "2026-09-19 23:00:00"

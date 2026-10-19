@@ -56,9 +56,9 @@ def test_C02_saturated_sync_delivers_every_library_with_policy(tmp_path, mode, p
         stack.enter_context(patch.object(strm, "_MAX_TRACKED_OVERFLOW_DIRS", 1))
         handoff = stack.enter_context(patch("app.modules.media_refresh_coordinator.enqueue_media_refresh_paths", return_value={"Jellyfin": "failed"}))
         execute = scheduler._execute_locked
-        def execute_with_policy(trigger):
+        def execute_with_policy(trigger, run_id):
             scheduler._run_options.update(media_server_refresh_override=refresh_enabled, emby_refresh_override=allow_emby)
-            return execute(trigger)
+            return execute(trigger, run_id)
         stack.enter_context(patch.object(scheduler, "_execute_locked", side_effect=execute_with_policy))
         original_track = strm._track_change
         generated = []
@@ -232,9 +232,9 @@ def test_C02_scheduler_retries_failed_spill_on_stop_without_consuming(tmp_path, 
         stack.enter_context(patch.object(strm, "_MAX_TRACKED_OVERFLOW_DIRS", 1))
         handoff = stack.enter_context(patch("app.modules.media_refresh_coordinator.enqueue_media_refresh_paths", return_value={"Jellyfin": "queued"}))
         execute = scheduler._execute_locked
-        def execute_with_policy(trigger):
+        def execute_with_policy(trigger, run_id):
             scheduler._run_options.update(emby_refresh_override=allow_emby)
-            return execute(trigger)
+            return execute(trigger, run_id)
         stack.enter_context(patch.object(scheduler, "_execute_locked", side_effect=execute_with_policy))
         original_enqueue = db.enqueue_strm_refresh_paths
         attempts = []

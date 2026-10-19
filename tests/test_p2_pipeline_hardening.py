@@ -435,7 +435,7 @@ class P2SchedulerCancellationTests(IsolatedDatabaseTestCase):
                 "STRM_ROOT": "/tmp/strm-root",
             }.get(key, default)
         ):
-            result = scheduler._execute_locked("manual")
+            result = scheduler._execute_locked("manual", db.add_task_run("strm_sync", "manual"))
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["stopped"])

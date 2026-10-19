@@ -836,7 +836,7 @@ class StrmSchedulerRobustnessTests(IsolatedDatabaseTestCase):
         release = threading.Event()
 
         class BlockingScheduler(STRMScheduler):
-            def _execute_locked(self, trigger_type: str) -> dict:
+            def _execute_locked(self, trigger_type: str, run_id: int) -> dict:
                 started.set()
                 release.wait(timeout=2)
                 try:

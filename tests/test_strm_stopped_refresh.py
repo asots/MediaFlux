@@ -49,12 +49,12 @@ def test_committed_strm_stop_retains_refresh_for_skip_only_replay(tmp_path, mode
                   "parent_id": "source", "name": "Movie.mkv", "rel_dir": ""}
         execute = scheduler._execute_locked
 
-        def execute_with_policy(trigger_type):
+        def execute_with_policy(trigger_type, run_id):
             scheduler._run_options.update(
                 media_server_refresh_override=refresh_enabled,
                 emby_refresh_override=allow_emby,
             )
-            return execute(trigger_type)
+            return execute(trigger_type, run_id)
 
         stack.enter_context(patch.object(scheduler, "_execute_locked", side_effect=execute_with_policy))
         options = {"sync_mode": mode}

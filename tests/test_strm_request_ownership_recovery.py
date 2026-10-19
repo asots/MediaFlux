@@ -222,7 +222,7 @@ class STRMRequestOwnershipRecoveryTests(unittest.TestCase):
         self.assertTrue(scheduler._run_lock.acquire(blocking=False))
         scheduler._run_options = dict(options)
         scheduler._running = True
-        return scheduler._execute_locked("organize")
+        return scheduler._execute_locked("organize", db.add_task_run("strm_sync", "organize"))
 
     def recovered_options(self, scheduler):
         with patch.object(

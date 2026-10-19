@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from app import database as db
 from app.modules.scheduler import STRMScheduler
 from tests.support import IsolatedDatabaseTestCase
 
@@ -87,7 +88,7 @@ class StrmFastFullModeTests(IsolatedDatabaseTestCase):
 
         def run_inline(trigger_type, options):
             self.scheduler._run_options = options
-            return self.scheduler._execute_locked(trigger_type)
+            return self.scheduler._execute_locked(trigger_type, db.add_task_run("strm_sync", trigger_type))
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
                 patches[5], patches[6], patches[7], patches[8], patch.object(

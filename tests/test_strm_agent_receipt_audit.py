@@ -9,6 +9,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from app import database as db
 from app.agent.domains.strm import runtime as strm_runtime
 from app.agent.errors import AgentToolError
 from app.modules.scheduler import STRMScheduler
@@ -64,6 +65,20 @@ class STRMAgentReceiptAuditTests(unittest.TestCase):
         self.scheduler._run_lock.release()
         self.assertIsNone(self.scheduler._worker)
         self.assertFalse(self.scheduler._running)
+        row = db.get_last_task_run("strm_sync")
+        assert row is not None
+        self.assertEqual(row["status"], "failed")
+
+    def test_persistence_failure_rejects_before_start_and_releases_admission(self):
+        with patch("app.modules.scheduler.db.add_task_run", side_effect=OSError("db unavailable")), patch(
+            "app.modules.scheduler.threading.Thread.start"
+        ) as start:
+            result = self.scheduler.trigger("manual")
+        self.assertFalse(result["ok"])
+        start.assert_not_called()
+        self.assertTrue(self.scheduler._run_lock.acquire(blocking=False))
+        self.scheduler._run_lock.release()
+        self.assertFalse(self.scheduler._running)
 
     def test_actual_busy_admission_keeps_conflict_and_never_starts_a_worker(self):
         _preview, fingerprint = strm_runtime.prepare_strm_run_once({})
@@ -86,7 +101,7 @@ class STRMAgentReceiptAuditTests(unittest.TestCase):
                 return_value=(sources, ""),
             ),
             patch.object(
-                self.scheduler, "trigger", return_value={"ok": True}
+                self.scheduler, "trigger", return_value={"ok": True, "run_id": 7}
             ) as trigger,
         ):
             preview, fingerprint = strm_runtime.prepare_strm_run_once(arguments)
@@ -98,8 +113,7 @@ class STRMAgentReceiptAuditTests(unittest.TestCase):
                 result.effect_metadata["completion"],
                 {
                     "kind": "strm_run",
-                    "after_run_id": 0,
-                    "trigger_type": "manual",
+                    "run_id": 7,
                     "operation": "run",
                 },
             )
