@@ -11,6 +11,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from app import config
 from app import database as db
 from app.agent import effect_completion as effects
 from app.agent.feature_gate import initialize_runtime_fence
@@ -29,7 +30,7 @@ from app.agent.kernel.state_types import AgentInput
 from app.agent.models import ToolContext, ToolResult
 from app.modules import organize_tasks
 from app.repositories import organize_operation_jobs as jobs
-from tests.support import isolated_test_database
+from tests.support import initialized_web_runtime, isolated_test_database
 from tests.test_agent_effect_admission import (
     _domain_arguments,
     _offline_runtime,
@@ -99,13 +100,16 @@ def _session(store, script, client, reads, *, stack):
 
 
 @asynccontextmanager
-async def _ready_case(tmp_path, *, channel='web', route=None, fail_write=False):
+async def _ready_case(tmp_path, *, channel='web', route=None, fail_write=False, runtime_settings=None):
     class RefusingClient(_OfflineClient):
         def rename(self, *_args, **_kwargs):
             raise RuntimeError('offline Provider refused rename')
     provider = RefusingClient() if fail_write else _OfflineClient()
-    with isolated_test_database(), _offline_runtime(tmp_path, provider) as stack, _paused_manager():
+    installation = initialized_web_runtime() if runtime_settings is not None else isolated_test_database()
+    with installation, _offline_runtime(tmp_path, provider) as stack, _paused_manager():
         initialize_runtime_fence()
+        if runtime_settings is not None:
+            config.set_and_save(runtime_settings)
         from app.agent.domains.guangya import (
             fs_change_actions as guangya_fs_change_actions,
         )
@@ -461,19 +465,15 @@ def test_local_read_quota_parks_effect_followup_without_asking_user_again(tmp_pa
 
 def test_real_outbox_handoff_survives_crash_before_delivery_ack_without_new_model(tmp_path):
     async def run():
-        from app import config
         from app.agent.kernel.continuation import deliver_continuation_result
         from app.bot.agent_adapter import (
             prepare_agent_continuation_delivery,
             publish_agent_continuation_delivery,
         )
         from app.modules import telegram_notification_center as notifications
-        get_config = config.get
         values = {'AGENT_ENABLED': '1', 'TG_AGENT_ENABLED': '1', 'TG_CHAT_ID': '-100', 'TG_AGENT_ALLOWED_USER_IDS': '7'}
-        with patch(__name__ + '.OWNER', 'tg:v1:-100\x1f7'), patch.object(
-            config, 'get', side_effect=lambda key, default='': values[key] if key in values else get_config(key, default),
-        ), patch.object(notifications, 'wake_telegram_notification_dispatcher', return_value=False):
-            async with _ready_case(tmp_path, channel='telegram', route={'chat_id': '-100', 'message_thread_id': 42}) as (store, candidate, client, reads, stack, _users):
+        with patch(__name__ + '.OWNER', 'tg:v1:-100\x1f7'), patch.object(notifications, 'wake_telegram_notification_dispatcher', return_value=False):
+            async with _ready_case(tmp_path, channel='telegram', route={'chat_id': '-100', 'message_thread_id': 42}, runtime_settings=values) as (store, candidate, client, reads, stack, _users):
                 script = FollowScript(resume=True)
                 session = _session(store, script, client, reads, stack=stack)
                 assert await session.resume_wait(candidate=candidate)

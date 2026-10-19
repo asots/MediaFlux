@@ -137,17 +137,14 @@ async def _handoff(store, candidate):
 
 @asynccontextmanager
 async def _completed_effect(tmp_path, clock):
-    current_get = config.get
     values = {
         "AGENT_ENABLED": "1", "TG_AGENT_ENABLED": "1", "TG_CHAT_ID": "-100123",
         "TG_AGENT_ALLOWED_USER_IDS": "7",
     }
     with patch.object(effect_cases, "OWNER", OWNER), patch.object(effect_cases, "SID", SID), patch.object(
         effect_cases, "SQLiteKernelStore", side_effect=lambda: SQLiteKernelStore(clock=lambda: clock[0]),
-    ), patch.object(effect_cases.effects, "time", SimpleNamespace(time=lambda: clock[0])), patch.object(
-        config, "get", side_effect=lambda key, default="": values[key] if key in values else current_get(key, default),
-    ):
-        async with effect_cases._ready_case(tmp_path, channel="telegram", route=ROUTE) as (
+    ), patch.object(effect_cases.effects, "time", SimpleNamespace(time=lambda: clock[0])):
+        async with effect_cases._ready_case(tmp_path, channel="telegram", route=ROUTE, runtime_settings=values) as (
             store, candidate, client, reads, stack, _users,
         ):
             follow = effect_cases.FollowScript(resume=True)
