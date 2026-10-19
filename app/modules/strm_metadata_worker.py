@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -223,6 +224,11 @@ class STRMMetadataWorker:
         prepared_job = None
         metadata_committed = False
         try:
+            # 输出根与完成交接共用队列冻结的媒体根，不受领取后配置切换影响。
+            # enabled 仅控制刷新；历史任务未保存媒体根时才沿用当前输出根。
+            media_root = json.loads(job.get("refresh_policy_json") or "{}").get("media_root")
+            if media_root:
+                root_text = str(Path(media_root).expanduser().parent)
             extension = str(job.get("filename") or "").rsplit(".", 1)[-1].lower()
             configured = {
                 item.strip().lower().lstrip(".")

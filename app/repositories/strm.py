@@ -36,12 +36,15 @@ class StrmRefreshPolicy:
             return
         from app.modules.media_refresh import plan_refresh_targets
 
+        paths = _normalize_refresh_paths(paths)
         # 历史任务未保存媒体根，保留其明确目标；新任务按冻结的根规划目录。
         planned = (
             plan_refresh_targets(changed_paths=paths, media_roots=[self.media_root])
             if self.media_root else plan_refresh_targets(changed_dirs=paths, media_roots=[self.media_root])
         )
         targets = planned.targets
+        if paths and not targets:
+            raise ValueError("STRM 刷新目标超出冻结媒体根，拒绝丢弃刷新交接")
         if targets:
             _enqueue_strm_refresh_paths(
                 conn, targets, stamp=db.now(), allow_emby=self.allow_emby,
