@@ -998,6 +998,14 @@ def merge_strm_changes(*groups: Iterable[object] | None) -> list[dict[str, Any]]
     return [*changes[-(_MAX_QUEUED_CHANGES - 1):], marker]
 
 
+def _replay_strm_changes(row: sqlite3.Row) -> list[dict[str, Any]]:
+    """领取、失败退回和恢复共用时间顺序：新 pending 覆盖旧 inflight。"""
+    return merge_strm_changes(
+        _load_changes(row["inflight_changes_json"]),
+        _load_changes(row["pending_changes_json"]),
+    )
+
+
 def group_changes_by_target(changes: Iterable[object] | None) -> dict[tuple[str, str], list[dict[str, Any]]]:
     """把 STRM 变化清单按 (source_id, 目标相对目录) 分组。"""
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1178,10 +1186,7 @@ def claim_strm_change_targets(
         ).fetchall()
         for row in rows:
             previous_generation = int(row["lease_generation"] or 0)
-            inflight = merge_strm_changes(
-                _load_changes(row["inflight_changes_json"]),
-                _load_changes(row["pending_changes_json"]),
-            )
+            inflight = _replay_strm_changes(row)
             cur = conn.execute(
                 "UPDATE strm_change_queue SET state='running',dirty=0,"
                 "pending_changes_json='[]',inflight_changes_json=?,lease_owner=?,"
@@ -1302,10 +1307,7 @@ def fail_strm_change_target(
         if row is None:
             return "stale"
         attempts = int(row["attempts"] or 0) + 1
-        pending = merge_strm_changes(
-            _load_changes(row["pending_changes_json"]),
-            _load_changes(row["inflight_changes_json"]),
-        )
+        pending = _replay_strm_changes(row)
         exhausted = attempts >= max(1, (max_attempts or 1))
         state = "failed" if exhausted else "queued"
         delay = 0 if exhausted else max(1, (backoff_seconds or 1)) * min(attempts, 6)
@@ -1345,10 +1347,7 @@ def release_strm_change_targets(claimed: Iterable[object] | None, *, reason: str
             ).fetchone()
             if row is None:
                 continue
-            pending = merge_strm_changes(
-                _load_changes(row["pending_changes_json"]),
-                _load_changes(row["inflight_changes_json"]),
-            )
+            pending = _replay_strm_changes(row)
             cur = conn.execute(
                 "UPDATE strm_change_queue SET state='queued',dirty=0,last_error=?,"
                 "pending_changes_json=?,inflight_changes_json='[]',lease_owner='',"
@@ -1378,10 +1377,7 @@ def recover_stale_strm_change_targets(*, provider: str = DEFAULT_STRM_PROVIDER) 
             (provider, now_epoch),
         ).fetchall()
         for row in rows:
-            pending = merge_strm_changes(
-                _load_changes(row["pending_changes_json"]),
-                _load_changes(row["inflight_changes_json"]),
-            )
+            pending = _replay_strm_changes(row)
             cur = conn.execute(
                 "UPDATE strm_change_queue SET state='queued',dirty=0,"
                 "pending_changes_json=?,inflight_changes_json='[]',lease_owner='',"

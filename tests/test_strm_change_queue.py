@@ -7,14 +7,26 @@
 """
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
+import unittest
+from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from app import database as db
-from app.modules.scheduler import STRMScheduler
-from app.modules.strm import _record_changed_path, finalize_changed_paths
-from tests.support import IsolatedDatabaseTestCase
+from app.clients.guangya import GuangYaClient, GuangYaFile
+from app.modules.scheduler import STRMScheduler, _merge_organize_changes
+from app.modules.strm import (
+    STRM_SUBDIR,
+    _record_changed_path,
+    build_play_url,
+    finalize_changed_paths,
+    sync_strm_incremental,
+)
+from tests.support import IsolatedDatabaseTestCase, isolated_test_database
+from tests.test_strm_p2_incremental import _IncrementalClient
 
 
 def _change(
@@ -477,6 +489,82 @@ class StrmChangeQueueWorkerTests(IsolatedDatabaseTestCase):
         )
 
         self.assertEqual(db.count_pending_strm_change_targets(), 1)
+
+
+class StrmChangeReplayTests(unittest.TestCase):
+    """退回与直接接管同一队列时，最新快照必须能完成增量且旧租约无权结算。"""
+
+    def setUp(self):
+        self.enterContext(isolated_test_database())
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for target in (
+            "socket.socket.connect", "socket.socket.connect_ex",
+            "socket.create_connection", "socket.getaddrinfo",
+        ):
+            self.enterContext(patch(target, side_effect=AssertionError("network forbidden")))
+
+    def test_replay_keeps_latest_file_and_fences_old_lease(self):
+        original = {**_change(), "etag": "old", "size": 1, "parent_id": "parent"}
+        for outcome in ("failure", "stop", "recovery", "claim"):
+            for change_type in ("version", "rename", "remove"):
+                with self.subTest(outcome=outcome, change_type=change_type):
+                    with db.get_conn() as conn:
+                        conn.execute("DELETE FROM strm_change_queue")
+                    latest = {**original, "etag": "new", "size": 2}
+                    if change_type == "rename":
+                        latest["name"] = "A - S01E01 - Final.mkv"
+                    elif change_type == "remove":
+                        latest["action"] = "remove"
+                    db.enqueue_strm_change_targets([original])
+                    first = db.claim_strm_change_targets(owner="first")[0]
+                    db.enqueue_strm_change_targets([latest])
+                    if outcome == "failure":
+                        self.assertEqual(db.fail_strm_change_target(
+                            first["id"], expected_owner=first["lease_owner"],
+                            expected_lease_generation=first["lease_generation"], error="timeout",
+                        ), "queued")
+                        db.reschedule_strm_change_targets([latest], not_before_seconds=0)
+                    elif outcome == "stop":
+                        self.assertEqual(db.release_strm_change_targets([first]), 1)
+                    else:
+                        with db.get_conn() as conn:
+                            conn.execute("UPDATE strm_change_queue SET lease_until=0")
+                        if outcome == "recovery":
+                            self.assertEqual(db.recover_stale_strm_change_targets(), 1)
+                    second = db.claim_strm_change_targets(owner="second")[0]
+                    self.assertGreater(second["lease_generation"], first["lease_generation"])
+                    changes = _merge_organize_changes(second["changes"])
+                    self.assertEqual(changes, [latest])
+                    before = dict(db.list_strm_change_queue()[0])
+                    self.assertEqual(db.complete_strm_change_target(
+                        first["id"], expected_owner=first["lease_owner"],
+                        expected_lease_generation=first["lease_generation"],
+                    ), "stale")
+                    self.assertEqual(db.fail_strm_change_target(
+                        first["id"], expected_owner=first["lease_owner"],
+                        expected_lease_generation=first["lease_generation"], error="late",
+                    ), "stale")
+                    self.assertEqual(db.release_strm_change_targets([first]), 0)
+                    self.assertEqual(dict(db.list_strm_change_queue()[0]), before)
+                    remote = GuangYaFile("f1", str(latest["name"]), False, 2, "new", "parent")
+                    cloud = _IncrementalClient({} if change_type == "remove" else {"f1": remote})
+                    stats = sync_strm_incremental(
+                        "source", changes, "http://play.invalid", str(self.root),
+                        client=cast(GuangYaClient, cloud),
+                    )
+                    self.assertFalse(stats["fallback_required"], stats)
+                    self.assertEqual(stats["failed"], 0)
+                    if change_type == "remove":
+                        self.assertEqual(db.list_strm_index("guangya:source"), [])
+                    else:
+                        target = self.root / STRM_SUBDIR / str(latest["rel_dir"]) / Path(remote.name).with_suffix(".strm")
+                        self.assertEqual(target.read_text(), build_play_url(
+                            "http://play.invalid", "f1", "new", 2, remote.name,
+                        ))
+                    self.assertEqual(db.complete_strm_change_target(
+                        second["id"], expected_owner=second["lease_owner"],
+                        expected_lease_generation=second["lease_generation"],
+                    ), "completed")
 
 
 class SchedulerChangeQueueIntegrationTests(IsolatedDatabaseTestCase):
