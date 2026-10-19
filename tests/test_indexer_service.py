@@ -95,8 +95,7 @@ class CrossLoopAdapter(FakeAdapter):
     async def search(self, request):
         with self._calls_lock:
             self.calls += 1
-        await asyncio.to_thread(self.barrier.wait, 1)
-        await asyncio.sleep(0.01)
+        await asyncio.to_thread(self.barrier.wait)
         return IndexerPage(
             items=list(self.items),
             page=request.page,
@@ -1429,9 +1428,11 @@ class IndexerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.site_page_states["mikan"].has_more)
 
     async def test_same_service_can_search_from_independent_event_loops(self):
-        barrier = threading.Barrier(2)
+        # 验证不同 loop 不共享 in-flight Future，而不是验证线程池冷启动速度。
+        # barrier 保证两次调用确实重叠；业务期限应覆盖这段同步等待。
+        barrier = threading.Barrier(2, timeout=5)
         adapter = CrossLoopAdapter("nyaa", [item("nyaa", "Frieren")], barrier)
-        service = self.service([adapter])
+        service = self.service([adapter], site_timeout_seconds=10, total_timeout_seconds=12)
 
         def run_search():
             return asyncio.run(service.search("Frieren", 1, ("nyaa",)))
