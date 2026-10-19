@@ -198,10 +198,9 @@ def test_telegram_in_place_multiselect_previews_and_finishes_once(store, monkeyp
     monkeypatch.setattr("app.agent.kernel.bootstrap.get_agent_kernel_runtime", lambda: runtime)
     monkeypatch.setattr(agent_adapter, "get_agent_kernel_runtime", lambda: runtime)
     monkeypatch.setattr(agent_adapter, "telegram_agent_access", lambda *a: "allowed")
-    monkeypatch.setenv("AGENT_ENABLED", "1")
-    monkeypatch.setenv("TG_AGENT_ENABLED", "1")
-    monkeypatch.setenv("TG_CHAT_ID", "-100")
-    monkeypatch.setenv("TG_AGENT_ALLOWED_USER_IDS", "7")
+    from app import config
+    config.set_and_save({"AGENT_ENABLED": "1", "TG_AGENT_ENABLED": "1",
+                         "TG_CHAT_ID": "-100", "TG_AGENT_ALLOWED_USER_IDS": "7"})
     monkeypatch.setattr(agent_adapter.agent_rate_limiter, "allow", lambda *a, **k: True)
     view, _ = asyncio.run(_publish_candidates(pipeline, states, owner=owner, session_id=session_id))
     draft = asyncio.run(agent_candidates.start_draft(runtime, owner=owner, session_id=session_id, view=view))
