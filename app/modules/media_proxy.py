@@ -5125,179 +5125,173 @@ def create_proxy_app(
         protocols = websocket.scope.get("subprotocols") or []
         session: ClientSession | None = None
         try:
-            pinned = await asyncio.to_thread(
-                _pin_upstream_target,
-                str(instance["upstream_url"]),
-                "/" + path.lstrip("/"),
-            )
-            target = _websocket_upstream_url(
-                str(instance["upstream_url"]), websocket, path
-            )
-            connector = TCPConnector(
-                resolver=_PinnedResolver(pinned.sni_hostname, pinned.addresses),
-                use_dns_cache=True,
-            )
-            session = ClientSession(
-                connector=connector,
-                trace_configs=[_websocket_trace_config()],
-                timeout=ClientTimeout(
-                    # 只约束 HTTP Upgrade；升级成功后 aiohttp 会按
-                    # ClientWSTimeout 将 WebSocket receive timeout 恢复为无限。
-                    total=_PROXY_WEBSOCKET_HANDSHAKE_TIMEOUT_SECONDS,
-                    connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
-                    sock_connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
-                ),
-            )
-            upstream_ws = await session.ws_connect(
-                target,
-                headers=headers,
-                protocols=protocols,
-                autoping=True,
-                heartbeat=30,
-                max_msg_size=message_limit,
-            )
-        except _WebSocketRedirectBlocked:
-            log_throttled(
-                logger,
-                logging.WARNING,
-                f"media-proxy-ws-redirect:{instance_id}",
-                "媒体反代 WebSocket 拒绝上游重定向 instance=%s",
-                instance_id,
-            )
-            if session is not None:
-                await session.close()
-            await websocket.close(
-                code=1011, reason="Upstream WebSocket redirect rejected"
-            )
-            return
-        except WSServerHandshakeError as exc:
-            status = int(getattr(exc, "status", 0) or 0)
-            anonymous_rejection = _websocket_handshake_is_anonymous_rejection(
-                websocket,
-                status,
-            )
-            if anonymous_rejection:
-                log_throttled(
-                    logger,
-                    logging.DEBUG,
-                    f"media-proxy-ws-anonymous:{instance_id}:{status}",
-                    "媒体反代匿名 WebSocket 被上游拒绝 instance=%s status=%s",
-                    instance_id,
-                    status,
+            try:
+                pinned = await asyncio.to_thread(
+                    _pin_upstream_target,
+                    str(instance["upstream_url"]),
+                    "/" + path.lstrip("/"),
                 )
-            else:
+                target = _websocket_upstream_url(
+                    str(instance["upstream_url"]), websocket, path
+                )
+                connector = TCPConnector(
+                    resolver=_PinnedResolver(pinned.sni_hostname, pinned.addresses),
+                    use_dns_cache=True,
+                )
+                session = ClientSession(
+                    connector=connector,
+                    trace_configs=[_websocket_trace_config()],
+                    timeout=ClientTimeout(
+                        # 只约束 HTTP Upgrade；升级成功后 aiohttp 会按
+                        # ClientWSTimeout 将 WebSocket receive timeout 恢复为无限。
+                        total=_PROXY_WEBSOCKET_HANDSHAKE_TIMEOUT_SECONDS,
+                        connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
+                        sock_connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
+                    ),
+                )
+                upstream_ws = await session.ws_connect(
+                    target,
+                    headers=headers,
+                    protocols=protocols,
+                    autoping=True,
+                    heartbeat=30,
+                    max_msg_size=message_limit,
+                )
+            except _WebSocketRedirectBlocked:
                 log_throttled(
                     logger,
                     logging.WARNING,
-                    f"media-proxy-ws-handshake:{instance_id}:{status}",
-                    "媒体反代 WebSocket 上游握手失败 instance=%s status=%s",
+                    f"media-proxy-ws-redirect:{instance_id}",
+                    "媒体反代 WebSocket 拒绝上游重定向 instance=%s",
                     instance_id,
+                )
+                await websocket.close(
+                    code=1011, reason="Upstream WebSocket redirect rejected"
+                )
+                return
+            except WSServerHandshakeError as exc:
+                status = int(getattr(exc, "status", 0) or 0)
+                anonymous_rejection = _websocket_handshake_is_anonymous_rejection(
+                    websocket,
                     status,
                 )
-            if session is not None:
-                await session.close()
-            await websocket.close(code=1011, reason="Upstream WebSocket unavailable")
-            return
-        except Exception as exc:
-            error_type = type(exc).__name__
-            log_throttled(
-                logger,
-                logging.WARNING,
-                f"media-proxy-ws-connect:{instance_id}:{error_type}",
-                "媒体反代 WebSocket 上游连接失败 instance=%s type=%s",
-                instance_id,
-                error_type,
-            )
-            if session is not None:
-                await session.close()
-            await websocket.close(code=1011, reason="Upstream WebSocket unavailable")
-            return
-        close_state = {
-            "downstream_code": 1000,
-            "downstream_reason": "",
-            "upstream_code": 1000,
-            "upstream_reason": "",
-        }
-
-        async def client_to_upstream():
-            while True:
-                message = await websocket.receive()
-                kind = message.get("type")
-                if kind == "websocket.disconnect":
-                    close_state["downstream_code"] = _valid_websocket_close_code(
-                        message.get("code"),
+                if anonymous_rejection:
+                    log_throttled(
+                        logger,
+                        logging.DEBUG,
+                        f"media-proxy-ws-anonymous:{instance_id}:{status}",
+                        "媒体反代匿名 WebSocket 被上游拒绝 instance=%s status=%s",
+                        instance_id,
+                        status,
                     )
-                    close_state["downstream_reason"] = _bounded_websocket_reason(
-                        message.get("reason"),
+                else:
+                    log_throttled(
+                        logger,
+                        logging.WARNING,
+                        f"media-proxy-ws-handshake:{instance_id}:{status}",
+                        "媒体反代 WebSocket 上游握手失败 instance=%s status=%s",
+                        instance_id,
+                        status,
                     )
-                    break
-                if message.get("text") is not None:
-                    text = message["text"]
-                    if len(text.encode("utf-8")) > message_limit:
-                        close_state["upstream_code"] = 1009
-                        close_state["upstream_reason"] = "WebSocket message too large"
-                        await websocket.close(code=1009, reason="WebSocket message too large")
-                        break
-                    await upstream_ws.send_str(text)
-                elif message.get("bytes") is not None:
-                    payload = message["bytes"]
-                    if len(payload) > message_limit:
-                        close_state["upstream_code"] = 1009
-                        close_state["upstream_reason"] = "WebSocket message too large"
-                        await websocket.close(code=1009, reason="WebSocket message too large")
-                        break
-                    await upstream_ws.send_bytes(payload)
-
-        async def upstream_to_client():
-            async for message in upstream_ws:
-                if message.type == WSMsgType.TEXT:
-                    if len(message.data.encode("utf-8")) > message_limit:
-                        close_state["upstream_code"] = 1009
-                        close_state["upstream_reason"] = "Upstream message too large"
-                        await websocket.close(code=1009, reason="Upstream message too large")
-                        break
-                    await websocket.send_text(message.data)
-                elif message.type == WSMsgType.BINARY:
-                    if len(message.data) > message_limit:
-                        close_state["upstream_code"] = 1009
-                        close_state["upstream_reason"] = "Upstream message too large"
-                        await websocket.close(code=1009, reason="Upstream message too large")
-                        break
-                    await websocket.send_bytes(message.data)
-                elif message.type == WSMsgType.CLOSE:
-                    close_state["upstream_code"] = _valid_websocket_close_code(message.data)
-                    close_state["upstream_reason"] = _bounded_websocket_reason(message.extra)
-                    break
-                elif message.type in {WSMsgType.CLOSED, WSMsgType.ERROR}:
-                    close_state["upstream_code"] = _valid_websocket_close_code(
-                        getattr(upstream_ws, "close_code", None),
-                    )
-                    break
-
-        tasks: set[asyncio.Task] = set()
-        try:
-            # 上游已建立后，下游可能已经离开；accept 也必须位于资源清理
-            # 边界内，避免泄漏已连接的 upstream_ws / ClientSession。
-            await websocket.accept(subprotocol=upstream_ws.protocol or None)
-            tasks = {
-                asyncio.create_task(client_to_upstream()),
-                asyncio.create_task(upstream_to_client()),
+                await websocket.close(code=1011, reason="Upstream WebSocket unavailable")
+                return
+            except Exception as exc:
+                error_type = type(exc).__name__
+                log_throttled(
+                    logger,
+                    logging.WARNING,
+                    f"media-proxy-ws-connect:{instance_id}:{error_type}",
+                    "媒体反代 WebSocket 上游连接失败 instance=%s type=%s",
+                    instance_id,
+                    error_type,
+                )
+                await websocket.close(code=1011, reason="Upstream WebSocket unavailable")
+                return
+            close_state = {
+                "downstream_code": 1000,
+                "downstream_reason": "",
+                "upstream_code": 1000,
+                "upstream_reason": "",
             }
-            done, _pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in done:
-                try:
-                    task.result()
-                except Exception:
-                    pass
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+
+            async def client_to_upstream():
+                while True:
+                    message = await websocket.receive()
+                    kind = message.get("type")
+                    if kind == "websocket.disconnect":
+                        close_state["downstream_code"] = _valid_websocket_close_code(
+                            message.get("code"),
+                        )
+                        close_state["downstream_reason"] = _bounded_websocket_reason(
+                            message.get("reason"),
+                        )
+                        break
+                    if message.get("text") is not None:
+                        text = message["text"]
+                        if len(text.encode("utf-8")) > message_limit:
+                            close_state["upstream_code"] = 1009
+                            close_state["upstream_reason"] = "WebSocket message too large"
+                            await websocket.close(code=1009, reason="WebSocket message too large")
+                            break
+                        await upstream_ws.send_str(text)
+                    elif message.get("bytes") is not None:
+                        payload = message["bytes"]
+                        if len(payload) > message_limit:
+                            close_state["upstream_code"] = 1009
+                            close_state["upstream_reason"] = "WebSocket message too large"
+                            await websocket.close(code=1009, reason="WebSocket message too large")
+                            break
+                        await upstream_ws.send_bytes(payload)
+
+            async def upstream_to_client():
+                async for message in upstream_ws:
+                    if message.type == WSMsgType.TEXT:
+                        if len(message.data.encode("utf-8")) > message_limit:
+                            close_state["upstream_code"] = 1009
+                            close_state["upstream_reason"] = "Upstream message too large"
+                            await websocket.close(code=1009, reason="Upstream message too large")
+                            break
+                        await websocket.send_text(message.data)
+                    elif message.type == WSMsgType.BINARY:
+                        if len(message.data) > message_limit:
+                            close_state["upstream_code"] = 1009
+                            close_state["upstream_reason"] = "Upstream message too large"
+                            await websocket.close(code=1009, reason="Upstream message too large")
+                            break
+                        await websocket.send_bytes(message.data)
+                    elif message.type == WSMsgType.CLOSE:
+                        close_state["upstream_code"] = _valid_websocket_close_code(message.data)
+                        close_state["upstream_reason"] = _bounded_websocket_reason(message.extra)
+                        break
+                    elif message.type in {WSMsgType.CLOSED, WSMsgType.ERROR}:
+                        close_state["upstream_code"] = _valid_websocket_close_code(
+                            getattr(upstream_ws, "close_code", None),
+                        )
+                        break
+
+            tasks: set[asyncio.Task] = set()
             try:
+                # 上游已建立后，下游可能已经离开；accept 也必须位于资源清理
+                # 边界内，避免泄漏已连接的 upstream_ws / ClientSession。
+                await websocket.accept(subprotocol=upstream_ws.protocol or None)
+                tasks = {
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                }
+                done, _pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    try:
+                        task.result()
+                    except Exception:
+                        pass
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
                 downstream_code = _valid_websocket_close_code(
                     close_state.get("downstream_code"),
                 )
@@ -5311,18 +5305,20 @@ def create_proxy_app(
                     )
                 else:
                     await upstream_ws.close()
-            finally:
+                try:
+                    upstream_code = _valid_websocket_close_code(
+                        close_state.get("upstream_code"),
+                    )
+                    upstream_reason = _bounded_websocket_reason(
+                        close_state.get("upstream_reason"),
+                    )
+                    await websocket.close(code=upstream_code, reason=upstream_reason)
+                except Exception:
+                    pass
+
+        finally:
+            if session is not None:
                 await session.close()
-            try:
-                upstream_code = _valid_websocket_close_code(
-                    close_state.get("upstream_code"),
-                )
-                upstream_reason = _bounded_websocket_reason(
-                    close_state.get("upstream_reason"),
-                )
-                await websocket.close(code=upstream_code, reason=upstream_reason)
-            except Exception:
-                pass
 
     @app.api_route(
         "/{path:path}",

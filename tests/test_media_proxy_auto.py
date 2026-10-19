@@ -2605,6 +2605,74 @@ class HybridMediaProxyTests(unittest.TestCase):
             "media-proxy-ws-redirect:7",
         )
 
+    def test_websocket_handshake_cancellation_closes_session_and_propagates(self):
+        instance = {
+            **self._instance(),
+            "server_type": "jellyfin",
+            "upstream_url": "http://media.example:8096",
+        }
+        pinned = media_proxy._PinnedUpstreamTarget(
+            logical_url="http://media.example:8096/socket",
+            connect_url="http://203.0.113.10:8096/socket",
+            host_header="media.example:8096",
+            sni_hostname="media.example",
+            addresses=("203.0.113.10",),
+        )
+        captured: dict[str, object] = {}
+
+        class CancelledHandshakeSession:
+            def __init__(self, *, connector, trace_configs=None, timeout=None) -> None:
+                self.close_calls = 0
+                captured["session"] = self
+
+            async def ws_connect(self, _target: str, **_kwargs):
+                raise asyncio.CancelledError()
+
+            async def close(self) -> None:
+                self.close_calls += 1
+
+        class DownstreamWebSocket:
+            def __init__(self) -> None:
+                self.headers = httpx.Headers({
+                    "Authorization": 'MediaBrowser Token="client-token"',
+                })
+                self.query_params = httpx.QueryParams()
+                self.url = SimpleNamespace(query="")
+                self.scope = {"subprotocols": ["jellyfin"]}
+
+            async def close(self, **_kwargs) -> None:
+                pass
+
+        app = media_proxy.create_proxy_app(7)
+        websocket_route = next(
+            route
+            for route in app.routes
+            if getattr(route, "path", None) == "/{path:path}"
+            and getattr(route, "methods", None) is None
+        )
+        with (
+            patch(
+                "app.modules.media_proxy.database.get_media_proxy_instance",
+                return_value=instance,
+            ),
+            patch(
+                "app.modules.media_proxy._pin_upstream_target",
+                return_value=pinned,
+            ),
+            patch("app.modules.media_proxy.TCPConnector", return_value=object()),
+            patch(
+                "app.modules.media_proxy.ClientSession",
+                CancelledHandshakeSession,
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                assert isinstance(websocket_route, WebSocketRoute)
+                asyncio.run(websocket_route.endpoint(DownstreamWebSocket(), "socket"))
+
+        session = captured["session"]
+        assert isinstance(session, CancelledHandshakeSession)
+        self.assertEqual(session.close_calls, 1)
+
     def test_websocket_accept_failure_closes_connected_upstream_resources(self):
         instance = {
             **self._instance(),
