@@ -7,14 +7,14 @@ import unicodedata
 from datetime import date
 from typing import Any
 
-from app.agent.domains.subscriptions.preference_policy import (
-    effective_preferences,
-    resource_preference_match,
-)
 from app.indexers.release import parse_indexer_release_position
 from app.modules.episode_mapping import (
     classify_episode_position,
     infer_release_episode_mapping,
+)
+from app.modules.media_preferences import (
+    effective_preferences,
+    resource_preference_match,
 )
 from app.modules.scraper import TMDBScraper
 
@@ -382,15 +382,6 @@ def matched_episode_items(search_data: dict[str, Any]) -> list[dict[str, Any]]:
     """匹配计数、默认推荐和模型明细共用同一结果集，不改变完整研究快照。"""
     return [item for item in search_data.get("items", []) if item["quality"]["eligible"]
             and item["quality"]["match"] in {"exact_episode", "episode_pack"}]
-
-
-def episode_search_model_data(search_data: dict[str, Any]) -> dict[str, Any]:
-    """默认只回答目标集是否有匹配；完整研究数据和未核验候选由原快照保留。"""
-    items = matched_episode_items(search_data)
-    recommendation = {**search_data["recommendation"], "candidate_count": len(items)}
-    if not items:
-        recommendation["status"] = "empty"
-    return {**search_data, "items": items, "recommendation": recommendation}
 
 
 def rank_episode_search(

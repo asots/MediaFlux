@@ -17,7 +17,6 @@ from typing import Any, Iterable, Mapping
 
 from app import config
 from app import database as db
-from app.agent.domains.resources.recommendation import rank_episode_search
 from app.clients.tmdb import TMDBClient, close_tmdb_client
 from app.discovery.models import ProviderError, ProviderNotConfigured
 from app.indexers.config import tmdb_detail_is_animation
@@ -25,6 +24,7 @@ from app.indexers.downloads import download_indexer_result_public
 from app.indexers.models import AggregatedIndexerResult, IndexerMediaSearchRequest
 from app.indexers.runtime import get_indexer_service, run_indexer_awaitable
 from app.logger import get_logger
+from app.modules.episode_resource_ranking import rank_episode_search
 from app.modules.media_identity import build_media_key
 from app.sensitive_data import redact_sensitive_text
 from app.services import inspect_media_identity_sources, inspect_series_episode_sources

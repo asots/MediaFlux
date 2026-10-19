@@ -6,12 +6,7 @@ import re
 import unicodedata
 from typing import Any
 
-from app.agent.action_history import action_history_owner_digest
-from app.agent.errors import AgentToolError
-from app.repositories.media_experience import (
-    default_media_preferences,
-    get_media_preferences,
-)
+from app.repositories.media_experience import default_media_preferences
 
 _ENUMS = {
     "preferred_server": ("any", "jellyfin", "emby"),
@@ -64,53 +59,47 @@ RESOURCE_PREFERENCE_PROPERTIES = {
 }
 
 
-def validate_resource_preference_overrides(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) - set(RESOURCE_PREFERENCE_FIELDS):
-        raise AgentToolError("preference_overrides 只接受资源质量偏好字段")
-    return validate_preference_updates(value) if value else {}
-
-
 def validate_preference_updates(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict) or not arguments or set(arguments) - set(PREFERENCE_FIELDS):
-        raise AgentToolError("媒体偏好字段无效或为空")
+        raise ValueError("媒体偏好字段无效或为空")
     result: dict[str, Any] = {}
     for key, raw in arguments.items():
         if key in _ENUMS:
             value = str(raw or "").strip().casefold()
             if value not in _ENUMS[key]:
-                raise AgentToolError(f"{key} 的取值不受支持")
+                raise ValueError(f"{key} 的取值不受支持")
         elif key in _LIST_LIMITS:
             if not isinstance(raw, list) or len(raw) > _LIST_LIMITS[key]:
-                raise AgentToolError(f"{key} 必须是最多 {_LIST_LIMITS[key]} 项的数组")
+                raise ValueError(f"{key} 必须是最多 {_LIST_LIMITS[key]} 项的数组")
             value = []
             seen: set[str] = set()
             for item in raw:
                 if not isinstance(item, str):
-                    raise AgentToolError(f"{key} 中的匹配词必须是字符串")
+                    raise ValueError(f"{key} 中的匹配词必须是字符串")  # noqa: TRY004 - 偏好字段统一按无效值处理。
                 term = unicodedata.normalize("NFKC", item).strip()
                 if (not term or len(term) > 80 or
                         any(unicodedata.category(char).startswith("C") for char in term)):
-                    raise AgentToolError(f"{key} 中包含无效匹配词")
+                    raise ValueError(f"{key} 中包含无效匹配词")
                 if key in {"preferred_genres", "excluded_genres"} and any(
                     not part.strip() for part in term.split("|")
                 ):
-                    raise AgentToolError(f"{key} 中包含空的同义匹配词")
+                    raise ValueError(f"{key} 中包含空的同义匹配词")
                 if key == "preferred_codecs":
                     term = term.casefold()
                     if term not in _CODECS:
-                        raise AgentToolError("preferred_codecs 仅支持 h264、hevc、av1")
+                        raise ValueError("preferred_codecs 仅支持 h264、hevc、av1")
                 if term.casefold() not in seen:
                     value.append(term)
                     seen.add(term.casefold())
         elif key == "exclude_played":
             if not isinstance(raw, bool):
-                raise AgentToolError("exclude_played 必须是布尔值")
+                raise ValueError("exclude_played 必须是布尔值")
             value = raw
         else:
             maximum = 200 if key == "max_episode_size_gb" else 10
             if (isinstance(raw, bool) or not isinstance(raw, (int, float)) or
                     not 0 <= raw <= maximum or not math.isfinite(raw)):
-                raise AgentToolError(f"{key} 必须是 0 到 {maximum} 的有限数字")
+                raise ValueError(f"{key} 必须是 0 到 {maximum} 的有限数字")
             value = float(raw)
         result[key] = value
     return result
@@ -125,18 +114,11 @@ def effective_preferences(
         if key in preferences:
             try:
                 result.update(validate_preference_updates({key: preferences[key]}))
-            except AgentToolError:
+            except ValueError:
                 pass  # 损坏的存量字段不应中断只读推荐。
     if overrides:
         result.update(validate_preference_updates(overrides))
     return result
-
-
-def owner_media_preferences(owner: str) -> dict[str, Any]:
-    owner = (owner or "").strip()
-    if not owner:
-        return default_media_preferences()
-    return effective_preferences(get_media_preferences(action_history_owner_digest(owner)))
 
 
 def _contains(text: str, term: str) -> bool:

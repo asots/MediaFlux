@@ -45,7 +45,6 @@ from app.agent.domains.subscriptions.policy import (
     prepare_set_media_subscription_policy,
     set_media_subscription_policy_confirmed,
 )
-from app.agent.domains.subscriptions.preference_policy import PREFERENCE_PROPERTIES
 from app.agent.domains.subscriptions.queries import (
     get_media_subscription_summary,
     inspect_media_subscription_updates,
@@ -106,6 +105,7 @@ from app.agent.models import (
     ToolSpec,
 )
 from app.agent.provider_operations import RECENT_MEDIA_PROPERTIES
+from app.modules.media_preferences import PREFERENCE_PROPERTIES
 
 
 def register_specs(registry) -> None:

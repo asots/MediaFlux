@@ -439,7 +439,7 @@ class AgentKernelResourceIngestTests(unittest.IsolatedAsyncioTestCase):
         from app.agent.domains.resources.candidate_context import (
             attach_resource_candidate_reference,
         )
-        from app.agent.domains.resources.recommendation import rank_episode_search
+        from app.modules.episode_resource_ranking import rank_episode_search
         items = [{"result_id": f"review-resource-{number:04d}", "title": f"理想禁区 {number:02d} 黑历史 1080P",
                   "site_id": "mikan", "site_name": "Mikan", "download_state": "ready", "download_kinds": ["magnet"]}
                  for number in range(1, 12)]

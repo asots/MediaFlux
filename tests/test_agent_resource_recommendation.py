@@ -1,12 +1,17 @@
 """缺集资源确定性排序与只读推荐测试。"""
 from __future__ import annotations
-from typing import Any
 
+import ast
 import copy
+import subprocess
+import sys
+import textwrap
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
 
-from app.agent.domains.resources.recommendation import rank_episode_search
+from app.modules.episode_resource_ranking import rank_episode_search
 
 
 def _item(
@@ -31,6 +36,52 @@ def _item(
 
 
 class ResourceRecommendationTests(unittest.TestCase):
+    def test_subscriptions_and_agent_use_one_business_ranking(self):
+        from app.agent.domains.library import episode_resource_actions
+        from app.modules import media_subscriptions
+
+        self.assertIs(media_subscriptions.rank_episode_search, rank_episode_search)
+        self.assertIs(episode_resource_actions.rank_episode_search, rank_episode_search)
+        self.assertEqual(rank_episode_search.__module__, "app.modules.episode_resource_ranking")
+        root = Path(__file__).resolve().parents[1]
+        self.assertFalse((root / "app/agent/domains/resources/recommendation.py").exists())
+        self.assertFalse((root / "app/agent/domains/subscriptions/preference_policy.py").exists())
+
+    def test_shared_ranking_and_preferences_load_without_agent_domains(self):
+        root = Path(__file__).resolve().parents[1]
+        for filename in ("episode_resource_ranking.py", "media_preferences.py"):
+            tree = ast.parse((root / "app/modules" / filename).read_text())
+            imports = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+            imports += [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
+            self.assertFalse(any(name and name.startswith("app.agent") for name in imports))
+        script = textwrap.dedent('''
+            import tests
+            import importlib.abc
+            import sys
+            from unittest.mock import patch
+
+            blocked = ("app.agent.domains", "app.agent.kernel")
+
+            class NoAgentDomainImports(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if any(fullname == name or fullname.startswith(name + ".") for name in blocked):
+                        raise AssertionError(f"业务排序反向依赖 Agent 领域/内核: {fullname}")
+
+            sys.meta_path.insert(0, NoAgentDomainImports())
+            with patch("socket.socket.connect", side_effect=AssertionError("禁止真实外联")):
+                from app.modules.episode_resource_ranking import rank_episode_search
+                from app.modules.media_preferences import effective_preferences
+                assert rank_episode_search({"items": []}, season=1, episode=1)["items"] == []
+                assert effective_preferences({"minimum_resolution": "bad"})["minimum_resolution"] == "any"
+            assert not any(name == prefix or name.startswith(prefix + ".")
+                           for name in sys.modules for prefix in blocked)
+        ''')
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_claimed_finished_pack_cannot_cover_episodes_not_yet_aired(self):
         as_of = date(2026, 10, 16)
         context = {

@@ -113,7 +113,7 @@ def _season_result(*candidates: dict) -> ToolResult:
 
 class RecentResourceCandidateStoreTests(unittest.TestCase):
     def test_review_search_freezes_all_numbered_candidates_not_only_top_four(self):
-        from app.agent.domains.resources.recommendation import rank_episode_search
+        from app.modules.episode_resource_ranking import rank_episode_search
         items = [dict(result_id=f"review-resource-{number:04d}", title=f"理想禁区 {number:02d} 黑历史 1080P",
                       site_id="mikan", site_name="Mikan", download_state="ready", download_kinds=["magnet"])
                  for number in range(1, 12)]

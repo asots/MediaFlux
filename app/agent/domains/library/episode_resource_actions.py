@@ -23,19 +23,19 @@ from app.agent.domains.resources.indexer_actions import (
 from app.agent.domains.resources.indexer_actions import (
     search_arguments as indexer_search_arguments,
 )
-from app.agent.domains.resources.recommendation import (
-    episode_search_model_data,
-    matched_episode_items,
-    rank_episode_search,
-)
-from app.agent.domains.subscriptions.preference_policy import (
-    validate_resource_preference_overrides,
-)
 from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolContext, ToolResult
 from app.indexers.models import IndexerItem, IndexerMediaSearchRequest
 from app.indexers.ranking import rank_item
 from app.indexers.runtime import get_indexer_service
+from app.modules.episode_resource_ranking import (
+    matched_episode_items,
+    rank_episode_search,
+)
+from app.modules.media_preferences import (
+    RESOURCE_PREFERENCE_FIELDS,
+    validate_preference_updates,
+)
 
 DEFAULT_MISSING_SEASON_EPISODES = 20
 MAX_MISSING_SEASON_EPISODES = 100
@@ -78,6 +78,24 @@ def _optional_visible_text(value: Any, *, name: str, maximum: int) -> str:
     if value in (None, ""):
         return ""
     return _visible_text(value, name=name, maximum=maximum)
+
+
+def validate_resource_preference_overrides(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) - set(RESOURCE_PREFERENCE_FIELDS):
+        raise AgentToolError("preference_overrides 只接受资源质量偏好字段")
+    try:
+        return validate_preference_updates(value) if value else {}
+    except ValueError as exc:
+        raise AgentToolError(str(exc)) from exc
+
+
+def episode_search_model_data(search_data: dict[str, Any]) -> dict[str, Any]:
+    """默认只回答目标集是否有匹配；完整研究数据和未核验候选由原快照保留。"""
+    items = matched_episode_items(search_data)
+    recommendation = {**search_data["recommendation"], "candidate_count": len(items)}
+    if not items:
+        recommendation["status"] = "empty"
+    return {**search_data, "items": items, "recommendation": recommendation}
 
 
 def missing_episode_resource_arguments(arguments: dict[str, Any]) -> dict[str, Any]:

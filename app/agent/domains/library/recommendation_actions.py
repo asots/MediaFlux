@@ -6,8 +6,10 @@ import math
 import unicodedata
 from typing import Any
 
-from app.agent.domains.subscriptions.consumption_actions import select_media_profile
-from app.agent.domains.subscriptions.preference_policy import owner_media_preferences
+from app.agent.domains.subscriptions.consumption_actions import (
+    owner_media_preferences,
+    select_media_profile,
+)
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext, ToolResult
 from app.agent.provider_actions import get_provider_gateway

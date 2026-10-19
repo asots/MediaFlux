@@ -10,15 +10,16 @@ from datetime import datetime
 from typing import Any
 
 from app.agent.action_history import action_history_owner_digest
-from app.agent.domains.subscriptions.preference_policy import (
-    PREFERENCE_FIELDS,
-    validate_preference_updates,
-)
 from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolContext, ToolResult
 from app.agent.provider_actions import get_provider_gateway
 from app.agent.provider_models import ProviderGatewayError
 from app.agent.public_safety import sanitize_public_text
+from app.modules.media_preferences import (
+    PREFERENCE_FIELDS,
+    effective_preferences,
+    validate_preference_updates,
+)
 from app.modules.media_server_profiles import list_configured_profiles
 from app.repositories.media_experience import (
     clear_media_preferences,
@@ -150,8 +151,18 @@ def recently_added_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def owner_media_preferences(owner: str) -> dict[str, Any]:
+    owner = (owner or "").strip()
+    if not owner:
+        return default_media_preferences()
+    return effective_preferences(get_media_preferences(action_history_owner_digest(owner)))
+
+
 def preferences_update_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    return validate_preference_updates(arguments)
+    try:
+        return validate_preference_updates(arguments)
+    except ValueError as exc:
+        raise AgentToolError(str(exc)) from exc
 
 
 def notification_rule_arguments(arguments: dict[str, Any]) -> dict[str, int]:

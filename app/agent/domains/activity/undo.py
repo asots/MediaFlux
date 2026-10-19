@@ -81,7 +81,7 @@ def attach_undo_receipt(
     # 必须校验原操作在提交事务中得到的写后状态，不能把晚到的新状态
     # 当成本次操作的状态冻结，否则 A→B→C 会被撤销 B 的凭证覆盖为 A。
     from app.agent.domains.subscriptions.consumption_actions import _fingerprint
-    from app.agent.domains.subscriptions.preference_policy import PREFERENCE_FIELDS
+    from app.modules.media_preferences import PREFERENCE_FIELDS
 
     after = result.effect_metadata.get("compensation_after")
     if not isinstance(after, dict):

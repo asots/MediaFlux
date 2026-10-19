@@ -1,10 +1,10 @@
 """结构化偏好的确认、持久化、单次覆盖与真实推荐消费。"""
 from __future__ import annotations
-from typing import Any
 
 import json
 import sqlite3
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -15,22 +15,23 @@ from app.agent.domains.library.recommendation_actions import (
     get_library_recommendations,
     library_recommendation_arguments,
 )
-from app.agent.domains.resources.recommendation import rank_episode_search
 from app.agent.domains.subscriptions.consumption_actions import (
     clear_preferences_confirmed,
     get_preferences,
+    owner_media_preferences,
     preferences_update_arguments,
     prepare_clear_preferences,
     prepare_set_preferences,
     set_preferences_confirmed,
 )
-from app.agent.domains.subscriptions.preference_policy import (
-    effective_preferences,
-    owner_media_preferences,
-    resource_preference_match,
-)
 from app.agent.errors import AgentToolError
 from app.agent.models import ToolContext, ToolResult
+from app.modules.episode_resource_ranking import rank_episode_search
+from app.modules.media_preferences import (
+    effective_preferences,
+    resource_preference_match,
+    validate_preference_updates,
+)
 from app.modules.media_server_profiles import MediaServerProfile
 from app.modules.share_transfer import ShareTransferPreviewStore
 from app.repositories.media_experience import (
@@ -143,8 +144,13 @@ def test_preference_confirmation_detects_changed_args(preference_db):
     {"preferred_genres": ["喜剧|"]},
 ])
 def test_preference_validation_is_bounded(updates):
-    with pytest.raises(AgentToolError):
+    with pytest.raises(ValueError) as domain_error:
+        validate_preference_updates(updates)
+    assert type(domain_error.value) is ValueError
+    with pytest.raises(AgentToolError) as agent_error:
         preferences_update_arguments(updates)
+    assert agent_error.value.code == "invalid_tool_call"
+    assert agent_error.value.safe_message == str(domain_error.value)
 
 
 def test_defaults_not_mutable_and_corrupt_storage_has_safe_defaults(preference_db):

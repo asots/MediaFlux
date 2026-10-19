@@ -48,10 +48,7 @@ from app.agent.domains.shared_arguments import (
     _library_episode_audit_arguments,
     _library_update_arguments,
 )
-from app.agent.domains.subscriptions.preference_policy import (
-    RESOURCE_PREFERENCE_PROPERTIES,
-    owner_media_preferences,
-)
+from app.agent.domains.subscriptions.consumption_actions import owner_media_preferences
 from app.agent.domains.system.jobs_actions import (
     prepare_start_episode_audit,
     start_episode_audit_arguments,
@@ -61,6 +58,7 @@ from app.agent.models import (
     RiskLevel,
     ToolSpec,
 )
+from app.modules.media_preferences import RESOURCE_PREFERENCE_PROPERTIES
 
 
 def register_specs(registry, *, missing_media_runtime) -> None:
