@@ -463,7 +463,8 @@ def test_failed_effect_quota_cold_resume_preserves_private_source_and_original_r
     assert_private(case, scripts, state)
 
 
-def test_cancelled_failed_effect_quota_wait_never_restores_source_or_replays_write(background_case):
+@pytest.mark.parametrize("cancel_entry", ["request", "session"])
+def test_cancelled_failed_effect_quota_wait_never_restores_source_or_replays_write(background_case, cancel_entry):
     case, _source, observed, prepared, client = background_case
     scripts = []
 
@@ -481,16 +482,17 @@ def test_cancelled_failed_effect_quota_wait_never_restores_source_or_replays_wri
         stale_candidate = candidates[0]
         session, unused = rebuild(case, ["read", "finish"], "cancelled")
         scripts.append(unused)
-        # request cancel 只针对运行中的普通 publication；确认续行的持久取消
-        # 使用真实会话 stop 入口，不能把 cancel=False 当作已经取消。
-        assert not await session.cancel(owner=case.owner, session_id=case.sid,
+        # 两个公开入口都必须持久撤销续行，不能只取消本地消费者。
+        if cancel_entry == "request":
+            assert await session.cancel(owner=case.owner, session_id=case.sid,
                                         request_id=record["source_request_id"])
-        stopped = await stop_agent_session(
-            SimpleNamespace(store=case.store, session=session), case.owner, case.sid,
-        )
-        assert stopped["cancelled_continuations"] == [plan_id]
-        assert stopped["status"] == "stopped" and stopped["stopped"] is True
-        assert stopped["background_tasks"] == [], "失败 worker 已终态，不是被 stop 再执行/取消"
+        else:
+            stopped = await stop_agent_session(
+                SimpleNamespace(store=case.store, session=session), case.owner, case.sid,
+            )
+            assert stopped["cancelled_continuations"] == [plan_id]
+            assert stopped["status"] == "stopped" and stopped["stopped"] is True
+            assert stopped["background_tasks"] == [], "失败 worker 已终态，不是被 stop 再执行/取消"
         cancelled = await case.cold_store().load(owner=case.owner, session_id=case.sid)
         saved = cancelled.metadata["effect_waits"][plan_id]["continuation"]
         assert saved["state"] == "cancelled" and saved["terminal_reason"] == "cancelled"
