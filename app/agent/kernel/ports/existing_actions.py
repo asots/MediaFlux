@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
 from typing import Any
 
+from app import config, database as db
 from app.agent.confirmation_contract import build_confirmation_contract
 from app.agent.domain_tool_metadata import (
     DOMAIN_ALIASES,
@@ -27,8 +29,11 @@ from app.agent.effect_completion import wait_for_effect_completion
 from app.agent.errors import AgentToolError, ToolPipelineError
 from app.agent.feature_gate import (
     AgentRuntimeDisabled,
+    RuntimeFenceError,
     agent_runtime_admission,
-    current_agent_runtime_generation,
+    agent_runtime_transition,
+    read_runtime_fence,
+    require_runtime_fence,
 )
 from app.agent.kernel.tool_calls import ToolCallContext
 from app.agent.models import RiskLevel, ToolContext, ToolResult, ToolSpec
@@ -53,29 +58,24 @@ def _production_owner_kind(owner: object) -> str:
     return ""
 
 
-def _bind_runtime_snapshot(fingerprint: str, context: ToolCallContext) -> str:
-    if not _production_owner_kind(context.owner):
-        return fingerprint
-    return f"mfkr1:{current_agent_runtime_generation()}:{fingerprint}"
-
-
-def _split_runtime_snapshot(
-    fingerprint: str,
-    context: ToolCallContext,
-) -> tuple[int | None, str]:
-    if not _production_owner_kind(context.owner):
-        return None, fingerprint
-    prefix, separator, remainder = (fingerprint or "").partition(":")
-    generation_text, separator2, domain_fingerprint = remainder.partition(":")
-    if prefix != "mfkr1" or not separator or not separator2:
-        raise ToolPipelineError("确认计划缺少运行态快照", code="confirmation_invalid")
-    try:
-        generation = int(generation_text)
-    except (TypeError, ValueError) as exc:
-        raise ToolPipelineError(
-            "确认计划运行态快照无效", code="confirmation_invalid"
-        ) from exc
-    return generation, domain_fingerprint
+@contextmanager
+def _confirmation_runtime(context: ToolCallContext):
+    """预检与执行使用同一持久身份；配置发布不能穿过确认执行边界。"""
+    owner_kind = _production_owner_kind(context.owner)
+    if not owner_kind:
+        yield ""
+        return
+    with agent_runtime_transition(), config.runtime_config_read_guard():
+        snapshot = config.capture_runtime_config_snapshot()
+        with db.get_conn() as conn:
+            fence = read_runtime_fence(conn)
+            require_runtime_fence(conn, fence)
+        if fence.config_digest != snapshot.config_digest:
+            raise RuntimeFenceError("runtime_snapshot_mismatch")
+        with config.use_runtime_config_snapshot(snapshot), agent_runtime_admission(require_telegram=owner_kind == "telegram"):
+            if owner_kind == "telegram" and not telegram_owner_route_is_currently_authorized(context.owner):
+                raise AgentRuntimeDisabled("Telegram Agent 授权已变化")
+            yield f"mfkr2:{fence.incarnation}:{fence.epoch}:{snapshot.effective_digest}:"
 
 
 def _kernel_context(context: ToolCallContext, *, tool: str = "") -> ToolContext:
@@ -254,9 +254,13 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
                 "领域能力不支持预检", code="confirmation_not_supported"
             )
         try:
-            result, fingerprint = handler(arguments, _kernel_context(context))
+            with _confirmation_runtime(context) as runtime_prefix:
+                result, fingerprint = handler(arguments, _kernel_context(context))
+                fingerprint = runtime_prefix + (fingerprint or "")
         except ToolPipelineError:
             raise
+        except (AgentRuntimeDisabled, RuntimeFenceError) as exc:
+            raise ToolPipelineError("Media Agent 授权或运行状态已变化", code="agent_disabled") from exc
         except Exception as exc:
             raise _safe_error(exc, fallback_code="precondition_failed") from exc
         checked = _assert_success(result, code="precondition_failed")
@@ -269,9 +273,7 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
         )
         return PreparedEffect(
             preview=checked.to_dict(),
-            snapshot_fingerprint=_bind_runtime_snapshot(
-                (fingerprint or ""), context
-            ),
+            snapshot_fingerprint=fingerprint,
             metadata={
                 **effect_metadata,
                 "source_kind": spec.source_kind,
@@ -294,31 +296,15 @@ def adapt_tool_spec(spec: ToolSpec) -> KernelToolSpec:
             raise ToolPipelineError(
                 "领域能力不支持确认执行", code="confirmation_not_supported"
             )
-        runtime_generation, domain_snapshot = _split_runtime_snapshot(
-            expected_snapshot, context
-        )
-        owner_kind = _production_owner_kind(context.owner)
         try:
-            if owner_kind:
-                with agent_runtime_admission(
-                    require_telegram=owner_kind == "telegram",
-                    expected_generation=runtime_generation,
-                ):
-                    if (
-                        owner_kind == "telegram"
-                        and not telegram_owner_route_is_currently_authorized(
-                            context.owner
-                        )
-                    ):
-                        raise AgentRuntimeDisabled("Telegram Agent 授权已变化")
-                    result = handler(
-                        arguments, domain_snapshot, _kernel_context(context, tool=spec.name)
-                    )
-            else:
+            with _confirmation_runtime(context) as runtime_prefix:
+                if not expected_snapshot.startswith(runtime_prefix):
+                    raise ToolPipelineError("确认时的配置已变化，请重新预检", code="confirmation_stale")
+                domain_snapshot = expected_snapshot.removeprefix(runtime_prefix)
                 result = handler(arguments, domain_snapshot, _kernel_context(context, tool=spec.name))
         except ToolPipelineError:
             raise
-        except AgentRuntimeDisabled as exc:
+        except (AgentRuntimeDisabled, RuntimeFenceError) as exc:
             raise ToolPipelineError(
                 "Media Agent 授权或运行状态已变化", code="agent_disabled"
             ) from exc

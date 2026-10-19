@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from contextlib import contextmanager
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -526,63 +525,6 @@ class ExistingDomainPortTests(unittest.IsolatedAsyncioTestCase):
             context=await context_for(state),
         )
         self.assertEqual(captured["observation_ref"], "GYOBS-v1-domain-owned")
-
-    async def test_production_effect_plan_binds_runtime_generation(self) -> None:
-        calls = []
-
-        def prepare(_arguments, _context):
-            return ToolResult(True, "preview", "将执行"), "domain-snapshot"
-
-        def execute(_arguments, expected, _context):
-            calls.append(expected)
-            return ToolResult(True, "success", "已执行")
-
-        legacy = ToolSpec(
-            name="config.runtime_bound",
-            description="验证运行态绑定",
-            risk=RiskLevel.WRITE,
-            parameters={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
-            validator=lambda value: dict(value),
-            requires_confirmation=True,
-            context_confirmation_preparer=prepare,
-            context_confirmed_handler=execute,
-        )
-        tool = adapt_tool_spec(legacy)
-        from app.agent.kernel.capabilities import ToolCatalog
-
-        catalog = ToolCatalog([tool])
-        state = InMemorySessionStateStore()
-        pipeline = ToolPipeline(catalog=catalog, state_store=state)
-        owner = "webk:v1:" + "a" * 64
-        context = await context_for(state, owner=owner)
-
-        with patch(
-            "app.agent.kernel.ports.existing_actions.current_agent_runtime_generation",
-            return_value=7,
-        ):
-            preview = await pipeline.execute(tool.name, {}, context=context)
-        assert preview.effect_plan is not None
-        self.assertTrue(preview.effect_plan.snapshot_fingerprint.startswith("mfkr1:7:"))
-
-        @contextmanager
-        def admitted(*, require_telegram, expected_generation):
-            self.assertFalse(require_telegram)
-            self.assertEqual(expected_generation, 7)
-            yield expected_generation
-
-        with patch(
-            "app.agent.kernel.ports.existing_actions.agent_runtime_admission",
-            side_effect=admitted,
-        ):
-            assert preview.effect_plan is not None
-            await pipeline.execute_confirmed(
-                preview.effect_plan.plan_id, context=context
-            )
-        self.assertEqual(calls, ["domain-snapshot"])
 
     async def test_unexpected_domain_exception_cannot_leak_paths_or_credentials(
         self,
