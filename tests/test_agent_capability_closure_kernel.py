@@ -10,10 +10,10 @@ from app.agent.errors import AgentToolError
 from app.agent.owner_routes import web_kernel_owner
 from app.repositories.media_experience import get_media_preferences
 from tests.agent_kernel_test_harness import KernelDomainTestHarness
-from tests.support import IsolatedDatabaseTestCase
+from tests.support import InitializedWebTestCase
 
 
-class ClosureKernelTests(IsolatedDatabaseTestCase):
+class ClosureKernelTests(InitializedWebTestCase):
     def setUp(self):
         with db.get_conn() as conn:
             conn.execute("DELETE FROM agent_compensations")
