@@ -331,8 +331,9 @@ def execute_undo(
             "回退最近操作", public["title"] or "Agent 回退", operation
         )
         if not accepted.get("ok"):
+            # 执行器明确没有派发 callback；它与写入后结果未知是两种状态。
+            receipts.release_unaccepted(payload["receipt_id"], digest)
             service.close()
-            receipts.finish(payload["receipt_id"], digest, completed=False)
             return ToolResult(
                 False,
                 "busy",

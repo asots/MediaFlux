@@ -230,3 +230,150 @@ class ActionUndoTests(IsolatedDatabaseTestCase):
             callbacks[0]()
             client.revert_latest.assert_called_once_with(1, "undo-organize-receipt", 1)
             client.close.assert_called_once()
+
+    def test_busy_organize_can_reinspect_and_retry_same_receipt_exactly_once(self):
+        from unittest.mock import Mock, patch
+
+        from app.modules.organize_tasks import OrganizeTaskManager
+        from app.repositories import agent_compensations as receipts
+
+        public = {"title": "示例", "version": 1, "changes": [], "affected": 1}
+        selection = {"activity_selection": {"items": [{"kind": "organize", "id": 1}]}}
+        manager = OrganizeTaskManager()
+        self.addCleanup(manager.shutdown, timeout=2)
+        unused, worker_client = Mock(), Mock()
+        worker_client.revert_latest.return_value = {"success": True}
+        digest = action_history_owner_digest(self.context.owner)
+        with (
+            patch("app.agent.domains.activity.undo._organize_state", return_value=(public, "version-one")),
+            patch("app.modules.organize_correction.OrganizeCorrectionService", side_effect=[unused, worker_client]),
+            patch("app.modules.organize_tasks.get_organize_manager", return_value=manager),
+        ):
+            receipt = inspect_undo(selection, self.context).references[0].value
+            arguments = {"undo_receipt": receipt}
+            _, expected = prepare_undo(arguments, self.context)
+            self.assertTrue(manager._lock.acquire(blocking=False))
+            try:
+                rejected = execute_undo(arguments, expected, self.context)
+            finally:
+                manager._lock.release()
+            self.assertEqual(rejected.status, "busy")
+            unused.revert_latest.assert_not_called()
+            unused.close.assert_called_once()
+            self.assertEqual(receipts.state(receipt["receipt_id"], digest), "available")
+            fresh_receipt = inspect_undo(selection, self.context).references[0].value
+            self.assertEqual(receipt["receipt_id"], fresh_receipt["receipt_id"])
+            _, expected = prepare_undo({"undo_receipt": fresh_receipt}, self.context)
+            accepted = execute_undo({"undo_receipt": fresh_receipt}, expected, self.context)
+            self.assertEqual(accepted.status, "accepted")
+            self.assertTrue(manager.shutdown(timeout=2))
+            worker_client.revert_latest.assert_called_once()
+            worker_client.close.assert_called_once()
+            self.assertEqual(receipts.state(receipt["receipt_id"], digest), "completed")
+            with self.assertRaises(ValueError):
+                prepare_undo(arguments, self.context)
+
+    def test_explicit_organize_admission_rejection_keeps_receipt_available(self):
+        from unittest.mock import Mock, patch
+
+        from app.modules.organize_tasks import OrganizeTaskManager
+        from app.repositories import agent_compensations as receipts
+
+        public = {"title": "示例", "version": 1, "changes": [], "affected": 1}
+        selection = {"activity_selection": {"items": [{"kind": "organize", "id": 1}]}}
+        for rejection in ("shutdown", "thread_start_failed"):
+            with self.subTest(rejection=rejection):
+                context = ToolContext(owner=self.context.owner, session_id=rejection)
+                manager, client = OrganizeTaskManager(), Mock()
+                self.addCleanup(manager.shutdown, timeout=2)
+                if rejection == "shutdown":
+                    manager.begin_shutdown()
+                thread = Mock()
+                thread.start.side_effect = RuntimeError("cannot start")
+                with (
+                    patch("app.agent.domains.activity.undo._organize_state", return_value=(public, "version-one")),
+                    patch("app.modules.organize_correction.OrganizeCorrectionService", return_value=client),
+                    patch("app.modules.organize_tasks.get_organize_manager", return_value=manager),
+                    patch("app.modules.organize_tasks.threading.Thread", return_value=thread),
+                ):
+                    receipt = inspect_undo(selection, context).references[0].value
+                    arguments = {"undo_receipt": receipt}
+                    _, expected = prepare_undo(arguments, context)
+                    result = execute_undo(arguments, expected, context)
+                    self.assertEqual(result.status, "busy")
+                    self.assertEqual(receipts.state(receipt["receipt_id"], action_history_owner_digest(context.owner)), "available")
+                    prepare_undo(arguments, context)
+                client.revert_latest.assert_not_called()
+                client.close.assert_called_once()
+
+    def test_unknown_admission_exception_does_not_release_receipt(self):
+        from unittest.mock import Mock, patch
+
+        from app.repositories import agent_compensations as receipts
+
+        public, arguments, expected = self.organize_receipt()
+        manager = Mock()
+        manager.start_operation.side_effect = RuntimeError("admission response lost")
+        with (
+            patch("app.agent.domains.activity.undo._organize_state", return_value=(public, "version-one")),
+            patch("app.modules.organize_correction.OrganizeCorrectionService"),
+            patch("app.modules.organize_tasks.get_organize_manager", return_value=manager),
+            self.assertRaises(RuntimeError),
+        ):
+            execute_undo(arguments, expected, self.context)
+        self.assertEqual(receipts.state("organize-receipt", action_history_owner_digest(self.context.owner)), "outcome_unknown")
+        with self.assertRaises(ValueError):
+            prepare_undo(arguments, self.context)
+
+    def test_accepted_callback_failure_stays_closed_to_retries(self):
+        from unittest.mock import Mock, patch
+
+        from app.repositories import agent_compensations as receipts
+
+        public = {"title": "示例", "version": 1, "changes": [], "affected": 1}
+        selection = {"activity_selection": {"items": [{"kind": "organize", "id": 1}]}}
+        for raises in (False, True):
+            with self.subTest(raises=raises):
+                context = ToolContext(owner=self.context.owner, session_id=f"failed-{raises}")
+                manager, client, callbacks = Mock(), Mock(), []
+                client.revert_latest.return_value = {"success": False}
+                if raises:
+                    client.revert_latest.side_effect = OSError("write outcome unknown")
+                manager.start_operation.side_effect = lambda _operation, _title, callback: (
+                    callbacks.append(callback) or {"ok": True, "task_id": "private-task"}
+                )
+                with (
+                    patch("app.agent.domains.activity.undo._organize_state", return_value=(public, "version-one")),
+                    patch("app.modules.organize_correction.OrganizeCorrectionService", return_value=client),
+                    patch("app.modules.organize_tasks.get_organize_manager", return_value=manager),
+                ):
+                    receipt = inspect_undo(selection, context).references[0].value
+                    arguments = {"undo_receipt": receipt}
+                    _, expected = prepare_undo(arguments, context)
+                    self.assertEqual(execute_undo(arguments, expected, context).status, "accepted")
+                    if raises:
+                        with self.assertRaises(OSError):
+                            callbacks[0]()
+                    else:
+                        callbacks[0]()
+                    self.assertEqual(receipts.state(receipt["receipt_id"], action_history_owner_digest(context.owner)), "outcome_unknown")
+                    with self.assertRaises(ValueError):
+                        prepare_undo(arguments, context)
+                client.revert_latest.assert_called_once()
+                client.close.assert_called_once()
+
+    def test_unaccepted_release_cannot_reopen_settled_or_other_owner_receipts(self):
+        from app.repositories import agent_compensations as receipts
+
+        digest = action_history_owner_digest(self.context.owner)
+        for completed in (False, True):
+            key = f"settled-{completed}"
+            receipts.create(key, digest)
+            self.assertTrue(receipts.claim(key, digest))
+            self.assertFalse(receipts.claim(key, digest))
+            self.assertFalse(receipts.release_unaccepted(key, "other-owner"))
+            self.assertEqual(receipts.state(key, digest), "executing")
+            receipts.finish(key, digest, completed=completed)
+            self.assertFalse(receipts.release_unaccepted(key, digest))
+            receipts.create(key, digest)
+            self.assertFalse(receipts.claim(key, digest))

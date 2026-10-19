@@ -37,6 +37,16 @@ def claim(key: str, owner_digest: str) -> bool:
         )
 
 
+def release_unaccepted(key: str, owner_digest: str) -> bool:
+    """仅供执行器明确未受理的操作归还占用，不复活任何已结算凭证。"""
+    with db.get_conn() as conn:
+        return conn.execute(
+            "UPDATE agent_compensations SET state='available',updated_at=? "
+            "WHERE receipt_id=? AND owner_digest=? AND state='executing'",
+            (db.now(), key, owner_digest),
+        ).rowcount == 1
+
+
 def finish(key: str, owner_digest: str, *, completed: bool) -> None:
     with db.get_conn() as conn:
         conn.execute(
