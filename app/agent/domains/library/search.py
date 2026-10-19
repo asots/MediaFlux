@@ -20,11 +20,11 @@ from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolResult
 from app.agent.provider_actions import reset_provider_gateway_for_tests
 from app.clients.base import normalize_playback_progress
-from app.services import search_media_servers
+from app.services import media_server_config_key, search_media_servers
 
 _SEARCH_CACHE_TTL_SECONDS = 15
 _SEARCH_CACHE_MAX_ENTRIES = 128
-_search_cache: dict[tuple[str, int, int, str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
+_search_cache: dict[tuple[tuple[str, ...], str, int, int, str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
 _search_cache_lock = threading.Lock()
 
 
@@ -45,7 +45,7 @@ def _search_sources(
     query: str, limit: int, *, offset: int = 0, search_by: str = "title",
     media_type: str = "all", count_only: bool = False,
 ) -> list[dict[str, Any]]:
-    cache_key = (query.casefold(), limit, offset, search_by, media_type, count_only)
+    cache_key = (media_server_config_key(), query.casefold(), limit, offset, search_by, media_type, count_only)
     now = time.monotonic()
     with _search_cache_lock:
         cached = _search_cache.get(cache_key)

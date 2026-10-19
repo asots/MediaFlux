@@ -157,7 +157,7 @@ _dashboard_cache = _MediaSnapshotCache()
 _recent_media_cache = _MediaSnapshotCache()
 
 
-def _dashboard_config_key() -> tuple[str, ...]:
+def media_server_config_key() -> tuple[str, ...]:
     """配置变化自动生成新缓存键，避免返回旧服务器数据。"""
     return (
         get("EMBY_ENABLED"),
@@ -199,7 +199,7 @@ def _load_dashboard(
 ) -> DashboardData:
     """读取一次看板并确定性释放该请求独占的连接池。"""
     try:
-        recent = _recent_media_cache.peek((*_dashboard_config_key(), "72")) if reuse_recent else None
+        recent = _recent_media_cache.peek((*media_server_config_key(), "72")) if reuse_recent else None
         source = next(
             (item for item in recent.data if item["server_type"] == server_type), None,
         ) if recent else None
@@ -308,7 +308,7 @@ def _merge_dashboards(
 def build_dashboards(*, force: bool = False) -> list[DashboardData]:
     """XHR 读取最新看板，同轮请求共享结果；失败不清空仍可用的快照。"""
     return _dashboard_cache.load(
-        _dashboard_config_key(),
+        media_server_config_key(),
         (lambda: _fetch_dashboards(reuse_recent=False)) if force else _fetch_dashboards,
         _merge_dashboards, force=force,
     )
@@ -316,7 +316,7 @@ def build_dashboards(*, force: bool = False) -> list[DashboardData]:
 
 def get_cached_dashboards_or_stubs() -> tuple[list[DashboardData], bool]:
     """页面只读取快照，不访问上游；第二值表示有快照而非仍然新鲜。"""
-    cached = _dashboard_cache.peek(_dashboard_config_key(), stale=True)
+    cached = _dashboard_cache.peek(media_server_config_key(), stale=True)
     if cached:
         expired = cached.expires_at <= time.monotonic()
         return [replace(board, stale=board.stale or expired) for board in cached.data], True
@@ -469,7 +469,7 @@ def _merge_recent_media(sources: list[dict] | None, previous: list[dict]) -> tup
 def build_recent_media(*, limit: int = 72) -> list[dict]:
     normalized_limit = max(1, min((limit or 72), 200))
     return _recent_media_cache.load(
-        (*_dashboard_config_key(), str(normalized_limit)),
+        (*media_server_config_key(), str(normalized_limit)),
         lambda: _fetch_recent_media(limit=normalized_limit), _merge_recent_media,
     )
 
@@ -477,7 +477,7 @@ def build_recent_media(*, limit: int = 72) -> list[dict]:
 def get_cached_recent_media_or_stubs(*, limit: int = 72) -> tuple[list[dict], bool]:
     """与看板使用相同的限龄快照，未加载时只返回服务器标识。"""
     normalized_limit = max(1, min((limit or 72), 200))
-    cached = _recent_media_cache.peek((*_dashboard_config_key(), str(normalized_limit)), stale=True)
+    cached = _recent_media_cache.peek((*media_server_config_key(), str(normalized_limit)), stale=True)
     if cached:
         expired = cached.expires_at <= time.monotonic()
         return [{**source, "stale": source.get("stale", False) or expired} for source in cached.data], True

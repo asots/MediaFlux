@@ -228,7 +228,7 @@ print(json.dumps([boards[0].updated_at, sources[0]['updated_at']]))
         original = services._recent_media_cache.invalidate
         def between_caches(**kwargs):
             original(**kwargs)
-            self.assertIsNone(services._recent_media_cache.peek((*services._dashboard_config_key(), "72")))
+            self.assertIsNone(services._recent_media_cache.peek((*services.media_server_config_key(), "72")))
             services.build_dashboards()
         with patch.object(services._recent_media_cache, "invalidate", side_effect=between_caches):
             services.clear_dashboard_cache(keep_stale=True)

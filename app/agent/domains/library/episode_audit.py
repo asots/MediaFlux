@@ -8,11 +8,12 @@ from copy import deepcopy
 from datetime import date, datetime
 from typing import Any
 
+from app import config
 from app.agent.models import Evidence, ToolResult
 from app.clients.tmdb import TMDBClient, close_tmdb_client
 from app.discovery.models import ProviderError, ProviderNotConfigured
 from app.logger import get_logger
-from app.services import inspect_series_episode_sources
+from app.services import inspect_series_episode_sources, media_server_config_key
 
 logger = get_logger(__name__)
 
@@ -598,6 +599,8 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
 
 def _audit_cache_key(arguments: dict[str, Any]) -> tuple[Any, ...]:
     return (
+        media_server_config_key(),
+        tuple(config.get_many(("TMDB_API_KEY", "TMDB_API_URL", "PROXY_URL")).values()),
         str(arguments.get("query") or "").casefold(),
         str(arguments.get("tmdb_id") or ""),
         str(arguments.get("library_name") or "").casefold(),

@@ -3124,7 +3124,7 @@ class DashboardCacheTests(unittest.TestCase):
 
         board = DashboardData(server_name="Test", online=True)
         with (
-            patch("app.services._dashboard_config_key", return_value=("test",)),
+            patch("app.services.media_server_config_key", return_value=("test",)),
             patch("app.services._fetch_dashboards", return_value=[board]) as fetch,
         ):
             self.assertIs(services.build_dashboards()[0], board)
@@ -3136,7 +3136,7 @@ class DashboardCacheTests(unittest.TestCase):
 
         board = DashboardData(server_name="Cached", server_type="jellyfin", online=True)
         with (
-            patch("app.services._dashboard_config_key", return_value=("test",)),
+            patch("app.services.media_server_config_key", return_value=("test",)),
             patch("app.services._fetch_dashboards", return_value=[board]),
         ):
             services.build_dashboards()
@@ -3154,7 +3154,7 @@ class DashboardCacheTests(unittest.TestCase):
             "EMBY_URL": "http://emby.local:8096",
         }
         with (
-            patch("app.services._dashboard_config_key", return_value=("test",)),
+            patch("app.services.media_server_config_key", return_value=("test",)),
             patch(
                 "app.services.get_bool",
                 side_effect=lambda key, default=False: enabled.get(key, default),
@@ -3178,7 +3178,7 @@ class DashboardCacheTests(unittest.TestCase):
         old = DashboardData(server_name="Old", online=True)
         fresh = DashboardData(server_name="Fresh", online=True)
         with (
-            patch("app.services._dashboard_config_key", return_value=("test",)),
+            patch("app.services.media_server_config_key", return_value=("test",)),
             patch(
                 "app.services._fetch_dashboards", side_effect=[[old], [fresh]]
             ) as fetch,
@@ -3204,7 +3204,7 @@ class DashboardCacheTests(unittest.TestCase):
 
         results = []
         with (
-            patch("app.services._dashboard_config_key", return_value=("test",)),
+            patch("app.services.media_server_config_key", return_value=("test",)),
             patch("app.services._fetch_dashboards", side_effect=fetch),
         ):
             threads = [
