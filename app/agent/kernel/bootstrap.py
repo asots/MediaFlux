@@ -227,6 +227,7 @@ def build_agent_kernel(
 
 
 def get_agent_kernel_runtime() -> AgentKernelRuntime:
+    """读取持久授权并获取运行态；包含阻塞锁/I/O，异步入口须在线程执行。"""
     global _runtime
     # Never acquire the config lock while holding the cache lock.
     with config.runtime_config_read_guard():

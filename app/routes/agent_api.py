@@ -12,6 +12,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app import config
 from app.agent.domains.resources.selection import (
@@ -133,7 +134,7 @@ async def capabilities(request: Request):
     require_api_login(request)
     try:
         _require_enabled()
-        catalog = get_agent_kernel_runtime().session.catalog
+        catalog = (await run_in_threadpool(get_agent_kernel_runtime)).session.catalog
         tools = [
             {"name": tool.name, "domain": tool.domain,
              "description": tool.description, "effect": tool.effect.value}
@@ -167,7 +168,7 @@ async def next_actions(request: Request):
 async def metrics(request: Request):
     require_api_login(request)
     try:
-        return api_response(get_agent_kernel_runtime().metrics.snapshot())
+        return api_response((await run_in_threadpool(get_agent_kernel_runtime)).metrics.snapshot())
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
         return _error(exc)
 
@@ -211,7 +212,7 @@ async def query(request: Request, data: Annotated[Any, Body()] = None):
             initial_read_tool=initial_read_tool,
         )
         envelope.to_agent_input()
-        runtime = get_agent_kernel_runtime()
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
         if initial_read_tool and (not runtime.session.catalog.has(initial_read_tool)
                 or runtime.session.catalog.get(initial_read_tool).effect is not ToolEffect.READ):
             raise AgentToolError("该工作区只读行动当前不可用", code="precondition_failed")
@@ -241,7 +242,7 @@ async def cancel_query(request: Request, data: Annotated[Any, Body()] = None):
         request_id = _request_id(data.get("request_id"))
         if not request_id:
             raise TransportInputError("停止任务必须提供 request_id，不能通配取消当前会话")
-        runtime = get_agent_kernel_runtime()
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
         cancelled = await runtime.web.cancel(
             owner=_owner(),
             session_id=_session_id(data.get("session_id")),
@@ -267,7 +268,8 @@ async def stop_session(request: Request, data: Annotated[Any, Body()] = None):
 
         owner = _owner()
         session_id = _session_id(data.get("session_id"))
-        return api_response(await stop_agent_session(get_agent_kernel_runtime(), owner, session_id))
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
+        return api_response(await stop_agent_session(runtime, owner, session_id))
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
         return _error(exc)
 
@@ -285,7 +287,7 @@ async def explain_action(request: Request, data: Annotated[Any, Body()] = None):
         envelope = ExplainEnvelope(owner=_owner(), session_id=_session_id(data.get("session_id")),
             plan_id=str(data.get("plan_id") or ""), message=data["message"],
             request_id=_request_id(data.get("request_id")), channel="web").normalized()
-        transport = get_agent_kernel_runtime().web
+        transport = (await run_in_threadpool(get_agent_kernel_runtime)).web
         if data.get("stream") is True:
             return StreamingResponse(transport.explain(envelope), media_type="application/x-ndjson",
                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -317,7 +319,7 @@ async def confirm_action(request: Request, data: Annotated[Any, Body()] = None):
             request_id=_request_id(data.get("request_id")),
             channel="web",
         )
-        transport = get_agent_kernel_runtime().web
+        transport = (await run_in_threadpool(get_agent_kernel_runtime)).web
         if data.get("stream") is True:
             return StreamingResponse(
                 transport.confirm(envelope),
@@ -342,7 +344,8 @@ async def edit_confirmation_action(request: Request, data: Annotated[Any, Body()
         _check_rate_limit("confirmation_edit", limit=12)
         envelope = EffectEnvelope(owner=_owner(), session_id=_session_id(data.get("session_id")),
                                   plan_id=str(data.get("plan_id") or ""), request_id=_request_id(data.get("request_id")), channel="web").normalized()
-        result = await get_agent_kernel_runtime().session.edit_confirmation(
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
+        result = await runtime.session.edit_confirmation(
             owner=envelope.owner, session_id=envelope.session_id, plan_id=envelope.plan_id,
             arguments=data["arguments"], request_id=envelope.request_id, channel="web")
         return api_response({"plan": result.effect_plan.public_approval_dict() if result.effect_plan else None,
@@ -371,7 +374,8 @@ async def discard_action(request: Request, data: Annotated[Any, Body()] = None):
             request_id=_request_id(data.get("request_id")),
             channel="web",
         )
-        discarded = await get_agent_kernel_runtime().web.cancel_effect(envelope)
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
+        discarded = await runtime.web.cancel_effect(envelope)
         return api_response({"discarded": discarded})
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
         return _error(exc)
@@ -388,7 +392,8 @@ async def scoped_trust_action(request: Request, data: Annotated[Any, Body()] = N
         _require_enabled()
         _check_rate_limit("scoped_trust", limit=12)
         selected = {key: data[key] for key in ("plan_id", "tool_name", "scope", "ttl_seconds", "max_actions") if key in data}
-        result = await get_agent_kernel_runtime().session.set_scoped_trust(
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
+        result = await runtime.session.set_scoped_trust(
             owner=_owner(), session_id=_session_id(data.get("session_id")),
             request_id=_request_id(data.get("request_id")), operation=data["operation"], **selected)
         return api_response(result)
@@ -404,7 +409,7 @@ async def reset_session(request: Request, data: Annotated[Any, Body()] = None):
     try:
         owner = _owner()
         session_id = _session_id(data.get("session_id"))
-        runtime = get_agent_kernel_runtime()
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
         state = await runtime.lifecycle.reset(owner=owner, session_id=session_id)
         return api_response({"session_id": session_id, "generation": state.generation})
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary
@@ -417,7 +422,8 @@ async def list_sessions(request: Request):
     try:
         owner = _owner()
         draft_scope = _draft_scope(owner)
-        sessions = await get_agent_kernel_runtime().store.list_sessions(owner=owner)
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
+        sessions = await runtime.store.list_sessions(owner=owner)
         response = api_response({
             "sessions": sessions, "draft_scope": draft_scope,
             "scope": "recent_sessions",
@@ -440,7 +446,8 @@ async def patch_session(request: Request, session_id: str, data: Annotated[Any, 
             patch = session_display_patch(data)
         except ValueError as exc:
             raise TransportInputError(str(exc)) from exc
-        summary = await get_agent_kernel_runtime().store.patch_session_display(
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
+        summary = await runtime.store.patch_session_display(
             owner=_owner(), session_id=normalized, patch=patch,
         )
         if summary is None:
@@ -456,7 +463,7 @@ async def get_session(request: Request, session_id: str):
     try:
         normalized = _session_id(session_id)
         observed_request = _request_id(request.headers.get("X-Agent-Request-Id"))
-        runtime = get_agent_kernel_runtime()
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
         owner = _owner()
         draft_scope = _draft_scope(owner)
         activity_before = await runtime.web.activity(owner=owner, session_id=normalized)
@@ -533,7 +540,7 @@ async def delete_session(request: Request, session_id: str):
     try:
         owner = _owner()
         normalized = _session_id(session_id)
-        runtime = get_agent_kernel_runtime()
+        runtime = await run_in_threadpool(get_agent_kernel_runtime)
         deleted = await runtime.lifecycle.delete(owner=owner, session_id=normalized)
         return api_response({"deleted": deleted, "session_id": normalized})
     except Exception as exc:  # noqa: BLE001 - HTTP fault boundary

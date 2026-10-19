@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -69,6 +70,74 @@ def save(values):
     request = Request({"type": "http", "app": SimpleNamespace(state=SimpleNamespace(background_services_enabled=False))})
     with patch.object(api, "require_api_login"):
         assert api.save_config(request, values) == {"success": True}
+
+
+def test_confirmed_restart_does_not_block_concurrent_web_runtime_lookup():
+    from starlette.requests import Request
+
+    from app.agent.domains.playback import proxy_actions
+    from app.agent.kernel.state import InMemorySessionStateStore
+    from app.modules.media_proxy import MediaProxyManager
+    from app.routes import agent_api
+
+    async def scenario():
+        with initialized_web_runtime():
+            config.set_and_save({"AGENT_ENABLED": "1", "AGENT_LLM_API_URL": "http://model.invalid/v1", "AGENT_LLM_MODEL": "test-model"})
+            invalidate_agent_kernel_runtime()
+            current = await asyncio.to_thread(get_agent_kernel_runtime)
+            instance_id = db.add_media_proxy_instance(
+                name="test", server_type="jellyfin", upstream_url="http://proxy.invalid",
+                api_key="test-key", listen_host="127.0.0.1", listen_port=19001,
+                local_root="/media", enabled=1,
+            )
+            loop = asyncio.get_running_loop()
+            # 模拟繁忙的业务执行器：确认占用一条线程，反代还需在线程读取实例。
+            loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+            manager = MediaProxyManager()
+            manager._loop = loop
+            restart_started = asyncio.Event()
+            lookup_started = asyncio.Event()
+            restarted = []
+
+            async def restart(selected):
+                restart_started.set()
+                await lookup_started.wait()
+                assert await asyncio.to_thread(db.get_media_proxy_instance, selected) is not None
+                restarted.append(selected)
+                return {"restarted": True}
+
+            def lookup():
+                loop.call_soon_threadsafe(lookup_started.set)
+                return get_agent_kernel_runtime()
+
+            context = await context_for(InMemorySessionStateStore(), owner=OWNER)
+            tool = current.session.catalog.get("media_proxy.restart_instance")
+            assert tool.prepare is not None and tool.execute_confirmed is not None
+            args = {"instance_number": 1}
+            prepared = await asyncio.to_thread(tool.prepare, args, context)
+            try:
+                with (
+                    patch.object(proxy_actions, "get_media_proxy_manager", return_value=manager),
+                    patch.object(proxy_actions, "_MEDIA_PROXY_RESTART_WAIT_SECONDS", 1.0),
+                    patch.object(manager, "restart_instance", side_effect=restart),
+                    patch.object(agent_api, "get_agent_kernel_runtime", side_effect=lookup),
+                    patch.object(agent_api, "require_api_login"),
+                    patch.object(agent_api, "_owner", return_value=OWNER),
+                    patch.object(agent_api, "_draft_scope", return_value="test-scope"),
+                ):
+                    execution = asyncio.create_task(asyncio.to_thread(
+                        tool.execute_confirmed, args, prepared.snapshot_fingerprint, context,
+                    ))
+                    await asyncio.wait_for(restart_started.wait(), timeout=5)
+                    response = await agent_api.list_sessions(Request({"type": "http"}))
+                    result = await execution
+                assert response.status_code == 200
+                assert result.status == "completed"
+                assert restarted == [instance_id]
+            finally:
+                invalidate_agent_kernel_runtime()
+
+    asyncio.run(scenario())
 
 
 def cold_confirm(paths, plan_id):
