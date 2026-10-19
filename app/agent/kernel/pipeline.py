@@ -7,8 +7,9 @@ import json
 import re
 import time
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import replace
+from functools import partial
 from typing import Any, Protocol
 
 from app.agent.errors import (
@@ -23,7 +24,6 @@ from app.agent.kernel.session_state import PendingEffectGuard, SessionState
 from app.agent.kernel.state_ports import SessionStateStore
 from app.agent.kernel.state_types import (
     PublicationLease,
-    SessionBusyError,
     StalePublicationError,
     StateUpdate,
     _ConfirmationClaim,
@@ -54,7 +54,7 @@ from .invocation import invoke
 from .projection import DefaultProjector, ReferenceValue, ToolOutcome
 from .references import InMemoryReferenceStore, ReferenceError, ReferenceStore
 from .scoped_trust import ScopedTrustPolicy
-from .session_guard import session_scope_guard
+from .session_guard import _CancelledWorkerResult, guarded_state_call, session_scope_guard
 from .task_state import TaskPatch, observation_patch, read_observations, task_tool
 from .tool_calls import PipelineResult, ToolCallContext
 
@@ -373,13 +373,13 @@ class ToolPipeline:
         """预览发布失败时撤销已冻结票据并释放领域预占状态。"""
         cancelled: EffectPlan | None = None
         try:
-            cancelled = await asyncio.to_thread(
+            cancelled = await guarded_state_call(context.owner, context.session_id, partial(
                 self.effect_store.cancel,
                 owner=context.owner,
                 session_id=context.session_id,
                 generation=context.lease.generation,
                 plan_id=plan.plan_id,
-            )
+            ), complete_on_cancel=True)
         except Exception:  # noqa: BLE001 - 原始发布失败仍是主错误
             cancelled = None
         if cancelled is not None:
@@ -589,20 +589,21 @@ class ToolPipeline:
         if prepare_only:
             return PipelineResult(tool=tool, arguments=normalized, prepared_effect=prepared_value,
                                   outcome=self.projector.project(prepared_value.preview))
-        try:
-            with session_scope_guard(context.owner, context.session_id):
+        with ExitStack() as scope:
+            plan: EffectPlan | None = None
+            try:
+                scope.enter_context(session_scope_guard(context.owner, context.session_id))
                 if not await self.state_store.is_current(context.lease):
-                    self._notify_effect("prepare_failed", prepared=prepared_value, context=context)
                     raise StalePublicationError("turn lost publication authority")
+                preview_outcome = await self._materialize_refs(
+                    self.projector.project(prepared_value.preview), context=context
+                )
                 try:
-                    preview_outcome = await self._materialize_refs(
-                        self.projector.project(prepared_value.preview), context=context
+                    deadline = await self._reference_deadline(
+                        [normalized, prepared_value.arguments], owner=context.owner, session_id=context.session_id,
                     )
                     try:
-                        deadline = await self._reference_deadline(
-                            [normalized, prepared_value.arguments], owner=context.owner, session_id=context.session_id,
-                        )
-                        plan = await asyncio.to_thread(
+                        plan = await guarded_state_call(context.owner, context.session_id, partial(
                             self.effect_store.freeze,
                             owner=context.owner,
                             session_id=context.session_id,
@@ -613,35 +614,28 @@ class ToolPipeline:
                             prepared=prepared_value,
                             public_result=preview_outcome.public_content,
                             deadline=deadline,
-                        )
-                    except ReferenceError as exc:
-                        raise ToolPipelineError("输入引用在预检期间已失效，本次未执行；请重新观察并预检",
-                                                code="reference_invalid") from exc
-                    except AgentToolError as exc:
-                        raise ToolPipelineError(str(exc), code=exc.code) from exc
-                except BaseException:
-                    self._notify_effect("prepare_failed", prepared=prepared_value, context=context)
-                    raise
-                try:
-                    updates = tuple(preview_outcome.state_updates) + (
-                        _PendingEffectTransition(
-                            "pending_effect_plan_id", plan.plan_id, plan_generation=plan.generation,
-                            goal=({"role": "user", "content": context.user_source,
-                                   **({"reply_context": dict(context.user_reply_context)} if context.user_reply_context else {})}
-                                  if context.user_source else {}),
-                        ),
-                    )
-                    if self.selection is not None:
-                        updates += self.selection.plan_updates(tool, raw_arguments, plan)
-                    outcome = replace(preview_outcome, state_updates=updates, effect_plan=plan)
-                    await self._commit_updates(context.lease, updates)
-                except BaseException:
-                    await self._discard_frozen_effect(
-                        plan=plan,
-                        prepared=prepared_value,
-                        context=context,
-                    )
-                    raise
+                        ))
+                    except _CancelledWorkerResult as exc:
+                        plan = exc.result
+                        raise
+                except ReferenceError as exc:
+                    raise ToolPipelineError("输入引用在预检期间已失效，本次未执行；请重新观察并预检",
+                                            code="reference_invalid") from exc
+                except AgentToolError as exc:
+                    raise ToolPipelineError(str(exc), code=exc.code) from exc
+                assert plan is not None
+                updates = tuple(preview_outcome.state_updates) + (
+                    _PendingEffectTransition(
+                        "pending_effect_plan_id", plan.plan_id, plan_generation=plan.generation,
+                        goal=({"role": "user", "content": context.user_source,
+                               **({"reply_context": dict(context.user_reply_context)} if context.user_reply_context else {})}
+                              if context.user_source else {}),
+                    ),
+                )
+                if self.selection is not None:
+                    updates += self.selection.plan_updates(tool, raw_arguments, plan)
+                outcome = replace(preview_outcome, state_updates=updates, effect_plan=plan)
+                await self._commit_updates(context.lease, updates)
                 error_repair.bind_plan(tool, raw_arguments, context, plan.plan_id)
                 return PipelineResult(
                     tool=tool,
@@ -650,9 +644,12 @@ class ToolPipeline:
                     effect_plan=plan,
                     elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
                 )
-        except SessionBusyError:
-            self._notify_effect("prepare_failed", prepared=prepared_value, context=context)
-            raise
+            except BaseException:
+                if plan is None:
+                    self._notify_effect("prepare_failed", prepared=prepared_value, context=context)
+                else:
+                    await self._discard_frozen_effect(plan=plan, prepared=prepared_value, context=context)
+                raise
 
 
     @staticmethod

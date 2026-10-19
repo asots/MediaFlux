@@ -195,6 +195,14 @@ async def session_io(call: Callable[..., Any], *args: Any) -> Any:
     return await asyncio.to_thread(call, *args)
 
 
+class _CancelledWorkerResult(asyncio.CancelledError):
+    """调用方取消后工作项仍正常返回，保留实际结果供持锁精确清理。"""
+
+    def __init__(self, result: Any) -> None:
+        super().__init__()
+        self.result = result
+
+
 async def _run_worker(call: Callable[..., Any], args: tuple[Any, ...], complete_on_cancel: bool) -> Any:
     # 使用 executor Future 而非额外 Task：事件循环 shutdown 的全 Task
     # 取消不能把仍在执行的同步线程误判为结束，进而提前释放会话文件锁。
@@ -212,5 +220,5 @@ async def _run_worker(call: Callable[..., Any], args: tuple[Any, ...], complete_
                 result = operation.result()  # 工作项自身取消/失败必须传播，不能反复 await。
                 break
     if cancelled and not complete_on_cancel:
-        raise asyncio.CancelledError
+        raise _CancelledWorkerResult(result)
     return result

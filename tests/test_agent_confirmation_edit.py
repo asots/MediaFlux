@@ -368,28 +368,57 @@ def test_second_card_created_by_confirmed_continuation_is_editable_under_origina
     asyncio.run(run())
 
 
-def test_edit_rejects_live_confirmation_continuation_even_with_finished_query_marker(rig):
+def test_edit_rejects_live_confirmation_tail_until_current_execution_finishes(rig):
     from app.agent.kernel.capabilities import CapabilityRetriever
+    from app.agent.kernel.events import AgentEventType as E
+    from app.agent.kernel.model import ModelEvent, ModelToolCall
+    from app.agent.kernel.model import ModelEventType as M
     from app.agent.kernel.session import AgentSession
-    from app.agent.kernel.state_types import (
-        PublicationLease,
-        SessionBusyError,
-        _PublicationFinished,
-    )
-    from tests.test_agent_kernel_core import ScriptedModel
+    from app.agent.kernel.state_types import AgentInput, SessionBusyError
+    from tests.test_agent_kernel_core import ScriptedModel, collect
+
+    def call(label):
+        return [ModelEvent(M.TOOL_CALL_COMPLETED, tool_call=ModelToolCall(label, rig.tool.name,
+                    {"label": label, "object_id": "opaque-object-7", "signature": "credential-signed-original"})),
+                ModelEvent(M.FINISH, finish_reason="tool_calls")]
+
+    session = AgentSession(model=ScriptedModel([call("A"), call("B")]), catalog=rig.pipeline.catalog,
+        retriever=CapabilityRetriever(), pipeline=rig.pipeline, state_store=rig.store, journal=rig.store)
 
     async def run():
-        context = await rig.context()
-        plan = (await rig.preview(context)).effect_plan
-        await rig.store.commit(context.lease, updates=(_PublicationFinished("", None),))
-        assert (await rig.store.load(owner=OWNER, session_id=SESSION)).metadata["active_publication"]["status"] == "finished"
-        session = AgentSession(model=ScriptedModel([]), catalog=rig.pipeline.catalog, retriever=CapabilityRetriever(),
-                               pipeline=rig.pipeline, state_store=rig.store)
-        continuation = PublicationLease(OWNER, SESSION, context.lease.generation, "still-running-confirmation", "continue")
-        token = await session.coordinator.begin(continuation, protected=False)
-        with pytest.raises(SessionBusyError):
-            await session.edit_confirmation(owner=OWNER, session_id=SESSION, plan_id=plan.plan_id, arguments={"label": "B"})
-        assert (await rig.pipeline.get_pending_plan(owner=OWNER, session_id=SESSION)).plan_id == plan.plan_id
-        assert len(rig.prepares) == 1 and rig.writes == []
-        await session.coordinator.finish(continuation, token)
+        initial = await collect(session.run(AgentInput(message="修改名称A，然后修改B。", owner=OWNER, session_id=SESSION)))
+        first = next(event.payload["plan"]["plan_id"] for event in initial if event.type == E.EFFECT_APPROVAL_REQUIRED)
+        ready, release = asyncio.Event(), asyncio.Event()
+        append = rig.store.append_for_turn
+
+        async def pause_approval(event, lease):
+            await append(event, lease)
+            if event.type == E.EFFECT_APPROVAL_REQUIRED:
+                ready.set()
+                await release.wait()
+
+        with patch.object(rig.store, "append_for_turn", pause_approval):
+            confirmation = asyncio.create_task(collect(session.confirm(owner=OWNER, session_id=SESSION,
+                plan_id=first, request_id="live-confirmation")))
+            try:
+                await asyncio.wait_for(ready.wait(), 5)
+                state = await rig.store.load(owner=OWNER, session_id=SESSION)
+                second = state.pending_effect_plan_id
+                active = state.metadata["active_publication"]
+                current = await session.coordinator.describe(owner=OWNER, session_id=SESSION)
+                assert current is not None and active["turn_id"] == current["turn_id"]
+                assert active["request_id"] == "live-confirmation" and active["status"] == "running"
+                assert second and second != first and not confirmation.done()
+                with pytest.raises(SessionBusyError):
+                    await session.edit_confirmation(owner=OWNER, session_id=SESSION, plan_id=second, arguments={"label": "C"})
+                assert await rig.store.load(owner=OWNER, session_id=SESSION) == state
+                pending = await rig.pipeline.get_pending_plan(owner=OWNER, session_id=SESSION)
+                assert pending is not None and pending.plan_id == second
+                assert len(rig.prepares) == 2 and [row["label"] for row in rig.writes] == ["A"]
+            finally:
+                release.set()
+                await asyncio.wait_for(confirmation, 5)
+        edited = await session.edit_confirmation(owner=OWNER, session_id=SESSION, plan_id=second, arguments={"label": "C"})
+        assert edited.effect_plan is not None and edited.effect_plan.arguments["label"] == "C"
+        assert len(rig.prepares) == 3 and [row["label"] for row in rig.writes] == ["A"]
     asyncio.run(run())
