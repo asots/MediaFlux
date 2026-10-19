@@ -30,7 +30,7 @@ from concurrent.futures import (
     wait,
 )
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any, Callable, Literal, overload
@@ -324,6 +324,27 @@ class _ConflictIdentityIndex:
             return self.episodes.get((plan.season, plan.episode), {}).values()
         # 电影/NSFW 仍保留原有标题/年份、辅助视频、CD 及版本安全判定。
         return self.files
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanIdentityEvidence:
+    """身份阶段产物；后续阶段只能验证，不能改变所选作品。"""
+
+    explicit_tmdb_id: str
+    threshold: float
+    automatic_proof: dict[str, Any] | None
+    package_proof: dict[str, Any] | None
+    attestation: dict[str, Any] | None
+    position_recovery: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanPosition:
+    """最终位置阶段产物：命名输入、权威详情和对应的校验结果。"""
+
+    parsed: dict[str, Any]
+    detail: dict[str, Any]
+    validation: dict[str, Any] | None
 
 
 class Organizer:
@@ -5736,68 +5757,18 @@ class Organizer:
             )
         mark_pending()
 
-    def _plan_one(
-        self,
-        file: GuangYaFile,
-        rel: str,
-        rules: OrganizeRules,
-        *,
-        recognition_parent_path: str | None = None,
-        parsed_override: tuple[int | None, int | None] | None = None,
-        source_position_override: tuple[int | None, int | None] | None = None,
-        directory_episode_evidence: DirectoryEpisodeEvidence | None = None,
-        directory_identity_evidence: DirectoryEpisodeEvidence | None = None,
-        directory_sequence_evidence: DirectoryEpisodeEvidence | None = None,
-        directory_episode_member_count: int = 0,
-        recognition_name: str = "",
-        recognition_identity_only: bool = False,
-        recognition_media_type_hint: str = "",
-        match_override: MatchResult | None = None,
-        directory_identity_attestation: dict[str, Any] | None = None,
-        recognition_work_cache: dict[tuple[str, str, str, bool, str], MatchResult] | None = None,
-        recognition_work_cache_key: tuple[str, str, str, bool, str] | None = None,
-        task_runtime: OrganizeTaskRuntime | None = None,
-        stats: dict | None = None,
-        media_probe_cache_only: bool = False,
-        media_probe_cached_payload: str = "",
-        media_probe_cache_prefetched: bool = False,
-        automatic: bool = False,
-    ) -> OrganizePlan:
-        match_name = (recognition_name or file.name)
-        parent_path = rel if recognition_parent_path is None else recognition_parent_path
-        manual_position_confirmed = bool(
-            getattr(self.scraper, "manual_position_confirmed", False)
-            and getattr(self.scraper, "episode_override", None) is not None
-        )
-        effective_parsed_override = None if manual_position_confirmed else parsed_override
-        task_recognition_key = self._task_recognition_cache_key(
-            recognition_name=match_name,
-            parent_path=parent_path,
-            media_type_hint=recognition_media_type_hint,
-            rules=rules,
-            automatic=automatic,
-            trusted_match_override=match_override,
-        ) if task_runtime is not None else None
-        match = self._resolve_plan_match(
-            file,
-            rules,
-            match_name=match_name,
-            parent_path=parent_path,
-            recognition_media_type_hint=recognition_media_type_hint,
-            match_override=match_override,
-            recognition_work_cache=recognition_work_cache,
-            recognition_work_cache_key=recognition_work_cache_key,
-            parsed_override=effective_parsed_override,
-            task_runtime=task_runtime,
-            task_recognition_key=task_recognition_key,
-            stats=stats,
-        )
+    def _assess_plan_identity(
+        self, plan: OrganizePlan, rules: OrganizeRules, *,
+        match_name: str, parent_path: str, recognition_media_type_hint: str,
+        parsed_override: tuple[int | None, int | None] | None,
+        source_position_override: tuple[int | None, int | None] | None,
+        directory_episode_evidence: DirectoryEpisodeEvidence | None,
+        directory_episode_member_count: int, recognition_identity_only: bool,
+        directory_identity_attestation: dict[str, Any] | None, automatic: bool,
+    ) -> _PlanIdentityEvidence | None:
+        """先确认作品身份；可恢复的位置约束留待最终季集证据复核。"""
+        match = plan.match
         assert match is not None
-        plan = OrganizePlan(
-            file_id=file.file_id, original_name=file.name,
-            original_path=rel, original_parent_id=file.parent_id,
-            size=file.size, etag=file.etag, match=match,
-        )
         # 显式 TMDB 标记是用户给出的强身份约束，而不是“提高搜索命中率”的
         # 普通提示。自动整理必须重新绑定返回结果：客户端/缓存即使返回了别的
         # ID，或把 SxxExx/特典错误识别为电影，也只能转人工确认，不能写入网盘。
@@ -5811,7 +5782,7 @@ class Organizer:
         if automatic and explicit_tmdb_conflict:
             marker_error = "同一路径层级包含多个不同 TMDB 标记，已阻止自动整理"
             plan.require_confirmation(marker_error, constraint="explicit_tmdb_marker_conflict")
-            return plan
+            return None
         if automatic and explicit_tmdb_id:
             recognized_tmdb_id = str(
                 getattr(match, "tmdb_id", "") or ""
@@ -5844,7 +5815,7 @@ class Organizer:
                 marker_error = "显式 TMDB 标记所在文件包含剧集/特典位置，但识别结果不是剧集，需人工确认"
             if marker_error:
                 plan.require_confirmation(marker_error, constraint="explicit_tmdb_marker_mismatch")
-                return plan
+                return None
         automatic_policy = automatic_match_policy(rules.automatic_match_preset)
         automatic_proof = (
             verified_automatic_identity_proof(
@@ -5914,47 +5885,62 @@ class Organizer:
                 automatic_threshold=automatic_policy.threshold,
             )
         )
+        has_identity_evidence = (
+            automatic_proof is not None or directory_package_proof is not None
+            or directory_identity_attestation is not None
+            or identity_probe_position_recovery_candidate
+            or position_only_mapping_recovery_candidate
+        )
         if (
             match.need_confirm
-            and automatic_proof is None
-            and directory_package_proof is None
-            and directory_identity_attestation is None
-            and not identity_probe_position_recovery_candidate
-            and not position_only_mapping_recovery_candidate
+            and not has_identity_evidence
         ):
             plan.action = "skip"
             plan.note = match.error or "媒体匹配结果需人工确认"
-            return plan
+            return None
         if (
             automatic
             and automatic_match_requires_confirmation(
                 match, threshold=automatic_policy.threshold
             )
-            and automatic_proof is None
-            and directory_package_proof is None
-            and directory_identity_attestation is None
-            and not identity_probe_position_recovery_candidate
-            and not position_only_mapping_recovery_candidate
+            and not has_identity_evidence
         ):
             plan.action = "skip"
             plan.note = automatic_match_confirmation_message(
                 automatic_policy.name
             )
-            if match is not None:
-                match.need_confirm = True
-                match.error = plan.note
-            return plan
+            match.need_confirm = True
+            match.error = plan.note
+            return None
         if not self._match_identity_key(match):
             plan.action = "skip"
             plan.note = "未识别"
-            return plan
+            return None
 
+        recovery = (
+            "directory_identity_probe_position_recovery"
+            if identity_probe_position_recovery_candidate else
+            "position_only_tmdb_mapping_recovery"
+            if position_only_mapping_recovery_candidate else ""
+        )
+        return _PlanIdentityEvidence(
+            explicit_tmdb_id, automatic_policy.threshold, automatic_proof,
+            directory_package_proof, directory_identity_attestation, recovery,
+        )
+
+    def _parse_plan_release(
+        self, plan: OrganizePlan, file: GuangYaFile, rules: OrganizeRules, *,
+        parent_path: str,
+        effective_parsed_override: tuple[int | None, int | None] | None,
+        source_position_override: tuple[int | None, int | None] | None,
+    ) -> tuple[ReleaseParseResult, dict[str, Any], tuple[int | None, int | None]]:
+        """只解析当前文件的发布位置/分片，不复用目录探针的集号。"""
+        match = plan.match
+        assert match is not None
         # 仅在 scraper 对象上真实声明统一解析接口时启用。
         # unittest.mock.Mock 会为任意属性动态生成可调用对象，普通 getattr/hasattr
         # 会误判为支持 parse_media；getattr_static 同时兼容类方法和显式实例方法。
         from inspect import getattr_static
-
-        from app.notifier import safe_int
 
         parse_media_declared = getattr_static(self.scraper, "parse_media", None)
         parse_media_impl = (
@@ -5999,6 +5985,30 @@ class Organizer:
             source_season, source_episode = source_position_override
         if effective_parsed_override is not None:
             parsed["season"], parsed["episode"] = effective_parsed_override
+        return release_parse, parsed, (source_season, source_episode)
+
+    def _resolve_plan_position(
+        self, plan: OrganizePlan, file: GuangYaFile, rules: OrganizeRules, *,
+        parent_path: str, identity: _PlanIdentityEvidence,
+        parsed_override: tuple[int | None, int | None] | None,
+        effective_parsed_override: tuple[int | None, int | None] | None,
+        source_position_override: tuple[int | None, int | None] | None,
+        directory_episode_evidence: DirectoryEpisodeEvidence | None,
+        directory_sequence_evidence: DirectoryEpisodeEvidence | None,
+        directory_episode_member_count: int, manual_position_confirmed: bool,
+        automatic: bool,
+    ) -> _PlanPosition | None:
+        """推导季集、必要时刷新详情并重算；失败保留对应位置诊断。"""
+        from app.notifier import safe_int
+
+        match = plan.match
+        assert match is not None
+        explicit_tmdb_id = identity.explicit_tmdb_id
+        release_parse, parsed, (source_season, source_episode) = self._parse_plan_release(
+            plan, file, rules, parent_path=parent_path,
+            effective_parsed_override=effective_parsed_override,
+            source_position_override=source_position_override,
+        )
         parsed_season = safe_int(parsed.get("season"), None, minimum=0)
         parsed_episode = safe_int(parsed.get("episode"), None, minimum=0)
         source_season_value = safe_int(source_season, None, minimum=0)
@@ -6044,7 +6054,7 @@ class Organizer:
             message = "标题尾部数字同时属于媒体正式名称，无法安全确定季号，需人工确认"
             plan.require_confirmation(message)
             plan.episode = parsed_episode
-            return plan
+            return None
 
         if match.media_type == "tv" and parsed_episode is not None and parsed_season is None:
             # 季标题来自 TMDB seasons 结构，只能用于已确认的 TMDB 候选。
@@ -6061,7 +6071,7 @@ class Organizer:
                 message = "检测到季标题线索，但当前候选不是 TMDB 身份，无法安全换算季号，需人工确认"
                 plan.require_confirmation(message)
                 plan.episode = parsed_episode
-                return plan
+                return None
             inferred_season = season_title_hint if tmdb_identity else None
             if inferred_season is not None:
                 inferred_validation = (
@@ -6096,7 +6106,7 @@ class Organizer:
                 message = "检测到续作/分部标记但无法安全确定 TMDB 季号，需人工确认"
                 plan.require_confirmation(message)
                 plan.episode = parsed_episode
-                return plan
+                return None
             if (
                 parsed_season is None
                 and automatic
@@ -6109,7 +6119,7 @@ class Organizer:
                 message = "发布标题仍包含未解释的篇章信息，无法安全确定 TMDB 季号，需人工确认"
                 plan.require_confirmation(message)
                 plan.episode = parsed_episode
-                return plan
+                return None
             if (
                 parsed_season is None
                 and automatic
@@ -6121,7 +6131,7 @@ class Organizer:
                 message = "孤立高集号缺少季号或连续目录证据，已阻止自动整理"
                 plan.require_confirmation(message)
                 plan.episode = parsed_episode
-                return plan
+                return None
             if parsed_season is None:
                 parsed_season = 1
         parsed["season"] = parsed_season
@@ -6177,7 +6187,7 @@ class Organizer:
             plan.require_confirmation(message)
             plan.season = parsed_season
             plan.episode = range_start
-            return plan
+            return None
         if (
             parsed_override is None
             and not manual_position_confirmed
@@ -6189,7 +6199,7 @@ class Organizer:
             )
             plan.require_confirmation(message)
             plan.season = parsed_season
-            return plan
+            return None
         maps_tmdb_source_positions = self._maps_tmdb_source_positions(match)
         source_position_mapping_eligible = (
             (
@@ -6243,28 +6253,11 @@ class Organizer:
                 automatic=automatic,
                 explicit_tmdb_id=explicit_tmdb_id,
                 source_year=_recognition_identity_year(file.name, parent_path),
-                automatic_threshold=automatic_policy.threshold,
+                automatic_threshold=identity.threshold,
             )
-            plan.episode_mapping = mapping
-            plan.source_season = mapping.source_season
-            plan.source_episode = mapping.source_episode
-            # ``recognition_name`` 只用于复用目录身份，携带的是首个被识别
-            # 文件的位置。最终归档位置必须始终以当前文件经 TMDB 校验后的
-            # mapping 为准；即使映射是 identity（例如源文件本来就是 S02E01），
-            # 也要覆盖缓存身份中的位置，不能只在 ``changed`` 时更新。
-            parsed_season = mapping.target_season
-            parsed_episode = mapping.target_episode
-            parsed["season"] = parsed_season
-            parsed["episode"] = parsed_episode
-            match.effective_season = parsed_season
-            match.effective_episode = parsed_episode
-            match.metadata = {
-                **dict(getattr(match, "metadata", None) or {}),
-                "episode_mapping": mapping.to_dict(),
-            }
-        automatic_proof_accepted = False
-        directory_package_proof_accepted = False
-        directory_identity_attestation_accepted = False
+            # 即使是 identity 映射，也必须用当前文件位置覆盖目录身份探针。
+            parsed_season, parsed_episode = self._apply_plan_mapping(plan, parsed, mapping)
+        validation = None
         if (
             self._supports_tmdb_position_validation(match)
             and match.media_type == "tv"
@@ -6311,7 +6304,7 @@ class Organizer:
                             source_year=_recognition_identity_year(
                                 file.name, parent_path
                             ),
-                            automatic_threshold=automatic_policy.threshold,
+                            automatic_threshold=identity.threshold,
                         )
                     elif cached_bare_absolute_episode is not None:
                         # 裸绝对集号没有发布季号；旧映射失效后仍可沿用已经
@@ -6336,20 +6329,9 @@ class Organizer:
                             range_end=absolute_mapping.range_end,
                         )
                     if refreshed_mapping is not None:
-                        mapping = refreshed_mapping
-                        plan.episode_mapping = mapping
-                        plan.source_season = mapping.source_season
-                        plan.source_episode = mapping.source_episode
-                        parsed_season = mapping.target_season
-                        parsed_episode = mapping.target_episode
-                        parsed["season"] = parsed_season
-                        parsed["episode"] = parsed_episode
-                        match.effective_season = parsed_season
-                        match.effective_episode = parsed_episode
-                        match.metadata = {
-                            **dict(getattr(match, "metadata", None) or {}),
-                            "episode_mapping": mapping.to_dict(),
-                        }
+                        parsed_season, parsed_episode = self._apply_plan_mapping(
+                            plan, parsed, refreshed_mapping,
+                        )
                     validation = self.scraper.validate_position(
                         detail, match.media_type, parsed_season, parsed_episode
                     )
@@ -6373,291 +6355,243 @@ class Organizer:
                 setattr(match, "threshold_decision", threshold_decision)
                 plan.season = parsed_season
                 plan.episode = parsed_episode
-                return plan
-            if (
-                identity_probe_position_recovery_candidate
-                or position_only_mapping_recovery_candidate
-            ):
-                mapping = plan.episode_mapping
-                recovered_tmdb_id = str(
-                    getattr(match, "tmdb_id", "") or ""
-                ).strip()
-                recovered_external_id = str(
-                    getattr(match, "external_id", "") or ""
-                ).strip()
-                detail_tmdb_id = str(
-                    detail.get("id") or ""
-                ).strip() if isinstance(detail, dict) else ""
-                recovery_accepted = bool(
-                    mapping is not None
-                    and mapping.confidence >= 0.9
-                    and recovered_tmdb_id
-                    and detail_tmdb_id == recovered_tmdb_id
-                    and (
-                        not recovered_external_id
-                        or recovered_external_id == recovered_tmdb_id
-                    )
-                    and validation.get("required")
-                    and validation.get("passed")
-                    and str(validation.get("reason") or "")
-                    == "episode_verified"
-                )
-                if not recovery_accepted:
-                    message = (
-                        "目录身份探针的位置错误无法由安全映射消解，需人工确认"
-                        if identity_probe_position_recovery_candidate
-                        else "文件季集位置无法由安全映射消解，需人工确认"
-                    )
-                    plan.require_confirmation(message)
-                    plan.season = parsed_season
-                    plan.episode = parsed_episode
-                    return plan
-                assert mapping is not None
-                plan.mark_matched()
-                recoverable_constraints = {
-                    "tmdb_position_season_not_found",
-                    "tmdb_position_episode_out_of_range",
-                }
-                setattr(match, "rejected_constraints", [
-                    item
-                    for item in (getattr(match, "rejected_constraints", None) or [])
-                    if str(item or "").strip() not in recoverable_constraints
-                ])
-                match.directory_identity_cache_eligible = (
-                    identity_probe_position_recovery_candidate
-                    and str(
-                        getattr(match, "matched_by", "") or ""
-                    ).strip().lower() == "search"
-                )
-                recovery_metadata_key = (
-                    "directory_identity_probe_position_recovery"
-                    if identity_probe_position_recovery_candidate
-                    else "position_only_tmdb_mapping_recovery"
-                )
-                match.metadata = {
-                    **dict(getattr(match, "metadata", None) or {}),
-                    recovery_metadata_key: {
-                        "tmdb_id": recovered_tmdb_id,
-                        "mapping": mapping.to_dict(),
-                        "position_validation": dict(validation),
-                    },
-                }
-            if directory_identity_attestation is not None:
-                attested_tmdb_id = str(
-                    directory_identity_attestation.get("tmdb_id") or ""
-                ).strip()
-                match_tmdb_id = str(getattr(match, "tmdb_id", "") or "").strip()
-                match_external_id = str(
-                    getattr(match, "external_id", "") or ""
-                ).strip()
-                detail_tmdb_id = str(
-                    detail.get("id") or ""
-                ).strip() if isinstance(detail, dict) else ""
-                directory_identity_attestation_accepted = bool(
-                    int(directory_identity_attestation.get("version") or 0)
-                    == _DIRECTORY_IDENTITY_ATTESTATION_VERSION
-                    and directory_identity_attestation.get("kind")
-                    == "same_scan_tmdb_tv_identity"
-                    and directory_identity_attestation.get("provider") == "tmdb"
-                    and directory_identity_attestation.get("media_type") == "tv"
-                    and attested_tmdb_id
-                    and attested_tmdb_id == match_tmdb_id
-                    and (not match_external_id or match_external_id == match_tmdb_id)
-                    and detail_tmdb_id == attested_tmdb_id
-                    and validation.get("required")
-                    and validation.get("passed")
-                    and str(validation.get("reason") or "") == "episode_verified"
-                    and parsed_season not in (None, 0)
-                    and parsed_episode is not None
-                )
-                if not directory_identity_attestation_accepted:
-                    message = "目录身份凭证未通过当前文件的最终季集复核，需人工确认"
-                    plan.require_confirmation(message)
-                    plan.season = parsed_season
-                    plan.episode = parsed_episode
-                    return plan
-                plan.mark_matched()
-                match.metadata = {
-                    **dict(getattr(match, "metadata", None) or {}),
-                    _DIRECTORY_IDENTITY_ATTESTATION_ACCEPTED_KEY: {
-                        "tmdb_id": attested_tmdb_id,
-                        "season": parsed_season,
-                        "episode": parsed_episode,
-                        "position_validation": dict(validation),
-                    },
-                }
-            if (
-                automatic_proof is not None
-                and directory_identity_attestation is None
-            ):
-                # 同目录首个文件已建立作品身份凭证后，后续文件必须以当前
-                # 源文件解析位置 + TMDB 最终校验为准；合成识别名携带的 E01
-                # 证明只属于首个搜索输入，不能再次约束 E02/E03。
-                target_position = automatic_proof.get("target_position")
-                proof_tmdb_id = str(automatic_proof.get("external_id") or "").strip()
-                match_tmdb_id = str(getattr(match, "tmdb_id", "") or "").strip()
-                match_external_id = str(
-                    getattr(match, "external_id", "") or ""
-                ).strip()
-                detail_tmdb_id = str(
-                    detail.get("id") or ""
-                ).strip() if isinstance(detail, dict) else ""
-                try:
-                    proof_season = int(
-                        target_position.get("season", "")
-                        if isinstance(target_position, dict) else ""
-                    )
-                    proof_episode = int(
-                        target_position.get("episode", "")
-                        if isinstance(target_position, dict) else ""
-                    )
-                except (TypeError, ValueError):
-                    proof_season = proof_episode = -1
+                return None
+        return _PlanPosition(parsed, detail, validation)
 
-                season_year_evidence = automatic_proof.get(
-                    "target_season_year_evidence"
-                )
-                season_year_detail_valid = True
-                if season_year_evidence is not None:
-                    season_detail = None
-                    if (
-                        isinstance(season_year_evidence, dict)
-                        and str(
-                            season_year_evidence.get("date_scope") or "season"
-                        ).strip().lower() == "segment"
-                    ):
-                        season_detail = self._tv_season_detail_for_match(
-                            match, proof_season
-                        )
-                    season_year_detail_valid = (
-                        target_season_year_evidence_matches_detail(
-                            season_year_evidence,
-                            detail,
-                            season_detail=season_detail,
-                        )
-                    )
+    @staticmethod
+    def _apply_plan_mapping(
+        plan: OrganizePlan, parsed: dict[str, Any], mapping: EpisodeMappingPlan,
+    ) -> tuple[int | None, int | None]:
+        """唯一映射写回点：计划、命名输入和识别证据使用同一目标位置。"""
+        match = plan.match
+        assert match is not None
+        plan.episode_mapping = mapping
+        plan.source_season, plan.source_episode = mapping.source_season, mapping.source_episode
+        parsed["season"], parsed["episode"] = mapping.target_season, mapping.target_episode
+        match.effective_season, match.effective_episode = mapping.target_season, mapping.target_episode
+        match.metadata = {**dict(match.metadata or {}), "episode_mapping": mapping.to_dict()}
+        return mapping.target_season, mapping.target_episode
 
-                # 合成目录探针只证明作品身份，不能把探针中的 E01 当成
-                # 当前文件的真实位置。真实位置已从源文件恢复、经统一映射，
-                # 并在上方通过 TMDB 最终校验。只有当前源位置确实属于本目录
-                # 连续证据时，才允许将“身份证明”和“位置证明”安全解耦。
-                identity_probe_evidence = (
-                    directory_identity_evidence or directory_episode_evidence
+    def _verify_plan_identity_evidence(
+        self, plan: OrganizePlan, position: _PlanPosition, identity: _PlanIdentityEvidence, *,
+        recognition_identity_only: bool,
+        directory_identity_evidence: DirectoryEpisodeEvidence | None,
+        directory_episode_evidence: DirectoryEpisodeEvidence | None,
+    ) -> str:
+        """以最终详情/季集复核身份凭证；返回拒绝原因，绝不再次选择媒体身份。"""
+        match = plan.match
+        assert match is not None
+        parsed_season, parsed_episode = position.parsed["season"], position.parsed["episode"]
+        detail, validation = position.detail, position.validation
+        automatic_proof, package_proof = identity.automatic_proof, identity.package_proof
+        attestation = identity.attestation
+        if validation is None:
+            if automatic_proof is not None and attestation is None:
+                return "自动识别强证据未完成最终季集复核，需人工确认"
+            if package_proof is not None:
+                return "连续剧集包身份凭证未完成最终季集复核，需人工确认"
+            return ""
+
+        tmdb_id = str(getattr(match, "tmdb_id", "") or "").strip()
+        external_id = str(getattr(match, "external_id", "") or "").strip()
+        detail_id = str(detail.get("id") or "").strip() if isinstance(detail, dict) else ""
+        verified_identity = bool(
+            tmdb_id and detail_id == tmdb_id and (not external_id or external_id == tmdb_id)
+            and validation.get("required") and validation.get("passed")
+            and str(validation.get("reason") or "") == "episode_verified"
+        )
+        if identity.position_recovery:
+            mapping = plan.episode_mapping
+            directory_recovery = identity.position_recovery == "directory_identity_probe_position_recovery"
+            if not (mapping is not None and mapping.confidence >= 0.9 and verified_identity):
+                return (
+                    "目录身份探针的位置错误无法由安全映射消解，需人工确认"
+                    if directory_recovery else "文件季集位置无法由安全映射消解，需人工确认"
                 )
-                source_position_in_directory_evidence = (
-                    recognition_identity_only
-                    and identity_probe_evidence is not None
-                    and plan.source_season == identity_probe_evidence.source_season
-                    and plan.source_episode is not None
-                    and identity_probe_evidence.range_start
-                    <= plan.source_episode
-                    <= identity_probe_evidence.range_end
+            plan.mark_matched()
+            recoverable = {"tmdb_position_season_not_found", "tmdb_position_episode_out_of_range"}
+            setattr(match, "rejected_constraints", [
+                item for item in (getattr(match, "rejected_constraints", None) or [])
+                if str(item or "").strip() not in recoverable
+            ])
+            match.directory_identity_cache_eligible = (
+                directory_recovery and str(getattr(match, "matched_by", "") or "").strip().lower() == "search"
+            )
+            match.metadata = {
+                **dict(match.metadata or {}), identity.position_recovery: {
+                    "tmdb_id": tmdb_id, "mapping": mapping.to_dict(),
+                    "position_validation": dict(validation),
+                },
+            }
+        if attestation is not None:
+            attested_id = str(attestation.get("tmdb_id") or "").strip()
+            if not (
+                int(attestation.get("version") or 0) == _DIRECTORY_IDENTITY_ATTESTATION_VERSION
+                and attestation.get("kind") == "same_scan_tmdb_tv_identity"
+                and attestation.get("provider") == "tmdb" and attestation.get("media_type") == "tv"
+                and attested_id and attested_id == tmdb_id and verified_identity
+                and parsed_season not in (None, 0) and parsed_episode is not None
+            ):
+                return "目录身份凭证未通过当前文件的最终季集复核，需人工确认"
+            plan.mark_matched()
+            match.metadata = {
+                **dict(match.metadata or {}), _DIRECTORY_IDENTITY_ATTESTATION_ACCEPTED_KEY: {
+                    "tmdb_id": attested_id, "season": parsed_season, "episode": parsed_episode,
+                    "position_validation": dict(validation),
+                },
+            }
+        if automatic_proof is not None and attestation is None:
+            target = automatic_proof.get("target_position")
+            proof_id = str(automatic_proof.get("external_id") or "").strip()
+            try:
+                proof_season = int(target.get("season", "") if isinstance(target, dict) else "")
+                proof_episode = int(target.get("episode", "") if isinstance(target, dict) else "")
+            except (TypeError, ValueError):
+                proof_season = proof_episode = -1
+            year_evidence = automatic_proof.get("target_season_year_evidence")
+            season_year_valid = True
+            if year_evidence is not None:
+                season_detail = None
+                if (isinstance(year_evidence, dict)
+                        and str(year_evidence.get("date_scope") or "season").strip().lower() == "segment"):
+                    season_detail = self._tv_season_detail_for_match(match, proof_season)
+                season_year_valid = target_season_year_evidence_matches_detail(
+                    year_evidence, detail, season_detail=season_detail,
                 )
-                proof_position_matches = (
-                    parsed_season == proof_season
-                    and parsed_episode == proof_episode
-                )
-                automatic_proof_accepted = bool(
-                    proof_tmdb_id
-                    and proof_tmdb_id == match_tmdb_id
-                    and (not match_external_id or match_external_id == match_tmdb_id)
-                    and detail_tmdb_id == proof_tmdb_id
-                    and validation.get("required")
-                    and validation.get("passed")
-                    and str(validation.get("reason") or "") == "episode_verified"
-                    and (
-                        proof_position_matches
-                        or source_position_in_directory_evidence
-                    )
-                    and season_year_detail_valid
-                )
-                if not automatic_proof_accepted:
-                    message = "自动识别证据与最终季集位置不一致，需人工确认"
-                    plan.require_confirmation(message)
-                    plan.season = parsed_season
-                    plan.episode = parsed_episode
-                    return plan
-                plan.mark_matched()
-                match.metadata = {
-                    **dict(getattr(match, "metadata", None) or {}),
-                    "verified_automatic_identity_proof_accepted": {
-                        "tmdb_id": proof_tmdb_id,
-                        "season": parsed_season,
-                        "episode": parsed_episode,
-                        "position_validation": dict(validation),
-                        "identity_only_probe": (
-                            source_position_in_directory_evidence
-                            and not proof_position_matches
-                        ),
-                    },
-                }
-            if directory_package_proof is not None:
-                proof_tmdb_id = str(
-                    directory_package_proof.get("tmdb_id") or ""
-                ).strip()
-                match_tmdb_id = str(getattr(match, "tmdb_id", "") or "").strip()
-                match_external_id = str(
-                    getattr(match, "external_id", "") or ""
-                ).strip()
-                detail_tmdb_id = str(
-                    detail.get("id") or ""
-                ).strip() if isinstance(detail, dict) else ""
-                directory_package_proof_accepted = bool(
-                    proof_tmdb_id
-                    and proof_tmdb_id == match_tmdb_id
-                    and match_external_id == match_tmdb_id
-                    and detail_tmdb_id == proof_tmdb_id
-                    and validation.get("required")
-                    and validation.get("passed")
-                    and str(validation.get("reason") or "")
-                    == "episode_verified"
-                    and parsed_season not in (None, 0)
-                    and parsed_episode is not None
-                )
-                if not directory_package_proof_accepted:
-                    message = "连续剧集包身份凭证未通过最终季集复核，需人工确认"
-                    plan.require_confirmation(message)
-                    plan.season = parsed_season
-                    plan.episode = parsed_episode
-                    return plan
-                plan.mark_matched()
-                match.metadata = {
-                    **dict(getattr(match, "metadata", None) or {}),
-                    _DIRECTORY_PACKAGE_IDENTITY_ACCEPTED_KEY: {
-                        "tmdb_id": proof_tmdb_id,
-                        "season": parsed_season,
-                        "episode": parsed_episode,
-                        "position_validation": dict(validation),
-                    },
-                }
-        if (
-            automatic_proof is not None
-            and directory_identity_attestation is None
-            and not automatic_proof_accepted
-        ):
-            message = "自动识别强证据未完成最终季集复核，需人工确认"
-            plan.require_confirmation(message)
-            plan.season = parsed_season
-            plan.episode = parsed_episode
-            return plan
-        if (
-            directory_package_proof is not None
-            and not directory_package_proof_accepted
-        ):
-            message = "连续剧集包身份凭证未完成最终季集复核，需人工确认"
-            plan.require_confirmation(message)
-            plan.season = parsed_season
-            plan.episode = parsed_episode
-            return plan
-        self._populate_move_plan(
-            plan,
+            # 合成目录 E01 只证明身份；当前文件的位置必须属于本目录连续证据。
+            evidence = directory_identity_evidence or directory_episode_evidence
+            source_in_directory = (
+                recognition_identity_only and evidence is not None
+                and plan.source_season == evidence.source_season
+                and plan.source_episode is not None
+                and evidence.range_start <= plan.source_episode <= evidence.range_end
+            )
+            proof_position_matches = parsed_season == proof_season and parsed_episode == proof_episode
+            if not (
+                proof_id and proof_id == tmdb_id and verified_identity
+                and (proof_position_matches or source_in_directory) and season_year_valid
+            ):
+                return "自动识别证据与最终季集位置不一致，需人工确认"
+            plan.mark_matched()
+            match.metadata = {
+                **dict(match.metadata or {}), "verified_automatic_identity_proof_accepted": {
+                    "tmdb_id": proof_id, "season": parsed_season, "episode": parsed_episode,
+                    "position_validation": dict(validation),
+                    "identity_only_probe": source_in_directory and not proof_position_matches,
+                },
+            }
+        if package_proof is not None:
+            proof_id = str(package_proof.get("tmdb_id") or "").strip()
+            if not (
+                proof_id and proof_id == tmdb_id and external_id == tmdb_id and verified_identity
+                and parsed_season not in (None, 0) and parsed_episode is not None
+            ):
+                return "连续剧集包身份凭证未通过最终季集复核，需人工确认"
+            plan.mark_matched()
+            match.metadata = {
+                **dict(match.metadata or {}), _DIRECTORY_PACKAGE_IDENTITY_ACCEPTED_KEY: {
+                    "tmdb_id": proof_id, "season": parsed_season, "episode": parsed_episode,
+                    "position_validation": dict(validation),
+                },
+            }
+        return ""
+
+    def _plan_one(
+        self,
+        file: GuangYaFile,
+        rel: str,
+        rules: OrganizeRules,
+        *,
+        recognition_parent_path: str | None = None,
+        parsed_override: tuple[int | None, int | None] | None = None,
+        source_position_override: tuple[int | None, int | None] | None = None,
+        directory_episode_evidence: DirectoryEpisodeEvidence | None = None,
+        directory_identity_evidence: DirectoryEpisodeEvidence | None = None,
+        directory_sequence_evidence: DirectoryEpisodeEvidence | None = None,
+        directory_episode_member_count: int = 0,
+        recognition_name: str = "",
+        recognition_identity_only: bool = False,
+        recognition_media_type_hint: str = "",
+        match_override: MatchResult | None = None,
+        directory_identity_attestation: dict[str, Any] | None = None,
+        recognition_work_cache: dict[tuple[str, str, str, bool, str], MatchResult] | None = None,
+        recognition_work_cache_key: tuple[str, str, str, bool, str] | None = None,
+        task_runtime: OrganizeTaskRuntime | None = None,
+        stats: dict | None = None,
+        media_probe_cache_only: bool = False,
+        media_probe_cached_payload: str = "",
+        media_probe_cache_prefetched: bool = False,
+        automatic: bool = False,
+    ) -> OrganizePlan:
+        match_name = (recognition_name or file.name)
+        parent_path = rel if recognition_parent_path is None else recognition_parent_path
+        manual_position_confirmed = bool(
+            getattr(self.scraper, "manual_position_confirmed", False)
+            and getattr(self.scraper, "episode_override", None) is not None
+        )
+        effective_parsed_override = None if manual_position_confirmed else parsed_override
+        task_recognition_key = self._task_recognition_cache_key(
+            recognition_name=match_name,
+            parent_path=parent_path,
+            media_type_hint=recognition_media_type_hint,
+            rules=rules,
+            automatic=automatic,
+            trusted_match_override=match_override,
+        ) if task_runtime is not None else None
+        match = self._resolve_plan_match(
             file,
             rules,
-            match,
-            detail,
-            parsed,
-            parsed_season=parsed_season,
-            automatic=automatic,
+            match_name=match_name,
+            parent_path=parent_path,
+            recognition_media_type_hint=recognition_media_type_hint,
+            match_override=match_override,
+            recognition_work_cache=recognition_work_cache,
+            recognition_work_cache_key=recognition_work_cache_key,
+            parsed_override=effective_parsed_override,
+            task_runtime=task_runtime,
+            task_recognition_key=task_recognition_key,
+            stats=stats,
+        )
+        assert match is not None
+        plan = OrganizePlan(
+            file_id=file.file_id, original_name=file.name,
+            original_path=rel, original_parent_id=file.parent_id,
+            size=file.size, etag=file.etag, match=match,
+        )
+        identity = self._assess_plan_identity(
+            plan, rules, match_name=match_name, parent_path=parent_path,
+            recognition_media_type_hint=recognition_media_type_hint,
+            parsed_override=parsed_override, source_position_override=source_position_override,
+            directory_episode_evidence=directory_episode_evidence,
+            directory_episode_member_count=directory_episode_member_count,
+            recognition_identity_only=recognition_identity_only,
+            directory_identity_attestation=directory_identity_attestation, automatic=automatic,
+        )
+        if identity is None:
+            return plan
+        position = self._resolve_plan_position(
+            plan, file, rules, parent_path=parent_path, identity=identity,
+            parsed_override=parsed_override, effective_parsed_override=effective_parsed_override,
+            source_position_override=source_position_override,
+            directory_episode_evidence=directory_episode_evidence,
+            directory_sequence_evidence=directory_sequence_evidence,
+            directory_episode_member_count=directory_episode_member_count,
+            manual_position_confirmed=manual_position_confirmed, automatic=automatic,
+        )
+        if position is None:
+            return plan
+        identity_error = self._verify_plan_identity_evidence(
+            plan, position, identity, recognition_identity_only=recognition_identity_only,
+            directory_identity_evidence=directory_identity_evidence,
+            directory_episode_evidence=directory_episode_evidence,
+        )
+        if identity_error:
+            plan.require_confirmation(identity_error)
+            plan.season, plan.episode = position.parsed["season"], position.parsed["episode"]
+            return plan
+        self._populate_move_plan(
+            plan, file, rules, match, position.detail, position.parsed,
+            parsed_season=position.parsed["season"], automatic=automatic,
             media_probe_cache_only=media_probe_cache_only,
             media_probe_cached_payload=media_probe_cached_payload,
             media_probe_cache_prefetched=media_probe_cache_prefetched,
