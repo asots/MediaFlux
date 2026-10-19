@@ -33,7 +33,7 @@ class DiscoveryScript(NativeScript):
         return httpx.Response(200, json={"choices": [{"message": message, "finish_reason": finish}]})
 
 
-def test_successful_native_discovery_does_not_extend_business_observation_budget():
+def test_discovery_keeps_its_own_bound_without_shortening_model_round_limit():
     async def run():
         db.init_db()
         script = DiscoveryScript()
@@ -41,8 +41,8 @@ def test_successful_native_discovery_does_not_extend_business_observation_budget
         events = [event async for event in runtime.session.run(AgentInput(
             owner=OWNER, session_id="discovery-budget", message="查看媒体目录查询能力",
         ))]
-        assert len(script.requests) == 12
-        assert not script.requests[-1].get("tools")
+        assert len(script.requests) == 15
+        assert script.requests[-1].get("tools")  # 模型自行完成，不再在第12轮被收走工具。
         assert events[-1].payload["successful_read_queries"] == 0
         started = [event for event in events if event.type is AgentEventType.TOOL_STARTED]
         completed = [event for event in events if event.type is AgentEventType.TOOL_COMPLETED]
@@ -51,11 +51,11 @@ def test_successful_native_discovery_does_not_extend_business_observation_budget
         assert all(event.payload["result"]["ok"] for event in completed)
         # 保留生产的 8 次不同发现上限；成功和超额拒绝都不是业务观察。
         failures = [event for event in events if event.type is AgentEventType.TOOL_FAILED]
-        assert len(completed) == 8 and len(failures) == 3
+        assert len(completed) == 8 and len(failures) == 6
         assert all(event.payload["code"] == "capability_discovery_budget" for event in failures)
         saved = await SQLiteKernelStore().load(owner=OWNER, session_id="discovery-budget")
         calls = [call for row in saved.conversation for call in row.get("tool_calls", ())]
         results = [row for row in saved.conversation if row.get("role") == "tool"]
-        assert len(calls) == len(results) == 11
+        assert len(calls) == len(results) == 14
         assert {call["name"] for call in calls} == {"agent__capabilities"}
     asyncio.run(run())

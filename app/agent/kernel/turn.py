@@ -652,6 +652,7 @@ class AgentTurn:
         )
         self.total_tool_calls = 0
         self.business_tool_calls = 0
+        self.write_tool_calls = 0
         self.discovery_tool_calls = 0
         self.tool_budget_blocked = False
         self.total_usage: dict[str, int] = {}

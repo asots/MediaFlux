@@ -17,6 +17,7 @@ from app.agent.model_context_budget import bounded_model_messages, compact_tool_
 from app.agent.public_safety import public_tool_label
 
 from . import error_repair, telegram_reference
+from .capabilities import ToolEffect
 from .conversation_context import persisted_conversation
 from .discovery import DISCOVERY_TOOL
 from .events import AgentEventType
@@ -34,8 +35,6 @@ if TYPE_CHECKING:
     from .turn import AgentTurn
 from .tool_batches import admit_calls, execute_calls
 from .tool_calls import independent_read
-
-_INITIAL_PLANNING_ROUNDS = 12
 
 logger = logging.getLogger(__name__)
 
@@ -269,8 +268,7 @@ async def next_round(turn: AgentTurn, round_task: Mapping[str, Any] | None,
     calls: list[ModelToolCall] = []
     finish_reason = ""
     provider_state = None
-    # 当前额度的最后一轮专门汇总；成功的新观察可在此前扩展额度，
-    # 失败、重复调用、能力发现和模型自称“有进展”均不产生额度。
+    # 固定上限的最后一轮用于汇总，不再用成功 READ 为模型“挣取”轮次。
     request, final_synthesis_round = await build_request(turn, round_task, round_limit)
     token = turn.tool_context.cancellation
     token.interruptible = True
@@ -342,7 +340,7 @@ async def model_loop(turn: AgentTurn) -> None:
         turn.round_index = turn.model_calls
         # 任务提案绑定模型本轮所见快照；同批后续提案不能覆盖前一项更新。
         round_task = deepcopy(turn.state.metadata.get("task"))
-        round_limit = min(turn.session.limits.max_model_rounds, _INITIAL_PLANNING_ROUNDS + len(turn.observed_reads))
+        round_limit = turn.session.limits.max_model_rounds
         turn.tool_context.cancellation.raise_if_cancelled()
         reply = await next_round(turn, round_task, round_limit)
         if reply is None:
@@ -356,8 +354,15 @@ async def model_loop(turn: AgentTurn) -> None:
             for call in calls
         )
         business_batch_calls = len(calls) - discovery_batch_calls
+        write_batch_calls = sum(
+            turn.session.catalog.has(call.name)
+            and (turn.session.catalog.get(call.name).effect is not ToolEffect.READ
+                 or turn.session.catalog.get(call.name).name == error_repair.REPAIR_TOOL)
+            for call in calls
+        )
         over_tool_budget = bool(calls) and (
             turn.business_tool_calls + business_batch_calls > turn.session.limits.max_tool_calls
+            or turn.write_tool_calls + write_batch_calls > turn.session.limits.max_write_calls
             or turn.discovery_tool_calls + discovery_batch_calls > 16
         )
         blocked_calls = bool(calls) and (final_synthesis_round or over_tool_budget)
@@ -386,7 +391,7 @@ async def model_loop(turn: AgentTurn) -> None:
             )
             return
         if calls:
-            if await execute_calls(turn, reply, round_task, business_batch_calls, discovery_batch_calls):
+            if await execute_calls(turn, reply, round_task, business_batch_calls, discovery_batch_calls, write_batch_calls):
                 return
             continue
 

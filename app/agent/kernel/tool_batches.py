@@ -119,10 +119,11 @@ def admit_calls(turn: AgentTurn, reply: _ModelRound) -> None:
 
 
 async def execute_calls(turn: AgentTurn, reply: _ModelRound, round_task: Mapping[str, Any] | None,
-                        business_batch_calls: int, discovery_batch_calls: int) -> bool:
+                        business_batch_calls: int, discovery_batch_calls: int, write_batch_calls: int) -> bool:
     calls, resuming_read = reply.calls, reply.resuming_read
     turn.total_tool_calls += len(calls)
     turn.business_tool_calls += business_batch_calls
+    turn.write_tool_calls += write_batch_calls
     turn.discovery_tool_calls += discovery_batch_calls
     # 同一模型批次只对领域明确声明独立的READ做有界并发。
     # 发现、修参、任务变更、混合写以及恢复单个READ均沿同一执行链逐项运行。

@@ -90,20 +90,22 @@ class AllowAllTurnAdmission:
 
 @dataclass(frozen=True, slots=True)
 class SessionLimits:
-    # 硬上限与实际规划额度分开：只有新成功的业务READ才增加初始额度。
-    # 工具、上下文及持久续行预算仍各自生效，不能以“有进展”绕过。
+    # 总尝试给只读探索留足空间；写侧另设上限，确认与持久任务预算不变。
     max_model_rounds: int = 32
-    max_tool_calls: int = 16
+    max_tool_calls: int = 64
     max_output_tokens: int = 6_000
     context_window_tokens: int = 128_000
     # 单回合可同时持有的业务工具上限；与首窗召回数量解耦。
     capability_window: int = 24
+    max_write_calls: int = 16
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_model_rounds <= 32:
             raise ValueError("max_model_rounds out of range")
-        if not 1 <= self.max_tool_calls <= 32:
+        if not 1 <= self.max_tool_calls <= 128:
             raise ValueError("max_tool_calls out of range")
+        if not 1 <= self.max_write_calls <= 32:
+            raise ValueError("max_write_calls out of range")
         if not 128 <= self.max_output_tokens <= 16_000:
             raise ValueError("max_output_tokens out of range")
         if not 16_384 <= self.context_window_tokens <= 2_000_000:
