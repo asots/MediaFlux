@@ -17,6 +17,7 @@ from app.agent.kernel.state_types import (
     CancellationToken,
     StalePublicationError,
     StateUpdate,
+    _ConfirmationClaim,
     _PendingEffectTransition,
 )
 from app.agent.kernel.tool_calls import ToolCallContext
@@ -308,7 +309,7 @@ class PendingPlanAtomicCleanupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self._pending(state, context), "")
                 execute.assert_called_once()
 
-    async def test_same_generation_replacement_during_cleanup_is_preserved(self):
+    async def test_same_generation_replacement_before_cleanup_or_claim_is_preserved(self):
         for kind in ("memory", "sqlite"):
             for operation in ("cancel", "confirm"):
                 with self.subTest(store=kind, operation=operation):
@@ -319,7 +320,8 @@ class PendingPlanAtomicCleanupTests(unittest.IsolatedAsyncioTestCase):
                         lease, *, conversation=None, updates=(), _commit=commit,
                         _context=context, _pipeline=pipeline, _replacements=replacements,
                     ):
-                        if any(update.key == "pending_effect_plan_id" for update in updates) and not _replacements:
+                        if any(update.key == "pending_effect_plan_id" or isinstance(update, _ConfirmationClaim)
+                               for update in updates) and not _replacements:
                             new = _pipeline.effect_store.freeze(
                                 owner=_context.owner, session_id=_context.session_id,
                                 generation=lease.generation, tool_name="downloads.submit",
@@ -338,14 +340,16 @@ class PendingPlanAtomicCleanupTests(unittest.IsolatedAsyncioTestCase):
                         if operation == "cancel":
                             self.assertTrue(await pipeline.cancel_effect(old_id, lease=context.lease))
                         else:
-                            await pipeline.execute_confirmed(old_id, context=context)
+                            # 新卡已接管待确认身份，旧卡不能再接管发布权或开始写入。
+                            with self.assertRaises(StalePublicationError):
+                                await pipeline.execute_confirmed(old_id, context=context)
                     self.assertEqual(await self._pending(state, context), replacements[0])
                     claimed = pipeline.effect_store.claim(
                         owner=context.owner, session_id=context.session_id,
                         generation=context.lease.generation, plan_id=replacements[0],
                     )
                     self.assertEqual(claimed.plan_id, replacements[0])
-                    self.assertEqual(execute.call_count, int(operation == "confirm"))
+                    execute.assert_not_called()
 
     async def test_conditional_clear_still_rejects_stale_generation(self):
         for kind in ("memory", "sqlite"):
