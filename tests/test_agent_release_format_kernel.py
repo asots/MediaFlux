@@ -18,7 +18,7 @@ from app.agent.owner_routes import web_kernel_owner
 from app.agent.public_safety import public_tool_label
 from app.modules.recognition import formats
 from app.modules.scraper import _parse_release_core
-from tests.support import IsolatedDatabaseTestCase
+from tests.support import InitializedWebTestCase
 from tests.test_release_formats import PARENT, TEMPLATE, filename, teaching
 
 PREVIEW = "recognition.preview_release_format"
@@ -57,7 +57,7 @@ class TeachingModel:
             yield ModelEvent(ModelEventType.FINISH, finish_reason="stop")
 
 
-class AgentReleaseFormatKernelTests(IsolatedDatabaseTestCase):
+class AgentReleaseFormatKernelTests(InitializedWebTestCase):
     def setUp(self):
         with db.get_conn() as conn:
             conn.execute("DELETE FROM recognition_format_rules")
