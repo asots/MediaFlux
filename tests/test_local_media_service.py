@@ -112,6 +112,86 @@ class SharedPositionFakeScraper(FakeScraper):
 
 
 class LocalMediaServiceTests(IsolatedDatabaseTestCase):
+    def test_crossfs_retirement_failure_resumes_qb_only_after_source_restored(self):
+        from app.modules.local_media_service import LocalMediaPostMoveError
+        from app.modules.local_move_transaction import LocalMoveError, LocalMoveTransaction
+        from app.modules.local_storage import LocalFilesystemAdapter
+
+        for restore_fails in (False, True):
+            with self.subTest(restore_fails=restore_fails), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source_root, target_root = root / "source", root / "library"
+                source_root.mkdir()
+                target_root.mkdir()
+                source = source_root / "Movie.2026.mkv"
+                content = b"verified movie content" * 100
+                source.write_bytes(content)
+                source_id = db.create_local_media_source(
+                    f"retirement-test-{restore_fails}", "", "", str(source_root),
+                    owner="admin", media_type="movie",
+                )
+                db.upsert_local_library_target(source_id, "movie", str(target_root))
+                task_id = db.create_local_media_task(
+                    source_id, f"{int(restore_fails) + 1:040x}", str(source_root), trigger="qb_completed",
+                    operation_token=f"retirement-test-{restore_fails}",
+                )
+                self.assertTrue(db.claim_local_media_task(task_id))
+                rules = OrganizeRules(
+                    region_split=False, year_split=False, small_file_mb=0,
+                    clean_empty=False, link_strm=False, emby_refresh=False,
+                    notify_enabled=False, library_notify=False,
+                )
+                calls = []
+                qb = SimpleNamespace(
+                    pause_torrents=lambda _: calls.append("pause"),
+                    resume_torrents=lambda _: calls.append("resume"),
+                    delete_torrents=lambda *_a, **_k: calls.append("delete"),
+                )
+                service = LocalMediaService(scraper=cast(TMDBScraper, FakeScraper(MatchResult(
+                    tmdb_id="1", title="Movie", year="2026", media_type="movie",
+                    confidence=1.0, status="matched",
+                ))))
+                unlink = LocalMoveTransaction._unlink_owned
+                publish = LocalMoveTransaction._publish_no_replace
+
+                def fail_retirement(path, identity, *, label):
+                    if ".mediaflux-retire-" in path.name:
+                        raise PermissionError("retired unlink denied")
+                    return unlink(path, identity, label=label)
+
+                def restore_or_fail(src, dst):
+                    if restore_fails and ".mediaflux-retire-" in src.name:
+                        raise PermissionError("source restoration denied")
+                    return publish(src, dst)
+
+                try:
+                    with (
+                        patch("app.modules.local_media_service.OrganizeRules.from_config", return_value=rules),
+                        patch("app.modules.local_media_service.probe_local_media_profile", return_value=None),
+                        patch.object(LocalFilesystemAdapter, "same_filesystem", return_value=False),
+                        patch.object(LocalMoveTransaction, "_unlink_owned", side_effect=fail_retirement),
+                        patch.object(LocalMoveTransaction, "_publish_no_replace", side_effect=restore_or_fail),
+                        self.assertRaises(LocalMediaPostMoveError if restore_fails else LocalMoveError),
+                    ):
+                        service.execute_task("admin", task_id, qb_client=qb)
+                    task = _require_task(task_id)
+                    targets = [p for p in target_root.rglob("*") if p.is_file()]
+                    retired = list(source_root.glob(".*.mediaflux-retire-*"))
+                    if restore_fails:
+                        self.assertEqual(calls, ["pause"])
+                        self.assertEqual(task.status, "requires_manual")
+                        self.assertEqual([p.read_bytes() for p in targets], [content])
+                        self.assertEqual([p.read_bytes() for p in retired], [content])
+                        self.assertFalse(source.exists())
+                    else:
+                        self.assertEqual(source.read_bytes(), content)
+                        self.assertEqual(calls, ["pause", "resume"])
+                        self.assertEqual(task.status, "failed")
+                        self.assertEqual(targets, [])
+                        self.assertEqual(retired, [])
+                finally:
+                    service.close()
+
     def test_directory_inspection_reuses_release_source_position_once(self):
         from app.modules import scraper as scraper_module
 

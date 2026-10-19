@@ -43,7 +43,9 @@ class MovePlanLike(Protocol):
 class LocalMoveError(RuntimeError):
     """移动事务失败且已尽力回滚。"""
 
-    rollback_errors: list[str]
+    def __init__(self, message: str, *, rollback_errors: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.rollback_errors = list(rollback_errors)
 
 
 @dataclass(frozen=True)
@@ -397,11 +399,18 @@ class LocalMoveTransaction:
         os.replace(source, retired)
         try:
             self._require_identity(retired, snapshot.identity, label="来源退役文件")
-        except Exception:
-            if not source.exists() and retired.exists():
-                os.replace(retired, source)
+            self._unlink_owned(retired, snapshot.identity, label="来源退役文件")
+        except Exception as exc:
+            try:
+                # 删除也是退役事务的一部分；只有恢复原路径后才能丢弃目标副本。
+                self._require_identity(retired, snapshot.identity, label="来源退役文件")
+                self._publish_no_replace(retired, source)
+                self._require_identity(source, snapshot.identity, label="恢复后的源文件")
+            except Exception as restore_exc:
+                raise LocalMoveError(
+                    str(exc), rollback_errors=[f"{snapshot.path}: {restore_exc}"],
+                ) from exc
             raise
-        self._unlink_owned(retired, snapshot.identity, label="来源退役文件")
 
     def _backup_replaced_target(
         self,
@@ -603,13 +612,13 @@ class LocalMoveTransaction:
                 self._finish_step(index, "completed")
                 return moved
             except Exception as exc:
-                cleanup_errors: list[str] = []
+                cleanup_errors = list(getattr(exc, "rollback_errors", ()))
                 if partial is not None:
                     try:
                         partial.unlink(missing_ok=True)
                     except Exception as cleanup_exc:
                         cleanup_errors.append(str(cleanup_exc))
-                if target_created and moved is None and published_identity is not None:
+                if target_created and moved is None and published_identity is not None and not cleanup_errors:
                     try:
                         self._unlink_owned(target, published_identity, label="事务目标")
                     except Exception as cleanup_exc:
@@ -627,7 +636,7 @@ class LocalMoveTransaction:
                 error_text = str(exc)
                 if cleanup_errors:
                     error_text += "；失败清理需要人工核验: " + " | ".join(cleanup_errors)
-                    exc = LocalMoveError(error_text)
+                    exc = LocalMoveError(error_text, rollback_errors=cleanup_errors)
                 self._finish_step(index, "failed", error_text)
                 raise exc
 
@@ -749,13 +758,11 @@ class LocalMoveTransaction:
                 warnings=warnings,
             )
         except Exception as exc:
-            rollback_errors = self.rollback()
+            rollback_errors = [*getattr(exc, "rollback_errors", ()), *self.rollback()]
             message = f"本地媒体移动失败: {exc}"
             if rollback_errors:
                 message += "；部分回滚失败，需要人工核验: " + " | ".join(rollback_errors)
-            error = LocalMoveError(message)
-            setattr(error, "rollback_errors", rollback_errors)
-            raise error from exc
+            raise LocalMoveError(message, rollback_errors=rollback_errors) from exc
 
     def execute(self, plans: Sequence[MovePlanLike]) -> MoveTransactionResult:
         if not plans:
