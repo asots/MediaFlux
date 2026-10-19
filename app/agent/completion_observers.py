@@ -407,7 +407,8 @@ def _patrol_status(tracker: _CompletionTracker) -> ToolResult:
             "missing_episodes": _bounded_int(data.get("missing_episode_count")),
         },
     }
-    return replace(result, data=data)
+    ok = result.status in {"updates_available", "up_to_date"}
+    return replace(result, ok=ok, error="" if ok else result.summary, data=data)
 
 
 async def _poll(

@@ -19,6 +19,7 @@ from app.agent import effect_completion as effects
 from app.agent.confirmation import SQLiteConfirmationStore
 from app.agent.domain_catalog import DomainActions, build_tool_specs
 from app.agent.domains.library import patrol_trigger_actions
+from app.agent.domains.library.patrol_status import get_library_patrol_status
 from app.agent.effect_completion import wait_for_effect_completion
 from app.agent.feature_gate import initialize_runtime_fence
 from app.agent.kernel.bootstrap import _capture_creation_binding
@@ -205,7 +206,48 @@ async def assert_patrol_identity(case):
             assert prior is not None
             assert current["last_finished_at"] == prior["last_finished_at"]
             assert current["lease_generation"] == prior["lease_generation"] + 1
-        assert confirmed[-1].payload["status"] == "success"  # 08 separately corrects business failure semantics.
+        assert final["ok"] == (case != "overwritten-cycle")
+        assert confirmed[-1].payload["status"] == ("partial" if case == "overwritten-cycle" else "success")
+
+
+async def assert_patrol_outcome(status: str):
+    with isolated_test_database(), ExitStack() as stack:
+        initialize_runtime_fence()
+        succeeded = status in {"updates_available", "up_to_date"}
+        result = ToolResult(succeeded, status, "巡检观测结果", data={
+            "checked_series_count": 0, "findings": []})
+        scheduler = AgentLibraryPatrolScheduler(audit_executor=lambda _args: (result, 0))
+        get_bool = patrol_trigger_actions.config.get_bool
+        stack.enter_context(patch.object(patrol_trigger_actions.config, "get_bool",
+            side_effect=lambda key, default=False: True if key == "AGENT_LIBRARY_PATROL_ENABLED" else get_bool(key, default)))
+        stack.enter_context(patch("app.modules.agent_library_patrol_scheduler.get_agent_library_patrol_scheduler", return_value=scheduler))
+        write = "library.trigger_patrol_now"
+        session, store, _ = completion_session([write], [(write, {})])
+        context = {"owner": "patrol-outcome-owner", "session_id": "patrol-outcome-session"}
+        preview = [e async for e in session.run(AgentInput(**context, request_id="patrol-preview",
+            message="执行一次全库巡检并回报真实结果。", channel="web"))]
+        assert preview[-1].payload["status"] == "approval_required"
+        plan_id = (await store.load(**context)).pending_effect_plan_id
+        async def finish_before_wait(accepted, **options):
+            assert scheduler.run_once() == 1
+            return await wait_for_effect_completion(accepted, timeout_seconds=0, **options)
+        with patch.object(existing_actions, "wait_for_effect_completion", finish_before_wait):
+            confirmed = [e async for e in session.confirm(**context, plan_id=plan_id,
+                request_id="patrol-confirm", channel="web")]
+        effect = next(e for e in confirmed if e.type.value in {"effect.completed", "effect.failed"})
+        final = effect.payload["result"]
+        assert final["status"] == status
+        assert final["ok"] == succeeded
+        assert effect.type.value == ("effect.completed" if succeeded else "effect.failed")
+        assert confirmed[-1].payload["status"] == ("success" if succeeded else "partial")
+        saved = await SQLiteKernelStore().load(**context)
+        wait = saved.metadata["effect_waits"][plan_id]
+        assert wait["delivered"] and wait["final_result"] == final
+        native_tool = next(r for r in saved.conversation if r.get("role") == "tool" and r.get("effect_plan_id") == plan_id)
+        assert json.loads(native_tool["content"]) == final
+        # A successful read of a failed patrol stays a successful READ query.
+        read = get_library_patrol_status({})
+        assert read.ok and read.status == status
 
 
 class AgentCompletionIdentityTests(unittest.TestCase):
@@ -218,3 +260,8 @@ class AgentCompletionIdentityTests(unittest.TestCase):
         for case in ("same-second", "separate-second", "overwritten-cycle"):
             with self.subTest(case=case):
                 asyncio.run(assert_patrol_identity(case))
+
+    def test_patrol_completion_reports_business_outcome(self):
+        for status in ("not_configured", "unavailable", "failed", "inconclusive", "up_to_date", "updates_available"):
+            with self.subTest(status=status):
+                asyncio.run(assert_patrol_outcome(status))
