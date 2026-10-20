@@ -94,6 +94,26 @@ class _FakeMediaClient:
 
 
 class SeriesSourcePayloadTests(unittest.TestCase):
+    def test_incomplete_identity_lookup_cannot_be_erased_by_title_fallback(self):
+        from app.modules.media_subscriptions import MediaSubscriptionService
+
+        for title_id, expected in ((None, "not_found"), ("", "unmapped"), ("12345", "ready"), ("2", "conflict")):
+            with self.subTest(title_id=title_id):
+                candidates = [] if title_id is None else [
+                    SeriesCandidate("series-1", "The Show", "2026", title_id)
+                ]
+                client = _FakeMediaClient(
+                    SeriesSearchResult(candidates=candidates, total=len(candidates)),
+                    provider_search=SeriesSearchResult(truncated=True),
+                    inventories={"series-1": SeriesEpisodeInventory(episodes=[(1, 1)], total=1)},
+                )
+                result = _series_source_payload(
+                    "jellyfin", "Jellyfin", cast(MediaServerClient, client), "The Show", "12345", 2000
+                )
+                self.assertEqual(result["status"], expected)
+                self.assertTrue(result["truncated"])
+                self.assertFalse(MediaSubscriptionService._inventory_complete([result])[0])
+
     def test_unmapped_unique_local_series_still_reads_jellyfin_inventory(self):
         candidate = SeriesCandidate(id="series-1", name="The Show", year="2026")
         client = _FakeMediaClient(
@@ -205,6 +225,20 @@ class EpisodeAuditTests(unittest.TestCase):
             "app.agent.domains.library.episode_audit.TMDBClient", return_value=_FakeTMDB()
         ):
             return audit_series_episodes(dict(self.arguments))
+
+    def test_incomplete_empty_source_is_not_proof_of_absence(self):
+        source = {**_ready([], truncated=True), "status": "not_found", "selected": None}
+        result = self._run([source])
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "inconclusive")
+
+    def test_incomplete_empty_second_server_prevents_definitive_missing_verdict(self):
+        sources = [_ready([(1, 1)]), {
+            **_ready([], server="Emby", truncated=True), "status": "not_found", "selected": None,
+        }]
+        result = self._run(sources)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "inconclusive")
 
     def _large_missing_fixture(self):
         fake = _FakeTMDB()

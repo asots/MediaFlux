@@ -324,14 +324,16 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
             data=data,
             suggestions=["请核对媒体库名称，或不指定媒体库以检查全部已配置服务器。"],
         )
-    if not ready and not unmapped and "unavailable" in statuses:
+    if not ready and not unmapped and (
+        "unavailable" in statuses or any(source.get("truncated") for source in sources)
+    ):
         return _result(
             ok=False,
-            status="unavailable",
+            status="unavailable" if "unavailable" in statuses else "inconclusive",
             summary="媒体服务器数据不完整，无法完成剧集审计",
             data=data,
             suggestions=["请检查不可用的媒体服务器后重试。"],
-            error="媒体服务器暂时不可用。",
+            error="媒体服务器库存未完整读取。",
         )
     if not ready and not unmapped:
         return _result(
@@ -551,7 +553,7 @@ def _audit_uncached(arguments: dict[str, Any]) -> ToolResult:
         seasons_truncated
         or bool(missing and data["ignored_unknown_local"])
         or remote_truncated
-        or any(source.get("truncated") for source in ready)
+        or any(source.get("truncated") for source in sources)
         or "unavailable" in statuses
         or "unmapped" in statuses
     )

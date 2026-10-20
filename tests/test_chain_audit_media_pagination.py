@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import asyncio
 from unittest.mock import patch
 
 from app.clients.emby import EmbyClient
@@ -127,6 +128,28 @@ class MediaInventoryCompletenessTests(unittest.TestCase):
         ready, reason = MediaSubscriptionService._inventory_complete([source])
         self.assertFalse(ready)
         self.assertIn("未执行资源搜索", reason)
+
+    def test_alias_fallback_preserves_partial_identity_scan_through_submission_guard(self):
+        from app.services import _series_source_payload
+        from app.modules.media_subscriptions import MediaSubscriptionError
+
+        client = self.client(JellyfinClient)
+        def request(path, *, params, **kwargs):
+            if "SearchTerm" in params:
+                return {"Items": [], "TotalRecordCount": 0}
+            return {"Items": [self.item(2)], "TotalRecordCount": 3}
+
+        with patch.object(client, "_request", side_effect=request):
+            source = _series_source_payload("jellyfin", "Synthetic", client, "An alias", "1", 2000)
+        self.assertEqual(source["status"], "not_found")
+        self.assertTrue(source["truncated"])
+        with patch("app.modules.media_subscriptions.inspect_series_episode_sources", return_value=[source]):
+            with self.assertRaises(MediaSubscriptionError) as raised:
+                asyncio.run(MediaSubscriptionService()._candidate_still_missing(
+                    {"media_type": "tv", "tmdb_id": "1", "title": "An alias", "include_specials": False},
+                    {"season": 1, "episode": 1},
+                ))
+        self.assertEqual(raised.exception.code, "inventory_unavailable")
 
     def test_repeated_item_ids_abort_inventory_before_becoming_complete(self):
         for cls in (EmbyClient, JellyfinClient):

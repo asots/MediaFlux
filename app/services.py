@@ -819,23 +819,16 @@ def _series_source_payload(
                 )
 
         candidates = _public_series_candidates(title_search, provider_search)
+        # 标题回退不能抹去精确身份枚举尚未完成的事实（别名、多副本均可能漏读）。
+        search_truncated = title_search.truncated or bool(provider_search and provider_search.truncated)
         selected_items = _complete_series_matches(title_search, query)
         if not selected_items:
-            if (title_search.total or 0) == 0 or not title_search.candidates:
-                return _empty_series_source_result(
-                    server_type=server_type,
-                    server_name=server_name,
-                    status="not_found",
-                    candidates=candidates,
-                    truncated=title_search.truncated,
-                    library_name=resolved_library_name,
-                )
             return _empty_series_source_result(
                 server_type=server_type,
                 server_name=server_name,
-                status="ambiguous",
+                status="not_found" if not title_search.total or not title_search.candidates else "ambiguous",
                 candidates=candidates,
-                truncated=title_search.truncated,
+                truncated=search_truncated,
                 library_name=resolved_library_name,
             )
 
@@ -846,7 +839,7 @@ def _series_source_payload(
                 server_name=server_name,
                 status="conflict",
                 candidates=candidates,
-                truncated=title_search.truncated,
+                truncated=search_truncated,
                 library_name=resolved_library_name,
             )
         status = "ready" if mapped_ids else "unmapped"
@@ -862,7 +855,7 @@ def _series_source_payload(
             max_episodes=max_episodes,
             include_specials=include_specials,
             library_name=resolved_library_name,
-            search_truncated=title_search.truncated,
+            search_truncated=search_truncated,
         )
     except Exception as exc:
         logger.warning(
