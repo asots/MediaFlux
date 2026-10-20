@@ -34,6 +34,26 @@ def retry(mode, client, runtime, **kwargs):
 
 
 @pytest.mark.parametrize("mode", ["selected", "all"])
+@pytest.mark.parametrize("stage", ["client", "lookup"])
+def test_retry_preparation_failure_keeps_items_available_without_restart(tmp_path, mode, stage):
+    with isolated_test_database(), patch("socket.socket.connect", side_effect=AssertionError("network forbidden")):
+        client, runtime = seed(tmp_path)
+        before = [(r["id"], r["retry_count"]) for r in db.list_strm_failures(status="open")]
+        failing = "GuangYaClient" if stage == "client" else "_locate_retry_files"
+        with patch.object(strm, failing, side_effect=OSError("preparation unavailable")):
+            with pytest.raises(OSError, match="preparation unavailable"):
+                retry(mode, None if stage == "client" else client, runtime)
+        assert [(r["id"], r["retry_count"]) for r in db.list_strm_failures(status="open")] == before
+        assert not db.list_strm_failures(status="retrying")
+        assert not list(tmp_path.rglob("*.strm"))
+        # 不重启/重置数据库即可重试；使用相同磁盘、台账和真实安装逻辑。
+        result = retry(mode, client, runtime)
+        assert result["resolved"] == len(before)
+        assert len(list(tmp_path.rglob("*.strm"))) == len(before)
+        assert not db.list_strm_failures(status="open")
+
+
+@pytest.mark.parametrize("mode", ["selected", "all"])
 @pytest.mark.parametrize("stop_at", ["after_scan", "after_first_install"])
 def test_retry_stop_never_installs_remaining_located_files(tmp_path, mode, stop_at):
     with isolated_test_database(), patch("socket.socket.connect", side_effect=AssertionError("network forbidden")):

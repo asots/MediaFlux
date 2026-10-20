@@ -3367,16 +3367,33 @@ def _process_claimed_strm_failures(
 
 
 def _retry_strm_failures_locked(
-    ids: list[int], trigger_type: str, *, client: Optional[GuangYaClient] = None,
+    ids: list[int] | None, trigger_type: str, *, client: Optional[GuangYaClient] = None,
     on_progress=None, runtime_config: Optional[dict] = None,
     should_stop: Callable[[], bool] | None = None,
+    source_id: str = "", action: str = "",
 ) -> dict:
-    normalized = list(dict.fromkeys(item for item in ids))
-    candidates = db.list_strm_failures(status="open", ids=normalized, limit=1000)
-    result = _retry_result(trigger_type, requested=len(normalized))
-    result["attempted"] = len(normalized)
-    result["batches"] = 1 if normalized else 0
-    if not candidates:
+    """选中/全部重试共用准备与分批执行；客户端和扫描成功前不领取失败项。"""
+    normalized = list(dict.fromkeys(ids)) if ids is not None else None
+    snapshot: list[tuple[int, str, str]] = []
+    before_id: int | None = None
+    while True:
+        candidates = db.list_strm_failures(
+            status="open", ids=normalized, source_id=(source_id or "").strip(),
+            action=action or "", before_id=before_id, limit=1000,
+        )
+        if not candidates:
+            break
+        snapshot.extend(
+            (int(row["id"]), str(row["source_id"]), str(row["file_id"])) for row in candidates
+        )
+        if normalized is not None:
+            break
+        before_id = min(int(row["id"]) for row in candidates)
+    requested = len(snapshot) if normalized is None else len(normalized)
+    result = _retry_result(trigger_type, requested=requested)
+    result["attempted"] = requested
+    result["batches"] = int(bool(normalized))
+    if not snapshot:
         return result
     if runtime_config is None:
         runtime, config_error = _retry_runtime_config()
@@ -3384,15 +3401,11 @@ def _retry_strm_failures_locked(
             return {**result, "ok": False, "error": config_error}
     else:
         runtime = deepcopy(runtime_config)
-    rows = db.claim_strm_failures([int(row["id"]) for row in candidates], limit=1000)
-    result["matched"] = len(rows)
-    if not rows:
-        return result
     with _guangya_client_scope(client) as runtime_client:
         lookup = _locate_retry_files(
             runtime_client,
             runtime["sources"],
-            {(str(row["source_id"]), str(row["file_id"])) for row in rows},
+            {(source, file_id) for _, source, file_id in snapshot},
             should_stop=should_stop,
         )
         result.update({
@@ -3404,18 +3417,21 @@ def _retry_strm_failures_locked(
             "stop_stage": "scan" if lookup.stopped else "",
         })
         progress = _BoundedProgress(on_progress)
-        progress.emit("retry", 0, len(rows), "重试失败项")
-        _process_claimed_strm_failures(
-            rows,
-            client=runtime_client,
-            runtime=runtime,
-            lookup=lookup,
-            result=result,
-            progress=progress,
-            progress_offset=0,
-            progress_total=len(rows),
-            should_stop=should_stop,
-        )
+        total = len(snapshot)
+        progress.emit("retry", 0, total, "重试失败项")
+        index_maps: dict = {}
+        for offset in range(0, total, 1000):
+            batch = snapshot[offset:offset + 1000]
+            rows = db.claim_strm_failures([failure_id for failure_id, _, _ in batch], limit=1000)
+            if normalized is None:
+                result["batches"] += 1
+            result["matched"] += len(rows)
+            _process_claimed_strm_failures(
+                rows, client=runtime_client, runtime=runtime, lookup=lookup,
+                result=result, progress=progress, progress_offset=offset,
+                progress_total=total, should_stop=should_stop, index_maps=index_maps,
+            )
+            progress.emit("retry", min(offset + len(batch), total), total, "重试失败项")
         return result
 
 
@@ -3455,78 +3471,11 @@ def retry_all_strm_failures(
             "ok": False, "error": "STRM 同步或重试任务正在运行",
         }
     try:
-        snapshot: list[tuple[int, str, str]] = []
-        before_id: int | None = None
-        while True:
-            candidates = db.list_strm_failures(
-                status="open",
-                source_id=(source_id or "").strip(),
-                action=(action or ""),
-                before_id=before_id,
-                limit=1000,
-            )
-            if not candidates:
-                break
-            snapshot.extend(
-                (int(row["id"]), str(row["source_id"]), str(row["file_id"])) for row in candidates
-            )
-            before_id = min(int(row["id"]) for row in candidates)
-
-        result = _retry_result(trigger_type, requested=len(snapshot))
-        result["attempted"] = len(snapshot)
-        if not snapshot:
-            return result
-        if runtime_config is None:
-            runtime, config_error = _retry_runtime_config()
-            if config_error:
-                return {**result, "ok": False, "error": config_error}
-        else:
-            runtime = deepcopy(runtime_config)
-        with _guangya_client_scope(client) as runtime_client:
-            lookup = _locate_retry_files(
-                runtime_client,
-                runtime["sources"],
-                {(source, file_id) for _, source, file_id in snapshot},
-                should_stop=should_stop,
-            )
-            result.update({
-                "scan_incomplete": lookup.scan_incomplete,
-                "scan_limit_reason": lookup.scan_limit_reason,
-                "scan_directories": lookup.directories,
-                "scan_entries": lookup.entries,
-                "stopped": lookup.stopped,
-                "stop_stage": "scan" if lookup.stopped else "",
-            })
-            progress = _BoundedProgress(on_progress)
-            total = len(snapshot)
-            progress.emit("retry", 0, total, "重试失败项")
-            index_maps: dict = {}
-            for offset in range(0, total, 1000):
-                batch = snapshot[offset:offset + 1000]
-                rows = db.claim_strm_failures(
-                    [failure_id for failure_id, _, _ in batch], limit=1000
-                )
-                result["batches"] += 1
-                result["matched"] += len(rows)
-                _process_claimed_strm_failures(
-                    rows,
-                    client=runtime_client,
-                    runtime=runtime,
-                    lookup=lookup,
-                    result=result,
-                    progress=progress,
-                    progress_offset=offset,
-                    progress_total=total,
-                    should_stop=should_stop,
-                    index_maps=index_maps,
-                )
-                progress.emit(
-                    "retry",
-                    min(offset + len(batch), total),
-                    total,
-                    "重试失败项",
-                )
-            return result
+        return _retry_strm_failures_locked(
+            None, trigger_type, source_id=source_id, action=action,
+            client=client, on_progress=on_progress,
+            runtime_config=runtime_config, should_stop=should_stop,
+        )
     finally:
         STRM_OPERATION_LOCK.release()
 
