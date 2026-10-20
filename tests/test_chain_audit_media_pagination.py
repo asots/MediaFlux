@@ -227,6 +227,45 @@ class MediaInventoryCompletenessTests(unittest.TestCase):
                 )[0]
                 self.assertEqual(source["items"][0]["status"], "present")
 
+    def test_exact_identity_lookups_also_include_collection_members(self):
+        for cls in (EmbyClient, JellyfinClient):
+            client = self.client(cls)
+            def request(path, params, **kwargs):
+                rows = [self.item(2)] if params.get("CollapseBoxSetItems") == "false" else []
+                return {"Items": rows, "TotalRecordCount": len(rows)}
+            with self.subTest(server=cls.__name__), patch.object(client, "_request", side_effect=request):
+                self.assertTrue(client.has_tmdb_media("2", "movie", parent_id="movies"))
+                result = client.find_series_candidates_by_tmdb("2")
+                self.assertEqual([item.tmdb_id for item in result.candidates], ["2"])
+
+    def test_exact_identity_does_not_trust_an_ignored_server_provider_filter(self):
+        for cls in (EmbyClient, JellyfinClient):
+            client = self.client(cls)
+            rows = [self.item(n) for n in range(1, 502)]
+            def request(path, params, **kwargs):
+                start, limit = params.get("StartIndex", 0), params["Limit"]
+                return {"Items": rows[start:start + limit], "TotalRecordCount": len(rows)}
+            with self.subTest(server=cls.__name__), patch.object(client, "_request", side_effect=request) as calls:
+                self.assertTrue(client.has_tmdb_media("501", "movie"))
+                self.assertEqual([c.kwargs["params"]["StartIndex"] for c in calls.call_args_list], [0, 500])
+                calls.reset_mock()
+                result = client.find_series_candidates_by_tmdb("501")
+                self.assertEqual([c.tmdb_id for c in result.candidates], ["501"])
+                self.assertEqual(result.total, 1)
+                self.assertFalse(result.truncated)
+                self.assertTrue(all("AnyProviderIdEquals" not in c.kwargs["params"] for c in calls.call_args_list))
+
+    def test_incomplete_identity_inventory_cannot_prove_absence(self):
+        client = self.client(JellyfinClient)
+        with patch.object(client, "_inventory_items", return_value=([self.item(1)], 10001, True)), \
+                patch.object(client, "_request", side_effect=AssertionError("must use shared inventory")):
+            self.assertTrue(client.has_tmdb_media("1", "movie"))
+            with self.assertRaisesRegex(ValueError, "不完整"):
+                client.has_tmdb_media("2", "movie")
+            result = client.find_series_candidates_by_tmdb("2")
+            self.assertTrue(result.truncated)
+            self.assertEqual(result.candidates, [])
+
     def test_unknown_short_search_page_keeps_filtered_candidate_incomplete(self):
         for cls in (EmbyClient, JellyfinClient):
             client = self.client(cls)

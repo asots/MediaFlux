@@ -704,59 +704,42 @@ class MediaServerClient:
                 return rows, max(reported_total, len(rows)), reported_total > len(rows)
         return rows, max(reported_total, len(rows)), True
 
-    def has_tmdb_media(
-        self, tmdb_id: str, media_type: str, *, parent_id: str = ""
-    ) -> bool:
-        """按 ProviderIds.Tmdb 精确判断电影或剧集是否存在，可限定媒体库。"""
+    def _tmdb_identity_items(
+        self, tmdb_id: str, media_type: str, parent_id: str,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """从统一库存枚举精确匹配，不依赖服务器未必支持的 ID 等值过滤。"""
         normalized_id = self._provider_tmdb_id({"Tmdb": tmdb_id})
-        normalized_type = "Series" if media_type.strip().lower() == "tv" else "Movie"
         if not normalized_id:
             raise ValueError("TMDB ID 无效")
         params = {
-            "Recursive": "true",
-            "Limit": 20,
-            "IncludeItemTypes": normalized_type,
-            "Fields": "ProviderIds",
-            "AnyProviderIdEquals": f"Tmdb.{normalized_id}",
+            "IncludeItemTypes": "Series" if media_type.strip().lower() == "tv" else "Movie",
+            "Fields": "ProviderIds,ProductionYear",
+            "HasTmdbId": "true",
         }
         if (parent_id or "").strip():
             params["ParentId"] = parent_id.strip()
-        data = self._request(
-            f"/Users/{self._user_id()}/Items",
-            params=params,
+        items, _total, truncated = self._inventory_items(
+            self._user_id(), params=params, cap=10_000, page_size=500, deadline_at=None,
         )
-        items, _total = self._items_payload(data)
-        return any(
-            self._provider_tmdb_id(item.get("ProviderIds")) == normalized_id
-            for item in items
-        )
+        return [item for item in items if self._provider_tmdb_id(item.get("ProviderIds")) == normalized_id], truncated
+
+    def has_tmdb_media(
+        self, tmdb_id: str, media_type: str, *, parent_id: str = ""
+    ) -> bool:
+        """按精确身份核对；不完整库存只能证明存在，不能证明缺失。"""
+        items, truncated = self._tmdb_identity_items(tmdb_id, media_type, parent_id)
+        if not items and truncated:
+            raise ValueError("媒体身份清单不完整，无法确认媒体不存在")
+        return bool(items)
 
     def find_series_candidates_by_tmdb(
         self, tmdb_id: str, limit: int = 20, *, parent_id: str = ""
     ) -> SeriesSearchResult:
         """按 ProviderIds.Tmdb 精确返回剧集候选，避免标题别名导致漏判。"""
-        normalized_id = self._provider_tmdb_id({"Tmdb": tmdb_id})
         normalized_limit = max(1, min((limit or 20), 20))
-        if not normalized_id:
-            raise ValueError("TMDB ID 无效")
-        params = {
-            "Recursive": "true",
-            "Limit": normalized_limit,
-            "IncludeItemTypes": "Series",
-            "Fields": "ProviderIds,ProductionYear",
-            "AnyProviderIdEquals": f"Tmdb.{normalized_id}",
-        }
-        if (parent_id or "").strip():
-            params["ParentId"] = parent_id.strip()
-        data = self._request(
-            f"/Users/{self._user_id()}/Items",
-            params=params,
-        )
-        items, total = self._items_payload(data)
+        items, truncated = self._tmdb_identity_items(tmdb_id, "tv", parent_id)
         candidates: list[SeriesCandidate] = []
-        for item in items:
-            if self._provider_tmdb_id(item.get("ProviderIds")) != normalized_id:
-                continue
+        for item in items[:normalized_limit]:
             item_id = str(item.get("Id") or "").strip()
             name = str(item.get("Name") or "").strip()
             if not item_id or not name:
@@ -765,12 +748,12 @@ class MediaServerClient:
                 id=item_id,
                 name=name,
                 year=str(item.get("ProductionYear") or "").strip(),
-                tmdb_id=normalized_id,
+                tmdb_id=self._provider_tmdb_id(item.get("ProviderIds")),
             ))
         return SeriesSearchResult(
             candidates=candidates,
-            total=max(len(candidates), (total or 0)),
-            truncated=total > len(items) if total is not None else len(items) >= normalized_limit,
+            total=len(items),
+            truncated=truncated or len(candidates) < len(items),
         )
 
     def search_series_candidates(

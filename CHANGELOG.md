@@ -19,6 +19,7 @@
 - 索引站独立配置，区分前端搜索和 Agent 来源权限；资源目录先完成分页再应用结果上限。公网磁力在下载接入边界补充 Tracker，移除固定片名别名推断（[`275fe24b`](https://github.com/li88iioo/MediaFlux/commit/275fe24b)、[`4c867b68`](https://github.com/li88iioo/MediaFlux/commit/4c867b68)、[`9facc6d6`](https://github.com/li88iioo/MediaFlux/commit/9facc6d6)、[`705471ba`](https://github.com/li88iioo/MediaFlux/commit/705471ba)、[`5bcba2a5`](https://github.com/li88iioo/MediaFlux/commit/5bcba2a5)）。
 
 ### Fixed
+- 按 TMDB ID 的单项存在性／剧集候选查询复用统一分页库存读取，移除未受支持的服务端等值过滤；库存未扫描完整时不再把未命中报告为不存在。
 - 媒体库存统一展开电影合集成员，不再把 Jellyfin / Emby 的界面折叠清单当作完整库存，避免推荐重复的已入库影片（[`c099e8e9`](https://github.com/li88iioo/MediaFlux/commit/c099e8e9)）。
 - 连续对话按窗口剩余容量保留最近查询工具的 Schema，仍重新核验当前权限；修复能力召回把工具示例中的“排除已入库”误当成工具动作，导致推荐工具被压低的问题（[`59d4ed53`](https://github.com/li88iioo/MediaFlux/commit/59d4ed53)、[`73c65809`](https://github.com/li88iioo/MediaFlux/commit/73c65809)）。
 - 修复 Agent 中断流、跨轮约束、部分查询失败和确认后后台任务的状态交接；停止、过期确认及重试保留执行身份，不把提交、检查或文件移动当作入库完成（[`077ea313`](https://github.com/li88iioo/MediaFlux/commit/077ea313)、[`fc9adc27`](https://github.com/li88iioo/MediaFlux/commit/fc9adc27)、[`0f7fae6b`](https://github.com/li88iioo/MediaFlux/commit/0f7fae6b)、[`42f2cd6c`](https://github.com/li88iioo/MediaFlux/commit/42f2cd6c)）。
