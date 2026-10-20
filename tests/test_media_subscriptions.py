@@ -73,6 +73,47 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[0], results[2])
 
+    def test_movie_preview_and_live_share_facts_without_preview_writes(self):
+        from datetime import date, timedelta
+        from itertools import product
+
+        from app.modules.media_identity import build_media_key
+
+        service = MediaSubscriptionService()
+        sid = self._seed_subscription(tmdb_id="7", media_type="movie")
+        dates = ("", (date.today() - timedelta(days=1)).isoformat(),
+                 (date.today() + timedelta(days=1)).isoformat())
+        for release, complete, present, active in product(dates, (True, False), (True, False), (True, False)):
+            with self.subTest(release=release, complete=complete, present=present, active=active):
+                sources = [{"status": "ready", "present": present}]
+                if not complete:
+                    sources.append({"status": "unavailable", "present": False})
+                admissions = [{"media_key": build_media_key("7", "movie")}] if active else []
+                before = db.get_media_subscription(sid)
+                assert before is not None
+                with (
+                    patch("app.modules.media_subscriptions._tmdb_detail", return_value={"title": "Fixture", "release_date": release}),
+                    patch("app.modules.media_subscriptions.inspect_media_identity_sources", return_value=sources),
+                    patch.object(db, "list_active_media_download_admissions", return_value=admissions),
+                    patch.object(service, "_sync_admissions", new=AsyncMock()) as sync,
+                    patch.object(service, "_preview_search_movie", new=AsyncMock(return_value=service._empty_preview_search("empty"))),
+                    patch.object(service, "_search_movie", new=AsyncMock(return_value=(0, 0))) as search,
+                    patch("app.modules.media_subscription_notifications.drain_media_subscription_notifications", return_value=0),
+                ):
+                    preview = asyncio.run(service.preview_subscription_updates(sid))
+                    after = db.get_media_subscription(sid)
+                    assert after is not None
+                    self.assertEqual(dict(before), dict(after))
+                    sync.assert_not_awaited()
+                    search.assert_not_awaited()
+                    live = asyncio.run(service.check_subscription(sid))["result"]
+                for field in ("status", "expected_count", "local_count", "missing_count", "inflight_count",
+                              "future_count", "unknown_air_date_count", "inventory_complete"):
+                    self.assertEqual(preview[field], live[field], field)
+                self.assertEqual(live["future_count"], int(release == dates[2]))
+                self.assertEqual(live["unknown_air_date_count"], int(not release))
+                self.assertEqual(live["missing_count"], int(complete and release == dates[1] and not present and not active))
+
     def test_search_cancellation_keeps_preview_and_live_exception_contracts(self):
         service = MediaSubscriptionService()
         subscription_id = self._seed_subscription(tmdb_id="7", media_type="movie")

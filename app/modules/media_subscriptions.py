@@ -237,6 +237,32 @@ def _parse_air_date(value: Any) -> date | None:
         return None
 
 
+def _movie_facts(
+    release_date: Any, *, present: bool, active: bool, inventory_complete: bool,
+    inventory_reason: str, unknown_summary: str,
+) -> dict[str, Any]:
+    """预览和巡检使用同一组观察事实；日期未知不是未来，库存不全不推断缺失。"""
+    release = _parse_air_date(release_date)
+    released = release is not None and release <= date.today()
+    missing = inventory_complete and released and not present and not active
+    if not inventory_complete:
+        status, summary = "inconclusive", inventory_reason
+    elif release is None and not present and not active:
+        status, summary = "inconclusive", unknown_summary
+    elif missing:
+        status, summary = "missing", "电影已上映但媒体库尚未收录"
+    else:
+        status, summary = "satisfied", "电影尚未上映" if not released else "媒体已收录或正在下载"
+    return {
+        "status": status, "summary": summary,
+        "expected_count": int(released), "local_count": int(present),
+        "missing_count": int(missing),
+        "inflight_count": int(active and not present),
+        "future_count": int(release is not None and not released),
+        "unknown_air_date_count": int(release is None),
+    }
+
+
 def _metadata_from_detail(detail: dict[str, Any], media_type: str) -> dict[str, str]:
     title = str(detail.get("name" if media_type == "tv" else "title") or "").strip()
     original = str(detail.get("original_name" if media_type == "tv" else "original_title") or "").strip()
@@ -1037,10 +1063,11 @@ class MediaSubscriptionService:
             str(item["media_key"] or "") == media_key
             for item in db.list_active_media_download_admissions(int(row["id"]))
         ) and not present
-        release = _parse_air_date(detail.get("release_date"))
-        release_known = release is not None
-        released = bool(release and release <= date.today())
-        missing_count = int(inventory_complete and released and not present and not active)
+        facts = _movie_facts(
+            detail.get("release_date"), present=present, active=active, inventory_complete=inventory_complete,
+            inventory_reason=inventory_reason, unknown_summary="TMDB 未提供上映日期，本次未搜索资源站",
+        )
+        missing_count = facts["missing_count"]
         search = self._empty_preview_search("not_run")
         if missing_count:
             search = await self._preview_search_movie(
@@ -1048,33 +1075,14 @@ class MediaSubscriptionService:
                 detail,
                 limit_per_media=limit_per_media,
             )
-        if not inventory_complete:
-            status = "inconclusive"
-            summary = inventory_reason
-        elif not release_known and not present and not active:
-            status = "inconclusive"
-            summary = "TMDB 未提供上映日期，本次未搜索资源站"
-        elif missing_count:
-            status = "missing"
-            summary = "电影已上映但媒体库尚未收录"
-        else:
-            status = "satisfied"
-            summary = "电影尚未上映" if not released else "媒体已收录或正在下载"
         resources = self._preview_resource_items(search)
         return {
             "subscription_number": int(row["id"]),
             "title": str(row["title"]),
             "media_type": "movie",
             "enabled": True,
-            "status": status,
-            "summary": summary,
-            "expected_count": int(released),
-            "local_count": int(present),
-            "missing_count": missing_count,
+            **facts,
             "missing": ([{"label": "电影"}] if missing_count else []),
-            "inflight_count": int(active),
-            "future_count": int(release_known and not released),
-            "unknown_air_date_count": int(not release_known),
             "inventory_complete": inventory_complete,
             "inventory_reason": inventory_reason,
             "sources": self._public_sources(sources),
@@ -1111,31 +1119,19 @@ class MediaSubscriptionService:
             str(item["media_key"]) == key
             for item in db.list_active_media_download_admissions(int(row["id"]))
         )
-        release = _parse_air_date(detail.get("release_date"))
-        release_known = release is not None
-        released = bool(release and release <= date.today())
-        expected_count = 1 if released else 0
-        missing = [] if present or active or not released else [_ExpectedMedia(key).public_dict()]
+        facts = _movie_facts(
+            detail.get("release_date"), present=present, active=active, inventory_complete=complete,
+            inventory_reason=reason, unknown_summary="TMDB 未提供上映日期，已停止自动搜索",
+        )
+        missing = [_ExpectedMedia(key).public_dict()] if facts["missing_count"] else []
         base = {
             "media_type": "movie", "tmdb_id": tmdb_id, "title": str(row["title"]),
-            "expected_count": expected_count, "local_count": int(present),
-            "missing_count": len(missing), "missing": missing,
-            "inflight_count": int(active), "future_count": int(not released),
-            "unknown_air_date_count": int(release is None),
+            **facts, "missing": missing,
             "inventory_complete": complete, "inventory_reason": reason,
             "sources": self._public_sources(sources), "candidate_count": 0, "auto_submitted": 0,
         }
-        if not complete:
-            return {**base, "status": "inconclusive", "summary": reason}
-        if not release_known and not present and not active:
-            return {
-                **base,
-                "status": "inconclusive",
-                "summary": "TMDB 未提供上映日期，已停止自动搜索",
-            }
-        if not missing:
-            summary = "电影尚未上映" if not released else "媒体已收录或正在下载"
-            return {**base, "status": "satisfied", "summary": summary}
+        if facts["status"] != "missing":
+            return base
         candidates = 0
         auto_submitted = 0
         if str(row["action"]) != "notify":
@@ -1143,7 +1139,7 @@ class MediaSubscriptionService:
                 row, detail, key, cancel_event=cancel_event
             )
         return {
-            **base, "status": "missing", "summary": "电影已上映但媒体库尚未收录",
+            **base,
             "candidate_count": candidates, "auto_submitted": auto_submitted,
         }
 
