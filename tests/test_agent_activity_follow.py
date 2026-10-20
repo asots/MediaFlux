@@ -68,6 +68,57 @@ class ActivityFollowTests(IsolatedDatabaseTestCase):
         self.assertEqual(preview.status, "confirmation_required")
         return follow_confirmed(self.arguments, token, self.context)
 
+    def test_topic_follow_notification_keeps_route_through_kernel_and_outbox(self):
+        from unittest.mock import AsyncMock
+
+        from app.agent.kernel.ports.existing_actions import _kernel_context
+        from app.agent.kernel.state_types import CancellationToken, PublicationLease
+        from app.agent.kernel.tool_calls import ToolCallContext
+        from app.modules.telegram_notification_center import drain_telegram_notifications
+        from app.notifier import TelegramSendResult
+
+        owner = "tg:v1:123\x1f456"
+        context = _kernel_context(ToolCallContext(
+            owner=owner, session_id="topic-77", request_id="follow-topic",
+            turn_id="turn", lease=PublicationLease(owner, "topic-77", 1, "turn", "follow-topic"),
+            cancellation=CancellationToken(), report_progress=AsyncMock(),
+            channel="telegram", delivery_route={"chat_id": "123", "message_thread_id": 77},
+        ))
+        values = {"AGENT_ENABLED": "1", "TG_AGENT_ENABLED": "1", "TG_AGENT_ALLOWED_USER_IDS": "456",
+                  "TG_NOTIFICATION_ENABLED": "1", "TG_NOTIFICATION_LEVEL": "standard"}
+        current_get = config.get
+        with patch.object(config, "get", side_effect=lambda key, default="": values.get(key, current_get(key, default))), \
+                patch("app.modules.telegram_notification_center.send_event_result",
+                      side_effect=[TelegramSendResult(ok=False, status_code=429, retry_after_seconds=1),
+                                   TelegramSendResult(ok=True, message_id=1234)]) as send:
+            _, token = prepare_follow(self.arguments, context)
+            saved = follow_confirmed(self.arguments, token, context)
+            db.update_download_request(self.identifier, status="completed", gy_status="completed")
+            self.assertEqual(drain_automation_rules(now=datetime.now().astimezone() + timedelta(seconds=1)), 1)
+            self.assertFalse(drain_telegram_notifications())
+            with db.get_conn() as conn:
+                conn.execute("UPDATE telegram_notification_outbox SET next_attempt_at='2000-01-01 00:00:00'")
+            self.assertTrue(drain_telegram_notifications())
+            self.assertEqual(send.call_count, 2)
+            for call in send.call_args_list:
+                self.assertEqual(call.kwargs.get("message_thread_id"), 77)
+                self.assertEqual(call.kwargs["chat_id"], "123")
+            row = rules.get_rule(agent_job_owner_digest(owner), saved.data["rule_id"])
+            assert row is not None
+            self.assertFalse(row["enabled"])
+
+    def test_follow_confirmation_rejects_changed_physical_topic(self):
+        from dataclasses import replace
+
+        context = ToolContext(owner="tg:v1:123\x1f456", session_id="shared",
+                              delivery_route={"chat_id": "123", "message_thread_id": 77})
+        with patch("app.modules.media_automation_rules.telegram_owner_route_is_currently_authorized", return_value=True):
+            _, token = prepare_follow(self.arguments, context)
+            changed = replace(context, delivery_route={"chat_id": "123", "message_thread_id": 78})
+            with self.assertRaisesRegex(AgentToolError, "通知目标已改变"):
+                follow_confirmed(self.arguments, token, changed)
+            self.assertEqual(list_follows({}, context).data["items"], [])
+
     def test_preparation_is_readonly_and_confirm_does_not_complete_download(self):
         _, token = prepare_follow(self.arguments, self.context)
         self.assertEqual(list_follows({}, self.context).data["items"], [])

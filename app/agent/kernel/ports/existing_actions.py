@@ -93,6 +93,7 @@ def _kernel_context(context: ToolCallContext, *, tool: str = "") -> ToolContext:
         capability_search=context.capability_search,
         cancelled=lambda: context.cancellation.cancelled,
         reobservation_source=deepcopy(context.reobservation_source),
+        delivery_route=deepcopy(context.delivery_route),
     )
 
 

@@ -108,7 +108,7 @@ def _prepare(
         "hours": hours,
         "rule_id": current["id"] if current else "",
         "revision": current["revision"] if current else 0,
-        "route": notification_route_settings(context.owner),
+        "route": notification_route_settings(context.owner, delivery_route=context.delivery_route),
     }
     return frozen, timeline.data, timeline
 

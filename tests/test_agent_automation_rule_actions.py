@@ -508,3 +508,41 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
         self.assertEqual(_authorized_notification_chat(rule), "123")
         with patch("app.modules.media_automation_rules.config.get", return_value="999"):
             self.assertEqual(_authorized_notification_chat(rule), "")
+
+    def test_daily_digest_preserves_topic_when_disabled_and_routes_after_reenable(self):
+        from app.repositories.agent_jobs import agent_job_owner_digest
+
+        context = ToolContext(owner="tg:v1:123\x1f456", session_id="topic",
+                              delivery_route={"chat_id": "123", "message_thread_id": 99})
+        args = {"enabled": True, "hour": 21, "send_empty": True}
+        with patch("app.modules.media_automation_rules.telegram_owner_route_is_currently_authorized", return_value=True):
+            _, token = prepare_set_digest(args, context)
+            saved = set_digest_confirmed(args, token, context)
+            rule_id = saved.data["rule_id"]
+            owner = agent_job_owner_digest(context.owner)
+            # 停用是控制操作；即使从默认聊天发起，也不应丢掉规则原话题。
+            disabled = {"rule_id": rule_id, "enabled": False, "hour": 21}
+            default_context = ToolContext(owner=context.owner, session_id="default")
+            _, token = prepare_set_digest(disabled, default_context)
+            set_digest_confirmed(disabled, token, default_context)
+            row = rules.get_rule(owner, rule_id)
+            assert row is not None
+            self.assertEqual(row["settings"]["notification_message_thread_id"], 99)
+            enabled = {"rule_id": rule_id, "enabled": True, "hour": 21}
+            _, token = prepare_set_digest(enabled, context)
+            set_digest_confirmed(enabled, token, context)
+            row = rules.get_rule(owner, rule_id)
+            assert row is not None
+            with patch("app.modules.media_automation_rules.publish_notification_event", return_value=Mock(status="pending")) as publish:
+                self.assertEqual(drain_automation_rules(now=datetime.fromisoformat(row["next_run_at"])), 1)
+            self.assertEqual(publish.call_args.kwargs["delivery_route"], {"chat_id": "123", "message_thread_id": 99})
+
+    def test_topic_route_rejects_other_chat_or_invalid_thread(self):
+        from app.modules.media_automation_rules import notification_route_settings
+
+        with patch("app.modules.media_automation_rules.telegram_owner_route_is_currently_authorized", return_value=True):
+            for route in ({"chat_id": "999", "message_thread_id": 77},
+                          {"chat_id": "123", "message_thread_id": -1},
+                          {"chat_id": "123", "message_thread_id": True}):
+                with self.subTest(route=route), self.assertRaises(AgentToolError):
+                    notification_route_settings("tg:v1:123\x1f456", delivery_route=route)

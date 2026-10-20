@@ -244,8 +244,8 @@ def _digest_snapshot(arguments: dict[str, Any], context: ToolContext) -> tuple[d
                 for key, default in _DIGEST_SETTINGS_DEFAULTS.items()}
     digest_set_arguments({"enabled": args["enabled"], **settings})
     # 停止自己的既有规则不依赖当前接收目标；启用/新建仍需验证投递身份。
-    route = ({key: previous.get(key, "") for key in ("notification_owner", "notification_chat_id")}
-             if current and not args["enabled"] else notification_route_settings(context.owner))
+    route = ({key: previous[key] for key in ("notification_owner", "notification_chat_id", "notification_message_thread_id") if key in previous}
+             if current and not args["enabled"] else notification_route_settings(context.owner, delivery_route=context.delivery_route))
     return {"owner": owner, "arguments": args,
             "revision": current["revision"] if current else 0, "route": route}, settings
 

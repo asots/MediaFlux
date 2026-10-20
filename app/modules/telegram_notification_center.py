@@ -993,6 +993,7 @@ def publish_notification_event(
     chat_id: str = "",
     topic_enabled: bool = True,
     deliver_now: bool = True,
+    delivery_route: Mapping[str, Any] | None = None,
 ) -> NotificationPublishResult:
     return _publish(
         event_key,
@@ -1003,6 +1004,7 @@ def publish_notification_event(
         thread=False,
         topic_enabled=topic_enabled,
         deliver_now=deliver_now,
+        delivery_route=delivery_route,
     )
 
 

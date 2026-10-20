@@ -93,6 +93,7 @@ class ToolContext:
         default=None, repr=False, compare=False,
     )
     reobservation_source: Mapping[str, Any] | None = field(default=None, repr=False, compare=False)
+    delivery_route: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
 
 ContextualToolHandler = Callable[[dict[str, Any], ToolContext], ToolResult]

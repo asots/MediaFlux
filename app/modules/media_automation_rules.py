@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -16,6 +16,7 @@ from app.agent.feature_gate import (
     is_agent_enabled,
 )
 from app.agent.owner_routes import (
+    normalize_delivery_route,
     parse_telegram_owner_route,
     telegram_owner_route_is_currently_authorized,
 )
@@ -54,7 +55,9 @@ def register_rule_handler(kind: str, handler: RuleHandler) -> None:
     _HANDLERS[kind] = handler
 
 
-def notification_route_settings(owner: str) -> dict[str, str]:
+def notification_route_settings(
+    owner: str, *, delivery_route: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """仅从已认证服务端 owner 绑定投递目标，禁止模型传 chat_id。"""
     route = parse_telegram_owner_route(owner)
     if route is not None:
@@ -62,7 +65,14 @@ def notification_route_settings(owner: str) -> dict[str, str]:
             raise AgentToolError(
                 "当前 Telegram 身份无权创建主动通知", code="identity_required"
             )
-        return {"notification_owner": owner, "notification_chat_id": route.chat_id}
+        try:
+            delivery = normalize_delivery_route(delivery_route or {"chat_id": route.chat_id}, owner=owner)
+        except ValueError as exc:
+            raise AgentToolError("当前 Telegram 通知话题无效", code="identity_required") from exc
+        settings: dict[str, Any] = {"notification_owner": owner, "notification_chat_id": delivery["chat_id"]}
+        if "message_thread_id" in delivery:
+            settings["notification_message_thread_id"] = delivery["message_thread_id"]
+        return settings
     if not re.fullmatch(r"webk:v1:[0-9a-f]{64}", owner):
         raise AgentToolError("当前身份不支持持久主动通知", code="identity_required")
     chat = (config.get("TG_CHAT_ID", "") or "").strip()
@@ -232,6 +242,7 @@ def drain_automation_rules(*, now: datetime | None = None, limit: int = 20) -> i
                         importance=NotificationImportance(delivery.importance),
                         chat_id=chat,
                         deliver_now=False,
+                        delivery_route={"chat_id": chat, "message_thread_id": rule["settings"].get("notification_message_thread_id")},
                     )
                     accepted = bool(outcome) or outcome.status in {
                         "disabled",
