@@ -192,6 +192,41 @@ class MediaInventoryCompletenessTests(unittest.TestCase):
             )[0]
         self.assertEqual(result["items"][0]["status"], "present")
 
+    def test_inventory_ignores_collection_display_folding_on_every_page(self):
+        for cls in (EmbyClient, JellyfinClient):
+            client = self.client(cls)
+            def request(path, params, **kwargs):
+                rows = [self.item(n) for n in range(1, 4)]
+                if params.get("CollapseBoxSetItems") != "false":
+                    rows = rows[:1]  # A complete display page is not complete inventory.
+                start, limit = params["StartIndex"], params["Limit"]
+                return {"Items": rows[start:start + limit], "TotalRecordCount": len(rows)}
+            for name, reader in self.readers(client).items():
+                with self.subTest(server=cls.__name__, operation=name), \
+                        patch.object(client, "_request", side_effect=request) as calls:
+                    result = reader()
+                    self.assertEqual(result.total, 3)
+                    self.assertFalse(result.truncated)
+                    self.assertEqual([c.kwargs["params"]["StartIndex"] for c in calls.call_args_list], [0, 2])
+
+    def test_batch_presence_does_not_recommend_a_hidden_collection_member_as_missing(self):
+        from app.services import inspect_media_identity_batch
+
+        for cls in (EmbyClient, JellyfinClient):
+            client = self.client(cls)
+            def request(path, params, **kwargs):
+                rows = [self.item(1)]
+                if params.get("CollapseBoxSetItems") == "false":
+                    rows.append({**self.item(2), "Type": "Movie"})
+                return {"Items": rows, "TotalRecordCount": len(rows)}
+            with self.subTest(server=cls.__name__), \
+                    patch.object(client, "_request", side_effect=request), \
+                    patch("app.services._configured_media_sources", return_value=[("synthetic", "Synthetic", "", client)]):
+                source = inspect_media_identity_batch(
+                    [{"tmdb_id": "2", "media_type": "movie", "title": "Show 2"}],
+                )[0]
+                self.assertEqual(source["items"][0]["status"], "present")
+
     def test_unknown_short_search_page_keeps_filtered_candidate_incomplete(self):
         for cls in (EmbyClient, JellyfinClient):
             client = self.client(cls)

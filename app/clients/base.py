@@ -683,6 +683,8 @@ class MediaServerClient:
                 params={
                     "Recursive": "true", "SortBy": "SortName", "SortOrder": "Ascending",
                     **params, "StartIndex": len(rows), "Limit": limit,
+                    # 盘点实际成员，不继承用户界面的合集折叠设置。
+                    "CollapseBoxSetItems": "false",
                 },
                 timeout=self._remaining_timeout(deadline_at),
             )
