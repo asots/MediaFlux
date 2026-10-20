@@ -157,6 +157,42 @@ class AutomationRuleTests(IsolatedDatabaseTestCase):
             "hour": 21, "minute": 0, "errors_only": False, "send_empty": False,
         })
 
+    def test_digest_update_without_hour_preserves_schedule_and_only_changes_requested_fields(self):
+        args = {"enabled": True, "hour": 21, "minute": 17, "errors_only": True, "send_empty": True}
+        _, token = prepare_set_digest(args, self.context)
+        saved = set_digest_confirmed(args, token, self.context)
+        for update, expected in (({"enabled": False}, {"hour": 21, "minute": 17}),
+                                 ({"enabled": True, "minute": 35}, {"hour": 21, "minute": 35})):
+            update = {"rule_id": saved.data["rule_id"], **update}
+            preview, token = prepare_set_digest(update, self.context)
+            self.assertEqual(preview.data["hour"], expected["hour"])
+            saved = set_digest_confirmed(update, token, self.context)
+            self.assertEqual(saved.data["enabled"], update["enabled"])
+            self.assertEqual(saved.data["settings"], {**expected, "errors_only": True, "send_empty": True})
+
+    def test_digest_schema_and_validator_agree_on_create_and_update(self):
+        from app.agent.domain_catalog import build_tool_specs
+        from app.agent.errors import ToolPipelineError
+        from app.agent.schema import validate_json_schema
+
+        tool = next(spec for spec in build_tool_specs() if spec.name == "automation.set_digest")
+        valid = [{"enabled": True, "hour": 21}, {"enabled": True, "hour": 0, "rule_id": ""},
+                 {"enabled": False, "rule_id": "existing"},
+                 {"enabled": True, "rule_id": "existing", "minute": 35}]
+        for payload in valid:
+            with self.subTest(payload=payload):
+                validate_json_schema(payload, tool.parameters)
+                normalized = tool.validator(payload)
+                self.assertEqual("hour" in normalized, "hour" in payload)
+        invalid = [{"enabled": True}, {"enabled": False, "rule_id": ""},
+                   {"enabled": True, "hour": None}, {"enabled": True, "rule_id": 123}]
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ToolPipelineError):
+                    validate_json_schema(payload, tool.parameters)
+                with self.assertRaises(AgentToolError):
+                    tool.validator(payload)
+
     def test_rule_claim_is_exclusive_recovers_expired_and_cancel_invalidates(self):
         row = rules.save_rule(
             "owner",

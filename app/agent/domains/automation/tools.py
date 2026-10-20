@@ -94,12 +94,16 @@ def register_specs(registry) -> None:
                 "properties": {
                     "rule_id": {"type": "string", "maxLength": 100},
                     "enabled": {"type": "boolean"},
-                    "hour": {"type": "integer", "minimum": 0, "maximum": 23},
+                    "hour": {"type": "integer", "minimum": 0, "maximum": 23, "description": "新增规则必填；提供 rule_id 修改时可省略，沿用原时间"},
                     "minute": {"type": "integer", "minimum": 0, "maximum": 59},
                     "errors_only": {"type": "boolean"},
                     "send_empty": {"type": "boolean"},
                 },
-                "required": ["enabled", "hour"],
+                "required": ["enabled"],
+                "anyOf": [
+                    {"required": ["hour"]},
+                    {"required": ["rule_id"], "properties": {"rule_id": {"minLength": 1}}},
+                ],
                 "additionalProperties": False,
             },
             validator=digest_set_arguments,

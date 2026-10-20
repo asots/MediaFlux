@@ -218,7 +218,7 @@ _DIGEST_SETTINGS_DEFAULTS = {"hour": 0, "minute": 0, "errors_only": False, "send
 
 
 def digest_set_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    _strict_args(arguments, {"rule_id", "enabled", *_DIGEST_SETTINGS_DEFAULTS}, {"enabled", "hour"})
+    _strict_args(arguments, {"rule_id", "enabled", *_DIGEST_SETTINGS_DEFAULTS}, {"enabled"})
     for key in ("enabled", "errors_only", "send_empty"):
         if key in arguments and not isinstance(arguments[key], bool):
             raise AgentToolError(f"{key} 必须是布尔值")
@@ -229,6 +229,8 @@ def digest_set_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     rule_id = arguments.get("rule_id", "")
     if not isinstance(rule_id, str) or len(rule_id) > 100:
         raise AgentToolError("rule_id 无效")
+    if not rule_id and "hour" not in arguments:
+        raise AgentToolError("新增摘要规则必须指定 hour；修改已有规则请提供 rule_id")
     # 保留字段是否显式提供；更新不能把“未提及”变成默认False/0。
     return {"rule_id": rule_id, **arguments}
 
