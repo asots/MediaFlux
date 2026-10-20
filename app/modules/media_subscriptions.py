@@ -26,6 +26,12 @@ from app.indexers.runtime import get_indexer_service, run_indexer_awaitable
 from app.logger import get_logger
 from app.modules.episode_resource_ranking import rank_episode_search
 from app.modules.media_identity import build_media_key
+from app.repositories.media_subscriptions import (
+    MediaSubscriptionError,
+    normalize_subscription_interval,
+    normalize_subscription_seasons,
+    validate_subscription_scope,
+)
 from app.sensitive_data import redact_sensitive_text
 from app.services import inspect_media_identity_sources, inspect_series_episode_sources
 
@@ -43,7 +49,6 @@ _ALLOWED_MONITOR_MODES = frozenset({"missing", "future", "selected"})
 _ALLOWED_ACTIONS = frozenset({"notify", "confirm", "auto"})
 _ALLOWED_TARGETS = frozenset({"qb", "guangya", "both"})
 _ALLOWED_PROVIDERS = frozenset({"tmdb", "douban", "bangumi"})
-_ALLOWED_CHECK_INTERVALS = frozenset({4320, 10080})
 _ACTIVE_CHECK_RUN_ID: ContextVar[int | None] = ContextVar(
     "media_subscription_active_check_run_id", default=None
 )
@@ -70,19 +75,6 @@ async def _await_sync_request(call, /, *args):
             # 外层取消是主结果；同步请求的尾部异常不得替换取消语义。
             pass
         raise
-
-
-class MediaSubscriptionError(ValueError):
-    """可安全返回给 Web 的订阅业务错误。"""
-
-    def __init__(
-        self, message: str, *, status_code: int = 400, code: str = "invalid",
-        can_try_next_candidate: bool = False,
-    ):
-        super().__init__(message)
-        self.status_code = status_code
-        self.code = code
-        self.can_try_next_candidate = can_try_next_candidate
 
 
 @dataclass(frozen=True)
@@ -165,36 +157,6 @@ def _provider_identity(provider: Any, external_id: Any, tmdb_id: str) -> tuple[s
         if normalized_external != tmdb_id:
             raise MediaSubscriptionError("TMDB 外部 ID 与订阅 TMDB ID 不一致")
     return normalized_provider, normalized_external
-
-
-def _bounded_interval(value: Any) -> int:
-    try:
-        interval = int(value or 4320)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise MediaSubscriptionError("检查间隔必须是整数") from exc
-    if interval not in _ALLOWED_CHECK_INTERVALS:
-        raise MediaSubscriptionError("检查间隔仅支持每 3 天或每 7 天")
-    return interval
-
-
-def _normalize_seasons(values: Any) -> list[int]:
-    if values in (None, ""):
-        return []
-    if not isinstance(values, (list, tuple, set)):
-        raise MediaSubscriptionError("季度必须是数组")
-    seasons: list[int] = []
-    for raw in values:
-        if isinstance(raw, bool):
-            raise MediaSubscriptionError("季度包含无效值")
-        try:
-            season = int(raw)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise MediaSubscriptionError("季度包含无效值") from exc
-        if not 0 <= season <= 100:
-            raise MediaSubscriptionError("季度必须在 0 到 100 之间")
-        if season not in seasons:
-            seasons.append(season)
-    return sorted(seasons)
 
 
 def _normalize_sites(values: Any) -> list[str]:
@@ -425,8 +387,8 @@ class MediaSubscriptionService:
         monitor_mode = _choice(data.get("monitor_mode"), _ALLOWED_MONITOR_MODES, "missing")
         action = _choice(data.get("action"), _ALLOWED_ACTIONS, "confirm")
         target = _choice(data.get("download_target"), _ALLOWED_TARGETS, "guangya")
-        interval = _bounded_interval(data.get("check_interval_minutes", 4320))
-        seasons = _normalize_seasons(data.get("seasons"))
+        interval = normalize_subscription_interval(data.get("check_interval_minutes", 4320))
+        seasons = normalize_subscription_seasons(data.get("seasons"))
         sites = _normalize_sites(data.get("sites"))
         include_specials = _strict_bool(data.get("include_specials"), default=False)
         enabled = _strict_bool(data.get("enabled"), default=True)
@@ -439,10 +401,7 @@ class MediaSubscriptionService:
                 status_code=409,
                 code="mapping_required",
             )
-        if media_type == "movie" and (seasons or include_specials or monitor_mode == "selected"):
-            raise MediaSubscriptionError("电影订阅不支持季度或特典筛选")
-        if monitor_mode == "selected" and not seasons:
-            raise MediaSubscriptionError("按季度订阅时至少选择一个季度")
+        validate_subscription_scope(media_type, monitor_mode, seasons, include_specials)
 
         try:
             detail = await asyncio.to_thread(_tmdb_detail, tmdb_id, media_type)
@@ -569,9 +528,6 @@ class MediaSubscriptionService:
         return result
 
     def update_subscription(self, subscription_id: int, data: dict[str, Any]) -> dict[str, Any]:
-        current = db.get_media_subscription(subscription_id)
-        if current is None:
-            raise MediaSubscriptionError("媒体订阅不存在", status_code=404, code="not_found")
         if not isinstance(data, dict):
             raise MediaSubscriptionError("订阅参数必须是 JSON 对象")
         allowed = {
@@ -582,14 +538,12 @@ class MediaSubscriptionService:
         if unknown:
             raise MediaSubscriptionError(f"包含不支持的订阅参数：{', '.join(sorted(unknown))}")
         fields: dict[str, Any] = {}
-        requested_enabled = bool(current["enabled"])
         if "enabled" in data:
-            requested_enabled = _strict_bool(data["enabled"], default=True)
-            fields["enabled"] = int(requested_enabled)
+            fields["enabled"] = int(_strict_bool(data["enabled"], default=True))
         if "monitor_mode" in data:
             fields["monitor_mode"] = _choice(data["monitor_mode"], _ALLOWED_MONITOR_MODES, "missing")
         if "seasons" in data:
-            fields["seasons_json"] = _dumps(_normalize_seasons(data["seasons"]))
+            fields["seasons_json"] = _dumps(normalize_subscription_seasons(data["seasons"]))
         if "include_specials" in data:
             fields["include_specials"] = int(_strict_bool(data["include_specials"], default=False))
         if "action" in data:
@@ -599,19 +553,8 @@ class MediaSubscriptionService:
         if "sites" in data:
             fields["sites_json"] = _dumps(_normalize_sites(data["sites"]))
         if "check_interval_minutes" in data:
-            fields["check_interval_minutes"] = _bounded_interval(data["check_interval_minutes"])
-        media_type = str(current["media_type"])
-        mode = str(fields.get("monitor_mode", current["monitor_mode"]))
-        seasons = _loads(fields.get("seasons_json", current["seasons_json"]), [])
-        specials = bool(fields.get("include_specials", current["include_specials"]))
-        if media_type == "movie" and (seasons or specials or mode == "selected"):
-            raise MediaSubscriptionError("电影订阅不支持季度或特典筛选")
-        if mode == "selected" and not seasons:
-            raise MediaSubscriptionError("按季度订阅时至少选择一个季度")
-        fields["status"] = "new" if requested_enabled else "paused"
-        fields["next_check_at"] = db.now()
-        fields["last_error"] = ""
-        if not db.update_media_subscription_config(subscription_id, **fields):
+            fields["check_interval_minutes"] = normalize_subscription_interval(data["check_interval_minutes"])
+        if db.update_media_subscription_config(subscription_id, **fields) is None:
             raise MediaSubscriptionError("媒体订阅不存在", status_code=404, code="not_found")
         return self.get_subscription(subscription_id)
 

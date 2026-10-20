@@ -448,8 +448,9 @@ def register_specs(registry) -> None:
                     "season": {"type": "integer", "minimum": 1, "maximum": 100},
                     "check_interval_minutes": {
                         "type": "integer",
-                        "enum": [4320, 10080],
-                        "description": "检查周期：4320 为每 3 天，10080 为每 7 天。",
+                        "minimum": 5,
+                        "maximum": 10080,
+                        "description": "检查周期（分钟），默认4320（每3天），最多10080（每7天）。",
                     },
                 },
                 "additionalProperties": False,

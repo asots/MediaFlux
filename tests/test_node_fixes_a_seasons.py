@@ -103,7 +103,9 @@ class SeasonCompletenessTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsupported_selected_season_fails_before_network(self):
         self.season_count = 101
-        db.update_media_subscription_config(self.sid, monitor_mode="selected", seasons_json="[101]")
+        # 模拟历史坏配置；新的配置写入口已经禁止保存101季。
+        with db.get_conn() as conn:
+            conn.execute("UPDATE media_subscriptions SET monitor_mode='selected',seasons_json='[101]' WHERE id=?", (self.sid,))
         with self.assertRaises(MediaSubscriptionError) as error:
             await MediaSubscriptionService().check_subscription(self.sid)
         self.assertEqual(error.exception.code, "unsupported_season")

@@ -21,6 +21,7 @@ from app.modules.media_subscriptions import (
     MediaSubscriptionError,
     get_media_subscription_service,
 )
+from app.repositories.media_subscriptions import normalize_subscription_interval
 
 from . import common
 
@@ -28,7 +29,6 @@ logger = get_logger(__name__)
 _CREATE_TIMEOUT_SECONDS = 35.0
 _ALLOWED_PROVIDERS = frozenset({"tmdb", "douban", "bangumi"})
 _ALLOWED_MEDIA_TYPES = frozenset({"movie", "tv"})
-_ALLOWED_CHECK_INTERVALS = frozenset({4320, 10080})
 _PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,180}$")
 
 
@@ -103,14 +103,13 @@ def media_subscription_create_arguments(arguments: dict[str, Any]) -> dict[str, 
         if media_type != "tv":
             raise AgentToolError("电影订阅不支持季度筛选")
     check_interval_minutes = arguments.get("check_interval_minutes")
-    if check_interval_minutes is not None and (
-        isinstance(check_interval_minutes, bool)
-        or not isinstance(check_interval_minutes, int)
-        or check_interval_minutes not in _ALLOWED_CHECK_INTERVALS
-    ):
-        raise AgentToolError(
-            "check_interval_minutes 仅支持 4320（每 3 天）或 10080（每 7 天）"
-        )
+    if check_interval_minutes is not None:
+        if isinstance(check_interval_minutes, bool) or not isinstance(check_interval_minutes, int):
+            raise AgentToolError("check_interval_minutes 必须是整数")
+        try:
+            check_interval_minutes = normalize_subscription_interval(check_interval_minutes)
+        except MediaSubscriptionError as exc:
+            raise AgentToolError(str(exc)) from exc
     normalized: dict[str, Any] = {
         "provider": provider,
         "external_id": external_id,
@@ -176,6 +175,7 @@ def prepare_create_media_subscription(
     media_type = str(arguments["media_type"])
     season = arguments.get("season")
     check_interval_minutes = int(arguments.get("check_interval_minutes") or 4320)
+    interval_label = {4320: "每 3 天", 10080: "每 7 天"}.get(check_interval_minutes, f"每 {check_interval_minutes} 分钟")
     tmdb_id = _resolved_tmdb_id(provider, external_id, media_type)
     with db.get_conn() as conn:
         snapshot = db.media_subscription_identity_snapshot(conn, tmdb_id, media_type)
@@ -227,14 +227,12 @@ def prepare_create_media_subscription(
             "monitor_scope": season_label,
             "season": int(season) if season is not None else None,
             "check_interval_minutes": check_interval_minutes,
-            "check_interval": "每 7 天"
-            if check_interval_minutes == 10080
-            else "每 3 天",
+            "check_interval": interval_label,
             "affected": 1,
             "effects": [
                 "确认后只会创建或恢复本地追更订阅，不会立即下载资源。",
                 (
-                    f"新订阅将按{'每 7 天' if check_interval_minutes == 10080 else '每 3 天'}"
+                    f"新订阅将按{interval_label}"
                     "检查缺失内容，候选下载仍需按策略确认。"
                 ),
             ],
@@ -291,6 +289,7 @@ def create_media_subscription_confirmed(
         )
     season = arguments.get("season")
     check_interval_minutes = int(arguments.get("check_interval_minutes") or 4320)
+    interval_label = {4320: "每 3 天", 10080: "每 7 天"}.get(check_interval_minutes, f"每 {check_interval_minutes} 分钟")
     payload: dict[str, Any] = {
         "provider": identity[0],
         "external_id": identity[1],
@@ -351,9 +350,7 @@ def create_media_subscription_confirmed(
             "media_type": common._media_type_label(identity[2]),
             "season": int(season) if season is not None else None,
             "check_interval_minutes": check_interval_minutes,
-            "check_interval": "每 7 天"
-            if check_interval_minutes == 10080
-            else "每 3 天",
+            "check_interval": interval_label,
             "affected": 1,
             "created": created,
             "runtime_refreshed": runtime_refreshed,
@@ -522,44 +519,11 @@ def set_media_subscription_enabled_confirmed(
                 summary="媒体追更订阅状态已变化，请重新预检",
                 error="确认快照已失效。",
             )
-        stamp = db.now()
-        cur = conn.execute(
-            "UPDATE media_subscriptions SET enabled=?,status=?,next_check_at=?,last_error='',"
-            "revision=revision+1,updated_at=? WHERE id=? AND deleted_at IS NULL",
-            (
-                1 if requested else 0,
-                "new" if requested else "paused",
-                stamp,
-                stamp,
-                subscription_id,
-            ),
+        changed = db.update_media_subscription_config(
+            subscription_id, connection=conn, enabled=int(requested), invalidate_related=not requested,
+            reason="订阅已暂停", run_summary="订阅已暂停，当前检查已取消",
         )
-        if cur.rowcount != 1:
-            return ToolResult(
-                ok=False,
-                status="conflict",
-                summary="媒体追更订阅状态已变化，请重新预检",
-                error="目标订阅已不存在。",
-            )
-        expired = 0
-        cancelled_admissions = 0
-        cancelled_runs = 0
-        if not requested:
-            expired = conn.execute(
-                "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
-                "WHERE subscription_id=? AND status='available'",
-                (stamp, subscription_id),
-            ).rowcount
-            cancelled_admissions = conn.execute(
-                "UPDATE media_download_admissions SET status='cancelled',error=?,completed_at=?,updated_at=? "
-                "WHERE subscription_id=? AND status='claimed'",
-                ("订阅已暂停", stamp, stamp, subscription_id),
-            ).rowcount
-            cancelled_runs = conn.execute(
-                "UPDATE media_subscription_runs SET status='cancelled',summary=?,error=?,finished_at=? "
-                "WHERE subscription_id=? AND status='running'",
-                ("订阅已暂停，当前检查已取消", "订阅已暂停", stamp, subscription_id),
-            ).rowcount
+        assert changed is not None  # 同一事务已核对存在与确认快照。
 
     runtime_refreshed = common._reload_scheduler()
     return ToolResult(
@@ -571,9 +535,9 @@ def set_media_subscription_enabled_confirmed(
             "subscription_number": subscription_id,
             "enabled": requested,
             "affected": 1,
-            "expired_candidates": max(0, (expired or 0)),
-            "cancelled_admissions": max(0, (cancelled_admissions or 0)),
-            "cancelled_runs": max(0, (cancelled_runs or 0)),
+            "expired_candidates": changed["expired_candidates"],
+            "cancelled_admissions": changed["cancelled_admissions"],
+            "cancelled_runs": changed["cancelled_runs"],
             "runtime_refreshed": runtime_refreshed,
         },
         evidence=[

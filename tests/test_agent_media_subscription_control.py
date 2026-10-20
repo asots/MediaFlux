@@ -670,6 +670,46 @@ class MediaSubscriptionAgentControlTests(IsolatedDatabaseTestCase):
                 "cancelled",
             )
 
+    def test_shared_mutation_rolls_back_config_and_invalidations_together(self) -> None:
+        import sqlite3
+
+        from app.modules.media_subscriptions import MediaSubscriptionService
+
+        self._seed_inflight_state()
+        before_row = db.get_media_subscription(self.sid)
+        assert before_row is not None
+        before = dict(before_row)
+        with db.get_conn() as conn:
+            conn.execute("CREATE TRIGGER reject_run_cancel BEFORE UPDATE ON media_subscription_runs "
+                         "BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                MediaSubscriptionService().update_subscription(self.sid, {"enabled": False})
+            after_row = db.get_media_subscription(self.sid)
+            assert after_row is not None
+            self.assertEqual(dict(after_row), before)
+            with db.get_conn() as conn:
+                for table, status in (("media_subscription_candidates", "available"),
+                                      ("media_download_admissions", "claimed"),
+                                      ("media_subscription_runs", "running")):
+                    self.assertEqual(conn.execute(f"SELECT status FROM {table} WHERE subscription_id=?", (self.sid,)).fetchone()["status"], status)
+        finally:
+            with db.get_conn() as conn:
+                conn.execute("DROP TRIGGER reject_run_cancel")
+
+    def test_web_short_interval_invalidates_agent_plan_without_losing_saved_scope(self) -> None:
+        from app.modules.media_subscriptions import MediaSubscriptionService
+
+        agent = get_agent_service()
+        plan = agent.prepare("media.set_subscription_policy", {"subscription_id": self.sid, "action": "auto"}, owner="owner")
+        saved = MediaSubscriptionService().update_subscription(self.sid, {"check_interval_minutes": 5, "seasons": [0, 1]})
+        self.assertEqual(saved["check_interval_minutes"], 5)
+        stale = agent.confirm(plan["action_plan"]["plan_id"], owner="owner")
+        self.assertEqual(stale["result"]["status"], "conflict")
+        policy = agent.invoke("media.get_subscription_policy", {"subscription_id": self.sid}, owner="owner")
+        self.assertEqual(policy["result"]["data"]["seasons"], [0, 1])
+        self.assertEqual(policy["result"]["data"]["check_interval_minutes"], 5)
+
     def test_resume_preserves_inflight_rows_for_scheduler_recovery(self) -> None:
         self._seed_inflight_state()
         with db.get_conn() as conn:

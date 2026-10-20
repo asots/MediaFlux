@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Iterable, TypedDict
 
@@ -43,6 +44,65 @@ def _next_check(interval_minutes: int, *, base: str | None = None) -> str:
     return (start + timedelta(minutes=max(5, min((interval_minutes or 60), 10080)))).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
+
+
+class MediaSubscriptionError(ValueError):
+    """可安全返回给 Web 的订阅业务错误。"""
+
+    def __init__(
+        self, message: str, *, status_code: int = 400, code: str = "invalid",
+        can_try_next_candidate: bool = False,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.can_try_next_candidate = can_try_next_candidate
+
+
+def normalize_subscription_interval(value: Any) -> int:
+    if value in (None, ""):
+        value = 4320
+    if isinstance(value, bool):
+        raise MediaSubscriptionError("检查间隔必须是整数")
+    try:
+        interval = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise MediaSubscriptionError("检查间隔必须是整数") from exc
+    if not isinstance(value, str) and value != interval:
+        raise MediaSubscriptionError("检查间隔必须是整数")
+    if not 5 <= interval <= 10080:
+        raise MediaSubscriptionError("检查间隔必须在 5 到 10080 分钟之间")
+    return interval
+
+
+def normalize_subscription_seasons(values: Any) -> list[int]:
+    if values in (None, ""):
+        return []
+    if not isinstance(values, (list, tuple, set)):
+        raise MediaSubscriptionError("季度必须是数组")
+    seasons: set[int] = set()
+    for raw in values:
+        if isinstance(raw, bool):
+            raise MediaSubscriptionError("季度包含无效值")
+        try:
+            season = int(raw)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MediaSubscriptionError("季度包含无效值") from exc
+        if not isinstance(raw, str) and raw != season:
+            raise MediaSubscriptionError("季度必须是整数")
+        if not 0 <= season <= 100:
+            raise MediaSubscriptionError("季度必须在 0 到 100 之间")
+        seasons.add(season)
+    return sorted(seasons)
+
+
+def validate_subscription_scope(
+    media_type: str, monitor_mode: str, seasons: list[int], include_specials: bool,
+) -> None:
+    if media_type == "movie" and (seasons or include_specials or monitor_mode == "selected"):
+        raise MediaSubscriptionError("电影订阅不支持季度或特典筛选")
+    if monitor_mode == "selected" and not seasons:
+        raise MediaSubscriptionError("按季度订阅时至少选择一个季度")
 
 
 def add_media_subscription(
@@ -170,20 +230,8 @@ def upsert_media_subscription(
                 "new" if enabled else "paused", revision, stamp, subscription_id,
             ),
         )
-        conn.execute(
-            "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
-            "WHERE subscription_id=? AND status='available'",
-            (stamp, subscription_id),
-        )
-        conn.execute(
-            "UPDATE media_download_admissions SET status='cancelled',error=?,completed_at=?,updated_at=? "
-            "WHERE subscription_id=? AND status='claimed'",
-            ("订阅配置已变更", stamp, stamp, subscription_id),
-        )
-        conn.execute(
-            "UPDATE media_subscription_runs SET status='cancelled',summary=?,error=?,finished_at=? "
-            "WHERE subscription_id=? AND status='running'",
-            ("订阅配置已变更，旧检查已取消", "订阅配置已变更", stamp, subscription_id),
+        _invalidate_subscription_work(
+            conn, subscription_id, stamp, "订阅配置已变更", "订阅配置已变更，旧检查已取消",
         )
         return subscription_id, False
 
@@ -369,83 +417,73 @@ def get_media_subscription_stats() -> dict[str, int]:
     }
 
 
-def update_media_subscription(subscription_id: int, **fields: Any) -> bool:
-    allowed = {
-        "provider", "external_id", "title", "original_title", "year", "poster_key",
-        "enabled", "monitor_mode", "seasons_json", "include_specials", "action",
-        "download_target", "sites_json", "check_interval_minutes", "last_checked_at",
-        "next_check_at", "status", "expected_count", "local_count", "missing_count",
-        "missing_json", "result_json", "last_error",
-    }
-    assignments: list[str] = []
-    params: list[Any] = []
-    for key, value in fields.items():
-        if key not in allowed:
-            continue
-        assignments.append(f"{key}=?")
-        params.append(value)
-    if not assignments:
-        return False
-    assignments.append("updated_at=?")
-    params.extend((now(), subscription_id))
-    with get_conn() as conn:
-        cur = conn.execute(
-            f"UPDATE media_subscriptions SET {','.join(assignments)} WHERE id=? AND deleted_at IS NULL", params
-        )
-        return bool(cur.rowcount)
+def update_media_subscription_config(
+    subscription_id: int, *, connection: sqlite3.Connection | None = None,
+    invalidate_related: bool = True, reason: str = "订阅配置已变更",
+    run_summary: str = "订阅配置已变更，旧检查已取消", **fields: Any,
+) -> dict[str, int] | None:
+    """同事务合并、校验和发布配置；确认入口可复用已持锁的事务。
 
-
-def update_media_subscription_config(subscription_id: int, **fields: Any) -> bool:
-    """更新用户配置并失效旧检查、候选和尚未派发的下载准入。"""
+    返回关联记录的失效数量；不存在返回None。恢复操作可保留在途工作，
+    已经dispatching/submitted的下载始终不受配置修改影响。
+    """
     allowed = {
         "enabled", "monitor_mode", "seasons_json", "include_specials", "action",
         "download_target", "sites_json", "check_interval_minutes", "next_check_at",
         "status", "last_error",
     }
-    assignments: list[str] = []
-    params: list[Any] = []
-    for key, value in fields.items():
-        if key in allowed:
-            assignments.append(f"{key}=?")
-            params.append(value)
-    if not assignments:
-        return False
-    stamp = now()
-    assignments.extend(("revision=revision+1", "updated_at=?"))
-    params.extend((stamp, subscription_id))
-    with get_conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        cur = conn.execute(
-            f"UPDATE media_subscriptions SET {','.join(assignments)} "
-            "WHERE id=? AND deleted_at IS NULL",
-            params,
-        )
-        if cur.rowcount != 1:
-            conn.rollback()
-            return False
+    fields = {key: value for key, value in fields.items() if key in allowed}
+    with nullcontext(connection) if connection is not None else get_conn() as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM media_subscriptions WHERE id=? AND deleted_at IS NULL",
+            (subscription_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if "seasons_json" in fields:
+            fields["seasons_json"] = _json(
+                normalize_subscription_seasons(json.loads(fields["seasons_json"])), [],
+            )
+        if "check_interval_minutes" in fields:
+            fields["check_interval_minutes"] = normalize_subscription_interval(fields["check_interval_minutes"])
+        effective = {**dict(row), **fields}
+        if fields.keys() & {"monitor_mode", "seasons_json", "include_specials"}:
+            validate_subscription_scope(
+                effective["media_type"], effective["monitor_mode"],
+                json.loads(effective["seasons_json"] or "[]"), bool(effective["include_specials"]),
+            )
+        stamp = now()
+        fields.setdefault("status", "new" if effective["enabled"] else "paused")
+        fields.setdefault("next_check_at", stamp)
+        fields.setdefault("last_error", "")
+        assignments = ",".join(f"{key}=?" for key in fields)
         conn.execute(
-            "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
-            "WHERE subscription_id=? AND status='available'",
-            (stamp, subscription_id),
+            f"UPDATE media_subscriptions SET {assignments},revision=revision+1,updated_at=? WHERE id=?",
+            (*fields.values(), stamp, subscription_id),
         )
-        conn.execute(
-            "UPDATE media_download_admissions SET status='cancelled',error=?,completed_at=?,updated_at=? "
-            "WHERE subscription_id=? AND status='claimed'",
-            ("订阅配置已变更", stamp, stamp, subscription_id),
-        )
-        conn.execute(
-            "UPDATE media_subscription_runs SET status='cancelled',summary=?,error=?,finished_at=? "
-            "WHERE subscription_id=? AND status='running'",
-            ("订阅配置已变更，旧检查已取消", "订阅配置已变更", stamp, subscription_id),
-        )
-        return True
+        return _invalidate_subscription_work(conn, subscription_id, stamp, reason, run_summary) if invalidate_related else {
+            "expired_candidates": 0, "cancelled_admissions": 0, "cancelled_runs": 0,
+        }
 
 
-def schedule_media_subscription(subscription_id: int, interval_minutes: int) -> bool:
-    return update_media_subscription(
-        subscription_id,
-        next_check_at=_next_check(interval_minutes),
-    )
+def _invalidate_subscription_work(
+    conn: sqlite3.Connection, subscription_id: int, stamp: str, reason: str, run_summary: str,
+) -> dict[str, int]:
+    expired = conn.execute(
+        "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
+        "WHERE subscription_id=? AND status='available'", (stamp, subscription_id),
+    ).rowcount
+    admissions = conn.execute(
+        "UPDATE media_download_admissions SET status='cancelled',error=?,completed_at=?,updated_at=? "
+        "WHERE subscription_id=? AND status='claimed'", (reason, stamp, stamp, subscription_id),
+    ).rowcount
+    runs = conn.execute(
+        "UPDATE media_subscription_runs SET status='cancelled',summary=?,error=?,finished_at=? "
+        "WHERE subscription_id=? AND status='running'", (run_summary, reason, stamp, subscription_id),
+    ).rowcount
+    return {"expired_candidates": expired, "cancelled_admissions": admissions, "cancelled_runs": runs}
 
 
 def media_subscription_mutation_snapshot(conn: Any, subscription_id: int) -> dict[str, Any]:

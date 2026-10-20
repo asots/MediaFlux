@@ -11,6 +11,12 @@ from app import database as db
 from app.agent.domains.workspace.actions import _safe_title
 from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolResult
+from app.repositories.media_subscriptions import (
+    MediaSubscriptionError,
+    normalize_subscription_interval,
+    normalize_subscription_seasons,
+    validate_subscription_scope,
+)
 
 from . import common
 
@@ -49,17 +55,12 @@ def media_subscription_policy_update_arguments(
         raw_seasons = arguments.get("seasons")
         if not isinstance(raw_seasons, list) or len(raw_seasons) > 20:
             raise AgentToolError("seasons 必须是最多 20 项的季度数组")
-        seasons: list[int] = []
-        for value in raw_seasons:
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or not 1 <= value <= 100
-            ):
-                raise AgentToolError("季度编号必须是 1 到 100 的整数")
-            if value not in seasons:
-                seasons.append(value)
-        normalized["seasons"] = sorted(seasons)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in raw_seasons):
+            raise AgentToolError("季度编号必须是 1 到 100 的整数")
+        try:
+            normalized["seasons"] = normalize_subscription_seasons(raw_seasons)
+        except MediaSubscriptionError as exc:
+            raise AgentToolError(str(exc)) from exc
     if "include_specials" in arguments:
         value = arguments.get("include_specials")
         if not isinstance(value, bool):
@@ -77,33 +78,20 @@ def media_subscription_policy_update_arguments(
         normalized["download_target"] = target
     if "check_interval_minutes" in arguments:
         interval = arguments.get("check_interval_minutes")
-        if (
-            isinstance(interval, bool)
-            or not isinstance(interval, int)
-            or not 5 <= interval <= 10080
-        ):
+        if isinstance(interval, bool) or not isinstance(interval, int):
             raise AgentToolError("check_interval_minutes 必须是 5 到 10080 的整数")
-        normalized["check_interval_minutes"] = interval
-    mode = normalized.get("monitor_mode")
-    selected_seasons = normalized.get("seasons")
-    if mode == "selected" and selected_seasons == []:
-        raise AgentToolError("selected 模式至少需要一个季度")
+        try:
+            normalized["check_interval_minutes"] = normalize_subscription_interval(interval)
+        except MediaSubscriptionError as exc:
+            raise AgentToolError(str(exc)) from exc
     return normalized
 
 
 def _json_int_list(value: Any) -> list[int]:
     try:
-        raw = json.loads(str(value or "[]"))
+        return normalize_subscription_seasons(json.loads(str(value or "[]")))
     except (TypeError, ValueError):
         return []
-    if not isinstance(raw, list):
-        return []
-    result: list[int] = []
-    for item in raw[:20]:
-        if (isinstance(item, int) and not isinstance(item, bool)
-                and 1 <= item <= 100 and item not in result):
-            result.append(item)
-    return sorted(result)
 
 
 def _policy_projection(row: Any) -> dict[str, Any]:
@@ -194,21 +182,13 @@ def _validate_effective_subscription_policy(
             "check_interval_minutes", snapshot.get("check_interval_minutes", 4320)
         ),
     }
-    media_type = str(snapshot.get("media_type") or "").strip().lower()
-    if media_type == "tv" and (
-        effective["monitor_mode"] == "selected" and not effective["seasons"]
-    ):
-        raise AgentToolError(
-            "selected 模式至少需要一个季度", code="precondition_failed"
+    try:
+        validate_subscription_scope(
+            str(snapshot.get("media_type") or ""), effective["monitor_mode"],
+            effective["seasons"], effective["include_specials"],
         )
-    if media_type == "movie" and (
-        effective["monitor_mode"] == "selected"
-        or bool(effective["seasons"])
-        or effective["include_specials"]
-    ):
-        raise AgentToolError(
-            "电影订阅不支持按季度或特别篇追更", code="precondition_failed"
-        )
+    except MediaSubscriptionError as exc:
+        raise AgentToolError(str(exc), code="precondition_failed") from exc
     return effective
 
 
@@ -350,42 +330,11 @@ def set_media_subscription_policy_confirmed(
                 if key == "include_specials"
                 else value
             )
-        if not fields:
-            return ToolResult(
-                False, "conflict", "没有可修改的追更策略", error="请求为空。"
-            )
-        fields["next_check_at"] = db.now()
-        fields["status"] = "new" if snapshot["enabled"] else "paused"
-        fields["last_error"] = ""
-        assignments = ",".join(f"{key}=?" for key in fields)
-        stamp = db.now()
-        cur = conn.execute(
-            f"UPDATE media_subscriptions SET {assignments},revision=revision+1,updated_at=? "
-            "WHERE id=? AND deleted_at IS NULL AND revision=?",
-            (*fields.values(), stamp, subscription_id, snapshot["revision"]),
+        changed = db.update_media_subscription_config(
+            subscription_id, connection=conn, reason="订阅策略已变更",
+            run_summary="订阅策略已变更，旧检查已取消", **fields,
         )
-        if cur.rowcount != 1:
-            return ToolResult(
-                False,
-                "conflict",
-                "追更策略已变化，请重新预检",
-                error="目标订阅已变化。",
-            )
-        expired = conn.execute(
-            "UPDATE media_subscription_candidates SET status='expired',updated_at=? "
-            "WHERE subscription_id=? AND status='available'",
-            (stamp, subscription_id),
-        ).rowcount
-        conn.execute(
-            "UPDATE media_download_admissions SET status='cancelled',error=?,completed_at=?,updated_at=? "
-            "WHERE subscription_id=? AND status='claimed'",
-            ("订阅策略已变更", stamp, stamp, subscription_id),
-        )
-        conn.execute(
-            "UPDATE media_subscription_runs SET status='cancelled',summary=?,error=?,finished_at=? "
-            "WHERE subscription_id=? AND status='running'",
-            ("订阅策略已变更，旧检查已取消", "订阅策略已变更", stamp, subscription_id),
-        )
+        assert changed is not None  # 同一事务已核对存在与确认快照。
     refreshed = common._reload_scheduler()
     return ToolResult(
         True,
@@ -394,7 +343,7 @@ def set_media_subscription_policy_confirmed(
         data={
             "subscription_number": subscription_id,
             "updated_fields": sorted(normalized),
-            "expired_candidates": max(0, (expired or 0)),
+            "expired_candidates": changed["expired_candidates"],
             "in_flight_dispatches": dispatching,
             "effective_action": effective["action"],
             "runtime_refreshed": refreshed,

@@ -356,22 +356,76 @@ class MediaSubscriptionTests(IsolatedDatabaseTestCase):
         self.assertEqual(stats["media_total"], 0)
         self.assertEqual(stats["candidate_total"], 0)
 
-    def test_interval_writes_only_accept_three_or_seven_days_and_preserve_legacy_values(self) -> None:
+    def test_scope_changes_validate_merged_state_inside_the_write_transaction(self) -> None:
+        import json
+
+        service = MediaSubscriptionService()
+        sid = self._seed_subscription()
+        service.update_subscription(sid, {"seasons": [1]})
+        barrier = threading.Barrier(2)
+        original = db.update_media_subscription_config
+        successes, failures = [], []
+
+        def synchronized_update(*args, **kwargs):
+            barrier.wait(timeout=5)
+            return original(*args, **kwargs)
+
+        def edit(fields):
+            try:
+                successes.append(service.update_subscription(sid, fields))
+            except Exception as exc:
+                failures.append(exc)
+
+        with patch.object(db, "update_media_subscription_config", side_effect=synchronized_update):
+            threads = [threading.Thread(target=edit, args=(fields,)) for fields in (
+                {"monitor_mode": "selected"}, {"seasons": []},
+            )]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+                self.assertFalse(thread.is_alive())
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], MediaSubscriptionError)
+        row = db.get_media_subscription(sid)
+        assert row is not None
+        self.assertFalse(row["monitor_mode"] == "selected" and not json.loads(row["seasons_json"]))
+
+    def test_invalid_seasons_are_rejected_before_any_configuration_change(self) -> None:
+        service = MediaSubscriptionService()
+        sid = self._seed_subscription()
+        for value in (1.9, -0.1, True, "1.9", 101, float("nan")):
+            with self.subTest(value=value):
+                before_row = db.get_media_subscription(sid)
+                assert before_row is not None
+                before = dict(before_row)
+                with self.assertRaises(MediaSubscriptionError):
+                    service.update_subscription(sid, {"monitor_mode": "selected", "seasons": [value]})
+                after_row = db.get_media_subscription(sid)
+                assert after_row is not None
+                self.assertEqual(dict(after_row), before)
+                with self.assertRaises(MediaSubscriptionError):
+                    asyncio.run(service.create_subscription({"tmdb_id": "9", "seasons": [value]}))
+        saved = service.update_subscription(sid, {"monitor_mode": "selected", "seasons": ["2", 0, 1, "2"]})
+        self.assertEqual(saved["seasons"], [0, 1, 2])
+
+    def test_interval_writes_share_domain_range_and_preserve_legacy_values(self) -> None:
         service = MediaSubscriptionService()
         subscription_id = self._seed_subscription()
 
         unchanged = service.update_subscription(subscription_id, {"action": "notify"})
         self.assertEqual(int(unchanged["check_interval_minutes"]), 60)
 
-        for interval in (4320, 10080):
+        for interval in (5, 60, 1440, 4320, 4321, 10080):
             updated = service.update_subscription(
                 subscription_id, {"check_interval_minutes": interval}
             )
             self.assertEqual(int(updated["check_interval_minutes"]), interval)
 
-        for interval in (60, 1440, 4321):
+        for interval in (0, 4, 10081):
             with self.subTest(interval=interval):
-                with self.assertRaisesRegex(MediaSubscriptionError, "仅支持每 3 天或每 7 天"):
+                with self.assertRaisesRegex(MediaSubscriptionError, "检查间隔必须在 5 到 10080 分钟之间"):
                     service.update_subscription(
                         subscription_id, {"check_interval_minutes": interval}
                     )
