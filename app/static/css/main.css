@@ -269,12 +269,8 @@ svg { display: block; flex: 0 0 auto; }
     cursor: pointer;
     transition: color .15s ease, background .15s ease, border-color .15s ease;
 }
-.nav-item > span {
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-}
+/* 宽度动画只裁切文字，不压缩字宽或重排，避免省略号与完整标题来回跳变。 */
+.nav-item > span { flex-shrink: 0; white-space: nowrap; }
 /* Reserve icon geometry before Lucide replaces placeholders, preventing labels from shifting on page navigation. */
 .nav-item > i[data-lucide]:not(.nav-cluster-chevron) { width: 18px; height: 18px; display: block; flex: 0 0 18px; }
 .nav-item svg { width: 18px; height: 18px; }
@@ -290,7 +286,7 @@ svg { display: block; flex: 0 0 auto; }
 .nav-cluster.open .nav-submenu { max-height: 420px; opacity: 1; }
 :root[data-nav-guangya="closed"] .nav-cluster[data-nav-cluster="guangya"] .nav-cluster-chevron { transform: none; }
 :root[data-nav-guangya="closed"] .nav-cluster[data-nav-cluster="guangya"] .nav-submenu { max-height: 0; opacity: 0; }
-.nav-subitem { min-height: 34px; display: flex; align-items: center; gap: 8px; margin-left: 10px; padding: 0 8px; color: var(--text-muted); border-left: 1px solid var(--border); font-size: 11.5px; transition: color .15s ease, border-color .15s ease, background .15s ease; }
+.nav-subitem { min-height: 34px; display: flex; align-items: center; gap: 8px; margin-left: 10px; padding: 0 8px; color: var(--text-muted); border-left: 1px solid var(--border); font-size: 11.5px; white-space: nowrap; transition: color .15s ease, border-color .15s ease, background .15s ease; }
 .nav-subitem > i[data-lucide] { width: 14px; height: 14px; display: block; flex: 0 0 14px; }
 .nav-subitem svg { width: 14px; height: 14px; }
 .nav-subitem:hover { color: var(--text-primary); border-left-color: var(--accent); background: var(--bg-card); }

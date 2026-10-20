@@ -378,3 +378,106 @@ class OrganizeRulesFirstPaintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(sync_playwright is None, "未安装 Playwright")
+class SidebarMotionTests(unittest.TestCase):
+    """真实侧栏模板/脚本，逐帧检查宽度动画，不连接生产服务。"""
+
+    def test_labels_keep_geometry_during_expansion_and_rapid_reversal(self):
+        import mimetypes
+        from urllib.parse import urlsplit
+
+        from jinja2 import Environment, FileSystemLoader
+
+        assert sync_playwright is not None
+        html = Environment(
+            loader=FileSystemLoader(ROOT / "app/templates"), autoescape=True,
+        ).get_template("base.html").render(
+            active="settings", agent_enabled=True, discovery_enabled=True,
+            csrf_token=lambda: "test", url_for=lambda name: "/" + name.split(".")[-1],
+            static_url=lambda path: "/static/" + path,
+        )
+        with sync_playwright() as playwright:
+            bundled = Path(playwright.chromium.executable_path)
+            executable = str(bundled) if bundled.is_file() else shutil.which("google-chrome") or shutil.which("chromium")
+            if not executable:
+                self.skipTest("未找到 Chrome/Chromium")
+            browser = playwright.chromium.launch(executable_path=executable, headless=True, args=["--no-sandbox"])
+            for width in (901, 1440):
+                with self.subTest(width=width), browser.new_context(viewport={"width": width, "height": 1100}) as context:
+                    errors, unexpected = [], []
+                    page = context.new_page()
+                    page.on("pageerror", lambda error: errors.append(str(error)))
+
+                    def respond(route):
+                        path = urlsplit(route.request.url).path
+                        if path == "/":
+                            route.fulfill(body=html, content_type="text/html")
+                        elif path.startswith("/static/"):
+                            file = ROOT / "app" / path.lstrip("/")
+                            route.fulfill(body=file.read_bytes(), content_type=mimetypes.guess_type(file)[0] or "application/octet-stream")
+                        else:
+                            unexpected.append(path)
+                            route.abort()
+
+                    page.route("**/*", respond)
+                    page.goto("http://mediaflux.test/")
+                    samples = page.evaluate("""() => {
+                        const sidebar = document.querySelector('.sidebar');
+                        const toggle = document.querySelector('#collapseSidebar');
+                        const measure = () => [...sidebar.querySelectorAll('.nav-item > span, .nav-subitem > span')].map(el => {
+                            const rect = el.getBoundingClientRect();
+                            const row = el.parentElement.getBoundingClientRect();
+                            return {text: el.textContent, width: rect.width, height: rect.height, y: row.y, rowHeight: row.height};
+                        });
+                        const baseline = measure();
+                        const frames = [];
+                        function seek(time) {
+                            sidebar.getBoundingClientRect();
+                            const animation = sidebar.getAnimations().find(a => a.transitionProperty === 'width');
+                            if (!animation) throw new Error('没有实际运行侧栏宽度动画');
+                            animation.pause();
+                            animation.currentTime = time;
+                            sidebar.getBoundingClientRect();
+                        }
+                        toggle.click(); seek(350);
+                        // 每次在展开到一半时反向，再重新展开；不依赖机器速度恰好抓到首帧。
+                        for (let cycle = 0; cycle < 3; cycle++) {
+                            toggle.click();
+                            for (const time of [0, 16, 32, 64, 175]) {
+                                seek(time);
+                                frames.push(measure());
+                            }
+                            toggle.click(); seek(cycle === 2 ? 350 : 16);
+                        }
+                        return {baseline, frames};
+                    }""")
+                    for index, frame in enumerate(samples["frames"]):
+                        for actual, expected in zip(frame, samples["baseline"], strict=True):
+                            for key in ("width", "height", "y", "rowHeight"):
+                                self.assertAlmostEqual(actual[key], expected[key], delta=0.1,
+                                                       msg=f"frame={index} {actual['text']} {key}")
+                    self.assertEqual(page.locator("html").get_attribute("data-sidebar"), "collapsed")
+                    self.assertFalse(page.locator("#guangyaSubmenu").is_visible())
+                    page.locator(".nav-cluster-toggle").click()
+                    self.assertTrue(page.locator("#guangyaFlyout").is_visible())
+                    page.keyboard.press("Escape")
+                    self.assertFalse(page.locator("#guangyaFlyout").is_visible())
+                    page.reload()
+                    self.assertEqual(page.locator("html").get_attribute("data-sidebar"), "collapsed")
+                    page.emulate_media(reduced_motion="reduce")
+                    page.locator("#collapseSidebar").click()
+                    self.assertTrue(page.locator("#guangyaSubmenu").is_visible())
+                    page.set_viewport_size({"width": 390, "height": 844})
+                    page.locator("#toggleSidebar").click()
+                    self.assertTrue(page.locator("#sidebar").evaluate("el => el.classList.contains('open')"))
+                    self.assertEqual(page.locator(".nav-subitem > span").evaluate_all(
+                        "els => els.map(el => getComputedStyle(el).whiteSpace)"
+                    ), ["nowrap"] * 6)
+                    self.assertFalse(page.evaluate("document.documentElement.scrollWidth > innerWidth"))
+                    page.keyboard.press("Escape")
+                    self.assertFalse(page.locator("#sidebar").evaluate("el => el.classList.contains('open')"))
+                    self.assertEqual(errors, [])
+                    self.assertEqual(unexpected, [])
+            browser.close()
