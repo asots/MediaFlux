@@ -948,12 +948,16 @@ async function runOrganizeAction(path,method='POST',extra={}){
     const logId=organizeDetail.id;
     const contextSerial=organizeDetailSerial;
     _setOrganizeState('操作已提交，正在后台执行...');
-    const response=await api(`/api/logs/organize/${logId}${path}`,{method,body:JSON.stringify({operation_token:_operationToken(),expected_version:organizeDetail.version,...extra})});
-    const data=await response.json();
-    if(contextSerial!==organizeDetailSerial)return;
-    if(!response.ok)throw new Error(data.error||'操作提交失败');
-    _setOrganizeState(data.message||'操作已启动');
-    await waitOrganizeTask(data.task_id,logId,contextSerial);
+    try{
+        const response=await api(`/api/logs/organize/${logId}${path}`,{method,body:JSON.stringify({operation_token:_operationToken(),expected_version:organizeDetail.version,...extra})});
+        const data=await response.json();
+        if(contextSerial!==organizeDetailSerial)return;
+        if(!response.ok)throw new Error(data.error||'操作提交失败');
+        _setOrganizeState(data.message||'操作已启动');
+        await waitOrganizeTask(data.task_id,logId,contextSerial);
+    }catch(error){
+        if(contextSerial===organizeDetailSerial)_setOrganizeState(error.message,'error');
+    }
 }
 function canExecuteOrganizePreview(preview=organizePreview){
     return Boolean(organizeDetail?.allowed_actions?.reorganize&&preview&&preview===organizePreview);
@@ -997,16 +1001,14 @@ async function runOrganizeReorganize(){
     invalidateOrganizePreview();
     try{
         await runOrganizeAction('/reorganize','POST',payload);
-    }catch(error){
-        if(serial===organizeDetailSerial)_setOrganizeState(error.message,'error');
     }finally{
         if(serial===organizeDetailSerial)document.getElementById('organizeReorganizeBtn').disabled=!canExecuteOrganizePreview();
     }
 }
 
-async function returnOrganizeToSource(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'送回源目录',message:'将视频和全部伴随文件送回各自保存的原始父目录，并恢复原文件名。',confirmText:'送回源目录',danger:true});if(!confirmed||serial!==organizeDetailSerial)return;try{await runOrganizeAction('/return-to-source');}catch(error){_setOrganizeState(error.message,'error');}}
-async function revertOrganize(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'回退最近操作',message:'按最近一次成功操作的持久化步骤回退，不会从路径猜测文件名。',confirmText:'执行回退',danger:true});if(!confirmed||serial!==organizeDetailSerial)return;try{await runOrganizeAction('/revert');}catch(error){_setOrganizeState(error.message,'error');}}
-async function deleteOrganizeGroup(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'移入光鸭回收站',message:'会将该日志明确记录的整个媒体组移入光鸭回收站。MediaFlux 不提供恢复按钮。',confirmText:'移入回收站',danger:true,verifyText:'DELETE',verifyLabel:'输入 DELETE 确认移入回收站'});if(!confirmed||serial!==organizeDetailSerial)return;try{await runOrganizeAction('','DELETE',{confirm:'DELETE'});}catch(error){_setOrganizeState(error.message,'error');}}
+async function returnOrganizeToSource(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'送回源目录',message:'将视频和全部伴随文件送回各自保存的原始父目录，并恢复原文件名。',confirmText:'送回源目录',danger:true});if(confirmed&&serial===organizeDetailSerial)await runOrganizeAction('/return-to-source');}
+async function revertOrganize(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'回退最近操作',message:'按最近一次成功操作的持久化步骤回退，不会从路径猜测文件名。',confirmText:'执行回退',danger:true});if(confirmed&&serial===organizeDetailSerial)await runOrganizeAction('/revert');}
+async function deleteOrganizeGroup(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'移入光鸭回收站',message:'会将该日志明确记录的整个媒体组移入光鸭回收站。MediaFlux 不提供恢复按钮。',confirmText:'移入回收站',danger:true,verifyText:'DELETE',verifyLabel:'输入 DELETE 确认移入回收站'});if(confirmed&&serial===organizeDetailSerial)await runOrganizeAction('','DELETE',{confirm:'DELETE'});}
 document.getElementById('organizeTmdbSearchBtn').addEventListener('click',searchOrganizeTmdb);
 document.getElementById('organizeTmdbQuery').addEventListener('keydown',event=>{if(event.key==='Enter')searchOrganizeTmdb();});
 document.getElementById('organizeTmdbQuery').addEventListener('input',invalidateBatchSearchInputs);

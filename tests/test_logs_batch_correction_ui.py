@@ -394,6 +394,43 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.assertFalse(any(call['path'].endswith('/reorganize') and call['method']=='POST' for call in self.calls()))
         self.assertTrue(self.page.locator('#organizeDetailModal').evaluate('el => el.scrollWidth <= el.clientWidth'))
 
+    def test_late_operation_transport_failure_does_not_overwrite_another_log(self):
+        for action in ('returnOrganizeToSource', 'revertOrganize', 'deleteOrganizeGroup'):
+            for phase in ('request', 'body'):
+                with self.subTest(action=action, phase=phase):
+                    self.page.evaluate('() => openOrganizeDetail(10)')
+                    self.page.evaluate("""({action,phase}) => {
+                      const originalApi=window.api;
+                      window.__operationSettled=false;
+                      window.api=(path,options={})=>{
+                        if(path.startsWith('/api/logs/organize/10')&&options.method!=='GET'){
+                          const failure=new Promise((_,reject)=>window.__failOperation=()=>reject(new Error('旧日志请求连接中断')));
+                          return phase==='request'?failure:Promise.resolve({ok:true,json:()=>failure});
+                        }
+                        return originalApi(path,options);
+                      };
+                      window[action]().finally(()=>{
+                        window.api=originalApi;window.__operationSettled=true;
+                      });
+                    }""", {'action':action,'phase':phase})
+                    self.page.wait_for_function('() => typeof window.__failOperation === "function"')
+                    self.page.evaluate('() => openOrganizeDetail(11)')
+                    state = self.page.locator('#organizeOperationState').inner_text()
+                    self.page.evaluate('() => {window.__failOperation();delete window.__failOperation;}')
+                    self.page.wait_for_function('() => window.__operationSettled')
+                    self.assertEqual(self.page.locator('#organizeOperationState').inner_text(), state)
+                    self.assertIn('#11', self.page.locator('#organizeDetailTitle').inner_text())
+
+    def test_current_operation_transport_failure_remains_visible(self):
+        self.page.evaluate('() => openOrganizeDetail(10)')
+        self.page.evaluate("""() => {
+          const originalApi=window.api;
+          window.api=(path,options={})=>options.method==='POST'
+            ?Promise.reject(new Error('当前请求连接中断')):originalApi(path,options);
+          return returnOrganizeToSource();
+        }""")
+        self.assertIn('当前请求连接中断', self.page.locator('#organizeOperationState').inner_text())
+
     def test_single_preview_success_respects_reorganize_permission(self):
         self.page.evaluate("() => window.__testConfig.detail11Reorganize=false")
         self.page.locator(".detail-btn").nth(1).click()
