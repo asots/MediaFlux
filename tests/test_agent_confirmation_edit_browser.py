@@ -1,4 +1,6 @@
 """真实 Chromium：编辑/限定信任复用原工作台，普通 Web 会话保持隔离；网络仅本地fixture。"""
+from __future__ import annotations
+
 import json
 import time
 import unittest
