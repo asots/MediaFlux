@@ -1017,6 +1017,7 @@ class OrganizeTaskManager:
         owner: str,
         payload: dict[str, Any],
         dedupe_key: str,
+        ttl_seconds: int = 3_600,
         on_admitted: Callable[[Any, Any, bool], None] | None = None,
     ) -> dict:
         """提交可在进程重启后恢复的单次云盘操作。
@@ -1039,6 +1040,7 @@ class OrganizeTaskManager:
                     reference=reference,
                     payload=payload,
                     dedupe_key=dedupe_key,
+                    ttl_seconds=ttl_seconds,
                     on_admitted=on_admitted,
                 )
             except OrganizeOperationAdmissionError:

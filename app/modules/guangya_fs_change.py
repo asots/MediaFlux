@@ -11,7 +11,7 @@ import re
 import tempfile
 import time
 import uuid
-from collections.abc import Generator, Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -29,10 +29,13 @@ from app.modules.guangya_journal import append_guangya_journal
 from app.modules.guangya_workspace import (
     GuangYaWorkspaceStale,
     capture_observation_source,
+    create_directory_observation,
+    discard_observation,
     observation_entry_map,
     observation_ref,
     resolve_workspace_path,
     valid_object_handle,
+    workspace_session_scope,
 )
 from app.modules.organize_delete_audit import (
     DeleteCandidate,
@@ -53,6 +56,7 @@ _EXECUTE_TTL_SECONDS = 15 * 60
 MAX_FS_CHANGE_INPUT_OPERATIONS = 200
 MAX_FS_CHANGE_OBJECT_OPERATIONS = 200
 MAX_FS_CHANGE_CREATE_OPERATIONS = 200
+MAX_FS_CHANGE_BATCH_OPERATIONS = 2_000
 MAX_FS_CHANGE_OPERATIONS = (
     MAX_FS_CHANGE_OBJECT_OPERATIONS + MAX_FS_CHANGE_CREATE_OPERATIONS
 )
@@ -69,7 +73,6 @@ _ACTIVE_PLAN_STATUSES = frozenset({"confirmed", "queued", "running"})
 _TERMINAL_PLAN_STATUSES = frozenset(
     {"completed", "partial", "failed", "cancelled", "manual_review"}
 )
-
 logger = logging.getLogger(__name__)
 
 
@@ -177,6 +180,8 @@ def _fingerprint(payload: dict[str, Any]) -> str:
         "trigger_strm": payload.get("trigger_strm"),
         "operations": payload.get("operations"),
     }
+    if "batch_summary" in payload:
+        stable["batch_summary"] = payload["batch_summary"]
     return hmac.new(
         _secret(),
         b"mediaflux-guangya-fs-change-fingerprint:v1\0"
@@ -900,10 +905,148 @@ def _operation_label(item: dict[str, Any]) -> str:
     return f"{label}：{name}"
 
 
+def _batch_filter_label(value: dict[str, Any]) -> str:
+    if not value:
+        return "全部剩余文件"
+    labels = []
+    if "size_lt_bytes" in value:
+        labels.append(f"大小 < {value['size_lt_bytes']} 字节")
+    if "size_gte_bytes" in value:
+        labels.append(f"大小 ≥ {value['size_gte_bytes']} 字节")
+    for key, label in (("kinds", "类型"), ("extensions", "扩展名"), ("name_contains", "名称包含")):
+        if value.get(key):
+            labels.append(f"{label}=" + "、".join(value[key]))
+    return " 且 ".join(labels)
+
+
+def _batch_matches(entry: dict[str, Any], rule: dict[str, Any]) -> bool:
+    size = int(entry.get("size") or 0)
+    return (
+        ("size_lt_bytes" not in rule or size < rule["size_lt_bytes"])
+        and ("size_gte_bytes" not in rule or size >= rule["size_gte_bytes"])
+        and (not rule.get("kinds") or entry["media_kind"] in rule["kinds"])
+        and (not rule.get("extensions") or entry["extension"].casefold() in rule["extensions"])
+        and (not rule.get("name_contains") or any(word in entry["name"].casefold() for word in rule["name_contains"]))
+    )
+
+
+def _batch_unique_name(name: str, parent_path: str, used: set[str], siblings: set[str]) -> str:
+    if name.casefold() not in used:
+        used.add(name.casefold())
+        return name
+    suffix = Path(name).suffix
+    stem = name[:-len(suffix)] if suffix else name
+    source = re.sub(r"[^\w.()\[\] -]+", "_", Path(parent_path).name).strip(" ._")[:48] or "来源"
+    number = 1
+    blocked = used | siblings
+    while True:
+        tag = f" ({source})" + (f"-{number}" if number > 1 else "")
+        budget = 255 - len(tag) - len(suffix)
+        # 长文件名仍保留末尾分片/版本标记及原始扩展名。
+        base = stem if len(stem) <= budget else stem[:budget - 17] + "…" + stem[-16:]
+        candidate = base + tag + suffix
+        if candidate.casefold() not in blocked:
+            used.add(candidate.casefold())
+            return _validate_name(candidate)
+        number += 1
+
+
+def _batch_prepare(
+    client: GuangYaClient, *, owner: str, session_id: str,
+    observation: dict[str, Any], rule: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    """把完整目录中的明确规则编译为普通操作；不写云盘，也不另起执行链。"""
+    if not session_id or observation.get("session_scope") != workspace_session_scope(owner, session_id):
+        raise GuangYaFSChangeError("批量规则需要当前已登录会话的目录观察")
+    scope = observation_entry_map(observation).get(rule["scope_ref"])
+    if not scope or not scope.get("is_dir") or scope.get("file_id") in {"", "0"}:
+        raise GuangYaFSChangeError("scope_ref 必须是已读取的非账号根目录")
+    if "trash_filter" in rule and not rule["trash_filter"]:
+        raise GuangYaFSChangeError("回收文件必须提供明确筛选条件")
+    root_path = _full_path(scope["parent_path"], scope["name"])
+    root = {"file_id": scope["file_id"], "parent_id": scope["parent_id"], "is_dir": True, "path": root_path}
+    fresh = create_directory_observation(
+        client, owner=owner, session_id=session_id, path=root_path, recursive=True,
+        max_items=MAX_FS_CHANGE_BATCH_OPERATIONS, expected_roots=[root],
+    )
+    try:
+        entries = fresh["entries"]
+        by_id = {entry["file_id"]: entry for entry in entries}
+        directories = {entry["file_id"]: entry for entry in entries if entry["is_dir"]}
+        directories[root["file_id"]] = fresh["roots"][0]
+        # scanner 的深度上限不记为 truncated；目录数量必须证明每个子目录都已读取。
+        if (fresh["truncated"] or fresh["scanned_dirs"] != len(directories)
+                or fresh["scanned_items"] != len(entries) or len(by_id) != len(entries)
+                or root["file_id"] in by_id):
+            raise GuangYaFSChangeError("目录扫描不完整、超过范围上限或清单发生变化；请拆分子目录重新读取")
+        paths = {file_id: _full_path(entry["parent_path"], entry["name"])
+                 for file_id, entry in directories.items()}
+        children: dict[str, list[dict[str, Any]]] = {file_id: [] for file_id in directories}
+        for entry in entries:
+            if paths.get(entry["parent_id"]) != entry["parent_path"]:
+                raise GuangYaFSChangeError("目录扫描父子关系发生变化，请重新读取")
+            children[entry["parent_id"]].append(entry)
+        target_path = rule.get("target_path", "")
+        observed_directories = {paths[file_id]: entry for file_id, entry in directories.items()}
+        target_id = _resolve_directory(client, target_path, observed_directories)[0] if target_path else ""
+        used = {item.name.casefold() for item in client.list_dir(target_id)} if target_id else set()
+        operations: list[dict[str, Any]] = []
+        vacated: set[str] = set()
+        trash_count = move_count = renamed_count = unchanged_count = file_count = cleanup_count = 0
+        for entry in sorted(entries, key=lambda item: (item["parent_path"].casefold(), item["name"].casefold(), item["file_id"])):
+            if entry["is_dir"]:
+                continue
+            file_count += 1
+            file_id, name = entry["file_id"], entry["name"]
+            if rule.get("trash_filter") and _batch_matches(entry, rule["trash_filter"]):
+                operations.append({"op": "trash", "object_ref": entry["handle"]})
+                vacated.add(file_id)
+                trash_count += 1
+            elif target_id and entry["parent_id"] != target_id and _batch_matches(entry, rule.get("move_filter", {})):
+                if name.casefold() in used and rule.get("conflict") == "error":
+                    raise GuangYaFSChangeError("目标目录或批内已有同名对象")
+                siblings = {item["name"].casefold() for item in children[entry["parent_id"]]}
+                new_name = _batch_unique_name(name, entry["parent_path"], used, siblings)
+                operation = {"op": "move", "object_ref": entry["handle"], "target_path": target_path}
+                if new_name != name:
+                    operation.update(op="relocate", new_name=new_name)
+                    renamed_count += 1
+                operations.append(operation)
+                vacated.add(file_id)
+                move_count += 1
+            else:
+                unchanged_count += 1
+        if rule.get("cleanup_empty_dirs"):
+            protected = {root["file_id"]}
+            current = target_id
+            while current in by_id and current not in protected:
+                protected.add(current)
+                current = by_id[current]["parent_id"]
+            # 只清理冻结清单中已安排移出/回收全部子项的目录；目标与范围根始终保留。
+            for file_id in sorted(directories, key=lambda item: (-paths[item].count("/"), item)):
+                if file_id not in protected and all(child["file_id"] in vacated for child in children[file_id]):
+                    operations.append({"op": "trash", "object_ref": directories[file_id]["handle"]})
+                    vacated.add(file_id)
+                    cleanup_count += 1
+        summary = (
+            f"范围：{' › '.join(root_path.strip('/').split('/'))}；"
+            f"回收规则：{_batch_filter_label(rule['trash_filter']) if rule.get('trash_filter') else '无'}；"
+            f"移动规则：{_batch_filter_label(rule.get('move_filter', {})) if target_path else '无'}；"
+            f"目标：{' › '.join(target_path.strip('/').split('/')) or '账号根目录' if target_path else '无'}；"
+            f"扫描 {file_count} 个文件、{len(directories)} 个目录；"
+            f"回收文件 {trash_count}、移动 {move_count}、重名保留两份 {renamed_count}、"
+            f"清理空子目录 {cleanup_count}、其余保留 {unchanged_count}。"
+        )
+        return operations, fresh, summary
+    finally:
+        discard_observation(fresh["plan_id"])
+
+
 def build_fs_change_plan(
     client: GuangYaClient,
     *,
     owner: str,
+    session_id: str = "",
     observation: dict[str, Any],
     operations: list[dict[str, Any]],
     trigger_strm: bool = True,
@@ -914,6 +1057,21 @@ def build_fs_change_plan(
             f"光鸭变更计划必须包含 1 到 {MAX_FS_CHANGE_OPERATIONS} 项操作"
         )
     entries = observation_entry_map(observation)
+    batch_rule: dict[str, Any] | None = None
+    batch_summary = ""
+    original_observation = observation
+    if any(str(raw.get("op") or "").strip().casefold() == "batch_files" for raw in operations if isinstance(raw, dict)):
+        if len(operations) != 1 or not isinstance(operations[0], dict):
+            raise GuangYaFSChangeError("batch_files 必须独占一个计划")
+        batch_rule = dict(operations[0])
+        operations, observation, batch_summary = _batch_prepare(
+            client,
+            owner=owner,
+            session_id=session_id,
+            observation=observation,
+            rule=batch_rule,
+        )
+        entries = observation_entry_map(observation)
     operations = _compile_operations(operations, entries)
     observed_directories = {_full_path(str(item.get("parent_path") or "/"), str(item["name"])): item
                             for item in entries.values() if item.get("is_dir")}
@@ -923,9 +1081,17 @@ def build_fs_change_plan(
         if str(item.get("op") or "").strip().casefold() == "create_directory"
     )
     object_count = len(operations) - create_count
+    operation_limit = (
+        MAX_FS_CHANGE_BATCH_OPERATIONS if batch_rule is not None
+        else MAX_FS_CHANGE_OPERATIONS
+    )
+    object_limit = (
+        MAX_FS_CHANGE_BATCH_OPERATIONS if batch_rule is not None
+        else MAX_FS_CHANGE_OBJECT_OPERATIONS
+    )
     if (
-        not 1 <= len(operations) <= MAX_FS_CHANGE_OPERATIONS
-        or object_count > MAX_FS_CHANGE_OBJECT_OPERATIONS
+        batch_rule is None and not 1 <= len(operations) <= operation_limit
+        or object_count > object_limit
         or create_count > MAX_FS_CHANGE_CREATE_OPERATIONS
     ):
         raise GuangYaFSChangeError(
@@ -938,6 +1104,14 @@ def build_fs_change_plan(
         0, len(Path(item["parent_path"]).parts),
     ) if str(item.get("op") or "").strip().casefold() == "create_directory" else (1, 0))
     cache: dict[str, dict[str, GuangYaFile]] = {}
+    resolved_directories: dict[str, tuple[str, dict[str, Any] | None]] = {}
+
+    def resolve_directory(path: str) -> tuple[str, dict[str, Any] | None]:
+        # 同一只读编译使用同一目标快照；实际执行仍逐项重新核验。
+        if path not in resolved_directories:
+            resolved_directories[path] = _resolve_directory(client, path, observed_directories)
+        return resolved_directories[path]
+
     frozen: list[dict[str, Any]] = []
     seen_objects: set[str] = set()
     unchanged = 0
@@ -962,7 +1136,7 @@ def build_fs_change_plan(
             pending_parent = pending_targets.get(parent_path)
             parent_id, parent_snapshot = (
                 ("", None) if pending_parent is not None
-                else _resolve_directory(client, parent_path, observed_directories)
+                else resolve_directory(parent_path)
             )
             if pending_parent is None and _name_conflict(_list_map(client, parent_id, cache), name):
                 raise GuangYaFSChangeError("新建目录名称已被占用")
@@ -1002,6 +1176,8 @@ def build_fs_change_plan(
                 str(observed.get("parent_path") or "/"), current.name
             ),
         }
+        if batch_rule is not None and op == "trash" and current.is_dir:
+            base["require_empty"] = True
         if op in {"rename", "relocate"} or op == "copy" and "new_name" in raw:
             new_name = _validate_name(raw.get("new_name"))
             if op == "rename" and new_name == current.name:
@@ -1022,7 +1198,7 @@ def build_fs_change_plan(
             target_path = raw["target_path"]
             pending_target = pending_targets.get(target_path)
             if pending_target is None:
-                target_id, target_snapshot = _resolve_directory(client, target_path, observed_directories)
+                target_id, target_snapshot = resolve_directory(target_path)
                 if target_id == parent_id:
                     if op == "copy":
                         raise GuangYaFSChangeError("复制目标与当前目录相同")
@@ -1086,13 +1262,14 @@ def build_fs_change_plan(
             ):
                 if parent["op"] == "trash":
                     target = str(item.get("target_path") or "")
-                    escapes = item["op"] in {"move", "relocate"} and not (
+                    moves_out = item["op"] in {"move", "relocate"} and (not (
                         target == parent_path or target.startswith(parent_path + "/")
-                    )
-                    if not escapes and not (item["op"] == "trash" and item["source"]["is_dir"]):
+                    ))
+                    trashes_explicit = item["op"] == "trash"
+                    if not moves_out and not trashes_explicit:
                         raise GuangYaFSChangeError("清理父目录前必须先移出内容；不能混合改名、复制或回收非空内容")
                     parent["require_empty"] = True
-                    if item["op"] == "trash":
+                    if item["op"] == "trash" and item["source"]["is_dir"]:
                         item["require_empty"] = True
                 elif parent["op"] != "rename" and item["op"] == "trash" and item["source"]["is_dir"]:
                     item["require_empty"] = True
@@ -1109,7 +1286,10 @@ def build_fs_change_plan(
             escapes = child.get("op") in {"move", "relocate"} and not (
                 target == path or target.startswith(path + "/")
             )
-            if not escapes and not (child.get("op") == "trash" and child.get("require_empty")):
+            recycled = child.get("op") == "trash" and (
+                not child["source"]["is_dir"] or child.get("require_empty")
+            )
+            if not escapes and not recycled:
                 raise GuangYaFSChangeError("父目录仍有未安排移出的内容，不能作为空目录清理")
         # 不能一边向目录放入文件、一边把它当成即将变空的目录回收。
         if any(str(other.get("target_path") or "") == path or
@@ -1150,18 +1330,22 @@ def build_fs_change_plan(
 
     stats = {"total": len(frozen), "unchanged": unchanged, **counts}
     if not frozen:
-        return {"status": "no_changes", "operations": [], "stats": stats,
-                "samples": [], "trigger_strm": False}
+        no_changes = {"status": "no_changes", "operations": [], "stats": stats,
+                      "samples": [], "trigger_strm": False}
+        if batch_summary:
+            no_changes["batch_summary"] = batch_summary
+        return no_changes
     current = time.time()
     plan = {
         "version": _PLAN_VERSION,
         "plan_id": uuid.uuid4().hex,
         "owner_digest": _owner_digest(owner),
         "credential_generation": client.credential_generation,
-        "observation_ref": observation_ref(str(observation.get("plan_id") or "")),
-        "observation_source": capture_observation_source(observation, [
-            item["object_ref"] for item in frozen if item.get("object_ref")
-        ]),
+        "observation_ref": observation_ref(str((original_observation if batch_rule else observation).get("plan_id") or "")),
+        "observation_source": (
+            capture_observation_source(original_observation, [batch_rule["scope_ref"]]) if batch_rule
+            else capture_observation_source(observation, [item["object_ref"] for item in frozen if item.get("object_ref")])
+        ),
         "created_at": _now_iso(),
         "created_at_epoch": current,
         "expires_at_epoch": current + _PLAN_TTL_SECONDS,
@@ -1172,6 +1356,8 @@ def build_fs_change_plan(
         "samples": samples,
         "execution": {},
     }
+    if batch_summary:
+        plan["batch_summary"] = batch_summary
     plan["fingerprint"] = _fingerprint(plan)
     with _plan_state_lock():
         _atomic_write(plan)

@@ -114,6 +114,7 @@ def _safe_preview(value: object) -> dict[str, Any] | None:
         "trigger_strm": bool(value.get("trigger_strm")),
         "cloud_write": False,
         **({"observation_note": str(value["observation_note"])[:1000]} if value.get("observation_note") else {}),
+        **({"batch_summary": str(value["batch_summary"])} if value.get("batch_summary") else {}),
     }
 
 
@@ -175,6 +176,67 @@ def _normalize_path(value: object, *, field: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
+def _file_filter_arguments(value: object, *, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) - {
+        "size_lt_bytes", "size_gte_bytes", "kinds", "extensions", "name_contains",
+    }:
+        raise AgentToolError(f"{field} 文件筛选条件无效")
+    result: dict[str, Any] = {}
+    for key, raw in value.items():
+        if key in {"size_lt_bytes", "size_gte_bytes"}:
+            if type(raw) is not int or not 0 <= raw <= 2**53 - 1:
+                raise AgentToolError(f"{field}.{key} 必须是非负整数字节数")
+            result[key] = raw
+            continue
+        if not isinstance(raw, list) or not 1 <= len(raw) <= 16:
+            raise AgentToolError(f"{field}.{key} 必须包含 1 到 16 项")
+        if any(not isinstance(item, str) or not 1 <= len(item.strip()) <= 160 for item in raw):
+            raise AgentToolError(f"{field}.{key} 必须是非空字符串列表")
+        values = list(dict.fromkeys(item.strip().casefold() for item in raw))
+        if key == "kinds" and set(values) - {"video", "subtitle", "image", "metadata", "other"}:
+            raise AgentToolError("批量规则只筛选文件，kinds 不支持目录")
+        if key == "extensions" and any(not re.fullmatch(r"[a-z0-9]{1,16}", item) for item in values):
+            raise AgentToolError("extensions 必须是无点的扩展名，如 mp4、srt、torrent")
+        result[key] = values
+    if "size_lt_bytes" in result and result.get("size_gte_bytes", -1) >= result["size_lt_bytes"]:
+        raise AgentToolError("大小筛选下限必须小于上限")
+    return result
+
+
+def _batch_files_arguments(raw: dict[str, Any]) -> dict[str, Any]:
+    if set(raw) - {
+        "op", "scope_ref", "trash_filter", "target_path", "move_filter", "cleanup_empty_dirs", "conflict",
+    }:
+        raise AgentToolError("batch_files 包含不支持的参数")
+    scope_ref = str(raw.get("scope_ref") or "").strip().upper()
+    if not valid_object_handle(scope_ref):
+        raise AgentToolError("scope_ref 必须是已读取的目录对象引用")
+    cleanup = raw.get("cleanup_empty_dirs", False)
+    if type(cleanup) is not bool:
+        raise AgentToolError("cleanup_empty_dirs 必须是布尔值")
+    conflict = raw.get("conflict", "keep_both")
+    if conflict not in ("keep_both", "error"):
+        raise AgentToolError("conflict 仅支持 keep_both 或 error，不允许覆盖")
+    result: dict[str, Any] = {
+        "op": "batch_files", "scope_ref": scope_ref,
+        "cleanup_empty_dirs": cleanup, "conflict": conflict,
+    }
+    if "trash_filter" in raw:
+        result["trash_filter"] = _file_filter_arguments(raw["trash_filter"], field="trash_filter")
+        if not result["trash_filter"]:
+            raise AgentToolError("回收文件必须提供明确筛选条件，不能使用空 trash_filter")
+    if "target_path" in raw:
+        if not isinstance(raw["target_path"], str):
+            raise AgentToolError("target_path 必须是目录路径字符串")
+        result["target_path"] = _normalize_path(raw["target_path"], field="target_path")
+        result["move_filter"] = _file_filter_arguments(raw.get("move_filter", {}), field="move_filter")
+    elif "move_filter" in raw:
+        raise AgentToolError("move_filter 必须配合 target_path 使用")
+    if not cleanup and "trash_filter" not in result and "target_path" not in result:
+        raise AgentToolError("batch_files 至少指定回收条件、移动目标或空目录清理")
+    return result
+
+
 def guangya_fs_change_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise AgentToolError("光鸭变更预览参数必须是对象")
@@ -198,6 +260,11 @@ def guangya_fs_change_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise AgentToolError("光鸭变更操作必须是对象")
         op = str(raw.get("op") or "").strip().casefold()
+        if op == "batch_files":
+            if len(raw_operations) != 1:
+                raise AgentToolError("batch_files 必须独占一个计划，不能混合逐项操作")
+            operations.append(_batch_files_arguments(raw))
+            continue
         expected = {
             "rename": {"op", "object_ref", "new_name"},
             "move": {"op", "object_ref", "target_path"},
@@ -351,6 +418,9 @@ def _public_error(exc: Exception) -> AgentToolError:
 def _operation_object_refs(operations: list[dict[str, Any]]) -> tuple[str, ...]:
     refs: list[str] = []
     for operation in operations:
+        if operation.get("op") == "batch_files":
+            refs.append(str(operation["scope_ref"]).strip().upper())
+            continue
         if str(operation.get("op") or "").strip().casefold() == "batch_relocate":
             refs.extend(
                 str(item.get("object_ref") or "").strip().upper()
@@ -522,6 +592,7 @@ class GuangyaFsChangeActions:
             plan = build_fs_change_plan(
                 client,
                 owner=context.owner,
+                session_id=context.session_id,
                 observation=observation,
                 operations=list(arguments["operations"]),
                 trigger_strm=bool(arguments["trigger_strm"]),
@@ -551,6 +622,7 @@ class GuangyaFsChangeActions:
             "trigger_strm": bool(plan.get("trigger_strm")),
             "cloud_write": False,
             **({"observation_note": note} if note else {}),
+            **({"batch_summary": plan["batch_summary"]} if plan.get("batch_summary") else {}),
         }
         if not preview_safe["total"]:
             if previous is not None:
@@ -558,7 +630,9 @@ class GuangyaFsChangeActions:
                     raise AgentToolError("光鸭预览已被其他请求更新，请重新核对", code="confirmation_stale")
                 discard_fs_change_plan(previous.plan_id, preview_only=True)
             return ToolResult(
-                True, "no_changes", "所选操作已符合目标名称或目录，无需重复变更；本次未写入云盘",
+                True, "no_changes",
+                ("未发现需要变更的匹配对象；本次未写入云盘" if plan.get("batch_summary")
+                 else "所选操作已符合目标名称或目录，无需重复变更；本次未写入云盘"),
                 data=preview_safe,
                 suggestions=["没有生成新的确认计划；这仅表示所选文件操作无需变更，不代表元数据刮削或媒体库入库已完成。"],
             ), ""
@@ -590,6 +664,7 @@ class GuangyaFsChangeActions:
             data={
                 **flow.preview_safe,
                 "effects": [
+                    *([flow.preview_safe["batch_summary"]] if flow.preview_safe.get("batch_summary") else []),
                     "只执行本卡冻结的对象、名称和目标目录，不会扩大范围。",
                     "移动、复制和改名会在写前重新检查快照与同名冲突。",
                     "trash 只调用 Provider 回收站语义，不提供永久删除。",
@@ -650,6 +725,8 @@ class GuangyaFsChangeActions:
                     "credential_generation": int(confirmed["credential_generation"]),
                 },
                 dedupe_key=f"agent-guangya-fs-change:{flow.plan_id}:{flow.fingerprint}",
+                **({"ttl_seconds": 6 * 60 * 60}
+                   if plan.get("batch_summary") and flow.preview_safe["total"] > MAX_FS_CHANGE_OBJECT_OPERATIONS else {}),
                 on_admitted=context.admit_background_operation,
             )
         except AgentToolError:

@@ -270,7 +270,7 @@ def test_guangya_fs_change_is_one_full_plan_confirmation_tool() -> None:
         for name in branch["properties"]["op"]["enum"]
     }
     assert operation_names == {
-        "rename", "move", "copy", "relocate", "batch_relocate", "create_directory", "trash",
+        "rename", "move", "copy", "relocate", "batch_relocate", "batch_files", "create_directory", "trash",
     }
 
     catalog = catalog_from_tool_specs(specs)

@@ -405,7 +405,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
                     "provider_id": "only",
                 },
                 {"position": 7, "op": "move", "status": "completed"},
-                {"position": 401, "operation": "move", "status": "completed"},
+                {"position": 2001, "operation": "move", "status": "completed"},
                 {
                     "position": 8,
                     "operation": "rename",
@@ -494,7 +494,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
         self.assertIn("笨贼妙探.1999.2160p.mkv", safe["operation_items"][0]["label"])
         self.assertNotIn("内部检查", safe["operation_items"][0]["label"])
 
-    def test_operation_item_labels_are_utf8_bounded_and_400_items_fit_result_budget(self) -> None:
+    def test_operation_item_labels_are_utf8_bounded_and_2000_items_fit_result_budget(self) -> None:
         long_label = "开头" + "集" * 100 + "结尾"
         single = sanitize_organize_operation_result(
             {
@@ -517,7 +517,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
             with self.subTest(kind=kind):
                 worst_case = sanitize_organize_operation_result(
                     {
-                        "stats": {"total": 400},
+                        "stats": {"total": 2000},
                         "operation_items": [
                             {
                                 "position": index + 1,
@@ -527,11 +527,11 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
                                 "completed_actions": ["create_directory", "create_directory"],
                                 "reason": "dependency_failed",
                             }
-                            for index in range(400)
+                            for index in range(2000)
                         ],
                     }
                 )
-                self.assertEqual(len(worst_case["operation_items"]), 400)
+                self.assertEqual(len(worst_case["operation_items"]), 2000)
                 self.assertTrue(
                     all(
                         len(item["label"].encode("utf-8")) <= 128
@@ -541,7 +541,7 @@ class OrganizeOperationJobRepositoryTests(IsolatedDatabaseTestCase):
                 serialized = json.dumps(
                     worst_case, ensure_ascii=False, separators=(",", ":"), sort_keys=True
                 ).encode("utf-8")
-                self.assertLess(len(serialized), 131_072)
+                self.assertLess(len(serialized), 1_048_576)
                 created, _ = self._enqueue(dedupe=f"label-budget:{kind}")
                 claimed = claim_organize_operation_job(str(created["job_id"]))
                 assert claimed is not None
@@ -1095,6 +1095,32 @@ class OrganizeDurableOperationManagerTests(IsolatedDatabaseTestCase):
         assert other is not None
         self.assertEqual(other["status"], "manual_review")
         self.assertEqual(other["error_code"], "WorkerExitedUnknownOutcome")
+
+    def test_large_batch_queue_deadline_is_forwarded_without_replay_extension(self) -> None:
+        manager = OrganizeTaskManager()
+        manager._lock = cast(CrossProcessLock, threading.Lock())
+        manager._lock.acquire()
+        try:
+            with patch.object(manager, "_ensure_operation_dispatcher"):
+                before = time.time()
+                arguments = {
+                    "job_kind": "agent_directory_scrape", "owner": "owner-batch-deadline",
+                    "payload": self._payload(), "dedupe_key": "batch-deadline",
+                }
+                first = manager.start_durable_operation("批量文件变更", "冻结计划", ttl_seconds=21600, **arguments)
+                row = get_organize_operation_job(first["task_id"])
+                assert row is not None
+                self.assertGreaterEqual(float(row["expires_at"]), before + 21600)
+                self.assertLess(float(row["expires_at"]), time.time() + 21601)
+                replayed = manager.start_durable_operation("批量文件变更", "冻结计划", ttl_seconds=43200, **arguments)
+                again = get_organize_operation_job(replayed["task_id"])
+                assert again is not None
+                self.assertTrue(replayed["replayed"])
+                self.assertEqual(first["task_id"], replayed["task_id"])
+                self.assertEqual(row["expires_at"], again["expires_at"])
+        finally:
+            manager.begin_shutdown()
+            manager._lock.release()
 
     def test_pending_operation_survives_shutdown_and_runs_after_resume(self) -> None:
         first = OrganizeTaskManager()

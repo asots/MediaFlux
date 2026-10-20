@@ -26,6 +26,7 @@ _ALLOWED_KINDS = {
 }
 _TERMINAL_STATUSES = {"completed", "partial", "failed", "cancelled", "manual_review"}
 _MAX_JSON_BYTES = 131_072
+_MAX_RESULT_JSON_BYTES = 1_048_576
 _MAX_TEXT = 240
 _MAX_TERMINAL_HISTORY_PER_OWNER = 64
 _MAX_TERMINAL_HISTORY_GLOBAL = 4_096
@@ -42,7 +43,7 @@ _PROVIDER_COPY_EXPIRED_ERROR = (
     "复制请求可能已提交，队列已过期；云端处理结果未知，可能仍在执行。"
     "请先核对目标目录，勿直接重试或视为已取消。"
 )
-_MAX_OPERATION_ITEMS = 400
+_MAX_OPERATION_ITEMS = 2_000
 _MAX_OPERATION_LABEL_BYTES = 128
 _ALLOWED_RESULT_STATS = {
     "total", "matched", "need_confirm", "moved", "relocated", "renamed", "rename_failed",
@@ -132,12 +133,12 @@ def _safe_text(value: object, *, limit: int = _MAX_TEXT) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
-def _safe_json(value: object, *, field: str) -> str:
+def _safe_json(value: object, *, field: str, max_bytes: int = _MAX_JSON_BYTES) -> str:
     if isinstance(value, str):
         raw = value
     else:
         raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    if len(raw.encode("utf-8")) > _MAX_JSON_BYTES:
+    if len(raw.encode("utf-8")) > max_bytes:
         raise ValueError(f"{field}过大")
     try:
         parsed = json.loads(raw)
@@ -648,7 +649,7 @@ def defer_organize_operation_job(
     safe_id = _safe_job_id(job_id)
     generation = max(0, expected_lease_generation)
     safe_result = sanitize_organize_operation_result(result or {})
-    safe_result_json = _safe_json(safe_result, field="光鸭操作任务结果")
+    safe_result_json = _safe_json(safe_result, field="光鸭操作任务结果", max_bytes=_MAX_RESULT_JSON_BYTES)
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -815,6 +816,7 @@ def finish_organize_operation_job(
     safe_result = _safe_json(
         safe_result_payload,
         field="光鸭操作任务结果",
+        max_bytes=_MAX_RESULT_JSON_BYTES,
     )
     safe_error_code = re.sub(r"[^A-Za-z0-9_.-]", "", (error_code or ""))[:80]
     safe_error = _safe_text(error, limit=500)

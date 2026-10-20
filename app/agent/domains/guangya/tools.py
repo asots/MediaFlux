@@ -58,6 +58,33 @@ from app.agent.models import (
     ToolSpec,
 )
 
+_FILE_FILTER_SCHEMA = {
+    "type": "object",
+    "description": "只匹配文件；字段之间 AND，同一数组内 OR；名称/扩展名不区分大小写。不填表示所有文件，回收条件不允许为空。",
+    "properties": {
+        "size_lt_bytes": {
+            "type": "integer", "minimum": 0, "maximum": 2**53 - 1,
+            "description": "严格小于此字节数；必须来自用户明确要求，不能擅自以小文件判定垃圾。200MiB=209715200；200MB=200000000。",
+        },
+        "size_gte_bytes": {"type": "integer", "minimum": 0, "maximum": 2**53 - 1},
+        "kinds": {
+            "type": "array", "minItems": 1, "maxItems": 16,
+            "items": {"type": "string", "enum": ["video", "subtitle", "image", "metadata", "other"]},
+        },
+        "extensions": {
+            "type": "array", "minItems": 1, "maxItems": 16,
+            "items": {"type": "string", "pattern": "^[a-zA-Z0-9]{1,16}$"},
+            "description": "无点的扩展名，如 mp4、srt、torrent。",
+        },
+        "name_contains": {
+            "type": "array", "minItems": 1, "maxItems": 16,
+            "items": {"type": "string", "minLength": 1, "maxLength": 160},
+            "description": "文件名包含任一字面子串；不是正则，不根据名称猜测文件内容。",
+        },
+    },
+    "additionalProperties": False,
+}
+
 
 def register_specs(registry, *, cleanup_actions, directory_scrape_actions, fs_change_actions, rename_actions, workspace_actions) -> None:
     registry.register(
@@ -586,6 +613,9 @@ def register_specs(registry, *, cleanup_actions, directory_scrape_actions, fs_ch
                 "传入完整operations，一次编译冻结计划并直接生成可点击确认卡；确认前不写云盘，无需另调预览或再次请求建卡。observation_ref只指定主快照，"
                 "同一会话与凭据世代的近期安全引用会自动合并，无需为了跨快照对象重复扫描。支持 rename、move、copy（可选 new_name，在同一计划内复制并对副本改名，源对象不变；省略时沿用源名称，冲突必须拒绝）、"
                 "relocate（一次计划内移动并改名，自动选择无名称冲突的执行顺序）、batch_relocate（用 object_ref+集号批量生成规范文件名）、"
+                "batch_files（单条规则递归筛选文件：按明确大小/类型/扩展名/名称回收、将剩余匹配文件平铺到指定目录、重名保留两份、清理空子目录；"
+                "先读取目录取得scope_ref，后端完整扫描并冻结最多2000个对象，无需逐页枚举；必须独占operations，扫描不完整不生成计划；"
+                "仅回收明确匹配的文件，不默认删除字幕/封面/种子/小视频，模糊的垃圾请求应先明确规则）、"
                 "trash（Provider 回收站）和 create_directory。子项复制备份、改名或搬出，以及后续空中间目录trash和父目录move/relocate可放在同一计划，系统按依赖执行；父目录清理前必须验证实际为空，任一前置失败会阻止后续父目录操作；这是有序执行而非全局回滚事务；"
                 "多层 create_directory 与指向新目录的移动可放在同一计划，父目录先于子目录创建，无需分次确认；"
                 "重新核对 owner、凭据世代、对象快照、目录占用与结构冲突，不执行任何云端写入。"
@@ -603,9 +633,35 @@ def register_specs(registry, *, cleanup_actions, directory_scrape_actions, fs_ch
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 200,
-                        "description": "每项操作键为op，源对象用object_ref；move/copy/relocate目标用target_path目录路径，不用目录引用。create_directory仅支持op+path或op+parent_path+name，不能混用；已有正确name时保留并补parent_path。",
+                        "description": "逐项操作源对象用object_ref，目标用target_path目录路径；batch_files只传一条规则，范围用scope_ref。create_directory仅支持op+path或op+parent_path+name，不能混用。",
                         "items": {
                             "oneOf": [
+                                {
+                                    "type": "object",
+                                    "required": ["op", "scope_ref"],
+                                    "properties": {
+                                        "op": {"type": "string", "enum": ["batch_files"]},
+                                        "scope_ref": {
+                                            "type": "string", "pattern": "^OBJ[0-9A-Fa-f]{24}$",
+                                            "description": "已读取的目录引用（scope_objects 或目录条目）；禁止账号根目录。范围根本身永不清理。",
+                                        },
+                                        "trash_filter": {**_FILE_FILTER_SCHEMA, "minProperties": 1},
+                                        "target_path": {
+                                            "type": "string", "minLength": 1, "maxLength": 2048,
+                                            "description": "已有目标目录；将递归范围内、未命中回收规则且匹配move_filter的文件平铺到这里。",
+                                        },
+                                        "move_filter": _FILE_FILTER_SCHEMA,
+                                        "cleanup_empty_dirs": {
+                                            "type": "boolean", "default": False,
+                                            "description": "只清理本次处理后为空的子目录；未匹配内容、范围根、目标目录均保留，执行前再次确认空目录。",
+                                        },
+                                        "conflict": {
+                                            "type": "string", "enum": ["keep_both", "error"], "default": "keep_both",
+                                            "description": "keep_both为重名添加来源目录后缀并保留两份；error拒绝冲突；没有覆盖模式。",
+                                        },
+                                    },
+                                    "additionalProperties": False,
+                                },
                                 {
                                     "type": "object",
                                     "required": ["op", "object_ref", "new_name"],
@@ -829,6 +885,8 @@ def register_specs(registry, *, cleanup_actions, directory_scrape_actions, fs_ch
                 "新建目录并为这些对象生成移动且改名的冻结计划",
                 "清理视频文件的广告前缀并把原作品目录整体移到目标目录，一次预览",
                 "把 85 个视频按各自集号批量移动并命名为规范剧集文件，先预览",
+                "把 /NewNsfw 低于200MiB的所有文件移入回收站，剩余媒体平铺到根目录，重名保留两份并清理空子目录",
+                "按名称与文件大小筛选，批量回收明确命中的文件，先给确认卡",
             ),
         )
     )
