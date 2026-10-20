@@ -86,12 +86,16 @@ window.__apiCalls=[];
 window.__confirmCalls=[];
 window.__confirmAnswer=true;
 window.__pendingPreviews=[];
+window.__pendingSinglePreviews=[];
 window.__pendingDetails=[];
 window.__pendingTaskStatuses=[];
 window.__testConfig=window.__testConfig||{};
 const jsonResponse=(body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});
 const detailFor=id=>{
   const nsfw=Boolean(window.__testConfig.nsfw);
+  const allowed=id==='11'&&window.__testConfig.detail11Reorganize===false
+    ? {search:true,preview:true,reorganize:false,return_to_source:true,revert:true,delete:true}
+    : {search:true,preview:true,reorganize:true,return_to_source:true,revert:true,delete:true};
   return {
     id:Number(id),version:id==='10'?4:7,status:'manual',title:'旧识别标题',year:2020,
     media_type:'unknown',provider:nsfw?'metatube':'tmdb',tmdb_id:'wrong-old-id',
@@ -101,7 +105,7 @@ const detailFor=id=>{
       ? {provider:'metatube',label:'MetaTube',nsfw_only:true,query_placeholder:'输入番号'}
       : {provider:'tmdb',label:'TMDB',nsfw_only:false,query_placeholder:'输入片名或剧名'},
     release_parse:{media_type:'tv',effective_position:{season:1,episode:2}},
-    allowed_actions:{search:true,preview:true,reorganize:true,return_to_source:true,revert:true,delete:true},
+    allowed_actions:allowed,
     items:[{file_id:'f'+id,role:'video',current_name:'Series.S01E02.mkv',original_name:'Series.S01E02.mkv',current_parent_id:'p',status:'success'}],
     operations:[],delete_audits:[],
   };
@@ -111,6 +115,13 @@ window.__releasePreview=id=>{
   if(index<0)return false;
   const [entry]=window.__pendingPreviews.splice(index,1);
   entry.resolve(jsonResponse(window.__testConfig.previewById?.[entry.id]||window.__testConfig.preview||{}));
+  return true;
+};
+window.__releaseSinglePreview=id=>{
+  const index=window.__pendingSinglePreviews.findIndex(entry=>entry.id===String(id));
+  if(index<0)return false;
+  const [entry]=window.__pendingSinglePreviews.splice(index,1);
+  entry.resolve(entry.response);
   return true;
 };
 window.__releaseTaskStatus=(taskId,task)=>{
@@ -137,7 +148,7 @@ window.fetch=async(input,options={})=>{
   }
   if(url.pathname.endsWith('/recognition/search')&&method==='POST'){
     const candidates=config.nsfw
-      ? [{external_id:'ABC-123',provider:'metatube',media_type:'movie',title:'成人候选',year:2024,score:0.9}]
+      ? (config.nsfwCandidates||[{external_id:'ABC-123',provider:'metatube',media_type:'movie',title:'成人候选',year:2024,score:0.9}])
       : (config.candidates||[]);
     return jsonResponse({candidates});
   }
@@ -156,7 +167,13 @@ window.fetch=async(input,options={})=>{
     const result=single?(config.singleTaskResult||{success:true,warnings:[]}):(config.taskResult||{success:true,action:'reorganize',requested:2,completed:[],failed:[],warnings:[]});
     return jsonResponse({id:taskId,status,message:single?(config.singleTaskMessage||''):(config.taskMessage||''),error:single?(config.singleTaskError||''):(config.taskError||''),result});
   }
-  if(/\/reorganize\/preview$/.test(url.pathname)&&method==='POST')return jsonResponse(config.singlePreview||{target_path:'Series/Correct',media_dir:'Series',file_name:'Correct.mkv',items:[]});
+  if(/\/reorganize\/preview$/.test(url.pathname)&&method==='POST'){
+    if((config.singlePreviewFailures||[]).length)return jsonResponse({error:config.singlePreviewFailures.shift()},422);
+    const response=jsonResponse(config.singlePreview||{target_path:'Series/Correct',media_dir:'Series',file_name:'Correct.mkv',items:[]});
+    const logId=url.pathname.match(/^\/api\/logs\/organize\/(\d+)\/reorganize\/preview$/)?.[1];
+    if(logId&&(config.holdSinglePreviewIds||[]).includes(logId))return new Promise(resolve=>window.__pendingSinglePreviews.push({id:logId,response,resolve}));
+    return response;
+  }
   if(/\/reorganize$/.test(url.pathname)&&method==='POST'){window.__activeTask='single-task';return jsonResponse({task_id:'single-task'});}
   return jsonResponse({error:'unmatched test API fixture: '+method+' '+url.pathname},404);
 };
@@ -255,6 +272,144 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.page.locator("#organizeTmdbSearchBtn").click()
         self.page.locator(".organize-candidate").first.click()
         self.page.locator("#organizeNamingPreview:not([hidden])").wait_for()
+
+    def single_previews(self):
+        return [call for call in self.calls() if call["path"].endswith("/reorganize/preview")]
+
+    def open_single_candidates(self):
+        self.page.locator(".detail-btn").first.click()
+        self.page.locator("#organizeDetailModal").wait_for(state="visible")
+        self.page.locator("#organizeTmdbQuery").fill("正确作品")
+        self.page.locator("#organizeTmdbSearchBtn").click()
+        self.page.locator(".organize-candidate").first.wait_for()
+
+    def test_single_execute_requires_current_successful_preview(self):
+        self.page.evaluate("() => window.__testConfig.singlePreviewFailures=['单条预览失败']")
+        self.open_single_candidates()
+        execute = self.page.locator("#organizeReorganizeBtn")
+        self.assertTrue(execute.is_disabled())
+        self.page.locator(".organize-candidate").first.click()
+        self.page.locator("#organizeOperationState").filter(has_text="单条预览失败").wait_for()
+        self.assertTrue(execute.is_disabled())
+        execute.click(force=True)
+        self.assertFalse(any(call["path"].endswith("/reorganize") and call["method"] == "POST" for call in self.calls()))
+
+        self.page.locator(".organize-candidate").first.click()
+        self.page.locator("#organizeNamingPreview:not([hidden])").wait_for()
+        self.assertTrue(execute.is_enabled())
+        execute.click()
+        self.page.wait_for_function("() => window.__apiCalls.some(call => call.path === '/api/logs/organize/10/reorganize')")
+        action = next(call for call in self.calls() if call["path"] == "/api/logs/organize/10/reorganize")
+        self.assertEqual(action["body"]["tmdb_id"], "111")
+        self.assertNotIn("season", action["body"])
+
+    def test_nsfw_single_correction_submits_metatube_identity_only_after_valid_preview(self):
+        self.page.evaluate("""() => Object.assign(window.__testConfig, {
+            nsfw:true,
+            nsfwCandidates:[{external_id:'JavBus:SSNI-596',provider:'metatube',media_type:'movie',title:'SSNI-596 归档测试',year:2019,score:1}],
+            singlePreviewFailures:['原文件名未提取到可校验番号'],
+        })""")
+        self.page.locator('.detail-btn').first.click()
+        self.page.locator('#organizeTmdbQuery').fill('SSNI-596C.mp4')
+        self.page.locator('#organizeTmdbSearchBtn').click()
+        candidate = self.page.locator('.organize-candidate').first
+        candidate.click()
+        self.page.locator('#organizeOperationState').filter(has_text='未提取到可校验番号').wait_for()
+        self.assertTrue(self.page.locator('#organizeReorganizeBtn').is_disabled())
+        self.assertTrue(self.page.locator('#organizePositionFields').is_hidden())
+        candidate.click()
+        self.page.locator('#organizeReorganizeBtn:not([disabled])').wait_for()
+        self.page.locator('#organizeReorganizeBtn').click()
+        self.page.wait_for_function("() => window.__apiCalls.some(c => c.path === '/api/logs/organize/10/reorganize')")
+        payload = next(c['body'] for c in self.calls() if c['path'] == '/api/logs/organize/10/reorganize')
+        self.assertEqual((payload['provider'], payload['external_id'], payload['tmdb_id']), ('metatube', 'JavBus:SSNI-596', ''))
+        self.assertNotIn('season', payload)
+        self.assertNotIn('episode', payload)
+
+    def test_single_search_reset_and_season_debounce_revoke_preview(self):
+        self.prepare_single_preview()
+        execute = self.page.locator("#organizeReorganizeBtn")
+        self.assertTrue(execute.is_enabled())
+        self.page.locator("#organizeTmdbQuery").fill("正确作品 2")
+        self.assertTrue(execute.is_disabled())
+        self.assertTrue(self.page.locator("#organizeNamingPreview").evaluate("el => el.hidden"))
+
+        self.page.locator(".organize-candidate").first.click()
+        self.page.locator("#organizeNamingPreview:not([hidden])").wait_for()
+        self.page.locator("#organizeTmdbSearchBtn").click()
+        self.assertFalse(self.page.locator(".organize-candidate.selected").count())
+        self.assertTrue(execute.is_disabled())
+        self.assertTrue(self.page.locator("#organizeNamingPreview").evaluate("el => el.hidden"))
+
+        self.page.locator("#organizeTmdbType").select_option("tv")
+        self.page.locator("#organizeTmdbSearchBtn").click()
+        self.page.locator(".organize-candidate").nth(1).click()
+        self.page.locator("#organizeNamingPreview:not([hidden])").wait_for()
+        self.assertTrue(execute.is_enabled())
+        self.page.locator("#organizeSeasonOverride").fill("3")
+        self.assertTrue(execute.is_disabled())
+        execute.click(force=True)
+        self.assertFalse(any(call["path"].endswith("/reorganize") and call["method"] == "POST" for call in self.calls()))
+        self.page.locator("#organizeNamingPreview:not([hidden])").wait_for()
+        self.assertTrue(execute.is_enabled())
+        latest = self.single_previews()[-1]["body"]
+        self.assertEqual(latest["tmdb_id"], "222")
+        self.assertEqual(latest["season"], 3)
+        self.page.locator("#organizeTmdbType").select_option("movie")
+        self.assertTrue(execute.is_disabled())
+        self.assertTrue(self.page.locator("#organizeNamingPreview").evaluate("el => el.hidden"))
+
+    def test_single_late_preview_cannot_enable_or_replace_new_detail(self):
+        self.page.evaluate("() => window.__testConfig.holdSinglePreviewIds=['10']")
+        self.open_single_candidates()
+        self.page.locator(".organize-candidate").first.click()
+        self.page.wait_for_function("() => window.__pendingSinglePreviews.length === 1")
+
+        self.page.keyboard.press("Escape")
+        self.assertFalse(self.page.locator("#organizeReorganizeBtn").is_enabled())
+        self.assertTrue(self.page.locator("#organizeNamingPreview").evaluate("el => el.hidden"))
+        self.assertEqual(self.page.locator("#organizeNamingPreview").inner_html(), "")
+        self.page.evaluate("() => window.__testConfig.holdSinglePreviewIds=[]")
+        self.page.locator(".detail-btn").nth(1).click()
+        self.page.wait_for_function("() => document.getElementById('organizeTmdbQuery').value === '旧识别标题'")
+        self.page.evaluate("() => window.__releaseSinglePreview('10')")
+        self.page.wait_for_timeout(100)
+        self.assertFalse(self.page.locator("#organizeReorganizeBtn").is_enabled())
+        self.assertTrue(self.page.locator("#organizeNamingPreview").evaluate("el => el.hidden"))
+        self.assertEqual(self.page.locator("#organizeTmdbQuery").input_value(), "旧识别标题")
+
+    def test_single_preview_success_respects_reorganize_permission(self):
+        self.page.evaluate("() => window.__testConfig.detail11Reorganize=false")
+        self.page.locator(".detail-btn").nth(1).click()
+        self.page.locator("#organizeDetailModal").wait_for(state="visible")
+        self.page.locator("#organizeTmdbQuery").fill("正确作品")
+        self.page.locator("#organizeTmdbSearchBtn").click()
+        self.page.locator(".organize-candidate").first.click()
+        self.page.locator("#organizeNamingPreview:not([hidden])").wait_for()
+        execute = self.page.locator("#organizeReorganizeBtn")
+        self.assertTrue(execute.is_disabled())
+        self.assertIn("不允许执行重新整理", self.page.locator("#organizeOperationState").inner_text())
+        execute.click(force=True)
+        self.assertFalse(any(call["path"].endswith("/reorganize") and call["method"] == "POST" for call in self.calls()))
+
+    def test_single_confirm_discards_payload_when_preview_invalidates(self):
+        self.prepare_single_preview()
+        self.page.evaluate("""() => {
+          window.__confirmGate = {promise: new Promise(resolve => { window.__confirmGateRelease = resolve; })};
+          window.appConfirm = async options => {
+            window.__confirmCalls.push(options);
+            await window.__confirmGate.promise;
+            return true;
+          };
+        }""")
+        self.page.locator("#organizeReorganizeBtn").click()
+        self.page.wait_for_function("() => window.__confirmCalls.length === 1")
+        self.page.locator("#organizeTmdbQuery").fill("已变化未预览")
+        self.assertFalse(self.page.locator("#organizeReorganizeBtn").is_enabled())
+        self.page.evaluate("() => window.__confirmGateRelease()")
+        self.page.wait_for_timeout(100)
+        self.assertFalse(any(call["path"].endswith("/reorganize") and call["method"] == "POST" for call in self.calls()))
+        self.assertEqual(self.single_previews()[0]["body"]["tmdb_id"], "111")
 
     def test_unknown_type_uses_release_parse_tv_and_submits_frozen_flat_preview(self):
         self.prepare_numeric_preview()
@@ -379,6 +534,10 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.assertNotIn("云端操作已完成", self.page.locator("#organizeOperationState").inner_text())
         status_calls = [call for call in self.calls() if call["path"] == "/api/guangya/organize/status"]
         self.assertEqual([call["taskId"] for call in status_calls], ["single-task"])
+        self.assertTrue(self.page.locator("#organizeReorganizeBtn").is_disabled())
+        self.page.evaluate("() => runOrganizeReorganize()")
+        submitted = [call for call in self.calls() if call["path"].endswith("/reorganize") and call["method"] == "POST"]
+        self.assertEqual(len(submitted), 1)
 
     def test_stopped_cancelled_and_manual_review_are_terminal_errors(self):
         self.prepare_single_preview()
@@ -388,6 +547,8 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
             ("manual_review", "后台操作需要人工复核"),
         ]
         for status, expected in cases:
+            self.page.locator(".organize-candidate").first.click()
+            self.page.locator("#organizeReorganizeBtn:not([disabled])").wait_for()
             self.page.evaluate("([status,message]) => { window.__testConfig.singleTaskStatus=status; window.__testConfig.singleTaskMessage=message; }", [status, expected])
             before = len([call for call in self.calls() if call["path"] == "/api/guangya/organize/status" and call["taskId"] == "single-task"])
             self.page.locator("#organizeReorganizeBtn").click()
@@ -399,6 +560,7 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
             text_content = self.page.locator("#organizeOperationState").get_attribute("class")
             assert text_content is not None
             self.assertIn("is-error", text_content)
+            self.assertTrue(self.page.locator("#organizeReorganizeBtn").is_disabled())
 
     def test_late_batch_task_error_does_not_touch_new_detail(self):
         self.page.evaluate("() => window.__testConfig.holdTaskIds=['batch-task']")

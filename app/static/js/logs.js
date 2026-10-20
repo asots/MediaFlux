@@ -7,6 +7,7 @@ const ORGANIZE_LOG_PAGE_SIZE = 20;
 let runtimeSource = null, runtimePaused = false, runtimeLines = [], runtimeOffset = 0, runtimeStreamId = '', runtimeCheckpoint = '', runtimeGeneration = 0;
 let runtimeRequestSerial = 0, runtimeReconnectTimer = null, runtimeClearPending = false;
 let organizeDetail = null, selectedOrganizeCandidate = null;
+let organizePreview = null;
 let organizeRows = [], selectedOrganizeLogs = new Map();
 let batchCorrection = null, batchCorrectionSession = 0, organizeDetailSerial = 0, organizeSearchSerial = 0;
 const organizeModal = createAppModal(document.getElementById('organizeDetailModal'), {
@@ -196,7 +197,8 @@ async function runOrganizeBatch(action){
 function invalidateBatchCorrection(){
     organizeDetailSerial++;
     organizeSearchSerial++;
-    organizePreviewSequence++;
+    selectedOrganizeCandidate=null;
+    invalidateOrganizePreview();
     const state=batchCorrection;
     if(!state)return;
     state.active=false;
@@ -204,7 +206,6 @@ function invalidateBatchCorrection(){
     state.searchSerial++;
     batchCorrection=null;
     batchCorrectionSession++;
-    selectedOrganizeCandidate=null;
     const modal=document.getElementById('organizeDetailModal');
     modal.classList.remove('is-batch-correction');
     document.getElementById('organizeBatchActions').hidden=true;
@@ -297,8 +298,6 @@ async function openBatchCorrection(){
     document.getElementById('organizeBatchPreview').replaceChildren();
     document.getElementById('organizeBatchPreview').hidden=true;
     document.getElementById('organizeTmdbCandidates').replaceChildren();
-    document.getElementById('organizeNamingPreview').replaceChildren();
-    document.getElementById('organizeNamingPreview').hidden=true;
     document.getElementById('organizeBatchActions').hidden=false;
     document.querySelector('.organize-single-actions').hidden=true;
     document.getElementById('organizeBatchExecuteBtn').disabled=true;
@@ -319,7 +318,7 @@ async function openBatchCorrection(){
     }
 }
 function invalidateBatchSearchInputs(){
-    if(!batchCorrection?.active)return;
+    if(!batchCorrection?.active){invalidateOrganizePreview();return;}
     batchCorrection.searchSerial++;
     selectedOrganizeCandidate=null;
     document.getElementById('organizeTmdbCandidates').replaceChildren();
@@ -340,6 +339,16 @@ function batchCandidatePayload(candidate=selectedOrganizeCandidate){
         if(season!=='')payload.season=Number(season);
     }
     return payload;
+}
+function invalidateOrganizePreview(message='',type=''){
+    organizePreview=null;
+    organizePreviewSequence++;
+    const button=document.getElementById('organizeReorganizeBtn');
+    button.disabled=true;
+    const box=document.getElementById('organizeNamingPreview');
+    box.replaceChildren();
+    box.hidden=true;
+    if(message)_setOrganizeState(message,type);
 }
 function batchPreviewPosition(item){
     return _formatReleasePosition({season:item?.season,episode:item?.episode});
@@ -621,7 +630,9 @@ function _renderReleaseParse(parse){
         </div>`;
 }
 function _renderOrganizeDetail(data){
-    organizeDetail=data;selectedOrganizeCandidate=null;
+    invalidateOrganizePreview();
+    organizeDetail=data;
+    selectedOrganizeCandidate=null;
     document.getElementById('organizeDetailTitle').textContent=`整理日志 #${data.id}`;
     const [statusLabel, statusClass] = orgStatusMap[data.status] || [data.status, 'running'];
     const identityLabel=data.provider==='clean_title'?['清洗入库 · 无完整元数据',data.external_id].filter(Boolean).join(' · '):data.provider==='metatube'&&data.external_id?`MetaTube · ${data.external_id}`:(data.tmdb_id?`TMDB-${data.tmdb_id}`:'');
@@ -740,13 +751,13 @@ function _renderOrganizeDetail(data){
     syncOrganizeRecognitionFields();
     syncOrganizePositionFields();
     document.getElementById('organizeCorrectionPanel').hidden=!data.allowed_actions.search;
-    document.getElementById('organizeReorganizeBtn').disabled=!data.allowed_actions.reorganize;
+    document.getElementById('organizeReorganizeBtn').disabled=true;
     document.getElementById('organizeReturnBtn').disabled=!data.allowed_actions.return_to_source;
     document.getElementById('organizeRevertBtn').disabled=!data.allowed_actions.revert;
     const deleteButton=document.getElementById('organizeDeleteBtn');
     deleteButton.disabled=!data.allowed_actions.delete;
     deleteButton.hidden=!data.allowed_actions.delete;
-    document.getElementById('organizeTmdbCandidates').replaceChildren();const namingPreview=document.getElementById('organizeNamingPreview');namingPreview.replaceChildren();namingPreview.hidden=true;_setOrganizeState('');
+    document.getElementById('organizeTmdbCandidates').replaceChildren();_setOrganizeState('');
     window.renderLucideIcons?.(document.getElementById('organizeDetailModal'));
 }
 async function openOrganizeDetail(logId,trigger){
@@ -791,16 +802,87 @@ async function searchOrganizeTmdb(){
         }catch(error){if(isBatchCorrectionSession(session)&&sequence===state.searchSerial)_setOrganizeState(error.message||'搜索失败','error');}
         return;
     }
-    const serial=organizeDetailSerial, searchSerial=++organizeSearchSerial;
+    const serial=organizeDetailSerial;
+    const searchSerial=++organizeSearchSerial;
+    selectedOrganizeCandidate=null;
+    invalidateOrganizePreview();
     _setOrganizeState(`正在搜索 ${profile.label||'媒体信息'}...`);
-    try{const response=await api(`/api/logs/organize/${organizeDetail.id}/recognition/search`,{method:'POST',body:JSON.stringify({query,year,media_type})});const data=await response.json();if(serial!==organizeDetailSerial||searchSerial!==organizeSearchSerial)return;if(!response.ok)throw new Error(data.error||'搜索失败');renderOrganizeCandidates(data.candidates||[]);_setOrganizeState(data.candidates?.length?'请选择候选并预览命名':'没有找到精确候选',data.candidates?.length?'success':'error');}catch(error){if(serial===organizeDetailSerial&&searchSerial===organizeSearchSerial)_setOrganizeState(error.message,'error');}
+    try{
+        const response=await api(`/api/logs/organize/${organizeDetail.id}/recognition/search`,{method:'POST',body:JSON.stringify({query,year,media_type})});
+        const data=await response.json();
+        if(serial!==organizeDetailSerial||searchSerial!==organizeSearchSerial)return;
+        if(!response.ok)throw new Error(data.error||'搜索失败');
+        renderOrganizeCandidates(data.candidates||[]);
+        _setOrganizeState(data.candidates?.length?'请选择候选并预览命名':'没有找到精确候选',data.candidates?.length?'success':'error');
+    }catch(error){
+        if(serial===organizeDetailSerial&&searchSerial===organizeSearchSerial)_setOrganizeState(error.message,'error');
+    }
 }
 function renderOrganizeCandidates(candidates){const box=document.getElementById('organizeTmdbCandidates');box.replaceChildren();candidates.forEach(candidate=>{const row=document.createElement('button');row.type='button';row.className='candidate-item organize-candidate';const provider=String(candidate.provider||'tmdb').toLowerCase();const identity=provider==='metatube'?`MetaTube · ${candidate.external_id||'-'}`:(provider==='clean_title'?`清洗标题 · ${candidate.external_id||'-'}`:`TMDB-${candidate.tmdb_id||candidate.external_id||'-'}`);const action=candidate.explicit_id?'指定 ID':provider==='clean_title'?'清洗标题后入库':`${Math.round((candidate.score||0)*100)}%`;row.innerHTML=`<div class="candidate-info"><strong>${_esc(candidate.title||candidate.external_id||candidate.tmdb_id)}</strong><span class="text-muted">${_esc(candidate.year||'-')} · ${_esc(identity)}</span></div><span class="tag-mini">${_esc(action)}</span>`;row.addEventListener('click',()=>selectOrganizeCandidate(candidate,row));box.appendChild(row);});}
 function syncOrganizePositionFields(){const isTv=!organizeRecognitionProfile().nsfw_only&&document.getElementById('organizeTmdbType').value==='tv';document.getElementById('organizePositionFields').hidden=!isTv;}
-function organizeCandidatePayload(candidate=selectedOrganizeCandidate){if(!candidate)return null;if(batchCorrection?.active)return batchCandidatePayload(candidate);const payload={...candidate};payload.provider=String(payload.provider||'tmdb').toLowerCase();payload.external_id=String(payload.external_id||payload.tmdb_id||'');payload.tmdb_id=String(payload.tmdb_id||'');if(payload.media_type==='tv'){const season=document.getElementById('organizeSeasonOverride').value.trim();const episode=document.getElementById('organizeEpisodeOverride').value.trim();if(season!=='')payload.season=Number(season);if(episode!=='')payload.episode=Number(episode);}return payload;}
+function organizeCandidatePayload(candidate=selectedOrganizeCandidate){
+    if(!candidate)return null;
+    if(batchCorrection?.active)return batchCandidatePayload(candidate);
+    const payload={...candidate};
+    payload.provider=String(payload.provider||'tmdb').toLowerCase();
+    payload.external_id=String(payload.external_id||payload.tmdb_id||'');
+    payload.tmdb_id=String(payload.tmdb_id||'');
+    if(payload.media_type==='tv'){
+        const season=document.getElementById('organizeSeasonOverride').value.trim();
+        const episode=document.getElementById('organizeEpisodeOverride').value.trim();
+        if(season!=='')payload.season=Number(season);
+        if(episode!=='')payload.episode=Number(episode);
+    }
+    return payload;
+}
 let organizePreviewSequence=0;
-async function previewOrganizeCandidate(candidate){if(batchCorrection?.active){await previewBatchCorrection(candidate);return;}const payload=organizeCandidatePayload(candidate);if(!payload)return;const sequence=++organizePreviewSequence;_setOrganizeState('正在生成无副作用预览...');try{const response=await api(`/api/logs/organize/${organizeDetail.id}/reorganize/preview`,{method:'POST',body:JSON.stringify(payload)});const data=await response.json();if(sequence!==organizePreviewSequence)return;if(!response.ok)throw new Error(data.error||'预览失败');const box=document.getElementById('organizeNamingPreview');const fullTarget=[data.target_path,data.file_name].filter(Boolean).join('/');box.hidden=false;box.innerHTML=`<div><span class="text-muted">影片目录</span><code>${_esc(data.media_dir||data.target_path||'-')}</code></div><div><span class="text-muted">视频文件</span><code>${_esc(data.file_name||'-')}</code></div><div class="organize-preview-full"><span class="text-muted">完整目标</span><code>${_esc(fullTarget||'-')}</code></div><div class="organize-preview-rule"><span class="text-muted">规则来源</span><code>命名规则来自「整理规则 → 识别与命名」</code></div>${(data.items||[]).filter(item=>item.role!=='video').map(item=>`<div><span class="text-muted">${_esc(_formatRole(item.role))}</span><code>${_esc(item.to_name)}</code></div>`).join('')}`;_setOrganizeState('预览完成，尚未写入云盘','success');}catch(error){if(sequence===organizePreviewSequence)_setOrganizeState(error.message,'error');}}
-async function selectOrganizeCandidate(candidate,row){selectedOrganizeCandidate=candidate;document.querySelectorAll('.organize-candidate').forEach(item=>item.classList.toggle('selected',item===row));if(batchCorrection?.active&&!organizeRecognitionProfile().nsfw_only){document.getElementById('organizeTmdbType').value=candidate.media_type==='tv'?'tv':'movie';syncOrganizePositionFields();}await previewOrganizeCandidate(candidate);}
+async function previewOrganizeCandidate(candidate){
+    if(batchCorrection?.active){
+        await previewBatchCorrection(candidate);
+        return;
+    }
+    const payload=organizeCandidatePayload(candidate);
+    if(!payload)return;
+    if(candidate!==selectedOrganizeCandidate){
+        invalidateOrganizePreview();
+        return;
+    }
+    invalidateOrganizePreview();
+    const sequence=organizePreviewSequence;
+    _setOrganizeState('正在生成无副作用预览...');
+    try{
+        const response=await api(`/api/logs/organize/${organizeDetail.id}/reorganize/preview`,{
+            method:'POST',body:JSON.stringify(payload),
+        });
+        const data=await response.json();
+        if(sequence!==organizePreviewSequence)return;
+        if(!response.ok)throw new Error(data.error||'预览失败');
+        organizePreview={payload};
+        const box=document.getElementById('organizeNamingPreview');
+        const fullTarget=[data.target_path,data.file_name].filter(Boolean).join('/');
+        box.hidden=false;
+        box.innerHTML=`<div><span class="text-muted">影片目录</span><code>${_esc(data.media_dir||data.target_path||'-')}</code></div><div><span class="text-muted">视频文件</span><code>${_esc(data.file_name||'-')}</code></div><div class="organize-preview-full"><span class="text-muted">完整目标</span><code>${_esc(fullTarget||'-')}</code></div><div class="organize-preview-rule"><span class="text-muted">规则来源</span><code>命名规则来自「整理规则 → 识别与命名」</code></div>${(data.items||[]).filter(item=>item.role!=='video').map(item=>`<div><span class="text-muted">${_esc(_formatRole(item.role))}</span><code>${_esc(item.to_name)}</code></div>`).join('')}`;
+        const canExecute=canExecuteOrganizePreview();
+        document.getElementById('organizeReorganizeBtn').disabled=!canExecute;
+        _setOrganizeState(canExecute?'预览完成，尚未写入云盘':'预览完成，但当前日志不允许执行重新整理',canExecute?'success':'error');
+    }catch(error){
+        if(sequence===organizePreviewSequence){
+            invalidateOrganizePreview(error.message,'error');
+        }
+    }
+}
+
+async function selectOrganizeCandidate(candidate,row){
+    selectedOrganizeCandidate=candidate;
+    document.querySelectorAll('.organize-candidate').forEach(item=>item.classList.toggle('selected',item===row));
+    if(batchCorrection?.active){
+        if(!organizeRecognitionProfile().nsfw_only){
+            document.getElementById('organizeTmdbType').value=candidate.media_type==='tv'?'tv':'movie';
+            syncOrganizePositionFields();
+        }
+    }
+    await previewOrganizeCandidate(candidate);
+}
 function organizeTaskFailure(task,batch=false){
     const result=task.result||{};
     const failed=Array.isArray(result.failed)?result.failed:[];
@@ -859,7 +941,55 @@ async function runOrganizeAction(path,method='POST',extra={}){
     _setOrganizeState(data.message||'操作已启动');
     await waitOrganizeTask(data.task_id,logId,contextSerial);
 }
-async function runOrganizeReorganize(){const serial=organizeDetailSerial;if(batchCorrection?.active){await executeBatchCorrection();return;}if(!selectedOrganizeCandidate){_setOrganizeState('请先选择一个识别候选并检查预览','error');return;}const payload=organizeCandidatePayload();const position=payload.media_type==='tv'?[payload.season!==undefined?`S${String(payload.season).padStart(2,'0')}`:'',payload.episode!==undefined?`E${String(payload.episode).padStart(2,'0')}`:''].filter(Boolean).join(''):'';const confirmed=await appConfirm({title:'重新整理媒体组',message:`按 ${payload.title||payload.external_id||payload.tmdb_id}${position?` · ${position}`:''} 重新整理整个媒体组。`,confirmText:'执行重新整理',danger:true});if(!confirmed||serial!==organizeDetailSerial)return;try{await runOrganizeAction('/reorganize','POST',payload);}catch(error){_setOrganizeState(error.message,'error');}}
+function canExecuteOrganizePreview(preview=organizePreview){
+    return Boolean(organizeDetail?.allowed_actions?.reorganize&&preview&&preview===organizePreview);
+}
+async function runOrganizeReorganize(){
+    if(batchCorrection?.active){
+        await executeBatchCorrection();
+        return;
+    }
+    const serial=organizeDetailSerial;
+    const preview=organizePreview;
+    if(!selectedOrganizeCandidate||!preview){
+        _setOrganizeState('请先选择候选并等待预览成功','error');
+        return;
+    }
+    if(!canExecuteOrganizePreview(preview)){
+        invalidateOrganizePreview('当前日志不允许执行重新整理，请刷新后核对状态','error');
+        return;
+    }
+    const payload=preview.payload;
+    const currentPayload=organizeCandidatePayload(selectedOrganizeCandidate);
+    if(JSON.stringify(currentPayload)!==JSON.stringify(payload)){
+        invalidateOrganizePreview('参数或候选已变化，请重新预览后再执行','error');
+        return;
+    }
+    document.getElementById('organizeReorganizeBtn').disabled=true;
+    const position=payload.media_type==='tv'?[payload.season!==undefined?`S${String(payload.season).padStart(2,'0')}`:'',payload.episode!==undefined?`E${String(payload.episode).padStart(2,'0')}`:''].filter(Boolean).join(''):'';
+    const confirmed=await appConfirm({
+        title:'重新整理媒体组',
+        message:`按 ${payload.title||payload.external_id||payload.tmdb_id}${position?` · ${position}`:''} 重新整理整个媒体组。`,
+        confirmText:'执行重新整理',danger:true,
+    });
+    if(!confirmed||organizePreview!==preview||serial!==organizeDetailSerial){
+        if(serial===organizeDetailSerial)document.getElementById('organizeReorganizeBtn').disabled=!canExecuteOrganizePreview();
+        return;
+    }
+    if(!canExecuteOrganizePreview(preview)){
+        invalidateOrganizePreview('当前日志状态已变化，不能执行重新整理','error');
+        return;
+    }
+    invalidateOrganizePreview();
+    try{
+        await runOrganizeAction('/reorganize','POST',payload);
+    }catch(error){
+        if(serial===organizeDetailSerial)_setOrganizeState(error.message,'error');
+    }finally{
+        if(serial===organizeDetailSerial)document.getElementById('organizeReorganizeBtn').disabled=!canExecuteOrganizePreview();
+    }
+}
+
 async function returnOrganizeToSource(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'送回源目录',message:'将视频和全部伴随文件送回各自保存的原始父目录，并恢复原文件名。',confirmText:'送回源目录',danger:true});if(!confirmed||serial!==organizeDetailSerial)return;try{await runOrganizeAction('/return-to-source');}catch(error){_setOrganizeState(error.message,'error');}}
 async function revertOrganize(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'回退最近操作',message:'按最近一次成功操作的持久化步骤回退，不会从路径猜测文件名。',confirmText:'执行回退',danger:true});if(!confirmed||serial!==organizeDetailSerial)return;try{await runOrganizeAction('/revert');}catch(error){_setOrganizeState(error.message,'error');}}
 async function deleteOrganizeGroup(){const serial=organizeDetailSerial;const confirmed=await appConfirm({title:'移入光鸭回收站',message:'会将该日志明确记录的整个媒体组移入光鸭回收站。MediaFlux 不提供恢复按钮。',confirmText:'移入回收站',danger:true,verifyText:'DELETE',verifyLabel:'输入 DELETE 确认移入回收站'});if(!confirmed||serial!==organizeDetailSerial)return;try{await runOrganizeAction('','DELETE',{confirm:'DELETE'});}catch(error){_setOrganizeState(error.message,'error');}}
@@ -869,7 +999,7 @@ document.getElementById('organizeTmdbQuery').addEventListener('input',invalidate
 document.getElementById('organizeTmdbYear').addEventListener('input',invalidateBatchSearchInputs);
 document.getElementById('organizeTmdbType').addEventListener('change',()=>{syncOrganizePositionFields();invalidateBatchSearchInputs();});
 let organizePositionPreviewTimer=null;
-for(const id of ['organizeSeasonOverride','organizeEpisodeOverride'])document.getElementById(id).addEventListener('input',()=>{clearTimeout(organizePositionPreviewTimer);if(batchCorrection?.active)clearBatchCorrectionPreview('季号已更改，正在重新生成整批预览…');organizePositionPreviewTimer=setTimeout(()=>{if(selectedOrganizeCandidate)previewOrganizeCandidate(selectedOrganizeCandidate);},300);});
+for(const id of ['organizeSeasonOverride','organizeEpisodeOverride'])document.getElementById(id).addEventListener('input',()=>{clearTimeout(organizePositionPreviewTimer);if(batchCorrection?.active){clearBatchCorrectionPreview('季号已更改，正在重新生成整批预览…');organizePositionPreviewTimer=setTimeout(()=>{if(selectedOrganizeCandidate)previewOrganizeCandidate(selectedOrganizeCandidate);},300);}else{invalidateOrganizePreview('季号已更改，正在重新生成预览…');const candidate=selectedOrganizeCandidate;organizePositionPreviewTimer=setTimeout(()=>{if(candidate&&candidate===selectedOrganizeCandidate)previewOrganizeCandidate(candidate);},300);}});
 document.getElementById('organizeReorganizeBtn').addEventListener('click',runOrganizeReorganize);
 document.getElementById('organizeReturnBtn').addEventListener('click',returnOrganizeToSource);
 document.getElementById('organizeRevertBtn').addEventListener('click',revertOrganize);

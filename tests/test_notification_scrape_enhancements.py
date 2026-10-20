@@ -788,7 +788,8 @@ class ScrapePreviewTemplateTests(unittest.TestCase):
         self.assertNotIn(".organize-operation-empty", css)
         self.assertIn("min-height: 72px", css)
         self.assertIn(".organize-detail-dialog [hidden] { display: none !important; }", css)
-        self.assertIn("namingPreview.replaceChildren();namingPreview.hidden=true", html)
+        # 初始隐藏属于模板契约；关闭/失败后清空旧预览由真实浏览器测试核验。
+        self.assertRegex(html, r'id="organizeNamingPreview"[^>]*\bhidden\b')
 
     def test_base_keeps_page_scoped_styles_without_retired_logs_asset(self):
         base = Path("app/templates/base.html").read_text(encoding="utf-8")
