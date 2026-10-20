@@ -286,7 +286,7 @@ def test_copy_preview_catalog_uses_one_existing_operation_with_optional_name():
         assert branch["properties"]["new_name"]["minLength"] == 1
         assert branch["properties"]["new_name"]["maxLength"] == 255
     assert {op for branch in branches for op in branch["properties"]["op"]["enum"]} == {
-        "rename", "move", "copy", "relocate", "batch_relocate", "trash", "create_directory"}
+        "rename", "move", "copy", "relocate", "batch_relocate", "batch_files", "trash", "create_directory"}
     assert "同一计划" in spec.description
     assert "副本改名" in spec.description
     assert "源对象不变" in spec.description
