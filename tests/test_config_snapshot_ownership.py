@@ -11,6 +11,7 @@ from app.agent.feature_gate import RuntimeFenceError
 from app.modules import backup
 from app.modules.process_lock import CrossProcessLock
 from app.runtime_paths import RuntimePaths
+from tests.test_setup_bootstrap import cold_run
 
 
 def paths_at(root):
@@ -184,14 +185,24 @@ def test_publication_scope_restores_across_paths_and_keeps_failure(tmp_path):
             pass
 
 
-@pytest.mark.skipif(not hasattr(os, 'fork'), reason='POSIX fork identity control')
-@pytest.mark.parametrize('unwind_first', [True, False])
-def test_fork_child_cannot_reuse_or_unlock_parent_owner(tmp_path, unwind_first):
+def _fork_owner_scenario(tmp_path, unwind_first):
+    from app.modules import backup
+    from app.modules.process_lock import CrossProcessLock
+
+    assert threading.enumerate() == [threading.main_thread()]
     paths = paths_at(tmp_path)
     ctx = multiprocessing.get_context('fork')
     attempted, entered = ctx.Event(), ctx.Event()
     guard = backup.config_snapshot_guard(paths)
-    guard.__enter__()
+    # 保留真实父锁的引用到子进程 os._exit：仅测 owner/LOCK_UN，不让
+    # 继承上下文展开时的文件析构混入此场景。未替换任何实际锁操作。
+    retained = []
+    real_acquire = CrossProcessLock.acquire
+    def retain(lock, blocking=True):
+        retained.append(lock)
+        return real_acquire(lock, blocking=blocking)
+    with patch.object(CrossProcessLock, 'acquire', retain):
+        guard.__enter__()
     pid = os.fork()
     if pid == 0:
         try:
@@ -220,3 +231,10 @@ def test_fork_child_cannot_reuse_or_unlock_parent_owner(tmp_path, unwind_first):
         _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 0
     assert entered.is_set()
+    return True
+
+
+@pytest.mark.skipif(not hasattr(os, 'fork'), reason='POSIX fork identity control')
+@pytest.mark.parametrize('unwind_first', [True, False])
+def test_fork_child_cannot_reuse_or_unlock_parent_owner(tmp_path, unwind_first):
+    assert cold_run(tmp_path, _fork_owner_scenario, tmp_path, unwind_first) == {'result': True}

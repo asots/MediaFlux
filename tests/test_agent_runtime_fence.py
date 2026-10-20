@@ -5,7 +5,10 @@ from starlette.requests import Request
 from app.agent.kernel.model import ModelAdapter
 from typing import cast
 import json
+from contextlib import closing
 import os
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -54,18 +57,74 @@ def test_publication_commits_changing_before_file_and_stable_after(runtime_env):
     assert read_record_result['phase'] == 'stable'
 
 
+def _run_cold_runtime(runtime_env, action):
+    script = r'''
+import importlib, json, os, pathlib, socket, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+source = pathlib.Path.cwd().resolve()
+def audit(event, args):
+    if event in ('socket.connect', 'socket.bind', 'socket.sendto', 'socket.sendmsg') and args[0].family != socket.AF_UNIX:
+        raise AssertionError('exec inet denied')
+    if event in ('socket.getaddrinfo', 'socket.gethostbyname', 'socket.gethostbyaddr', 'socket.getnameinfo'):
+        raise AssertionError('exec DNS denied')
+sys.addaudithook(audit)
+assert not any(n == 'app' or n.startswith('app.') for n in sys.modules)
+import tests
+assert pathlib.Path(tests.__file__).resolve() == source / 'tests/__init__.py'
+from app import config, database as db
+from app.runtime_paths import configure_runtime_paths
+from tests.test_backup import make_paths
+paths = make_paths(root)
+for key, value in {
+    'MEDIAFLUX_DATA_DIR': paths.data_dir,
+    'MEDIAFLUX_CONFIG_DIR': paths.config_dir,
+    'MEDIAFLUX_CACHE_DIR': paths.cache_dir,
+    'MEDIAFLUX_LOG_DIR': paths.log_dir,
+    'MEDIAFLUX_STRM_DIR': paths.strm_dir,
+    'MEDIAFLUX_TEST_DB_PATH': paths.database_path,
+}.items(): os.environ[key] = str(value)
+configure_runtime_paths(paths)
+importlib.reload(config)
+assert os.environ['AGENT_LLM_ENABLED'] == '0'
+db.configure_database(paths.database_path, test_mode=True)
+db.init_db()
+from app.agent.feature_gate import initialize_runtime_fence
+from app.agent.kernel import bootstrap
+assert pathlib.Path(bootstrap.__file__).resolve() == source / 'app/agent/kernel/bootstrap.py'
+assert config.ENV_FILE == paths.env_file
+initialize_runtime_fence()
+''' + action
+    environment = dict(
+        config._SYSTEM_ENV_SNAPSHOT,
+        AGENT_LLM_ENABLED='0',
+        PYTHONDONTWRITEBYTECODE='1',
+        MEDIAFLUX_DATA_DIR=str(runtime_env.data_dir),
+        MEDIAFLUX_CONFIG_DIR=str(runtime_env.config_dir),
+        MEDIAFLUX_CACHE_DIR=str(runtime_env.cache_dir),
+        MEDIAFLUX_LOG_DIR=str(runtime_env.log_dir),
+        MEDIAFLUX_STRM_DIR=str(runtime_env.strm_dir),
+        MEDIAFLUX_TEST_DB_PATH=str(runtime_env.database_path),
+    )
+    return subprocess.run(
+        [sys.executable, '-B', '-c', script, str(runtime_env.data_dir.parent)],
+        env=environment, text=True, capture_output=True, timeout=20,
+    )
+
+
 def test_real_worker_publication_invalidates_cached_runtime(runtime_env):
     config.set_and_save({'AGENT_LLM_MODEL': 'old'})
     old = bootstrap.get_agent_kernel_runtime()
-    pid = os.fork()
-    if pid == 0:
-        try:
-            config.set_and_save({'AGENT_LLM_MODEL': 'new'})
-        except BaseException:
-            os._exit(2)
-        os._exit(0)
-    _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 0
+    action = r'''
+from app.agent import feature_gate as gate
+config.set_and_save({'AGENT_LLM_MODEL': 'new'})
+new = bootstrap.get_agent_kernel_runtime()
+with db.get_conn() as conn:
+    gate.require_runtime_fence(conn, new.creation_binding.fence)
+print(json.dumps({'model': new.session.model.settings.model}), flush=True)
+'''
+    result = _run_cold_runtime(runtime_env, action)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {'model': 'new'}
     new = bootstrap.get_agent_kernel_runtime()
     assert new is not old
     assert isinstance(new.session.model, OpenAICompatibleModelAdapter)
@@ -236,13 +295,14 @@ def test_strm_database_failure_compensates_but_never_stabilizes(runtime_env):
 
 def test_worker_dies_after_changing_before_file(runtime_env):
     before = config.ENV_FILE.read_bytes()
-    pid = os.fork()
-    if pid == 0:
-        with patch.object(config, 'update_env_file', side_effect=lambda *a, **k: os._exit(27)):
-            config.set_and_save({'AGENT_LLM_MODEL': 'never'})
-        os._exit(2)
-    _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 27
+    action = r'''
+from unittest.mock import patch
+from app import config
+with patch.object(config, 'update_env_file', side_effect=lambda *a, **k: os._exit(27)):
+    config.set_and_save({'AGENT_LLM_MODEL': 'never'})
+'''
+    result = _run_cold_runtime(runtime_env, action)
+    assert result.returncode == 27, result.stderr
     read_record_result_5 = read_record()
     assert read_record_result_5 is not None
     assert read_record_result_5['phase'] == 'changing'
@@ -265,62 +325,16 @@ def test_missing_established_database_is_not_silently_authorized(runtime_env):
 
 
 def test_cold_process_reuses_persisted_stable_binding(runtime_env):
-    import subprocess
-    import sys
-    script = r'''
-import os, sys, json, pathlib, importlib, socket
-root = pathlib.Path(sys.argv[1]).resolve()
-source = pathlib.Path.cwd().resolve()
-def deny(*a, **k): raise AssertionError('network forbidden')
-socket.socket.connect = deny
-socket.create_connection = deny
-socket.getaddrinfo = deny
-import tests
-assert pathlib.Path(tests.__file__).resolve() == source / 'tests/__init__.py'
-from app import config, database as db
-from app.runtime_paths import configure_runtime_paths
-from tests.test_backup import make_paths
-paths = make_paths(root)
-for key, value in {
-    'MEDIAFLUX_DATA_DIR': paths.data_dir,
-    'MEDIAFLUX_CONFIG_DIR': paths.config_dir,
-    'MEDIAFLUX_CACHE_DIR': paths.cache_dir,
-    'MEDIAFLUX_LOG_DIR': paths.log_dir,
-    'MEDIAFLUX_STRM_DIR': paths.strm_dir,
-    'MEDIAFLUX_TEST_DB_PATH': paths.database_path,
-}.items(): os.environ[key] = str(value)
-configure_runtime_paths(paths)
-importlib.reload(config)
-db.configure_database(paths.database_path, test_mode=True)
-db.init_db()
-from app.agent.feature_gate import initialize_runtime_fence
-from app.agent.kernel import bootstrap
-assert pathlib.Path(bootstrap.__file__).resolve() == source / 'app/agent/kernel/bootstrap.py'
-assert config.ENV_FILE == paths.env_file
-assert os.environ['AGENT_LLM_ENABLED'] == '0'
-initialize_runtime_fence()
+    action = r'''
 runtime = bootstrap.get_agent_kernel_runtime()
 binding = runtime.creation_binding
 print(json.dumps({'incarnation': binding.fence.incarnation,
                   'epoch': binding.fence.epoch, 'effective': binding.effective_digest,
-                  'model': runtime.session.model.settings.model}))
+                  'model': runtime.session.model.settings.model}), flush=True)
 '''
-    environment = dict(config._SYSTEM_ENV_SNAPSHOT)
-    environment['AGENT_LLM_ENABLED'] = '0'
-    environment['PYTHONDONTWRITEBYTECODE'] = '1'
-    environment['TMPDIR'] = '/root/.hermes/cache/scratch'
-    script = '''import socket, sys
-assert not any(n == 'app' or n.startswith('app.') for n in sys.modules)
-def audit(event, args):
-    if event in ('socket.connect', 'socket.bind', 'socket.sendto', 'socket.sendmsg') and args[0].family != socket.AF_UNIX:
-        raise AssertionError('exec inet denied')
-    if event in ('socket.getaddrinfo', 'socket.gethostbyname', 'socket.gethostbyaddr', 'socket.getnameinfo'):
-        raise AssertionError('exec DNS denied')
-sys.addaudithook(audit)
-''' + script
     results = []
     for _ in range(2):
-        result = subprocess.run([sys.executable, '-B', '-c', script, str(runtime_env.data_dir.parent)], env=environment, text=True, capture_output=True, timeout=20)
+        result = _run_cold_runtime(runtime_env, action)
         assert result.returncode == 0, result.stderr
         results.append(json.loads(result.stdout))
     assert results[0] == results[1]
@@ -341,7 +355,7 @@ def test_restore_rebinds_verified_payload_and_revokes_old_runtime(runtime_env, t
     observed = []
 
     def observe(paths, files):
-        with sqlite3.connect(files['database/mediaflux.db'][1]) as conn:
+        with closing(sqlite3.connect(files['database/mediaflux.db'][1])) as conn, conn:
             row = json.loads(conn.execute(
                 'SELECT value FROM settings_kv WHERE key=?', (gate.RUNTIME_FENCE_KEY,)
             ).fetchone()[0])
@@ -386,7 +400,7 @@ def test_restore_rejects_changing_backup_without_touching_existing_db_or_env(run
     archive = tmp_path / 'changing-fence.zip'
     backup.create_backup(runtime_env, output=archive)
     with backup._verified_backup(archive) as (_manifest, payloads):
-        with sqlite3.connect(payloads['database/mediaflux.db']) as conn:
+        with closing(sqlite3.connect(payloads['database/mediaflux.db'])) as conn, conn:
             archived = json.loads(conn.execute(
                 'SELECT value FROM settings_kv WHERE key=?', (gate.RUNTIME_FENCE_KEY,)
             ).fetchone()[0])

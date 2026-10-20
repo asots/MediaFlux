@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import re
 import sqlite3
 from pathlib import Path
@@ -12,11 +13,9 @@ from tests.test_setup_bootstrap import cold_run
 from tests.test_setup_bootstrap_support import initialize_web_paths
 
 
-def test_web_setup_persists_admin_without_initial_get_writes(tmp_path):
-    paths = RuntimePaths.from_environment({
-        "MEDIAFLUX_DATA_DIR": str(tmp_path),
-        "MEDIAFLUX_CONFIG_DIR": str(tmp_path / "config"),
-    })
+def _install_web_action():
+    from app.runtime_paths import get_runtime_paths
+    paths = get_runtime_paths()
 
     def inspect_page(page, client):
         assert page.status_code == 200
@@ -32,17 +31,22 @@ def test_web_setup_persists_admin_without_initial_get_writes(tmp_path):
         assert not paths.database_path.exists()
         assert not (paths.config_dir / ".web-secret-key").exists()
 
-    def install():
-        initialize_web_paths(paths, "operator", "test-bootstrap-password", inspect_page)
-        return 0
+    initialize_web_paths(paths, "operator", "test-bootstrap-password", inspect_page)
+    return 0
 
-    assert cold_run(tmp_path, install) == {"result": 0}
+
+def test_web_setup_persists_admin_without_initial_get_writes(tmp_path):
+    paths = RuntimePaths.from_environment({
+        "MEDIAFLUX_DATA_DIR": str(tmp_path),
+        "MEDIAFLUX_CONFIG_DIR": str(tmp_path / "config"),
+    })
+    assert cold_run(tmp_path, _install_web_action) == {"result": 0}
     values = read_env_bytes(paths.env_file.read_bytes())
     assert values["ENV_WEB_PASSPORT"] == "operator"
     assert values["ENV_WEB_PASSWORD"] == "test-bootstrap-password"
     assert values["MEDIAFLUX_INITIALIZED"] == "1"
     assert len(values["WEB_SECRET_KEY"]) >= 32
-    with sqlite3.connect(paths.database_path) as conn:
+    with closing(sqlite3.connect(paths.database_path)) as conn, conn:
         fence = json.loads(conn.execute(
             "SELECT value FROM settings_kv WHERE key='agent.runtime_fence.v1'"
         ).fetchone()[0])
