@@ -34,7 +34,7 @@ from app.modules.organize import (
     OrganizeRules,
     enforce_fixed_organize_rules,
     organize_rules_snapshot,
-    organize_rules_snapshot_matches,
+    organize_rules_snapshot_changes,
     restore_organize_rules_snapshot,
 )
 from app.modules.scraper import MatchResult, TMDBScraper
@@ -258,7 +258,7 @@ def _clean_confirmation_retry_is_current(payload: dict, client) -> bool:
     """只给仍有效的冻结材料签发人工按钮，避免过期快照形成确认死循环。"""
     try:
         rules = OrganizeRules.from_config().for_source(str(payload.get("source_dir_id") or ""))
-        if not organize_rules_snapshot_matches(payload.get("rules"), rules):
+        if organize_rules_snapshot_changes(payload.get("rules"), rules, files=payload.get("files")):
             return False
         if client is not None:
             for item in (*payload.get("files", []), *payload.get("companions", [])):
@@ -278,7 +278,7 @@ class _AgentCleanWriteBoundary:
         _validate_agent_clean_authorization(self.payload, self.candidate)
         source = str(self.payload.get("source_dir_id") or "")
         rules = OrganizeRules.from_config().for_source(source)
-        if not organize_rules_snapshot_matches(self.payload.get("rules"), rules):
+        if organize_rules_snapshot_changes(self.payload.get("rules"), rules, files=self.payload.get("files")):
             raise DirectoryScrapeConflictError("来源或整理规则已变化，保留人工确认")
         if plan.action != "move" or plan.conflict_decision not in {"new", "coexist"}:
             raise DirectoryScrapeConflictError("目标存在冲突或需要替换，自动清洗不授权覆盖或回收")
@@ -360,7 +360,7 @@ class _AgentEpisodeWriteBoundary:
             raise DirectoryScrapeConflictError("复杂季集研究已关闭，未授权后续文件变更")
         source = str(self.payload.get("source_dir_id") or "")
         rules = OrganizeRules.from_config().for_source(source)
-        if not organize_rules_snapshot_matches(self.payload.get("rules"), rules):
+        if organize_rules_snapshot_changes(self.payload.get("rules"), rules, files=self.payload.get("files")):
             raise DirectoryScrapeConflictError("来源或整理规则已变化，保留人工确认")
         row = self.expected.get(str(plan.file_id))
         if row is None or (plan.season, plan.episode) != (row["target_season"], row["target_episode"]):
@@ -509,6 +509,7 @@ def publish_confirmation_event(
     message_id: int | None = None,
     terminal: bool = False,
     error: bool = False,
+    deliver_now: bool = True,
 ) -> bool:
     """把候选卡及其终态写入同一个可靠 Telegram 消息线程。"""
     from app.modules.telegram_notification_center import publish_notification_thread
@@ -533,6 +534,7 @@ def publish_confirmation_event(
             importance=importance,
             chat_id=chat_id,
             preferred_message_id=(message_id or 0),
+            deliver_now=deliver_now,
         )
     finally:
         if not terminal:
@@ -1233,7 +1235,8 @@ def skip_confirmation(
     return {"skipped": True, "directory": directory}
 
 
-def _confirmation_result(row, payload: dict, candidate: dict, *, status: str) -> dict:
+def _confirmation_result(row, payload: dict, candidate: dict) -> dict:
+    status = str(row["status"])
     queue_position = (
         db.get_organize_confirmation_queue_position(int(row["id"]))
         if status == "queued" else 0
@@ -1251,6 +1254,28 @@ def _confirmation_result(row, payload: dict, candidate: dict, *, status: str) ->
         "status": status,
         "queue_position": queue_position,
     }
+
+
+def _confirmation_selected_event(row, payload: dict, candidate: dict) -> NotificationEvent:
+    """消费者启动工作前发布一次接纳状态；后续仅由终态回执更新同一张卡。"""
+    identity_label = {"metatube": "MetaTube", "clean_title": "清洗标题"}.get(
+        str(candidate.get("provider") or "").strip().lower(), "TMDB",
+    )
+    return NotificationEvent(
+        f"✅ 已选择：{_candidate_display_name(candidate, '')}",
+        fields=(
+            ("目标媒体", _candidate_display_name(candidate, "")),
+            ("类型", semantic_candidate_category(candidate)),
+            (identity_label, str(candidate.get("external_id") or candidate.get("tmdb_id") or "")),
+            ("涉及文件", Organizer._confirmation_scope_summary(payload)),
+            ("存储来源", str(payload.get("source_name") or payload.get("directory") or "/")),
+            NOTIFICATION_SECTION_BREAK,
+            ("队列", str(row["task_id"] or f"queue-{int(row['id']):06d}")),
+            ("处理状态", "已接纳，尚未完成"),
+        ),
+        footer="可以继续选择其他待确认媒体，系统会按点击顺序串行整理。",
+        layout="relaxed",
+    )
 
 
 def _selected_candidate(row) -> tuple[dict, dict, int]:
@@ -1321,6 +1346,14 @@ def _dispatch_confirmation_token(token: str) -> dict:
     if actor not in {"human", "agent"}:
         actor = "human"
     try:
+        # 必须先入通知队列再启动 worker。回调不再直接编辑消息，避免快速
+        # 失败/成功之后，迟到的“正在执行”覆写已送达终态。这里不等待 TG 网络。
+        if _confirmation_delivery_enabled(payload):
+            publish_confirmation_event(
+                _confirmation_selected_event(row, payload, candidate),
+                chat_id=chat_id, token=token,
+                message_id=_confirmation_message_id(payload), deliver_now=False,
+            )
         task = get_organize_manager().start_operation(
             "Agent 确认整理" if actor == "agent" else "Telegram 确认整理",
             reference,
@@ -1344,7 +1377,6 @@ def _dispatch_confirmation_token(token: str) -> dict:
         return {"ok": False, "claimed": True, "busy": True, "error": error}
 
     task_id = str(row["task_id"] or task.get("task_id") or "")
-    db.update_organize_confirmation(token, error="")
     return {
         "ok": True,
         "claimed": True,
@@ -1774,7 +1806,7 @@ def start_confirmation(
         if int(preview["selected_index"] if preview["selected_index"] is not None else -1) != selected_index:
             raise ValueError("该媒体已选择其他候选，不能重复修改")
         return _confirmation_result(
-            preview, payload, candidate, status=status
+            preview, payload, candidate
         ) | {"replayed": True}
     if status != "pending":
         raise ValueError("该确认操作已处理")
@@ -1809,7 +1841,6 @@ def start_confirmation(
                     current,
                     current_payload,
                     current_candidate,
-                    status=str(current["status"] or "queued"),
                 ) | {"replayed": True}
             if str(current["status"] or "") in {"queued", "running"}:
                 raise ValueError("该媒体已选择其他候选，不能重复修改")
@@ -1823,30 +1854,11 @@ def start_confirmation(
                 )
             raise ValueError("确认操作已过期，请重新执行整理")
         raise
-    queue_id = f"queue-{int(row['id']):06d}"
-    db.update_organize_confirmation(token, task_id=queue_id, error="")
-    row = db.get_organize_confirmation(token)
-    assert row is not None
-
-    # 只调度队首，避免后来点击的消息绕过已经排队的确认任务。
+    # 原子入队时已经绑定 queue_id；此后不得清空 error，worker 可能已经失败。
     _dispatch_next_queued_confirmation()
-    current = db.get_organize_confirmation(token) or row
-    current_status = str(current["status"] or "queued")
-    if current_status == "running":
-        return _confirmation_result(
-            current, payload, candidate, status="running"
-        )
-
     wake_confirmation_dispatcher()
-    # 后台消费者可能已在上一步与当前线程竞争成功，返回前再读取一次真实状态。
-    current = db.get_organize_confirmation(token) or current
-    current_status = str(current["status"] or "queued")
-    return _confirmation_result(
-        current,
-        payload,
-        candidate,
-        status="running" if current_status == "running" else "queued",
-    )
+    current = db.get_organize_confirmation(token) or row
+    return _confirmation_result(current, payload, candidate)
 
 
 def _validate_snapshot(client: GuangYaClient, item: dict, *, role: str) -> None:
@@ -2531,8 +2543,19 @@ def _execute_guangya_confirmation(
             _validate_agent_clean_authorization(payload, candidate)
         source_dir_id = str(payload.get("source_dir_id") or "").strip()
         current_rules = OrganizeRules.from_config().for_source(source_dir_id)
-        if not organize_rules_snapshot_matches(payload.get("rules"), current_rules):
-            raise DirectoryScrapeConflictError("整理规则已变化，请重新执行整理后再确认")
+        changes = organize_rules_snapshot_changes(
+            payload.get("rules"), current_rules, files=payload.get("files"),
+        )
+        if changes:
+            labels = {
+                "small_file_mb": f"小文件过滤阈值 {current_rules.small_file_mb} MB（含不合格或大小未知的视频）",
+                "target_dir_id": "归档目标目录",
+                "conflict_strategy": "文件覆盖策略",
+                "nsfw_source_ids": "成人来源范围",
+                "nsfw_enabled": "成人识别开关",
+            }
+            fields = "、".join(labels.get(key, key) for key in changes)
+            raise DirectoryScrapeConflictError(f"整理规则已变化（{fields}），请重新执行整理后再确认")
 
         from app.repositories.download_staging import requests_for_download_confirmation
         download_owners = requests_for_download_confirmation(payload, strict=True)

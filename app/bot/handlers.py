@@ -36,7 +36,6 @@ from app.modules.organize_sources import (
 )
 from app.modules.strm_notifications import cleanup_notice_lines
 from app.notifier import (
-    NOTIFICATION_SECTION_BREAK,
     NotificationEvent,
     get_bot,
     render_event,
@@ -2846,81 +2845,17 @@ def _handle_organize_confirmation_callback(bot, call) -> None:
             token, chat_id=chat_id, message_id=call.message.message_id
         )
         result = start_confirmation(token, selected_index, chat_id=chat_id)
-        candidate = result.get("candidate") or {}
-        provider = str(candidate.get("provider") or "").strip().lower()
-        tmdb_id_raw = str(candidate.get("tmdb_id") or "").strip()
-        external_id_raw = str(candidate.get("external_id") or tmdb_id_raw).strip()
-        if not provider and tmdb_id_raw:
-            provider = "tmdb"
-        title = str(candidate.get("title") or external_id_raw or "候选媒体")
-        year = str(candidate.get("year") or "")
-        external_id = external_id_raw
-        display = f"{title} ({year})" if year else title
         status = str(result.get("status") or "queued")
         replayed = bool(result.get("replayed"))
-        queue_position = max(0, int(result.get("queue_position") or 0))
-        if status == "running":
-            status_text = "正在执行"
-            callback_text = "该任务正在执行" if replayed else "已开始确认整理"
-        elif status == "completed":
-            status_text = "已完成"
-            callback_text = "该任务已完成"
-        else:
-            status_text = (
-                f"等待执行 · 前方 {queue_position} 项"
-                if queue_position
-                else "等待执行 · 等待当前整理完成"
-            )
-            callback_text = "该任务已在队列中" if replayed else "已加入整理队列"
+        callback_text = {
+            "running": "该任务正在执行" if replayed else "已开始确认整理",
+            "completed": "该任务已完成",
+            "failed": "整理失败，请查看结果卡中的原因",
+            "cancelled": "该任务已取消",
+            "expired": "该确认已过期",
+        }.get(status, "该任务已在队列中" if replayed else "已加入整理队列")
+        # 卡片从候选、接纳到终态仅由确认消费者与统一通知中心更新。
         bot.answer_callback_query(call.id, callback_text)
-        media_type = str(result.get("media_type") or candidate.get("media_type") or "")
-        media_label = (
-            "成人内容"
-            if provider in {"metatube", "clean_title"}
-            else "剧集"
-            if media_type == "tv"
-            else "电影"
-        )
-        scope_summary = str(result.get("scope_summary") or "")
-        source_name = str(result.get("source_name") or result.get("directory") or "")
-        identity_label = (
-            "MetaTube"
-            if provider == "metatube"
-            else "清洗标题"
-            if provider == "clean_title"
-            else "TMDB"
-        )
-        detail_fields: list[tuple[object, object]] = [
-            ("目标媒体", display),
-            (
-                "类型",
-                f"{media_label}" + (f" · {scope_summary}" if scope_summary else ""),
-            ),
-            (identity_label, external_id),
-            ("涉及文件", f"{int(result.get('file_count') or 0)} 个视频"),
-        ]
-        if source_name:
-            detail_fields.append(("存储来源", source_name))
-        detail_fields.extend(
-            (
-                NOTIFICATION_SECTION_BREAK,
-                ("队列", str(result.get("task_id") or "")),
-                ("处理状态", status_text),
-            )
-        )
-        bot.edit_message_text(
-            render_event(
-                NotificationEvent(
-                    f"✅ 已选择：{display}",
-                    fields=tuple(detail_fields),
-                    footer="可以继续选择其他待确认媒体，系统会按点击顺序串行整理。",
-                    layout="relaxed",
-                )
-            ),
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=None,
-        )
     except (TypeError, ValueError) as exc:
         bot.answer_callback_query(call.id, str(exc or "确认参数无效"), show_alert=True)
     except Exception as exc:

@@ -7,6 +7,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -188,8 +189,18 @@ class ConfirmationGroupingTests(unittest.TestCase):
         self.assertEqual(groups[0]["candidates"][0]["provider"], "metatube")
         self.assertEqual(groups[0]["candidates"][0]["external_id"], "javbus:ssis001")
         self.assertTrue(groups[0]["rules"]["nsfw_exclusive"])
+        self.assertIsNone(groups[0]["files"][0]["episode"])
+        self.assertIsNone(groups[0]["files"][0]["season"])
+        self.assertEqual(Organizer._confirmation_scope_summary(groups[0]), "共 1 个视频")
         self.assertNotIn("nsfw_metatube_token", groups[0]["rules"])
         self.assertNotIn("server-secret", json.dumps(groups[0]["rules"]))
+
+    def test_historical_adult_confirmation_does_not_display_catalog_number_as_episode(self):
+        group = {
+            "candidates": [{"provider": "metatube", "external_id": "JavBus:BTHA-061"}],
+            "files": [{"season": None, "episode": 61}, {"season": None, "episode": 61}],
+        }
+        self.assertEqual(Organizer._confirmation_scope_summary(group), "共 2 个视频")
 
     def test_no_metadata_group_is_retained_for_terminal_skip(self):
         organizer = Organizer(client=cast(GuangYaClient, SimpleNamespace()), scraper=cast(TMDBScraper, _PositionScraper()))
@@ -1472,9 +1483,90 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
                 rules,
             )
 
-    def test_worker_success_runs_preview_execute_and_post_actions(self):
+    def test_fast_terminal_result_preserves_error_and_notification_order(self):
+        for terminal in ("completed", "failed"):
+            with self.subTest(terminal=terminal):
+                group = self._group()
+                group["files"][0]["file_id"] = terminal
+                actions = create_confirmation_actions(group, OrganizeRules(), chat_id="100")
+                token = actions[0].callback_data.split(":")[1]
+                published = []
+
+                def execute(*_args, **_kwargs):
+                    event = notifier.NotificationEvent(terminal)
+                    common = dict(
+                        event_json=notification_center.serialize_notification_event(event),
+                        chat_id="100", message_id=77,
+                    )
+                    if terminal == "completed":
+                        db.complete_organize_confirmation_with_delivery(token, result_json="{}", **common)
+                    else:
+                        db.fail_organize_confirmation_with_delivery(
+                            token, error="specific failure", retryable=False, **common,
+                        )
+                    confirmation_module._dispatch_due_confirmation_delivery(token)
+                    return {}
+
+                def start_operation(_name, _reference, callback):
+                    row = db.get_organize_confirmation(token)
+                    assert row is not None
+                    self.assertEqual(row["task_id"], f"queue-{row['id']:06d}")
+                    callback()  # 确定性重现：worker 在接纳回调返回前已经结束。
+                    return {"ok": True, "task_id": "worker"}
+
+                with patch("app.modules.organize_tasks.get_organize_manager", return_value=SimpleNamespace(
+                    start_operation=start_operation,
+                )), patch.object(confirmation_module, "_execute_confirmation", side_effect=execute), patch.object(
+                    confirmation_module, "publish_confirmation_event",
+                    side_effect=lambda event, **kwargs: published.append((event, kwargs)) or True,
+                ):
+                    result = start_confirmation(token, 0, chat_id="100")
+                self.assertEqual(result["status"], terminal)
+                row = db.get_organize_confirmation(token)
+                assert row is not None
+                self.assertEqual(row["error"], "specific failure" if terminal == "failed" else "")
+                self.assertEqual(len(published), 2)
+                self.assertIn("已选择", published[0][0].title)
+                self.assertFalse(published[0][1]["deliver_now"])
+                self.assertEqual(published[0][0].actions, ())
+                self.assertEqual(published[-1][0].title, terminal)
+                self.assertTrue(published[-1][1]["terminal"])
+
+    def test_changed_execution_rules_reject_before_cloud_access(self):
+        frozen = OrganizeRules()
+        cases = (
+            (replace(frozen, small_file_mb=100), 50 * 1024**2, "小文件过滤阈值"),
+            (replace(frozen, small_file_mb=100), 0, "大小未知"),
+            (replace(frozen, target_dir_id="other"), 200 * 1024**2, "归档目标目录"),
+            (replace(frozen, conflict_strategy=3), 200 * 1024**2, "文件覆盖策略"),
+        )
+        for current, size, reason in cases:
+            with self.subTest(reason=reason):
+                group = self._group()
+                group["files"][0]["size"] = size
+                token = create_confirmation_actions(group, frozen, chat_id="100")[0].callback_data.split(":")[1]
+                db.claim_organize_confirmation(token, chat_id="100", selected_index=0)
+                row = db.claim_queued_organize_confirmation(token)
+                assert row is not None
+                payload = json.loads(row["payload_json"])
+                with patch.object(OrganizeRules, "from_config", return_value=current), patch.object(
+                    confirmation_module, "GuangYaClient",
+                ) as cloud, patch.object(confirmation_module, "_dispatch_due_confirmation_delivery", return_value=True):
+                    with self.assertRaisesRegex(DirectoryScrapeConflictError, reason):
+                        confirmation_module._execute_guangya_confirmation(
+                            token, payload, payload["candidates"][0], selected_index=0, chat_id="100",
+                        )
+                cloud.assert_not_called()
+                row = db.get_organize_confirmation(token)
+                assert row is not None
+                self.assertEqual(row["status"], "failed")
+                self.assertIn(reason, row["error"])
+
+    def test_worker_accepts_threshold_change_and_runs_preview_execute_and_post_actions(self):
         rules = OrganizeRules()
+        current_rules = replace(rules, small_file_mb=100)
         group = self._group()
+        group["files"][0]["size"] = 128 * 1024**2
         group["candidates"].append({
             "tmdb_id": "999999", "media_type": "tv",
             "title": "错误候选", "year": "2020", "score": 0.7,
@@ -1514,7 +1606,7 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
                 post_action_kwargs.append(dict(kwargs))
 
         current_file = GuangYaFile(
-            "file-4", "Nagatoro - 04.mp4", False, size=104,
+            "file-4", "Nagatoro - 04.mp4", False, size=128 * 1024**2,
             etag="etag-4", parent_id="parent",
         )
         fake_client = SimpleNamespace(file_info=lambda _file_id: current_file)
@@ -1535,7 +1627,7 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
         published = []
         with patch(
             "app.modules.organize_confirmations.OrganizeRules.from_config",
-            return_value=rules,
+            return_value=current_rules,
         ), patch(
             "app.modules.organize_confirmations.GuangYaClient",
             return_value=fake_client,
@@ -1561,7 +1653,7 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
             result = callbacks[0]()
         cleanup.assert_called_once()
         self.assertEqual(cleanup.call_args.args[0]["source_parent_id"], "parent")
-        self.assertEqual(cleanup.call_args.args[2], rules)
+        self.assertEqual(cleanup.call_args.args[2], current_rules)
         self.assertEqual(result["stats"], {"moved": 1})
         self.assertEqual(
             [item for item in calls if isinstance(item, tuple)],
@@ -2174,7 +2266,7 @@ class TelegramCallbackTests(unittest.TestCase):
         def edit_message_text(self, *args, **kwargs):
             self.edits.append((args, kwargs))
 
-    def test_callback_edits_message_and_removes_buttons(self):
+    def test_callback_only_acknowledges_selection_and_never_overwrites_notification(self):
         from app.bot.handlers import _handle_organize_confirmation_callback
 
         bot = self.FakeBot()
@@ -2204,14 +2296,24 @@ class TelegramCallbackTests(unittest.TestCase):
             _handle_organize_confirmation_callback(bot, call)
         bind_mock.assert_called_once_with("token", chat_id="100", message_id=77)
         self.assertEqual(bot.answers[0][0][1], "已加入整理队列")
-        edited = bot.edits[0][0][0]
-        self.assertIn("已选择：不要欺负我，长瀞同学 (2021)", edited)
-        self.assertIn("- <b>🎞️ 类型：</b> 剧集 · 第 2 季 · E13 · 共 11 个视频", edited)
-        self.assertIn("- <b>📄 涉及文件：</b> 11 个视频", edited)
-        self.assertIn("- <b>☁️ 存储来源：</b> 1/待确认目录", edited)
-        self.assertIn("等待执行 · 前方 2 项", edited)
-        self.assertIn("继续选择其他待确认媒体", edited)
-        self.assertIsNone(bot.edits[0][1]["reply_markup"])
+        self.assertEqual(bot.edits, [])
+
+    def test_callback_reports_fast_terminal_outcome_without_direct_edit(self):
+        from app.bot.handlers import _handle_organize_confirmation_callback
+
+        for status, expected in (("completed", "该任务已完成"), ("failed", "整理失败，请查看结果卡中的原因")):
+            with self.subTest(status=status):
+                bot = self.FakeBot()
+                call = SimpleNamespace(
+                    id="callback", data="orgc:token:0", from_user=SimpleNamespace(id=9),
+                    message=SimpleNamespace(chat=SimpleNamespace(id=100), message_id=77),
+                )
+                with patch("app.bot.handlers.db.bind_organize_confirmation_message"), patch.object(
+                    confirmation_module, "start_confirmation", return_value={"status": status},
+                ):
+                    _handle_organize_confirmation_callback(bot, call)
+                self.assertEqual(bot.answers[0][0][1], expected)
+                self.assertEqual(bot.edits, [])
 
 
     def test_skip_callback_finishes_pending_group(self):
@@ -2289,7 +2391,7 @@ class TelegramCallbackTests(unittest.TestCase):
         bind_mock.assert_called_once_with("token", chat_id="-100", message_id=77)
         start_mock.assert_called_once_with("token", 0, chat_id="-100")
         self.assertEqual(bot.answers[0][0][1], "已开始确认整理")
-        self.assertTrue(bot.edits)
+        self.assertEqual(bot.edits, [])
 
 
 

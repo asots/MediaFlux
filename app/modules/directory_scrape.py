@@ -37,7 +37,7 @@ from app.modules.organize import (
     OrganizeRules,
     enforce_fixed_organize_rules,
     organize_rules_snapshot,
-    organize_rules_snapshot_matches,
+    organize_rules_snapshot_changes,
 )
 from app.modules.organize_delete_audit import (
     DeleteCandidate,
@@ -1327,7 +1327,7 @@ class DirectoryScrapeService:
             # 额外启用 nsfw_exclusive，因此执行阶段也必须按同一 scope 重新
             # 派生规则；直接拿全局规则比较会把合法成人预览误判成规则变化。
             current_rules = self.rules_loader().for_source(record.scope_id, client=self.client)
-            if not organize_rules_snapshot_matches(
+            if organize_rules_snapshot_changes(
                 organize_rules_snapshot(record.rules), current_rules,
             ):
                 raise DirectoryScrapeConflictError("光鸭整理规则已变化，请重新检查并生成预览")

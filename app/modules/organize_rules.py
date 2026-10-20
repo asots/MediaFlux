@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 
 from app.config import get, get_bool, get_int
@@ -251,6 +252,9 @@ def enforce_fixed_organize_rules(rules: OrganizeRules) -> OrganizeRules:
 
 
 _ORGANIZE_RULE_SERVER_ONLY_FIELDS = frozenset({"nsfw_metatube_token"})
+_ORGANIZE_RULE_NOTIFICATION_FIELDS = frozenset({
+    "notify_enabled", "library_notify", "strm_detail_notify",
+})
 
 
 def organize_rules_snapshot(rules: OrganizeRules) -> dict[str, object]:
@@ -264,26 +268,52 @@ def organize_rules_snapshot(rules: OrganizeRules) -> dict[str, object]:
 def restore_organize_rules_snapshot(
     snapshot: object, *, trusted_rules: OrganizeRules | None = None,
 ) -> OrganizeRules:
-    """从非敏感快照恢复规则；服务端字段始终取当前可信配置。"""
+    """恢复业务快照；密钥与通知偏好始终取当前可信配置。"""
     if not isinstance(snapshot, dict):
         raise ValueError("整理规则快照无效")
     trusted = enforce_fixed_organize_rules(
         trusted_rules if trusted_rules is not None else OrganizeRules.from_config()
     )
     values = asdict(trusted)
-    allowed_fields = set(OrganizeRules.__dataclass_fields__) - _ORGANIZE_RULE_SERVER_ONLY_FIELDS
+    allowed_fields = set(OrganizeRules.__dataclass_fields__) - (
+        _ORGANIZE_RULE_SERVER_ONLY_FIELDS | _ORGANIZE_RULE_NOTIFICATION_FIELDS
+    )
     for key in allowed_fields:
         if key in snapshot:
             values[key] = snapshot[key]
     return enforce_fixed_organize_rules(OrganizeRules(**values))
 
 
-def organize_rules_snapshot_matches(snapshot: object, current_rules: OrganizeRules) -> bool:
-    """比较可执行规则；密钥轮换不复用历史值，而是使用当前服务端配置。"""
+def organize_rules_snapshot_changes(
+    snapshot: object, current_rules: OrganizeRules, *,
+    files: Sequence[Mapping[str, object]] | None = None,
+) -> list[str]:
+    """返回影响本次执行的变更；冻结文件确认不因无关配置变化失效。
+
+    整源预览不传 files：筛选阈值会改变扫描成员，必须重新预览。
+    人工确认传入冻结文件：阈值变化只重验这些文件，不扩张已确认范围。
+    """
     if not isinstance(snapshot, dict):
-        return False
-    normalized = {
-        key: value for key, value in snapshot.items()
-        if key not in _ORGANIZE_RULE_SERVER_ONLY_FIELDS
+        return ["rules_snapshot"]
+    current = organize_rules_snapshot(current_rules)
+    ignored = _ORGANIZE_RULE_SERVER_ONLY_FIELDS | _ORGANIZE_RULE_NOTIFICATION_FIELDS
+    changed = {
+        key for key in snapshot.keys() | current.keys()
+        if key not in ignored and snapshot.get(key) != current.get(key)
     }
-    return normalized == organize_rules_snapshot(current_rules)
+    if "nsfw_source_ids" in changed:
+        from app.modules.organize_sources import normalize_organize_source_ids
+
+        old_sources, old_error = normalize_organize_source_ids(snapshot.get("nsfw_source_ids"))
+        new_sources, new_error = normalize_organize_source_ids(current_rules.nsfw_source_ids)
+        if not old_error and not new_error and set(old_sources) == set(new_sources):
+            changed.remove("nsfw_source_ids")
+    if "small_file_mb" in changed and files:
+        minimum = current_rules.small_file_mb * 1024 * 1024
+        if all(
+            type(size := item.get("size")) is int
+            and size > 0 and size >= minimum
+            for item in files
+        ):
+            changed.remove("small_file_mb")
+    return sorted(changed)

@@ -33,7 +33,7 @@ from app.modules.organize import (
     Organizer,
     OrganizeRules,
     organize_rules_snapshot,
-    organize_rules_snapshot_matches,
+    organize_rules_snapshot_changes,
     restore_organize_rules_snapshot,
 )
 from app.modules.organize_delete_audit import (
@@ -1574,7 +1574,7 @@ class OrganizeCorrectionService:
         items = self._load_items(log_id)
         self._verify_items(items)
         current_rules = self._rules_for_log(self.detail(log_id))
-        if not organize_rules_snapshot_matches(preview["rules_snapshot"], current_rules):
+        if organize_rules_snapshot_changes(preview["rules_snapshot"], current_rules):
             raise ValueError("整理规则已变化，请重新预览并确认")
         rules = restore_organize_rules_snapshot(preview["rules_snapshot"], trusted_rules=current_rules)
         self._verify_nsfw_target_identity(MatchResult(**preview["match"]), preview["target_path"])

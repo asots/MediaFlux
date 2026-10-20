@@ -46,7 +46,7 @@ from app.modules.organize import (
     Organizer,
     OrganizeRules,
     organize_rules_snapshot,
-    organize_rules_snapshot_matches,
+    organize_rules_snapshot_changes,
     restore_organize_rules_snapshot,
 )
 from app.modules.organize_correction import OrganizeCorrectionService
@@ -56,6 +56,59 @@ from tests.support import IsolatedDatabaseTestCase, isolated_test_database
 
 
 class OrganizeRulesSnapshotTests(unittest.TestCase):
+    def test_notification_changes_and_equivalent_source_json_do_not_invalidate_rules(self):
+        rules = OrganizeRules(nsfw_source_ids='["a", "b"]')
+        current = replace(
+            rules, notify_enabled=False, library_notify=False,
+            strm_detail_notify=False, nsfw_source_ids='["b","a"]',
+        )
+        self.assertEqual(organize_rules_snapshot_changes(organize_rules_snapshot(rules), current), [])
+        restored = restore_organize_rules_snapshot(organize_rules_snapshot(rules), trusted_rules=current)
+        self.assertFalse(restored.notify_enabled)
+        self.assertFalse(restored.library_notify)
+        self.assertFalse(restored.strm_detail_notify)
+
+    def test_threshold_change_revalidates_only_frozen_files(self):
+        snapshot = organize_rules_snapshot(OrganizeRules(small_file_mb=10))
+        current = OrganizeRules(small_file_mb=100)
+        for size, allowed in ((101 * 1024**2, True), (100 * 1024**2, True),
+                              (99 * 1024**2, False), (0, False), (None, False)):
+            with self.subTest(size=size):
+                changes = organize_rules_snapshot_changes(snapshot, current, files=[{"size": size}])
+                self.assertEqual(changes, [] if allowed else ["small_file_mb"])
+        for files in (None, []):
+            with self.subTest(files=files):
+                self.assertEqual(organize_rules_snapshot_changes(snapshot, current, files=files), ["small_file_mb"])
+        self.assertEqual(organize_rules_snapshot_changes(snapshot, current, files=[
+            {"size": 200 * 1024**2}, {"size": 20 * 1024**2},
+        ]), ["small_file_mb"])
+
+    def test_lower_threshold_keeps_frozen_scope_but_other_execution_changes_still_block(self):
+        rules = OrganizeRules(small_file_mb=100)
+        snapshot = organize_rules_snapshot(rules)
+        files = [{"size": 200 * 1024**2}]
+        self.assertEqual(organize_rules_snapshot_changes(snapshot, replace(rules, small_file_mb=0), files=files), [])
+        changes = (
+            ("target_dir_id", replace(rules, target_dir_id="other")),
+            ("conflict_strategy", replace(rules, conflict_strategy=3)),
+            ("nsfw_enabled", replace(rules, nsfw_enabled=True)),
+            ("nsfw_source_ids", replace(rules, nsfw_source_ids='["different"]')),
+            ("clean_empty", replace(rules, clean_empty=False)),
+            ("nsfw_category_name", replace(rules, nsfw_category_name="other")),
+        )
+        for key, changed in changes:
+            with self.subTest(key=key):
+                self.assertEqual(organize_rules_snapshot_changes(
+                    snapshot, replace(changed, small_file_mb=10), files=files,
+                ), [key])
+
+    def test_invalid_or_incomplete_rule_snapshot_is_not_treated_as_unchanged(self):
+        rules = OrganizeRules()
+        self.assertEqual(organize_rules_snapshot_changes(None, rules), ["rules_snapshot"])
+        snapshot = organize_rules_snapshot(rules)
+        del snapshot["conflict_strategy"]
+        self.assertEqual(organize_rules_snapshot_changes(snapshot, rules), ["conflict_strategy"])
+
     def test_snapshot_excludes_server_secret_and_restore_uses_trusted_value(self):
         rules = OrganizeRules(
             target_dir_id="archive", nsfw_enabled=True, nsfw_exclusive=True,
@@ -71,9 +124,9 @@ class OrganizeRulesSnapshotTests(unittest.TestCase):
             legacy_or_tampered, trusted_rules=rules,
         )
         self.assertEqual(restored.nsfw_metatube_token, "server-secret")
-        self.assertTrue(organize_rules_snapshot_matches(legacy_or_tampered, rules))
+        self.assertFalse(organize_rules_snapshot_changes(legacy_or_tampered, rules))
         changed = replace(rules, nsfw_category_name="其他成人分类")
-        self.assertFalse(organize_rules_snapshot_matches(snapshot, changed))
+        self.assertEqual(organize_rules_snapshot_changes(snapshot, changed), ["nsfw_category_name"])
 
 
 class FakeResponse:
@@ -1513,7 +1566,7 @@ class NsfwDownloadSourceTests(IsolatedDatabaseTestCase):
         # 新建规则对象、重新读SQLite，不依赖上一次执行的内存意图。
         restored = OrganizeRules(**self.rules.__dict__).for_source("task-dir")
         self.assertTrue(restored.nsfw_exclusive)
-        self.assertTrue(organize_rules_snapshot_matches(snapshot, restored))
+        self.assertFalse(organize_rules_snapshot_changes(snapshot, restored))
         from app.modules.organize_confirmations import (
             _clean_confirmation_retry_is_current,
         )

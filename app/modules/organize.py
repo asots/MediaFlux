@@ -132,7 +132,7 @@ from app.modules.organize_rules import (  # noqa: F401
     automatic_match_requires_confirmation,
     enforce_fixed_organize_rules,
     organize_rules_snapshot,
-    organize_rules_snapshot_matches,
+    organize_rules_snapshot_changes,
     restore_organize_rules_snapshot,
 )
 from app.modules.organize_runtime import OrganizeTaskRuntime
@@ -3706,16 +3706,17 @@ class Organizer:
                 group["multipart_strategy"] = "sequence"
             season = episode = None
             parse_source_position = getattr(self.scraper, "parse_source_position", None)
-            if callable(parse_source_position):
+            is_nsfw = bool(rules and rules.nsfw_exclusive) or match.provider in {"metatube", "clean_title"}
+            if not is_nsfw and callable(parse_source_position):
                 try:
                     season, episode = self.scraper.parse_source_position(
                         plan.original_name, plan.original_path
                     )
                 except Exception:
                     pass
-            if season is None:
+            if not is_nsfw and season is None:
                 season = getattr(context, "season", None)
-            if episode is None:
+            if not is_nsfw and episode is None:
                 episode = getattr(context, "episode", None)
             group["files"].append({
                 "file_id": plan.file_id,
@@ -4239,6 +4240,11 @@ class Organizer:
         files = [
             item for item in (group.get("files") or []) if isinstance(item, dict)
         ]
+        if (group.get("rules") or {}).get("nsfw_exclusive") or any(
+            candidate.get("provider") in {"metatube", "clean_title"}
+            for candidate in group.get("candidates", [])
+        ):
+            return f"共 {len(files)} 个视频"
         seasons = sorted({
             safe_int(item.get("season"), 0, minimum=0)
             for item in files if item.get("season") not in (None, "")

@@ -3283,7 +3283,7 @@ def claim_organize_confirmation(
         else:
             cursor = conn.execute(
                 "UPDATE organize_confirmations SET status='queued',selected_index=?,"
-                "queued_at=?,confirmation_actor=?,"
+                "queued_at=?,confirmation_actor=?,task_id=?,error='',"
                 "review_status=CASE "
                 "WHEN ?='agent' THEN 'approved' "
                 "WHEN ?='human' AND review_status IN ('waiting','pending','running') THEN 'cancelled' "
@@ -3295,7 +3295,7 @@ def claim_organize_confirmation(
                 "WHERE id=? AND status='pending' "
                 "AND (?<>'agent' OR review_status='running')",
                 (
-                    selected_index, queued_at, normalized_actor,
+                    selected_index, queued_at, normalized_actor, f"queue-{int(row['id']):06d}",
                     normalized_actor, normalized_actor,
                     normalized_actor, timestamp,
                     normalized_actor, timestamp,

@@ -449,7 +449,7 @@ def update_organize_lifecycle_confirmations(
         handled_groups,
         safe_int(baseline.get("actionable_groups"), 0, minimum=0),
     )
-    confirmation_parts = [f"已处理 {handled_groups} / {expected_groups}"]
+    confirmation_parts = [f"已处理 {handled_groups} / {expected_groups} 组"]
     for key, label in (
         ("moved", "入库"),
         ("skipped", "跳过"),
@@ -458,9 +458,9 @@ def update_organize_lifecycle_confirmations(
     ):
         value = safe_int(outcomes.get(key), 0, minimum=0)
         if value:
-            confirmation_parts.append(f"{label} {value}")
+            confirmation_parts.append(f"{label} {value} 个视频")
     if counts["confirm"]:
-        confirmation_parts.append(f"Web 待处理 {counts['confirm']}")
+        confirmation_parts.append(f"Web 待处理 {counts['confirm']} 个视频")
 
     fields = _replace_field(
         previous.fields, "整理", _summary_label(counts, expired=expired),
@@ -487,12 +487,12 @@ def update_organize_lifecycle_confirmations(
 
     if counts["confirm"]:
         footer = (
-            f"Telegram 候选已处理；仍有 {counts['confirm']} 个项目保留在 Web "
+            f"Telegram 候选已处理；仍有 {counts['confirm']} 个视频保留在 Web "
             "待确认队列。"
         )
     elif expired:
         footer = (
-            f"{expired} 个候选超过 24 小时未确认，文件保持原位；"
+            f"{expired} 个视频超过 24 小时未确认，文件保持原位；"
             "重新执行整理可再次识别。"
         )
     elif counts["skipped"] or counts["failed"]:

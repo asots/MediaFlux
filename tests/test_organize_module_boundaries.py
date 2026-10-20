@@ -168,7 +168,7 @@ assert organize.OrganizeRules is organize_rules.OrganizeRules
         )
         self.assertEqual(restored.nsfw_metatube_token, "fixture-current-secret")
         self.assertTrue(restored.rename_enabled)
-        self.assertTrue(organize.organize_rules_snapshot_matches(snapshot, restored))
+        self.assertFalse(organize.organize_rules_snapshot_changes(snapshot, restored))
         self.assertEqual(organize.organize_rules_snapshot(restored), snapshot)
 
     def test_automatic_confirmation_and_result_formatting_keep_their_contract(self):

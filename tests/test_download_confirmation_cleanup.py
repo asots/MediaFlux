@@ -235,7 +235,7 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
         )
         db.update_organize_confirmation('legacy-mismatch', status='running')
         with patch.object(confirmations.OrganizeRules, 'from_config', return_value=self.rules), patch.object(
-            confirmations, 'organize_rules_snapshot_matches', return_value=True,
+            confirmations, 'organize_rules_snapshot_changes', return_value=[],
         ), patch.object(confirmations, 'GuangYaClient') as client_factory, patch.object(
             confirmations, '_dispatch_due_confirmation_delivery', return_value=False,
         ), self.assertRaises(ValueError):
@@ -275,7 +275,7 @@ class DownloadConfirmationCleanupTests(IsolatedDatabaseTestCase):
         try:
             with ExitStack() as stack:
                 stack.enter_context(patch.object(confirmations.OrganizeRules, 'from_config', return_value=self.rules))
-                stack.enter_context(patch.object(confirmations, 'organize_rules_snapshot_matches', return_value=True))
+                stack.enter_context(patch.object(confirmations, 'organize_rules_snapshot_changes', return_value=[]))
                 stack.enter_context(patch.object(confirmations, 'GuangYaClient', return_value=self.cloud))
                 stack.enter_context(patch.object(confirmations, 'close_guangya_client'))
                 stack.enter_context(patch.object(confirmations, '_validate_snapshot'))

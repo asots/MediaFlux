@@ -286,8 +286,39 @@ class OrganizeNotificationDeliveryTests(IsolatedDatabaseTestCase):
         self.assertEqual(event.title, "✅ 光鸭整理完成")
         self.assertEqual(event.state, "completed")
         self.assertIn(("整理", "视频 1 · 入库 1"), event.fields)
-        self.assertIn(("人工确认", "已处理 1 / 1 · 入库 1"), event.fields)
+        self.assertIn(("人工确认", "已处理 1 / 1 组 · 入库 1 个视频"), event.fields)
         self.assertIn("已全部完成", event.footer)
+
+    def test_confirmation_rollup_distinguishes_groups_from_video_counts(self) -> None:
+        stats = {
+            "total": 211, "moved": 101, "need_confirm": 28,
+            "skipped": 82, "failed": 0,
+            "notification_actionable_confirmation_files": 28,
+            "notification_actionable_confirmation_groups": 15,
+        }
+        previous = build_organize_lifecycle_event(
+            stats, source_name="5 个源目录", strm_status="完成",
+            media_refresh="Jellyfin 已排队",
+        )
+        with patch(
+            "app.modules.telegram_organize_lifecycle.get_notification_thread_event",
+            return_value=previous,
+        ), patch(
+            "app.modules.telegram_organize_lifecycle.publish_notification_thread",
+            return_value=_accepted(),
+        ) as publish:
+            update_organize_lifecycle_confirmations(
+                "task-batch", chat_id="100",
+                baseline=build_organize_confirmation_rollup(stats),
+                outcomes={
+                    "groups": 15, "resolved_files": 28,
+                    "failed": 23, "skipped": 5,
+                },
+            )
+        event = publish.call_args.args[1]
+        self.assertEqual(event.state, "partial")
+        self.assertIn(("整理", "视频 211 · 入库 101 · 跳过 87 · 失败 23"), event.fields)
+        self.assertIn(("人工确认", "已处理 15 / 15 组 · 跳过 5 个视频 · 失败 23 个视频"), event.fields)
 
     def test_successful_rollup_removes_stale_pending_inventory_status(self) -> None:
         stats = _stats_with_confirmation()
