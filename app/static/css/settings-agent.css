@@ -886,7 +886,8 @@ html[data-settings-config="pending"] .settings-page #settingsForm {
     width: 100%;
 }
 .field-control-with-action .field-control { flex: 1 1 auto; }
-.tmdb-test-btn {
+.agent-field .field-control-with-action .field-control-password { width: 0; min-width: 0; flex: 1; }
+.tmdb-test-btn, .tavily-test-btn {
     flex: 0 0 auto;
     min-height: 42px;
     height: 42px;
@@ -897,7 +898,8 @@ html[data-settings-config="pending"] .settings-page #settingsForm {
     gap: 6px;
     white-space: nowrap;
 }
-.tmdb-test-btn svg { width: 14px; height: 14px; color: var(--accent); }
+.tmdb-test-btn svg, .tavily-test-btn :is(svg, [data-lucide]) { width: 14px; height: 14px; flex: 0 0 14px; color: var(--accent); }
+.agent-field > .agent-model-hint.tavily-connection-state { min-height: 32px; }
 
 .metadata-field:has(> .tmdb-connection-status) {
     padding-bottom: 4px;

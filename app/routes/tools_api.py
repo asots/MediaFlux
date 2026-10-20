@@ -1449,6 +1449,66 @@ def proxy_test(request: Request, data: dict | None = Body(default=None)):
     })
 
 
+@router.post("/tavily/test")
+async def tavily_test(request: Request, data: dict | None = Body(default=None)):
+    """读取用量接口验证密钥；不保存草稿，也不提交收费搜索。"""
+    require_api_login(request)
+    data = data or {}
+    if set(data) - {"api_key", "timeout_seconds"}:
+        return api_error("Tavily 测试包含不支持的参数", 400)
+    token_digest = hashlib.sha256(csrf_token(request).encode()).hexdigest()
+    if not agent_rate_limiter.allow(f"settings:tavily-test:{token_digest}", limit=6, window_seconds=60):
+        return api_error("测试过于频繁，请稍后再试", 429)
+    api_key = data.get("api_key", "********")
+    if api_key == "********":
+        api_key = config.get("TAVILY_API_KEY", "")
+    if not isinstance(api_key, str) or len(api_key) > 512 or re.search(r"[\x00-\x1f\x7f]", api_key):
+        return api_error("Tavily API Key 格式无效", 400)
+    api_key = api_key.strip()
+    if not api_key:
+        return api_error("请先填写 Tavily API Key", 400)
+    try:
+        timeout = int(str(data.get("timeout_seconds", config.get("TAVILY_TIMEOUT_SECONDS", "10"))))
+        if not 2 <= timeout <= 30:
+            raise ValueError
+    except (TypeError, ValueError):
+        return api_error("请求超时须为 2–30 秒的整数", 400)
+
+    client = FixedHostHttpClient(
+        allowed_hosts={"api.tavily.com"}, timeout_seconds=timeout,
+        max_response_bytes=64 * 1024, max_redirects=0,
+        get_timeout_retries=0, pin_resolved_address=True,
+    )
+    started = perf_counter()
+    try:
+        async with asyncio.timeout(timeout):
+            response = await client.get(
+                "https://api.tavily.com/usage",
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            )
+        if response.status_code in {401, 403}:
+            return api_error("Tavily 密钥无效或无访问权限", 400)
+        if response.status_code == 429:
+            return api_error("Tavily 请求受限，请稍后再试", 429)
+        if response.status_code != 200:
+            return api_error("Tavily 服务暂不可用，请稍后重试", 502)
+        payload = json.loads(response.text)
+        if not isinstance(payload, dict) or not isinstance(payload.get("key"), dict) or not isinstance(payload.get("account"), dict):
+            return api_error("Tavily 返回数据异常", 502)
+        return api_response({
+            "ok": True, "message": "Tavily 连接正常，密钥有效",
+            "elapsed_ms": max(1, round((perf_counter() - started) * 1000)),
+        })
+    except (TimeoutError, httpx.TimeoutException):
+        return api_error("Tavily 响应超时，请检查网络", 504)
+    except ValueError:
+        return api_error("Tavily 返回数据异常", 502)
+    except (httpx.HTTPError, HttpError):
+        return api_error("无法连接 Tavily，请检查网络", 502)
+    finally:
+        await client.aclose()
+
+
 @router.post("/tmdb/test")
 def tmdb_test(request: Request, data: dict | None = Body(default=None)):
     """测试当前 TMDB 表单草稿的连通性与密钥有效性。"""

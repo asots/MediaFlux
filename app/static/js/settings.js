@@ -160,6 +160,7 @@
 
     function setConfigReady(){
         configReady=true;
+        if(testTavilyBtn)testTavilyBtn.disabled=false;
         syncNsfwCleanReviewAvailability();
         syncEpisodeResearchAvailability();
         form.setAttribute('aria-busy','false');
@@ -451,7 +452,7 @@
             diag.title=detail;
         }
     }
-    function qbSecretDraft(field){
+    function settingsSecretDraft(field){
         const state=field.dataset.secretState||'empty';
         if(state==='saved'&&!field.value)return '********';
         if(state==='clear'||state==='empty')return '';
@@ -465,8 +466,8 @@
     const getQbDraft=()=>({
         url:qbUrlField?.value.trim()||'',
         username:qbUsernameField?.value.trim()||'',
-        password:qbSecretDraft(qbPasswordField),
-        api_key:qbSecretDraft(qbApiKeyField),
+        password:settingsSecretDraft(qbPasswordField),
+        api_key:settingsSecretDraft(qbApiKeyField),
     });
     const setQbBusy=busy=>{
         if(!testQbButton)return;
@@ -761,6 +762,42 @@
         try{const response=await fetch('/api/tools/proxy/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({use_proxy:document.getElementById('proxyUseProxy').checked})});const data=await response.json();if(!response.ok)throw new Error(data.error||'测试失败');renderProxyResults(data);}
         catch(error){result.className='proxy-result proxy-result-list is-error';result.textContent=error.message||'测试请求失败';}
         finally{button.disabled=false;}
+    });
+
+    const testTavilyBtn=document.getElementById('testTavilyBtn');
+    const tavilyApiKeyInput=document.getElementById('tavilyApiKeyInput');
+    const tavilyTimeoutInput=form.querySelector('[data-key="TAVILY_TIMEOUT_SECONDS"]');
+    const tavilyConnectionState=document.getElementById('tavilyConnectionState');
+    const getTavilyDraft=()=>({api_key:settingsSecretDraft(tavilyApiKeyInput),timeout_seconds:tavilyTimeoutInput.value});
+    function setTavilyState(tone,message){
+        tavilyConnectionState.dataset.tone=tone;
+        tavilyConnectionState.textContent=message;
+        testTavilyBtn.disabled=!configReady||tone==='testing';
+        testTavilyBtn.setAttribute('aria-busy',String(tone==='testing'));
+    }
+    const tavilyRequestGate=createDraftRequestGate(getTavilyDraft,()=>setTavilyState('idle','配置已变化，请重新测试'));
+    bindDraftInvalidation([tavilyApiKeyInput,tavilyTimeoutInput],tavilyRequestGate);
+    testTavilyBtn?.addEventListener('click',async()=>{
+        if(!configReady)return;
+        const draft=getTavilyDraft();
+        const ticket=tavilyRequestGate.begin();
+        setTavilyState('testing','正在验证 Tavily 密钥…');
+        try{
+            const response=await fetch('/api/tools/tavily/test',{
+                method:'POST',headers:{'Content-Type':'application/json'},
+                body:JSON.stringify(draft),signal:ticket.signal,
+            });
+            const data=await response.json();
+            if(!response.ok||data.ok!==true)throw new Error(data.error||'Tavily 密钥测试失败');
+            if(tavilyRequestGate.isCurrent(ticket))setTavilyState('success',`${data.message}（${data.elapsed_ms} ms）`);
+        }catch(error){
+            if(tavilyRequestGate.isCurrent(ticket)&&!isAbortError(error))setTavilyState('error',error.message||'Tavily 密钥测试失败');
+        }finally{
+            if(tavilyRequestGate.finish(ticket)){
+                testTavilyBtn.disabled=false;
+                testTavilyBtn.setAttribute('aria-busy','false');
+            }
+        }
     });
 
     const testTmdbBtn=document.getElementById('testTmdbBtn');
