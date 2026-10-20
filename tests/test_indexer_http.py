@@ -475,6 +475,142 @@ class IndexerHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.close_calls, 2)
         self.client = None
 
+    async def test_browser_cancel_keeps_worker_exclusive_until_receive_finishes(self):
+        for phase in ("request", "warmup", "redirect"):
+            for followup in ("request", "close"):
+                with self.subTest(phase=phase, followup=followup):
+                    started = asyncio.Event()
+                    release = threading.Event()
+                    loop = asyncio.get_running_loop()
+                    events = []
+
+                    class BlockingSession(FakeCurlSession):
+                        def get(self, url, **kwargs):
+                            events.append(url)
+                            if len(events) == 1:
+                                loop.call_soon_threadsafe(started.set)
+                                if not release.wait(2):
+                                    raise TimeoutError("测试未释放同步请求")
+                            return FakeCurlResponse(
+                                status_code=302 if phase == "redirect" and url.endswith("/first") else 200,
+                                headers={"location": "/redirected"},
+                            )
+
+                        def close(self):
+                            events.append("close")
+                            super().close()
+
+                    session = BlockingSession([])
+                    client = BrowserImpersonatingHttpClient(
+                        allowed_hosts={"example.com"}, resolver=PUBLIC_DNS,
+                        session_factory=lambda: session,
+                        warmup_url="https://example.com/warmup" if phase == "warmup" else "",
+                    )
+                    first = asyncio.create_task(client.get("https://example.com/first"))
+                    tasks: list[asyncio.Task] = [first]
+                    try:
+                        await asyncio.wait_for(started.wait(), 1)
+                        first.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(first, 1)
+                        # 调用方立即取消，但底层线程仍在持有会话；后续读/关闭均须等待。
+                        next_task = asyncio.create_task(
+                            client.get("https://example.com/second")
+                            if followup == "request" else client.aclose()
+                        )
+                        tasks.append(next_task)
+                        done, _ = await asyncio.wait([next_task], timeout=0.05)
+                        self.assertEqual(done, set())
+                        self.assertEqual(len(events), 1)
+                        release.set()
+                        await asyncio.wait_for(next_task, 1)
+                        self.assertEqual(events[1:], [
+                            "https://example.com/second" if followup == "request" else "close"
+                        ])
+                    finally:
+                        release.set()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        await client.aclose()
+
+    async def test_browser_cancelled_close_still_finalizes_before_new_request(self):
+        closing = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        class BlockingClose(FakeCurlSession):
+            def close(self):
+                loop.call_soon_threadsafe(closing.set)
+                if not release.wait(2):
+                    raise TimeoutError("测试未释放关闭操作")
+                super().close()
+
+        old = BlockingClose([FakeCurlResponse()])
+        new = FakeCurlSession([FakeCurlResponse(content=b"new")])
+        sessions = iter((old, new))
+        client = BrowserImpersonatingHttpClient(
+            allowed_hosts={"example.com"}, resolver=PUBLIC_DNS,
+            session_factory=lambda: next(sessions),
+        )
+        await client.get("https://example.com/first")
+        close_task = asyncio.create_task(client.aclose())
+        tasks: list[asyncio.Task] = [close_task]
+        try:
+            await asyncio.wait_for(closing.wait(), 1)
+            close_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await close_task
+            next_task = asyncio.create_task(client.get("https://example.com/second"))
+            tasks.append(next_task)
+            done, _ = await asyncio.wait([next_task], timeout=0.05)
+            self.assertEqual(done, set())
+            release.set()
+            self.assertEqual((await asyncio.wait_for(next_task, 1)).body, b"new")
+            self.assertTrue(old.closed)
+            self.assertEqual(len(old.calls), 1)
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await client.aclose()
+
+    async def test_browser_cancelled_queued_request_never_reaches_session(self):
+        started = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        class BlockingSession(FakeCurlSession):
+            def get(self, url, **kwargs):
+                if url.endswith("/first"):
+                    loop.call_soon_threadsafe(started.set)
+                    if not release.wait(2):
+                        raise TimeoutError("测试未释放同步请求")
+                return super().get(url, **kwargs)
+
+        session = BlockingSession([FakeCurlResponse(), FakeCurlResponse()])
+        client = BrowserImpersonatingHttpClient(
+            allowed_hosts={"example.com"}, resolver=PUBLIC_DNS,
+            session_factory=lambda: session,
+        )
+        first = asyncio.create_task(client.get("https://example.com/first"))
+        tasks = [first]
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            queued = asyncio.create_task(client.get("https://example.com/cancelled"))
+            tasks.append(queued)
+            await asyncio.wait([queued], timeout=0.05)
+            queued.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await queued
+            release.set()
+            await asyncio.wait_for(first, 1)
+            await asyncio.wait_for(client.get("https://example.com/last"), 1)
+            self.assertEqual([url for url, _ in session.calls], [
+                "https://example.com/first", "https://example.com/last",
+            ])
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await client.aclose()
+
     async def test_browser_client_injects_configured_cookies_into_private_session(self):
         session = FakeCurlSession([FakeCurlResponse(url="https://www.example.com/")])
         client = BrowserImpersonatingHttpClient(

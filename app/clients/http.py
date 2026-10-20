@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -11,7 +12,6 @@ from urllib.parse import urljoin
 
 import httpx
 
-from app.concurrency import CrossLoopAsyncLock
 from app.logger import get_logger
 
 Resolver = Callable[[str, int], list[tuple]]
@@ -500,7 +500,8 @@ class BrowserImpersonatingHttpClient:
         self._cookies = {key: value for key, value in dict(cookies or {}).items() if key}
         self._session_factory = session_factory or self._default_session_factory
         self._session = None
-        self._lock = CrossLoopAsyncLock()
+        # 互斥覆盖真实的同步会话生命周期，而不是可提前取消的异步等待。
+        self._lock = threading.Lock()
         self._warmed = False
 
     @staticmethod
@@ -512,16 +513,18 @@ class BrowserImpersonatingHttpClient:
         return Session(trust_env=False)
 
     async def aclose(self) -> None:
-        async with self._lock:
+        await asyncio.to_thread(self._close)
+
+    def _close(self) -> None:
+        with self._lock:
             session = self._session
             if session is None:
                 self._warmed = False
                 return
             # close 失败时保留同一个 session，供 IndexerService 的下一轮
             # aclose 真正重试；关闭期间继续持锁，禁止并发 get 创建替代会话。
-            await asyncio.to_thread(session.close)
-            if self._session is session:
-                self._session = None
+            session.close()
+            self._session = None
             self._warmed = False
 
     async def get(
@@ -536,17 +539,37 @@ class BrowserImpersonatingHttpClient:
         if redirect_limit < 0:
             raise ValueError("max_redirects cannot be negative")
         current = httpx.URL(url)
+        cancelled = threading.Event()
+        try:
+            return await asyncio.to_thread(
+                self._get, current, params, headers, redirect_limit, cancelled,
+            )
+        finally:
+            cancelled.set()
+
+    def _get(
+        self,
+        current: httpx.URL,
+        params: Mapping[str, str | int] | None,
+        headers: Mapping[str, str] | None,
+        redirect_limit: int,
+        cancelled: threading.Event,
+    ) -> HttpResponse:
         current_params = params
-        async with self._lock:
+        with self._lock:
+            if cancelled.is_set():
+                raise asyncio.CancelledError
             if self._session is None:
                 self._session = self._session_factory()
                 if self._cookies:
                     self._session.cookies.update(self._cookies)
             if self.warmup_url and not self._warmed:
-                await asyncio.to_thread(self._request_once, httpx.URL(self.warmup_url), None, {"Referer": self.warmup_url})
+                self._request_once(httpx.URL(self.warmup_url), None, {"Referer": self.warmup_url})
                 self._warmed = True
             for redirect_count in range(redirect_limit + 1):
-                response = await asyncio.to_thread(self._request_once, current, current_params, headers)
+                if cancelled.is_set():
+                    raise asyncio.CancelledError
+                response = self._request_once(current, current_params, headers)
                 current_params = None
                 if response.status_code in _REDIRECT_CODES:
                     location = response.headers.get("location", "").strip()
@@ -644,8 +667,6 @@ class BrowserImpersonatingHttpClient:
         declared_size = FixedHostHttpClient._content_length(response_headers.get("content-length"))
         if declared_size is not None and declared_size > self.max_response_bytes:
             raise HttpResponseTooLarge(f"declared response size {declared_size}")
-        if len(bounded_body) > self.max_response_bytes:
-            raise HttpResponseTooLarge(f"response size exceeds {self.max_response_bytes}")
         return HttpResponse(
             url=str(logical_url),
             status_code=int(response.status_code),
