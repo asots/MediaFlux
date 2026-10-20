@@ -189,6 +189,41 @@ class NsfwIdentifierTests(unittest.TestCase):
                 assert (identifier) is not None
                 self.assertEqual(identifier.code, expected)
 
+    def test_attached_c_suffix_is_consistent_across_identifier_cleaning_and_parts(self):
+        for name in ("SSNI596C", "ssni596c", "SSNI-596C", "SSNI.596c", "SSNI 596C"):
+            with self.subTest(name=name):
+                identifier = extract_nsfw_identifier(name + ".mp4")
+                self.assertIsNotNone(identifier)
+                assert identifier is not None
+                self.assertEqual(identifier.code, "SSNI-596")
+                self.assertEqual(assert_present(build_clean_title_candidate(name + ".mp4"))["title"], "SSNI-596")
+                self.assertIsNone(extract_nsfw_multipart(name + ".mp4"))
+                part = extract_nsfw_multipart(name + "_CD2.mp4")
+                self.assertIsNotNone(part)
+                assert part is not None
+                self.assertEqual(part.part_index, 2)
+                self.assertEqual(clean_nsfw_archive_title(name + "_CD2.mp4"), "SSNI-596")
+
+    def test_compact_c_suffix_does_not_accept_arbitrary_letters_or_release_noise(self):
+        for name in ("SSNI596CUT.mp4", "SSNI596CC.mp4", "SSNI596C7.mp4", "SSNI596XYZ.mp4",
+                     "Movie2026C.mp4", "AVC123C.mp4", "1080HEVC123C.mp4"):
+            with self.subTest(name=name):
+                self.assertIsNone(extract_nsfw_identifier(name))
+
+    def test_identifier_span_preserves_actual_release_spelling_and_ignores_prefix_noise(self):
+        for name, code in (("@SSNI596C_CD2.mp4", "SSNI-596"),
+                           ("www.example.com@KRI079C_CD2.mp4", "KRI-079"),
+                           ("@FC2-1234567_CD2.mp4", "FC2-PPV-1234567"),
+                           ("FC2-PPV-1234567C_CD2.mp4", "FC2-PPV-1234567"),
+                           ("HEYZO-1234C_CD2.mp4", "HEYZO-1234"),
+                           ("1pondo-012324_001C_CD2.mp4", "1PONDO-012324-001")):
+            with self.subTest(name=name):
+                self.assertEqual(clean_nsfw_archive_title(name), code)
+                part = extract_nsfw_multipart(name)
+                self.assertIsNotNone(part)
+                assert part is not None
+                self.assertEqual(part.part_index, 2)
+
     def test_numeric_prefix_identifiers_feed_clean_title_candidates(self):
         cases = {
             "300MIUM-1474/300MIUM-1474.mp4": "300MIUM-1474",

@@ -27,21 +27,26 @@ _DOMAIN_TOKEN_RE = re.compile(
     r"(?:com|net|org|tv|cc|me|cn|xyz|site|club|info|top|vip|pro|io)"
     r"(?:[/\\][^\s\[\]【】()]*)?"
 )
-_FC2_RE = re.compile(r"(?i)(?<![A-Z0-9])FC2[\s._-]*(?:PPV[\s._-]*)?(\d{5,9})(?!\d)")
+# 紧贴序号的独立 C 是发布尾缀，不属于番号；不吞掉任意字母/数字串。
+_CODE_SUFFIX = r"(?:C(?![A-Z0-9]))?"
+_FC2_RE = re.compile(r"(?i)(?<![A-Z0-9])FC2[\s._-]*(?:PPV[\s._-]*)?(\d{5,9})(?!\d)" + _CODE_SUFFIX)
 _NAMED_PROVIDER_RE = re.compile(
     r"(?i)(?<![A-Z0-9])(HEYZO|HEYDOUGA)[\s._-]*(\d{3,6})(?!\d)"
+    + _CODE_SUFFIX
 )
 _DATE_PROVIDER_RE = re.compile(
     r"(?i)(?<![A-Z0-9])(1PONDO|CARIB(?:BEANCOM)?|PACOPACOMAMA|10MUSUME)"
     r"[\s._-]*(\d{6,8})[\s._-]+(\d{2,4})(?!\d)"
+    + _CODE_SUFFIX
 )
 # 数字前缀仍须跟至少两位字母，避免把纯年份、分辨率或单字母编码当作番号。
 _GENERIC_CODE_RE = re.compile(
     r"(?i)(?<![A-Z0-9])((?:[0-9]{1,4})?[A-Z]{2,8}[A-Z0-9]{0,4})"
     r"[\s._-]+(\d{3,7})(?!\d)"
+    + _CODE_SUFFIX
 )
 _COMPACT_CODE_RE = re.compile(
-    r"(?i)(?<![A-Z0-9])([A-Z]{2,7})(\d{3,5})(?![A-Z0-9])"
+    r"(?i)(?<![A-Z0-9])([A-Z]{2,7})(\d{3,5})" + _CODE_SUFFIX + r"(?![A-Z0-9])"
 )
 _CODE_PREFIX_BLOCKLIST = {
     "AAC", "AC3", "AV1", "AVC", "BDMV", "CBR", "DDP", "DTS", "DV", "DVD",
@@ -286,22 +291,12 @@ _LEADING_RELEASE_YEAR_RE = re.compile(r"^(?:19|20)\d{2}(?=$|[\s._\-])")
 
 
 def _identifier_span(value: str, identifier: NsfwIdentifier) -> tuple[str, int, int] | None:
-    """在清洗后的字符串中定位番号，兼容连字符、点、空格和紧凑写法。"""
+    """定位解析器已经接受的原始片段，不从标准番号反向猜测另一套语法。"""
     cleaned = (value or "")
-    code = normalize_code(identifier.code)
-    parts = [part for part in code.split("-") if part]
-    if not parts:
-        return None
-    pattern = re.compile(
-        r"(?i)(?<![A-Z0-9])" + r"[\s._-]*".join(map(re.escape, parts))
-        + r"(?![A-Z0-9])"
+    match = re.search(
+        r"(?i)(?<![A-Z0-9])" + re.escape(identifier.matched_text) + r"(?![A-Z0-9])",
+        cleaned,
     )
-    match = pattern.search(cleaned)
-    if match is None:
-        compact = re.sub(r"[^A-Z0-9]", "", code)
-        if not compact:
-            return None
-        match = re.search(rf"(?i)(?<![A-Z0-9]){re.escape(compact)}(?![A-Z0-9])", cleaned)
     return (cleaned, match.start(), match.end()) if match else None
 
 
