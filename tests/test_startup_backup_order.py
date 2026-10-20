@@ -19,6 +19,10 @@ def test_startup_and_manual_backup_keep_config_before_backup(first, request):
         case = support.FirstRunTests()
         case.setUp()
         try:
+            # Importing app.main creates its module-level app. Warm the import while
+            # this case still has an empty installation; importing after the legacy
+            # database exists would migrate it outside the measured concurrency.
+            import app.main  # noqa: F401
             case.paths.ensure_writable_dirs()
             case.paths.env_file.write_text('MEDIAFLUX_INITIALIZED=1\nENV_WEB_PASSPORT=admin\nENV_WEB_PASSWORD=synthetic-password\nWEB_SECRET_KEY=synthetic-secret\n')
             case._reload_runtime_modules()
