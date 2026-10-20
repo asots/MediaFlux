@@ -4,6 +4,40 @@
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-10-20
+
+### Added
+- 设置页新增 Tavily API Key 只读连接测试，支持测试尚未保存的输入，并区分认证失败和服务暂不可用（[`319f1887`](https://github.com/li88iioo/MediaFlux/commit/319f1887)）。
+- Telegram 支持话题隔离、会话模型选择与分页菜单；选择或取消后收起按钮，首条消息及后续回复使用相同话题路由（[`6d8d73a7`](https://github.com/li88iioo/MediaFlux/commit/6d8d73a7)、[`be6fb4f3`](https://github.com/li88iioo/MediaFlux/commit/be6fb4f3)、[`e545d4aa`](https://github.com/li88iioo/MediaFlux/commit/e545d4aa)）。
+- Agent 增加流式显示开关、按实际媒体库范围查询最近入库、核对公网推荐与本地库存，以及整批资源预检与提交能力（[`37f56dae`](https://github.com/li88iioo/MediaFlux/commit/37f56dae)、[`be7ac825`](https://github.com/li88iioo/MediaFlux/commit/be7ac825)、[`2015239c`](https://github.com/li88iioo/MediaFlux/commit/2015239c)、[`6809bb3b`](https://github.com/li88iioo/MediaFlux/commit/6809bb3b)）。
+- 整理日志支持通过预览批量修正媒体身份；RSS 增加 12/24 小时刷新间隔；探索页增加空闲隐藏的返回顶部按钮（[`781d4329`](https://github.com/li88iioo/MediaFlux/commit/781d4329)、[`1bf0632b`](https://github.com/li88iioo/MediaFlux/commit/1bf0632b)、[`4d200b93`](https://github.com/li88iioo/MediaFlux/commit/4d200b93)）。
+
+### Changed
+- Agent 按领域拆分业务与内核职责，分离回合、模型流、工具执行和终态处理；只读探索使用固定有界额度，不再靠成功读取逐次增加规划额度（[`852dbb4d`](https://github.com/li88iioo/MediaFlux/commit/852dbb4d)、[`479131ae`](https://github.com/li88iioo/MediaFlux/commit/479131ae)、[`10ec9bdd`](https://github.com/li88iioo/MediaFlux/commit/10ec9bdd)、[`68eeee23`](https://github.com/li88iioo/MediaFlux/commit/68eeee23)）。
+- 整理统一单文件身份与季集规划、主文件和伴随文件事务及失败补偿；媒体推荐和偏好下沉到共享业务层，避免 Web 与 Agent 各自实现（[`3fe15878`](https://github.com/li88iioo/MediaFlux/commit/3fe15878)、[`50b1e996`](https://github.com/li88iioo/MediaFlux/commit/50b1e996)、[`1163b31c`](https://github.com/li88iioo/MediaFlux/commit/1163b31c)）。
+- 首次安装收敛为 Web 初始化流程；配置校验、持久发布与运行快照使用统一事务入口（[`bc9d6e85`](https://github.com/li88iioo/MediaFlux/commit/bc9d6e85)、[`4dea3297`](https://github.com/li88iioo/MediaFlux/commit/4dea3297)）。
+- 索引站独立配置，区分前端搜索和 Agent 来源权限；资源目录先完成分页再应用结果上限。公网磁力在下载接入边界补充 Tracker，移除固定片名别名推断（[`275fe24b`](https://github.com/li88iioo/MediaFlux/commit/275fe24b)、[`4c867b68`](https://github.com/li88iioo/MediaFlux/commit/4c867b68)、[`9facc6d6`](https://github.com/li88iioo/MediaFlux/commit/9facc6d6)、[`705471ba`](https://github.com/li88iioo/MediaFlux/commit/705471ba)、[`5bcba2a5`](https://github.com/li88iioo/MediaFlux/commit/5bcba2a5)）。
+
+### Fixed
+- 连续对话按窗口剩余容量保留最近查询工具的 Schema，仍重新核验当前权限；修复能力召回把工具示例中的“排除已入库”误当成工具动作，导致推荐工具被压低的问题（[`59d4ed53`](https://github.com/li88iioo/MediaFlux/commit/59d4ed53)、[`73c65809`](https://github.com/li88iioo/MediaFlux/commit/73c65809)）。
+- 修复 Agent 中断流、跨轮约束、部分查询失败和确认后后台任务的状态交接；停止、过期确认及重试保留执行身份，不把提交、检查或文件移动当作入库完成（[`077ea313`](https://github.com/li88iioo/MediaFlux/commit/077ea313)、[`fc9adc27`](https://github.com/li88iioo/MediaFlux/commit/fc9adc27)、[`0f7fae6b`](https://github.com/li88iioo/MediaFlux/commit/0f7fae6b)、[`42f2cd6c`](https://github.com/li88iioo/MediaFlux/commit/42f2cd6c)）。
+- 日历查询自动补齐请求范围；缺集搜索排除明确错集/错作品候选，媒体库存支持合并集文件；推荐翻页保留来源偏移（[`e60a79c8`](https://github.com/li88iioo/MediaFlux/commit/e60a79c8)、[`b2cac42d`](https://github.com/li88iioo/MediaFlux/commit/b2cac42d)、[`6207504a`](https://github.com/li88iioo/MediaFlux/commit/6207504a)、[`24212db5`](https://github.com/li88iioo/MediaFlux/commit/24212db5)）。
+- RSS 条目与下载中心重试共享状态，未处理条目优先排序，耗尽重试的提醒不丢失；电影追更预览与执行复用相同观察事实，策略和范围原子更新（[`226a2c01`](https://github.com/li88iioo/MediaFlux/commit/226a2c01)、[`ed615a3f`](https://github.com/li88iioo/MediaFlux/commit/ed615a3f)、[`eea85ed6`](https://github.com/li88iioo/MediaFlux/commit/eea85ed6)、[`33f58359`](https://github.com/li88iioo/MediaFlux/commit/33f58359)、[`47e11608`](https://github.com/li88iioo/MediaFlux/commit/47e11608)）。
+- 下载提交时钟与进度更新时间分离；重启后恢复尚未开始的整理交接；显示名称补齐不改变原有下载路由（[`f2bb8467`](https://github.com/li88iioo/MediaFlux/commit/f2bb8467)、[`f52e13e1`](https://github.com/li88iioo/MediaFlux/commit/f52e13e1)、[`8fbc0d33`](https://github.com/li88iioo/MediaFlux/commit/8fbc0d33)）。
+- STRM 元数据输出与刷新绑定同一冻结根目录，恢复中断后的未索引安装，保留同步期间到达的增量变化；完整性不足时不执行删除型清理（[`7e74db7d`](https://github.com/li88iioo/MediaFlux/commit/7e74db7d)、[`49b7aa4f`](https://github.com/li88iioo/MediaFlux/commit/49b7aa4f)、[`1188ccb4`](https://github.com/li88iioo/MediaFlux/commit/1188ccb4)、[`7f288bfc`](https://github.com/li88iioo/MediaFlux/commit/7f288bfc)）。
+- 修复索引器取消请求后浏览器会话提前释放，以及媒体代理握手取消时连接泄漏；探索弹窗释放关闭后的结果，侧栏展开收起时文字不再换行跳变（[`9a2e9301`](https://github.com/li88iioo/MediaFlux/commit/9a2e9301)、[`cd437066`](https://github.com/li88iioo/MediaFlux/commit/cd437066)、[`ab799610`](https://github.com/li88iioo/MediaFlux/commit/ab799610)、[`daed6895`](https://github.com/li88iioo/MediaFlux/commit/daed6895)）。
+- 启动与备份并发测试显式隔离首次模块导入，消除单独运行与全量套件之间的顺序依赖，保留原锁顺序与备份完整性断言（[`acb41080`](https://github.com/li88iioo/MediaFlux/commit/acb41080)）。
+
+### 升级说明
+- 本版本数据库由 schema31 → 35；从 v0.1.13 升级时自动执行连续迁移，增加下载展示名称、后台轮询索引、巡检周期身份和独立下载提交时钟，保留已有任务与历史记录。
+- 升级前请停止服务，对配置、凭据和数据库进行完整离线备份；WAL 模式下不要在运行中只复制主 `.db` 文件。先确认数据卷与 STRM 输出目录的挂载和运行账户权限。
+- 回退必须停止服务，并按离线恢复流程恢复升级前配置和数据库；不要直接让 schema31 程序打开 schema35 数据库。
+- Web 与 Telegram 功能及外部来源仍取决于各自配置。已有历史确认、未知远端写入结果需要按当前状态复核，不应通过反复提交来验证升级。
+
+### 已知限制
+- 外部索引、云盘离线下载与模型服务可能超时或限流；下载受理不代表媒体已传输完成。发布组季集映射仍需可核验依据。
+- 自动化通过与有界真实对话验收不等于所有模型、所有媒体和全部生产任务都已验证；未覆盖的第三方环境仍需部署后按自身配置验收。
+
 ## [0.1.13] - 2026-09-19
 
 ### Added
@@ -315,7 +349,8 @@ MediaFlux 首个正式开源版本发布！致力于为家庭媒体中心提供�
 - **本地运行与零遥测**：100% 独立运行在用户设备，无任何远程遥测或数据上报，所有凭据与数据库均保存在本地。
 - **严格安全防护**：全局 CSRF 防护、Session 防篡改、首启绑定本地回环与生产密钥强制校验。
 
-[Unreleased]: https://github.com/li88iioo/MediaFlux/compare/v0.1.13...HEAD
+[Unreleased]: https://github.com/li88iioo/MediaFlux/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/li88iioo/MediaFlux/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/li88iioo/MediaFlux/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/li88iioo/MediaFlux/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/li88iioo/MediaFlux/compare/v0.1.10...v0.1.11
