@@ -12,6 +12,17 @@ _BUSINESS_LOG_FIELDS = (
 _FINISH_FIELDS = {"status", "operation_type", "current_parent_id", "current_name", "error"}
 
 
+def list_related_organize_logs(log_id: int) -> list[sqlite3.Row]:
+    """同一云端主文件的其它历史记录；只提供导航，不替换任一历史快照。"""
+    with db.get_conn() as conn:
+        return conn.execute(
+            "SELECT other.id,other.status,other.updated_at FROM organize_log AS current "
+            "JOIN organize_log AS other ON other.source=current.source AND other.file_id=current.file_id "
+            "WHERE current.id=? AND current.file_id!='' AND other.id!=current.id "
+            "ORDER BY other.updated_at DESC,other.id DESC LIMIT 5", (log_id,),
+        ).fetchall()
+
+
 def list_organize_operation_steps(log_id: int, limit: int = 300) -> list[sqlite3.Row]:
     with db.get_conn() as conn:
         return conn.execute(

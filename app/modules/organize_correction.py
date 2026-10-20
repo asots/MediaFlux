@@ -22,6 +22,7 @@ from app.clients.guangya import (
 )
 from app.logger import get_logger
 from app.modules.guangya_compensation import restore_guangya_file
+from app.modules.directory_scrape_errors import DirectoryScrapeConflictError
 from app.modules.nsfw import (
     CleanTitleCandidate,
     build_clean_title_candidate,
@@ -184,6 +185,7 @@ class OrganizeCorrectionService:
         status = str(data.get("status") or "")
         busy = status in BUSY_STATUSES
         data["items"] = items
+        data["related_logs"] = [dict(row) for row in db.list_related_organize_logs(log_id)]
         data["operations"] = steps
         data["delete_audits"] = [
             self._row_dict(audit)
@@ -645,6 +647,7 @@ class OrganizeCorrectionService:
         parts.extend(self.organizer.build_media_path_parts(match, parsed, rules))
         target_path = "/".join(parts)
         self._verify_nsfw_target_identity(match, target_path)
+        self._verify_items(items)
         planned = []
         for item in items:
             target_name = new_name if item.role == "video" else companion_target_name(
@@ -696,19 +699,19 @@ class OrganizeCorrectionService:
     def _verify_item(self, item: CorrectionItem) -> GuangYaFile:
         remote = self.client.file_info(item.file_id)
         if not remote:
-            raise RuntimeError(f"云端文件不存在或详情不可用: {item.current_name or item.file_id}")
+            raise DirectoryScrapeConflictError("云端文件不存在或详情不可用，请先刷新云盘目录核对，不要重复提交整理。")
         if not (remote.file_id or "").strip():
-            raise RuntimeError(f"无法读取云端文件详情: {item.current_name or item.file_id}")
+            raise DirectoryScrapeConflictError("无法读取云端文件详情，请稍后刷新云盘目录重试。")
         if remote.file_id != item.file_id:
-            raise RuntimeError(f"云端文件详情不匹配: {item.current_name or item.file_id}")
+            raise DirectoryScrapeConflictError("云端文件详情不匹配，已停止整理，请核对当前文件。")
         if item.current_parent_id and remote.parent_id != item.current_parent_id:
-            raise RuntimeError(f"文件位置已被外部修改: {item.current_name}")
+            raise DirectoryScrapeConflictError("文件位置已变化，当前日志快照已过期；请查看同一文件的其它整理记录，或在当前云盘目录重新识别。")
         if item.current_name and remote.name != item.current_name:
-            raise RuntimeError(f"文件名已被外部修改: {item.current_name} → {remote.name}")
+            raise DirectoryScrapeConflictError("文件名已变化，当前日志快照已过期；请查看同一文件的其它整理记录，或在当前云盘目录重新识别。")
         if item.size and remote.size and item.size != remote.size:
-            raise RuntimeError(f"文件大小已变化: {item.current_name}")
+            raise DirectoryScrapeConflictError("文件大小已变化，当前日志快照已过期，请在当前云盘目录重新识别。")
         if item.etag and remote.etag and item.etag != remote.etag:
-            raise RuntimeError(f"文件校验值已变化: {item.current_name}")
+            raise DirectoryScrapeConflictError("文件校验值已变化，当前日志快照已过期，请在当前云盘目录重新识别。")
         return remote
 
     def _verify_items(self, items: list[CorrectionItem]) -> None:

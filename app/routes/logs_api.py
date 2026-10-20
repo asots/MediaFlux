@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from app import database as db
 from app.logger import get_logger, log_throttled
 from app.modules.organize_correction import OrganizeCorrectionService
+from app.modules.directory_scrape_errors import DirectoryScrapeConflictError, public_error_message
 from app.modules.organize_tasks import get_organize_manager
 from app.modules.runtime_log import clear_logs, log_snapshot, read_stream_chunk
 from app.web import api_error, require_api_login
@@ -402,6 +403,8 @@ def preview_reorganize(log_id: int, request: Request,
             _optional_position(data, "episode", minimum=1),
             provider=provider, external_id=external_id,
         )
+    except DirectoryScrapeConflictError as exc:
+        return api_error(public_error_message(exc), exc.status_code)
     except LookupError as exc:
         return api_error(str(exc), 404)
     except ValueError as exc:
@@ -578,6 +581,8 @@ def run_reorganize(log_id: int, request: Request,
             return api_error(result["error"], 409)
         transferred = True
         return {**result, "operation_token": token}
+    except DirectoryScrapeConflictError as exc:
+        return api_error(public_error_message(exc), exc.status_code)
     except LookupError as exc:
         return api_error(str(exc), 404)
     except ValueError as exc:

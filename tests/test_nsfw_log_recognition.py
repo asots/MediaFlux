@@ -9,6 +9,7 @@ from app import database as db
 from app.clients.guangya import GuangYaFile
 from app.modules.organize import OrganizeRules
 from app.modules.organize_correction import OrganizeCorrectionService
+from app.modules.directory_scrape_errors import DirectoryScrapeConflictError
 from app.modules.scraper import Candidate, MatchResult, TMDBScraper
 from app.modules.nsfw import NsfwRecognizer, clear_nsfw_cache
 from tests.support import isolated_test_database
@@ -18,7 +19,7 @@ from tests.support import isolated_test_database
 def log_case():
     with isolated_test_database():
         client = MagicMock()
-        client.file_info.return_value = None
+        client.file_info.return_value = GuangYaFile('video', 'SODAH-003.mp4', False, 100, 'etag', 'existing')
         service = OrganizeCorrectionService(client=client, scraper=TMDBScraper())
         rules = OrganizeRules(
             target_dir_id='archive', region_split=False, year_split=False,
@@ -47,10 +48,14 @@ def make_log(provider='clean_title', source='', *, name='SODAH-003.mp4', status=
     return log_id
 
 
-@pytest.mark.parametrize('filename', ['SSNI596C.mp4', 'SSNI-596C.mp4', 'SSNI396C.mp4'])
-def test_compact_skipped_log_search_preview_and_reorganize_share_identity(log_case, filename):
+@pytest.mark.parametrize('filename,number', [
+    ('SSNI596C.mp4', 'SSNI-596'), ('SSNI-596C.mp4', 'SSNI-596'),
+    ('SSNI396C.mp4', 'SSNI-396'), ('KRI079C.mp4', 'KRI-079'),
+    ('SPRBD-019.FHD-www.52iv.net.mkv', 'SPRBD-019'),
+    ('SPRBD-019.1080p.example.com.mkv', 'SPRBD-019'),
+])
+def test_skipped_log_search_preview_and_reorganize_share_identity(log_case, filename, number):
     service, _ = log_case
-    number = 'SSNI-396' if '396' in filename else 'SSNI-596'
     log_id = make_log('', 'adult-source', name=filename, status='skipped')
     metadata = {'provider': 'JavBus', 'id': number, 'number': number,
                 'title': '归档测试', 'release_date': '2019-01-01'}
@@ -97,6 +102,87 @@ def test_compact_skipped_log_search_preview_and_reorganize_share_identity(log_ca
     finally:
         recognizer.close()
         clear_nsfw_cache()
+
+
+def test_other_log_already_organized_same_file_is_reported_before_execution(log_case):
+    service, _ = log_case
+    successful_log = make_log('', 'adult-source', name='KRI079C.mp4', status='skipped')
+    stale_log = make_log('', 'adult-source', name='KRI079C.mp4', status='skipped')
+    # 与生产相同：较小的日志ID后来完成重整，较大的历史记录仍是旧快照。
+    db.update_organize_log(successful_log, status='success', operation_type='reorganize',
+                           current_name='KRI-079.2019.mp4', current_parent_id='archived',
+                           provider='metatube', external_id='JavBus:KRI-079')
+    item = db.list_organize_log_items(successful_log)[0]
+    db.update_organize_log_item(item['id'], current_name='KRI-079.2019.mp4',
+                                current_parent_id='archived', status='success')
+    service.client.file_info.return_value = GuangYaFile('video', 'KRI-079.2019.mp4', False, 100, 'etag', 'archived')
+    before_row = db.get_organize_log(stale_log)
+    assert before_row is not None
+    before = dict(before_row)
+    with pytest.raises(DirectoryScrapeConflictError, match='位置.*变化|位置.*修改'):
+        service.preview_reorganize(stale_log, '', 'movie', provider='clean_title', external_id='KRI-079')
+    detail = service.detail(stale_log)
+    assert [row['id'] for row in detail['related_logs']] == [successful_log]
+    assert detail['related_logs'][0]['status'] == 'success'
+    after_row = db.get_organize_log(stale_log)
+    assert after_row is not None
+    assert dict(after_row) == before
+    service.client.create_dir.assert_not_called()
+    service.client.move.assert_not_called()
+    service.client.rename.assert_not_called()
+
+
+def test_source_changed_after_preview_keeps_actionable_background_error(log_case, caplog):
+    from app.modules.organize_tasks import OrganizeTaskManager
+    from time import monotonic, sleep
+
+    service, _ = log_case
+    log_id = make_log('', 'adult-source', name='KRI079C.mp4', status='skipped')
+    service.client.file_info.return_value = GuangYaFile('video', 'KRI079C.mp4', False, 100, 'etag', 'existing')
+    preview = service.preview_reorganize(log_id, '', 'movie', provider='clean_title', external_id='KRI-079')
+    service.client.file_info.return_value = GuangYaFile('video', 'KRI-079.2019.mp4', False, 100, 'etag', 'archived')
+    manager = OrganizeTaskManager()
+    try:
+        with patch.object(manager, '_wake_download_tracker'):
+            result = manager.start_operation('重新整理', f'日志 {log_id}',
+                lambda: service._execute_reorganize(log_id, 'stale-log', preview['version'], preview))
+            assert result['ok']
+            deadline = monotonic() + 3
+            while monotonic() < deadline:
+                task = manager.task_result(result['task_id'])
+                if task and task['status'] == 'failed':
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail('后台任务未在限定时间收敛')
+            assert '当前日志快照已过期' in task['error']
+            assert '当前日志快照已过期' in caplog.text
+        service.client.move.assert_not_called()
+        service.client.rename.assert_not_called()
+    finally:
+        manager.shutdown(timeout=3)
+
+
+def test_stale_preview_api_returns_conflict_before_task_submission(log_case):
+    import json
+    from starlette.responses import JSONResponse
+    from starlette.requests import Request
+    from app.routes.logs_api import preview_reorganize, run_reorganize
+
+    service, _ = log_case
+    log_id = make_log('', 'adult-source', name='KRI079C.mp4', status='skipped')
+    service.client.file_info.return_value = GuangYaFile('video', 'KRI-079.2019.mp4', False, 100, 'etag', 'archived')
+    data = {'provider': 'clean_title', 'external_id': 'KRI-079', 'media_type': 'movie',
+            'operation_token': 'stale-preview', 'expected_version': 1}
+    request = Request({'type': 'http', 'method': 'POST', 'path': '/', 'headers': [], 'session': {'logged_in': True}})
+    with patch('app.routes.logs_api.OrganizeCorrectionService', return_value=service), \
+            patch('app.routes.logs_api.get_organize_manager') as manager:
+        for endpoint in (preview_reorganize, run_reorganize):
+            response = endpoint(log_id, request, data)
+            assert isinstance(response, JSONResponse)
+            assert response.status_code == 409
+            assert '当前日志快照已过期' in json.loads(bytes(response.body))['error']
+        manager.assert_not_called()
 
 
 @pytest.mark.parametrize('filename,error', [('SSNI596C.mp4', '番号与原文件不一致'),

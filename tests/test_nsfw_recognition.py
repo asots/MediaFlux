@@ -1016,6 +1016,12 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
         return log_id
 
     @staticmethod
+    def _client():
+        client = MagicMock()
+        client.file_info.return_value = GuangYaFile("video", "SSIS-001.2024.1080p.mp4", False, 1024, "etag-video", "adult-source")
+        return client
+
+    @staticmethod
     def _rules() -> OrganizeRules:
         return OrganizeRules(
             target_dir_id="archive", small_file_mb=0, region_split=False,
@@ -1028,7 +1034,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
 
     def test_pending_adult_log_exposes_metatube_recognition_profile(self):
         log_id = self._pending_log()
-        service = OrganizeCorrectionService(client=MagicMock(), scraper=MagicMock())
+        service = OrganizeCorrectionService(client=self._client(), scraper=MagicMock())
 
         with patch(
             "app.modules.organize_correction.OrganizeRules.from_config",
@@ -1044,7 +1050,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
     def test_pending_adult_search_uses_metatube_without_tmdb_fallback(self):
         log_id = self._pending_log()
         scraper = MagicMock()
-        service = OrganizeCorrectionService(client=MagicMock(), scraper=scraper)
+        service = OrganizeCorrectionService(client=self._client(), scraper=scraper)
         recognizer = MagicMock()
         recognizer.candidates.return_value = [Candidate(
             tmdb_id="", title="SSIS-001 测试标题", year="2024", score=1.0,
@@ -1068,7 +1074,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
 
     def test_pending_adult_search_falls_back_to_clean_title_candidate(self):
         log_id = self._pending_log()
-        service = OrganizeCorrectionService(client=MagicMock(), scraper=MagicMock())
+        service = OrganizeCorrectionService(client=self._client(), scraper=MagicMock())
         recognizer = MagicMock()
         recognizer.candidates.return_value = []
 
@@ -1087,7 +1093,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
 
     def test_pending_adult_preview_accepts_clean_title_candidate(self):
         log_id = self._pending_log()
-        service = OrganizeCorrectionService(client=MagicMock(), scraper=TMDBScraper())
+        service = OrganizeCorrectionService(client=self._client(), scraper=TMDBScraper())
 
         with patch(
             "app.modules.organize_correction.OrganizeRules.from_config",
@@ -1106,7 +1112,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
 
     def test_pending_adult_preview_resolves_metatube_and_keeps_scoped_archive(self):
         log_id = self._pending_log()
-        service = OrganizeCorrectionService(client=MagicMock(), scraper=TMDBScraper())
+        service = OrganizeCorrectionService(client=self._client(), scraper=TMDBScraper())
         recognizer = MagicMock()
         detail = {
             "provider": "javbus", "id": "ssis001", "number": "SSIS-001",
@@ -1146,7 +1152,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
             "guangya", "other", "成人内容/SSIS-001", "other-video", "success", "",
             provider="metatube", external_id="javbus:other", media_type="movie",
         )
-        client = MagicMock()
+        client = self._client()
         service = OrganizeCorrectionService(client=client, scraper=TMDBScraper())
         with (
             patch("app.modules.organize_correction.OrganizeRules.from_config", return_value=self._rules()),
@@ -1165,7 +1171,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
             "guangya", "other", "成人内容/SSIS-001", "other-video", "success", "",
             provider="metatube", external_id="javbus:other", media_type="movie",
         )
-        client = MagicMock()
+        client = self._client()
         service = OrganizeCorrectionService(client=client, scraper=TMDBScraper())
         with patch("app.modules.organize_correction.OrganizeRules.from_config", return_value=self._rules()), patch.object(service, "_verify_items"):
             preview = service.preview_batch(
@@ -1180,7 +1186,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
     def test_nsfw_reorganize_rechecks_target_identity_before_writes(self):
         self.enterContext(isolated_test_database())
         log_id = self._pending_log()
-        client = MagicMock()
+        client = self._client()
         service = OrganizeCorrectionService(client=client, scraper=TMDBScraper())
         with patch("app.modules.organize_correction.OrganizeRules.from_config", return_value=self._rules()):
             preview = service.preview_reorganize(log_id, "", "movie", provider="clean_title", external_id="SSIS-001")
@@ -1197,7 +1203,7 @@ class NsfwCorrectionIntegrationTests(IsolatedDatabaseTestCase):
 
     def test_pending_adult_preview_rejects_different_number(self):
         log_id = self._pending_log()
-        service = OrganizeCorrectionService(client=MagicMock(), scraper=TMDBScraper())
+        service = OrganizeCorrectionService(client=self._client(), scraper=TMDBScraper())
         recognizer = MagicMock()
         detail = {"number": "ABP-123"}
         recognizer.resolve.return_value = (MatchResult(

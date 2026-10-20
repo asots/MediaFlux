@@ -1629,15 +1629,14 @@ class OrganizeTaskManager:
                     self._remember_task_locked(self._task)
                     self._remember_operation_locked(self._task)
         except Exception as exc:
-            logger.error(
-                "整理操作失败 operation=%s type=%s",
-                operation,
-                type(exc).__name__,
-            )
             error = (
                 public_error_message(exc)
                 if isinstance(exc, DirectoryScrapePublicError)
                 else f"{operation}失败，请稍后重试"
+            )
+            logger.error(
+                "整理操作失败 operation=%s task_id=%s type=%s reason=%s",
+                operation, task_id, type(exc).__name__, error,
             )
             with self._state_lock:
                 if self._task.get("id") == task_id:

@@ -1495,6 +1495,7 @@ from app.repositories.organize_history import (  # noqa: E402,F401
     finish_organize_operation_step,
     list_latest_reversible_organize_steps,
     list_organize_operation_steps,
+    list_related_organize_logs,
     list_pending_organize_probe_steps,
     restore_organize_business_snapshot,
 )

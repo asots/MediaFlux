@@ -133,6 +133,7 @@ def test_log_reorganize_recovers_part_from_original_name(pipeline):
         'current_parent_id': 'archive', 'size': 100, 'etag': 'etag', 'status': 'success',
     }])
     service = OrganizeCorrectionService(client=organizer.client, scraper=organizer.scraper)
+    organizer.client.file_info.return_value = GuangYaFile('video', current, False, 100, 'etag', 'archive')
     with patch('app.modules.organize_correction.OrganizeRules.from_config', return_value=rules):
         preview = service.preview_reorganize(
             log_id, '', 'movie', provider='clean_title', external_id='FC2-PPV-4970405',

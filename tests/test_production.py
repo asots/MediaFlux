@@ -23,7 +23,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import ANY, Mock, call, patch
 
 from fastapi.testclient import TestClient
 
@@ -66,6 +66,7 @@ from app.modules.media_proxy import (
 from app.modules.naming import build_context, render_template, validate_template
 from app.modules.organize import OrganizePlan, Organizer, OrganizeRules
 from app.modules.organize_correction import OrganizeCorrectionService
+from app.modules.directory_scrape_errors import DirectoryScrapeConflictError
 from app.modules.organize_execution import execute_organize_plans
 from app.modules.organize_postprocess import companion_target_name
 from app.modules.rss import RSSEngine
@@ -1208,6 +1209,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
         with (
             patch("app.database.get_organize_log", return_value=row),
             patch("app.database.list_organize_log_items", return_value=items),
+            patch("app.database.list_related_organize_logs", return_value=[]),
             patch("app.database.list_organize_operation_steps", return_value=[]),
             patch("app.database.list_organize_delete_audits", return_value=[]),
         ):
@@ -1453,6 +1455,11 @@ class OrganizeCorrectionTests(unittest.TestCase):
                     )
 
                 client = Mock()
+                remote = {
+                    "video": GuangYaFile("video", "Show.S01E01.mkv", False, 100, "", "old-id"),
+                    "sub": GuangYaFile("sub", "Show.S01E01.zh.ass", False, 2, "", "old-id"),
+                }
+                client.file_info.side_effect = remote.get
                 service = OrganizeCorrectionService(
                     client=client, scraper=cast(TMDBScraper, FakeScraper())
                 )
@@ -1474,7 +1481,10 @@ class OrganizeCorrectionTests(unittest.TestCase):
                 self.assertEqual(
                     preview["items"][1]["to_name"], "正确节目.2026.S01E01.zh.ass"
                 )
-                client.assert_not_called()
+                self.assertEqual(client.file_info.call_args_list, [call("video"), call("sub")])
+                client.move.assert_not_called()
+                client.rename.assert_not_called()
+                client.create_dir.assert_not_called()
 
     def test_reorganize_preview_defaults_bare_episode_to_first_season(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1538,8 +1548,10 @@ class OrganizeCorrectionTests(unittest.TestCase):
                             confidence=1.0,
                         )
 
+                client = Mock()
+                client.file_info.return_value = GuangYaFile("video", name, False, 100, "", "source-id")
                 service = OrganizeCorrectionService(
-                    client=Mock(), scraper=cast(TMDBScraper, FakeScraper())
+                    client=client, scraper=cast(TMDBScraper, FakeScraper())
                 )
                 with patch(
                     "app.modules.organize_correction.OrganizeRules.from_config",
@@ -1791,7 +1803,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
                 )
                 service = OrganizeCorrectionService(client=client, scraper=cast(TMDBScraper, object()))
                 version = service.detail(log_id)["version"]
-                with self.assertRaisesRegex(RuntimeError, "文件名已被外部修改"):
+                with self.assertRaisesRegex(DirectoryScrapeConflictError, "文件名已变化.*快照已过期"):
                     service.return_to_source(log_id, "return-token", version)
                 client.move.assert_not_called()
                 client.rename.assert_not_called()
@@ -2790,7 +2802,7 @@ class OrganizeCorrectionTests(unittest.TestCase):
             with patch("app.database.DB_PATH", test_db):
                 service = OrganizeCorrectionService(client=client, scraper=cast(TMDBScraper, object()))
                 version = service.detail(log_id)["version"]
-                with self.assertRaisesRegex(RuntimeError, "文件名已被外部修改"):
+                with self.assertRaisesRegex(DirectoryScrapeConflictError, "文件名已变化.*快照已过期"):
                     service.delete_group(log_id, "delete-token", version, "DELETE")
                 get_organize_log_result_5 = db.get_organize_log(log_id)
                 assert get_organize_log_result_5 is not None

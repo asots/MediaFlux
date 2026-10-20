@@ -107,7 +107,7 @@ const detailFor=id=>{
     release_parse:{media_type:'tv',effective_position:{season:1,episode:2}},
     allowed_actions:allowed,
     items:[{file_id:'f'+id,role:'video',current_name:'Series.S01E02.mkv',original_name:'Series.S01E02.mkv',current_parent_id:'p',status:'success'}],
-    operations:[],delete_audits:[],
+    operations:[],delete_audits:[],related_logs:window.__testConfig.relatedLogsById?.[id]||[],
   };
 };
 window.__releasePreview=id=>{
@@ -377,6 +377,22 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.assertFalse(self.page.locator("#organizeReorganizeBtn").is_enabled())
         self.assertTrue(self.page.locator("#organizeNamingPreview").evaluate("el => el.hidden"))
         self.assertEqual(self.page.locator("#organizeTmdbQuery").input_value(), "旧识别标题")
+
+    def test_stale_log_preview_can_open_other_successful_record_without_resubmission(self):
+        self.page.set_viewport_size({"width": 390, "height": 844})
+        self.page.evaluate("""() => Object.assign(window.__testConfig, {
+          relatedLogsById:{'10':[{id:11,status:'success',updated_at:'2026-10-21 03:19:39'}]},
+          singlePreviewFailures:['文件位置已变化，当前日志快照已过期；请查看同一文件的其它整理记录'],
+        })""")
+        self.open_single_candidates()
+        self.page.locator('.organize-candidate').first.click()
+        self.page.locator('#organizeOperationState').filter(has_text='快照已过期').wait_for()
+        self.assertTrue(self.page.locator('#organizeReorganizeBtn').is_disabled())
+        self.page.locator('#organizeSafetyNotice button').filter(has_text='#11 · 成功').click()
+        self.page.locator('#organizeDetailTitle').filter(has_text='#11').wait_for()
+        self.assertTrue(self.page.locator('#organizeSafetyNotice').is_hidden())
+        self.assertFalse(any(call['path'].endswith('/reorganize') and call['method']=='POST' for call in self.calls()))
+        self.assertTrue(self.page.locator('#organizeDetailModal').evaluate('el => el.scrollWidth <= el.clientWidth'))
 
     def test_single_preview_success_respects_reorganize_permission(self):
         self.page.evaluate("() => window.__testConfig.detail11Reorganize=false")

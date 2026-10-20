@@ -649,7 +649,21 @@ function _renderOrganizeDetail(data){
         </span>
         <span class="organize-detail-media-meta">${_esc(subtitleParts.join(' · ') || '媒体组纠偏与操作审计')}</span>
     `;
-    const notice=document.getElementById('organizeSafetyNotice');notice.hidden=!data.safety_notice;notice.textContent=data.safety_notice||'';
+    const notice=document.getElementById('organizeSafetyNotice');
+    const related=data.related_logs||[];
+    notice.hidden=!data.safety_notice&&!related.length;
+    notice.textContent=data.safety_notice||'';
+    if(related.length){
+        notice.append(document.createTextNode(' 同一文件的其它整理记录（按最近更新排序）：'));
+        for(const record of related){
+            const button=document.createElement('button');
+            button.type='button';button.className='jump-btn';
+            button.textContent=`#${record.id} · ${orgStatusMap[record.status]?.[0]||record.status}`;
+            button.title=record.updated_at||'';
+            button.addEventListener('click',()=>openOrganizeDetail(record.id,button));
+            notice.append(button);
+        }
+    }
     const originalName = data.original_name || '-';
     const currentName = data.current_name || '-';
     const originalParentId = data.original_parent_id || '-';
