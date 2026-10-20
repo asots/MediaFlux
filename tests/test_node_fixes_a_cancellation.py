@@ -170,7 +170,10 @@ class RSSAutoCancellationTests(unittest.TestCase):
                 self.cloud_backend.assert_not_called()
                 self.assertTrue(result.get("conflict") or result.get("cancelled"))
                 pending = db.list_rss_entries(sub_id=self.sid, status="pending")
-                self.assertEqual(len(pending), 1)
+                self.assertEqual(len(pending), 0)
+                current = db.get_rss_subscription(self.sid)
+                assert current is not None
+                self.assertIsNone(current["last_refreshed_at"])
 
     def test_automatic_without_explicit_revision_still_fences_fetch(self):
         def parse(_url):

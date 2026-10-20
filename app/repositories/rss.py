@@ -325,54 +325,61 @@ def add_rss_entry_with_media(
     season: int | None = None,
     episode: int | None = None,
     skip_reason: str = "",
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
-    """按 guid 与可信 media_key 去重写入，并保留可见跳过原因。"""
+    """按 guid 与可信 media_key 去重；传入连接时加入调用方的写事务。"""
+    if connection is None:
+        with db.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return add_rss_entry_with_media(
+                sub_id, title, guid, pub_date=pub_date, payload=payload,
+                media_key=media_key, tmdb_id=tmdb_id, season=season,
+                episode=episode, skip_reason=skip_reason, connection=conn,
+            )
     timestamp = db.now()
     normalized_key = (media_key or "").strip()
     normalized_reason = (skip_reason or "").strip()[:160]
-    with db.get_conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        duplicate_guid = conn.execute(
-            "SELECT e.id,e.status,m.media_key,m.skip_reason FROM rss_entries e "
-            "LEFT JOIN rss_entry_media m ON m.rss_entry_id=e.id "
-            "WHERE e.rss_item_id=? AND e.guid=? LIMIT 1", (sub_id, guid),
-        ).fetchone()
-        if duplicate_guid is not None:
-            # 自动语义跳过是可重评估的发现结果；人工跳过与库内跳过不重开。
-            if (duplicate_guid["status"] == "skipped"
-                    and duplicate_guid["skip_reason"] == _RSS_MEDIA_DUPLICATE_REASON
-                    and normalized_key and duplicate_guid["media_key"] == normalized_key
-                    and not normalized_reason
-                    and _rss_media_blocker(conn, normalized_key, exclude_id=duplicate_guid["id"]) is None):
-                conn.execute(
-                    "UPDATE rss_entries SET status='pending',processed=0,processed_at=NULL WHERE id=?",
-                    (duplicate_guid["id"],),
-                )
-                conn.execute(
-                    "UPDATE rss_entry_media SET skip_reason='',updated_at=? WHERE rss_entry_id=?",
-                    (timestamp, duplicate_guid["id"]),
-                )
-            return {"id": None, "status": "duplicate_guid", "skip_reason": ""}
-        if normalized_key and not normalized_reason and _rss_media_blocker(conn, normalized_key):
-            normalized_reason = _RSS_MEDIA_DUPLICATE_REASON
-        status = "skipped" if normalized_reason else "pending"
-        processed = 1 if normalized_reason else 0
-        processed_at = timestamp if normalized_reason else None
-        cur = conn.execute(
-            "INSERT INTO rss_entries(rss_item_id,title,status,processed,processed_at,pub_date,guid,"
-            "payload,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-            (sub_id, title, status, processed, processed_at, pub_date, guid, payload, timestamp),
-        )
-        assert cur.lastrowid is not None
-        entry_id = cur.lastrowid
-        if normalized_key or tmdb_id or season is not None or episode is not None or normalized_reason:
-            conn.execute(
-                "INSERT INTO rss_entry_media(rss_entry_id,media_key,tmdb_id,season,episode,"
-                "skip_reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                (entry_id, normalized_key, (tmdb_id or ""), season, episode,
-                 normalized_reason, timestamp, timestamp),
+    duplicate_guid = connection.execute(
+        "SELECT e.id,e.status,m.media_key,m.skip_reason FROM rss_entries e "
+        "LEFT JOIN rss_entry_media m ON m.rss_entry_id=e.id "
+        "WHERE e.rss_item_id=? AND e.guid=? LIMIT 1", (sub_id, guid),
+    ).fetchone()
+    if duplicate_guid is not None:
+        # 自动语义跳过是可重评估的发现结果；人工跳过与库内跳过不重开。
+        if (duplicate_guid["status"] == "skipped"
+                and duplicate_guid["skip_reason"] == _RSS_MEDIA_DUPLICATE_REASON
+                and normalized_key and duplicate_guid["media_key"] == normalized_key
+                and not normalized_reason
+                and _rss_media_blocker(connection, normalized_key, exclude_id=duplicate_guid["id"]) is None):
+            connection.execute(
+                "UPDATE rss_entries SET status='pending',processed=0,processed_at=NULL WHERE id=?",
+                (duplicate_guid["id"],),
             )
-        return {"id": entry_id, "status": status, "skip_reason": normalized_reason}
+            connection.execute(
+                "UPDATE rss_entry_media SET skip_reason='',updated_at=? WHERE rss_entry_id=?",
+                (timestamp, duplicate_guid["id"]),
+            )
+        return {"id": None, "status": "duplicate_guid", "skip_reason": ""}
+    if normalized_key and not normalized_reason and _rss_media_blocker(connection, normalized_key):
+        normalized_reason = _RSS_MEDIA_DUPLICATE_REASON
+    status = "skipped" if normalized_reason else "pending"
+    processed = 1 if normalized_reason else 0
+    processed_at = timestamp if normalized_reason else None
+    cur = connection.execute(
+        "INSERT INTO rss_entries(rss_item_id,title,status,processed,processed_at,pub_date,guid,"
+        "payload,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (sub_id, title, status, processed, processed_at, pub_date, guid, payload, timestamp),
+    )
+    assert cur.lastrowid is not None
+    entry_id = cur.lastrowid
+    if normalized_key or tmdb_id or season is not None or episode is not None or normalized_reason:
+        connection.execute(
+            "INSERT INTO rss_entry_media(rss_entry_id,media_key,tmdb_id,season,episode,"
+            "skip_reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (entry_id, normalized_key, (tmdb_id or ""), season, episode,
+             normalized_reason, timestamp, timestamp),
+        )
+    return {"id": entry_id, "status": status, "skip_reason": normalized_reason}
 
 
 def _rss_entry_filters(sub_id: int | None = None, status: str | None = None,

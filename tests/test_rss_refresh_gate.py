@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import sqlite3
 import threading
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
@@ -18,13 +19,204 @@ from app.modules.rss import (
     RSS_REFRESH_CONFLICT_ERROR,
     MikanParser,
     RSSEngine,
+    RSSEntry,
     rss_subscription_refresh_revision,
     validate_rss_source_url,
     validate_rss_source_urls,
 )
 from app.modules.rss_scheduler import RSSScheduler
 from app.notifier import render_event
-from tests.support import IsolatedDatabaseTestCase
+from tests.support import IsolatedDatabaseTestCase, assert_present
+
+
+class RSSRefreshCommitTests(IsolatedDatabaseTestCase):
+    def setUp(self) -> None:
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM rss_entries")
+            conn.execute("DELETE FROM rss_items")
+        self.entries = [
+            RSSEntry(title=f"Series A E0{episode}", guid=f"guid-{episode}",
+                     episode=f"E0{episode}", series_title="Series A")
+            for episode in (1, 2)
+        ]
+        self.engine = RSSEngine()
+        self.addCleanup(self.engine.close)
+        self.engine.parser.parse = Mock(return_value=self.entries)
+        self.engine._bound_tv_title_keys = Mock(return_value=({"seriesa"}, True))
+        self.engine._existing_library_episodes = Mock(return_value=(
+            {(1, 2)}, {"sources": 1, "ready": 1, "unavailable": 0, "truncated": 0},
+        ))
+
+    def _subscription(self) -> int:
+        sid = db.add_rss_subscription(
+            "C03", "https://example.invalid/old", action="download",
+            media_tmdb_id="105556", skip_existing_episodes=1,
+        )
+        db.update_rss_subscription(sid, {"last_refreshed_at": "2000-01-01 00:00:00"})
+        return sid
+
+    @staticmethod
+    def _stored_state() -> dict:
+        with db.get_conn() as conn:
+            return {
+                table: [dict(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1")]
+                for table in ("rss_items", "rss_media_bindings", "rss_entries", "rss_entry_media")
+            }
+
+    def test_configuration_changed_during_fetch_rejects_entire_snapshot(self):
+        for changes in (
+            {"urls": "https://example.invalid/new"},
+            {"exclude_keywords": "Series"},
+            {"gy_target_dir": "new-destination"},
+            {"enabled": 0},
+            {"media_tmdb_id": "105557"},
+            {"media_default_season": 0},
+            {"skip_existing_episodes": 0},
+        ):
+            for explicit_revision in (False, True):
+                with self.subTest(changes=changes, explicit_revision=explicit_revision):
+                    # 同秒修改也必须由配置内容识别，不能只比较 updated_at。
+                    with patch("app.database.now", return_value="2000-01-01 00:00:00"):
+                        sid = self._subscription()
+                        revision = rss_subscription_refresh_revision(db.get_rss_subscription(sid))
+
+                        def parse(_url):
+                            db.update_rss_subscription(sid, changes)
+                            return self.entries
+
+                        self.engine.parser.parse = Mock(side_effect=parse)
+                        result = self.engine.refresh(
+                            sid, expected_revision=revision if explicit_revision else "",
+                        )
+                    self.assertEqual(result, {"error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True})
+                    current = assert_present(db.get_rss_subscription(sid))
+                    self.assertEqual(current["last_refreshed_at"], "2000-01-01 00:00:00")
+                    for key, value in changes.items():
+                        self.assertEqual(current[key], value)
+                    self.assertEqual(self._stored_state()["rss_entries"], [])
+                    self.assertEqual(self._stored_state()["rss_entry_media"], [])
+
+    def test_deletion_during_fetch_rejects_empty_and_nonempty_responses(self):
+        for entries in ([], self.entries):
+            for explicit_revision in (False, True):
+                with self.subTest(entries=len(entries), explicit_revision=explicit_revision):
+                    sid = self._subscription()
+                    revision = rss_subscription_refresh_revision(db.get_rss_subscription(sid))
+
+                    def parse(_url):
+                        db.delete_rss_subscription(sid)
+                        return entries
+
+                    self.engine.parser.parse = Mock(side_effect=parse)
+                    result = self.engine.refresh(
+                        sid, expected_revision=revision if explicit_revision else "",
+                    )
+                    self.assertEqual(result, {"error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True})
+                    self.assertIsNone(db.get_rss_subscription(sid))
+                    self.assertTrue(all(not rows for rows in self._stored_state().values()))
+
+    def test_empty_feed_does_not_mark_changed_configuration_refreshed(self):
+        sid = self._subscription()
+
+        def parse(_url):
+            db.update_rss_subscription(sid, {"urls": "https://example.invalid/new"})
+            return []
+
+        self.engine.parser.parse = Mock(side_effect=parse)
+        result = self.engine.refresh(sid)
+        self.assertEqual(result, {"error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True})
+        self.assertEqual(assert_present(db.get_rss_subscription(sid))["last_refreshed_at"], "2000-01-01 00:00:00")
+
+    def test_configuration_changes_during_network_identification_are_fenced(self):
+        for stage in ("_bound_tv_title_keys", "_existing_library_episodes"):
+            for deleted in (False, True):
+                with self.subTest(stage=stage, deleted=deleted):
+                    sid = self._subscription()
+
+                    def identify(_tmdb_id):
+                        if deleted:
+                            db.delete_rss_subscription(sid)
+                        else:
+                            db.update_rss_subscription(sid, {"media_default_season": 2})
+                        return getattr(self.engine, stage).return_value
+
+                    # 回调通过独立连接修改配置，证明识别请求期间未持有写事务。
+                    with patch.object(
+                        self.engine, stage, side_effect=identify,
+                        return_value=getattr(self.engine, stage).return_value,
+                    ):
+                        result = self.engine.refresh(sid)
+                    self.assertEqual(result, {"error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True})
+                    current = db.get_rss_subscription(sid)
+                    if deleted:
+                        self.assertIsNone(current)
+                    else:
+                        assert current is not None
+                        self.assertEqual(current["media_default_season"], 2)
+                        self.assertEqual(current["last_refreshed_at"], "2000-01-01 00:00:00")
+                    self.assertEqual(self._stored_state()["rss_entries"], [])
+
+    def test_batch_failure_rolls_back_entries_media_reopens_and_refresh_marker(self):
+        sid = self._subscription()
+        key = "tmdb:105556:tv:S01E001"
+        blocker = db.add_rss_entry_with_media(sid, "blocker", "blocker", media_key=key)["id"]
+        self.assertTrue(db.claim_rss_entry(blocker))
+        reopened = db.add_rss_entry_with_media(sid, "semantic duplicate", "guid-1", media_key=key)
+        self.assertEqual(reopened["status"], "skipped")
+        db.record_rss_entry_failure(blocker, "torrent_invalid", False)
+        self.engine.parser.parse = Mock(return_value=[
+            self.entries[0], RSSEntry(title="plain entry", guid="plain"), self.entries[1],
+        ])
+        before = self._stored_state()
+        for trigger in (
+            "BEFORE INSERT ON rss_entry_media WHEN NEW.episode=2",
+            "AFTER UPDATE OF last_refreshed_at ON rss_items",
+        ):
+            with self.subTest(trigger=trigger):
+                with db.get_conn() as conn:
+                    conn.execute(
+                        f"CREATE TRIGGER c03_reject_write {trigger} "
+                        "BEGIN SELECT RAISE(ABORT, 'C03 injected write failure'); END"
+                    )
+                try:
+                    with self.assertRaisesRegex(sqlite3.IntegrityError, "C03 injected write failure"):
+                        self.engine.refresh(sid)
+                    self.assertEqual(self._stored_state(), before)
+                finally:
+                    with db.get_conn() as conn:
+                        conn.execute("DROP TRIGGER c03_reject_write")
+
+        # 失败释放单飞门；成功重跑仍遵守 guid 去重和自动语义重开规则。
+        result = self.engine.refresh(sid)
+        self.assertEqual(result["new"], 2)
+        self.assertEqual(result["library_skipped"], 1)
+        self.assertEqual(assert_present(db.get_rss_entry(reopened["id"]))["status"], "pending")
+
+    def test_stable_refresh_publishes_entries_and_timestamp_together(self):
+        sid = self._subscription()
+        self.engine.parser.parse = Mock(return_value=[*self.entries, self.entries[0]])
+        before = self._stored_state()
+        update = db.update_rss_subscription
+
+        def observe_before_marker(*args, **kwargs):
+            # 外部连接在本批次更新刷新标记前不能读到任何半批条目。
+            self.assertEqual(self._stored_state(), before)
+            return update(*args, **kwargs)
+
+        with patch("app.database.update_rss_subscription", side_effect=observe_before_marker), patch(
+            "app.database.now", return_value="2000-01-02 00:00:00",
+        ):
+            result = self.engine.refresh(sid)
+        self.assertEqual(result, {
+            "total": 3, "new": 2, "skipped": 1, "library_skipped": 1,
+            "semantic_duplicates": 0, "identity_unresolved": 0,
+            "library_check": {"sources": 1, "ready": 1, "unavailable": 0, "truncated": 0},
+        })
+        state = self._stored_state()
+        self.assertEqual([row["status"] for row in state["rss_entries"]], ["pending", "skipped"])
+        self.assertEqual(len(state["rss_entry_media"]), 2)
+        self.assertEqual(state["rss_items"][0]["last_refreshed_at"], "2000-01-02 00:00:00")
+        self.assertEqual(self.engine.refresh(sid)["new"], 0)
 
 
 class RSSRefreshGateTests(IsolatedDatabaseTestCase):

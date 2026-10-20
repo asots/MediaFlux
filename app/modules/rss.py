@@ -590,8 +590,9 @@ class RSSEngine:
             urls = [u.strip() for u in (sub["urls"] or "").splitlines() if u.strip()]
             if not urls:
                 return {"error": "订阅项无 URL"}
+            revision = rss_subscription_refresh_revision(sub)
             if expected_revision and not secrets.compare_digest(
-                rss_subscription_refresh_revision(sub), expected_revision
+                revision, expected_revision
             ):
                 return {"error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True}
 
@@ -681,59 +682,69 @@ class RSSEngine:
 
             total, new, skipped = 0, 0, 0
             library_skipped = semantic_duplicates = identity_unresolved = 0
-            for entry in parsed_entries:
-                total += 1
-                if self._excluded(entry.title, exclude):
-                    skipped += 1
-                    continue
-                position = parse_episode_label(
-                    entry.episode, default_season=default_season
-                ) if binding_allowed else None
-                media_key = ""
-                automatic_skip_reason = ""
-                if position is not None:
-                    media_key = build_media_key(
-                        media_tmdb_id, "tv", position[0], position[1]
-                    )
-                    if skip_existing and position in library_positions:
-                        automatic_skip_reason = "媒体库已存在该剧集"
-                elif media_tmdb_id and binding_allowed:
-                    identity_unresolved += 1
-
-                inserted = db.add_rss_entry_with_media(
-                    sub_id=sub_id,
-                    title=entry.title,
-                    guid=entry.guid,
-                    pub_date=entry.pub_date,
-                    payload=json.dumps({
-                        "link": entry.link,
-                        "torrent_url": entry.torrent_url,
-                        "content_type": entry.content_type,
-                        "episode": entry.episode,
-                        "release_group": entry.release_group,
-                        "resolution": entry.resolution,
-                        "series_title": entry.series_title,
-                    }, ensure_ascii=False),
-                    media_key=media_key,
-                    tmdb_id=media_tmdb_id if position is not None else "",
-                    season=position[0] if position is not None else None,
-                    episode=position[1] if position is not None else None,
-                    skip_reason=automatic_skip_reason,
-                )
-                if inserted.get("id") is not None:
-                    new += 1
-                    reason = str(inserted.get("skip_reason") or "")
-                    if reason:
+            # 网络抓取、TMDB 识别及库存查询已结束；持有写锁后再校验快照，
+            # 条目（含语义重开）与刷新时间共用此事务，失败时整批回滚。
+            with db.get_conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                current = db.get_rss_subscription(sub_id, connection=conn)
+                if current is None or not secrets.compare_digest(
+                    rss_subscription_refresh_revision(current), revision
+                ):
+                    return {"error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True}
+                for entry in parsed_entries:
+                    total += 1
+                    if self._excluded(entry.title, exclude):
                         skipped += 1
-                        if reason == "媒体库已存在该剧集":
-                            library_skipped += 1
-                        else:
-                            semantic_duplicates += 1
+                        continue
+                    position = parse_episode_label(
+                        entry.episode, default_season=default_season
+                    ) if binding_allowed else None
+                    media_key = ""
+                    automatic_skip_reason = ""
+                    if position is not None:
+                        media_key = build_media_key(
+                            media_tmdb_id, "tv", position[0], position[1]
+                        )
+                        if skip_existing and position in library_positions:
+                            automatic_skip_reason = "媒体库已存在该剧集"
+                    elif media_tmdb_id and binding_allowed:
+                        identity_unresolved += 1
+
+                    inserted = db.add_rss_entry_with_media(
+                        sub_id=sub_id,
+                        title=entry.title,
+                        guid=entry.guid,
+                        pub_date=entry.pub_date,
+                        payload=json.dumps({
+                            "link": entry.link,
+                            "torrent_url": entry.torrent_url,
+                            "content_type": entry.content_type,
+                            "episode": entry.episode,
+                            "release_group": entry.release_group,
+                            "resolution": entry.resolution,
+                            "series_title": entry.series_title,
+                        }, ensure_ascii=False),
+                        media_key=media_key,
+                        tmdb_id=media_tmdb_id if position is not None else "",
+                        season=position[0] if position is not None else None,
+                        episode=position[1] if position is not None else None,
+                        skip_reason=automatic_skip_reason,
+                        connection=conn,
+                    )
+                    if inserted.get("id") is not None:
+                        new += 1
+                        reason = str(inserted.get("skip_reason") or "")
+                        if reason:
+                            skipped += 1
+                            if reason == "媒体库已存在该剧集":
+                                library_skipped += 1
+                            else:
+                                semantic_duplicates += 1
+                db.update_rss_subscription(sub_id, {"last_refreshed_at": db.now()}, connection=conn)
             logger.info(
                 "RSS 刷新 sub#%s: 拉取 %s 新增 %s 排除 %s 库内 %s 语义重复 %s 失败源 %s",
                 sub_id, total, new, skipped, library_skipped, semantic_duplicates, failed_sources,
             )
-            db.update_rss_subscription(sub_id, {"last_refreshed_at": db.now()})
             result: dict[str, Any] = {"total": total, "new": new, "skipped": skipped}
             if media_tmdb_id:
                 result.update({
