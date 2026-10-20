@@ -128,9 +128,11 @@ class SubscriptionSchedulerLifecycleTests(unittest.TestCase):
                 entered = threading.Event()
                 release = threading.Event()
 
-                async def check(_subscription_id, *, trigger, cancel_event):
+                async def check(_subscription_id, *, trigger, cancel_event, identity_batch):
+                    self.assertFalse(identity_batch.cancelled())
                     entered.set()
                     await asyncio.to_thread(release.wait, 2)
+                    self.assertEqual(identity_batch.cancelled(), cancel_event.is_set())
                     observed.append((trigger, cancel_event.is_set()))
 
                 with (
