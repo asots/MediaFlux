@@ -33,7 +33,7 @@ from app.repositories.media_subscriptions import (
     validate_subscription_scope,
 )
 from app.sensitive_data import redact_sensitive_text
-from app.services import inspect_media_identity_sources, inspect_series_episode_sources
+from app.services import MediaIdentityBatch, inspect_media_identity_sources, inspect_series_episode_sources
 
 logger = get_logger(__name__)
 
@@ -597,6 +597,7 @@ class MediaSubscriptionService:
         *,
         trigger: str = "manual",
         cancel_event: threading.Event | None = None,
+        identity_batch: MediaIdentityBatch | None = None,
     ) -> dict[str, Any]:
         if db.get_media_subscription(subscription_id) is None:
             raise MediaSubscriptionError("媒体订阅不存在", status_code=404, code="not_found")
@@ -611,9 +612,9 @@ class MediaSubscriptionService:
         try:
             self._ensure_active_check(subscription_id, revision, cancel_event)
             if str(row["media_type"]) == "tv":
-                result = await self._check_tv(row, cancel_event=cancel_event)
+                result = await self._check_tv(row, cancel_event=cancel_event, identity_batch=identity_batch)
             else:
-                result = await self._check_movie(row, cancel_event=cancel_event)
+                result = await self._check_movie(row, cancel_event=cancel_event, identity_batch=identity_batch)
             stored_result = dict(result)
             public_result = dict(result)
             public_result.pop("_search_rotation", None)
@@ -723,7 +724,8 @@ class MediaSubscriptionService:
             )
 
     async def _check_tv(
-        self, row: Any, *, cancel_event: threading.Event | None = None
+        self, row: Any, *, cancel_event: threading.Event | None = None,
+        identity_batch: MediaIdentityBatch | None = None,
     ) -> dict[str, Any]:
         tmdb_id = str(row["tmdb_id"])
         title = str(row["title"])
@@ -747,6 +749,7 @@ class MediaSubscriptionService:
             tmdb_id=tmdb_id,
             max_episodes=2000,
             include_specials=include_specials,
+            identity_batch=identity_batch,
         )
         self._ensure_active_check(int(row["id"]), revision, cancel_event)
         inventory_complete, inventory_reason = self._inventory_complete(sources)
@@ -1098,7 +1101,8 @@ class MediaSubscriptionService:
         }
 
     async def _check_movie(
-        self, row: Any, *, cancel_event: threading.Event | None = None
+        self, row: Any, *, cancel_event: threading.Event | None = None,
+        identity_batch: MediaIdentityBatch | None = None,
     ) -> dict[str, Any]:
         tmdb_id = str(row["tmdb_id"])
         revision = int(row["revision"] or 1)
@@ -1109,7 +1113,9 @@ class MediaSubscriptionService:
             raise MediaSubscriptionError("请先配置 TMDB API Key", status_code=503, code="not_configured") from exc
         except ProviderError as exc:
             raise MediaSubscriptionError(exc.safe_message, status_code=exc.status_code, code=exc.code) from exc
-        sources = await asyncio.to_thread(inspect_media_identity_sources, tmdb_id, "movie")
+        sources = await asyncio.to_thread(
+            inspect_media_identity_sources, tmdb_id, "movie", identity_batch=identity_batch,
+        )
         self._ensure_active_check(int(row["id"]), revision, cancel_event)
         complete, reason = self._inventory_complete(sources, identity=True)
         present = any(bool(source.get("present")) for source in sources if source.get("status") == "ready")

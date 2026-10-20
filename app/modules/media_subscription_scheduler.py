@@ -8,6 +8,7 @@ import time
 from app import database as db
 from app.logger import get_logger
 from app.modules.media_subscriptions import MediaSubscriptionError, get_media_subscription_service
+from app.services import MediaIdentityBatch
 
 logger = get_logger(__name__)
 _MAX_CONCURRENT_CHECKS = 2
@@ -116,6 +117,7 @@ class MediaSubscriptionScheduler:
             self._last_recovery_at = current
 
         count = 0
+        identity_batch = MediaIdentityBatch(deadline_at=current + 120, cancelled=self._stop_event.is_set)
         for row in db.list_due_media_subscriptions(limit=20):
             if self._stop_event.is_set():
                 break
@@ -132,7 +134,7 @@ class MediaSubscriptionScheduler:
                     continue
                 worker = threading.Thread(
                     target=self._execute,
-                    args=(subscription_id,),
+                    args=(subscription_id, identity_batch),
                     name=f"media-subscription-{subscription_id}",
                     daemon=True,
                 )
@@ -145,13 +147,14 @@ class MediaSubscriptionScheduler:
             count += 1
         return count
 
-    def _execute(self, subscription_id: int) -> None:
+    def _execute(self, subscription_id: int, identity_batch: MediaIdentityBatch | None = None) -> None:
         try:
             asyncio.run(
                 get_media_subscription_service().check_subscription(
                     subscription_id,
                     trigger="scheduler",
                     cancel_event=self._stop_event,
+                    identity_batch=identity_batch,
                 )
             )
         except MediaSubscriptionError as exc:

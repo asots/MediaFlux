@@ -8,9 +8,10 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 import time
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Optional
@@ -37,6 +38,42 @@ _MAX_PRECISE_REFRESH_TARGETS_PER_LIBRARY = 64
 
 class MediaLibraryEnumerationTooLarge(RuntimeError):
     """媒体库过大，无法安全枚举单条 Item；调用方应优先收敛到物理根。"""
+
+
+class MediaIdentityBatch:
+    """一次业务批次的身份索引；不全局缓存，不持有客户端，不用于写前复查。"""
+
+    def __init__(self, *, deadline_at: float | None = None, cancelled: Callable[[], bool] | None = None):
+        self.deadline_at = deadline_at
+        self.cancelled = cancelled
+        self._lock = threading.Lock()
+        self._indexes: dict[tuple, tuple[dict[str, list[dict[str, Any]]], bool]] = {}
+
+    def _check_active(self) -> None:
+        if self.cancelled and self.cancelled():
+            raise InterruptedError("媒体身份核对已停止")
+        if self.deadline_at is not None and time.monotonic() >= self.deadline_at:
+            raise TimeoutError("媒体身份核对截止时间已到")
+
+    def lookup(self, client: MediaServerClient, params: dict[str, str], tmdb_id: str) -> tuple[list[dict[str, Any]], bool]:
+        # URL、凭据、类型和父目录共同限定可见范围，不能跨账号/媒体库复用。
+        key = (type(client), client.url, client.token, tuple(sorted(params.items())))
+        self._check_active()
+        with self._lock:
+            self._check_active()
+            if key not in self._indexes:
+                rows, _, truncated = client._inventory_items(
+                    client._user_id(deadline_at=self.deadline_at), params=params,
+                    cap=10_000, page_size=500, deadline_at=self.deadline_at, cancelled=self.cancelled,
+                )
+                self._check_active()
+                index: dict[str, list[dict[str, Any]]] = {}
+                for row in rows:
+                    identity = client._provider_tmdb_id(row.get("ProviderIds"))
+                    index.setdefault(identity, []).append(row)
+                self._indexes[key] = index, truncated
+            index, truncated = self._indexes[key]
+            return list(index.get(tmdb_id, [])), truncated
 
 
 def runtime_ticks_to_minutes(value: Any) -> int:
@@ -671,12 +708,15 @@ class MediaServerClient:
     def _inventory_items(
         self, user_id: str, *, params: dict[str, Any], cap: int, page_size: int,
         deadline_at: float | None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], int, bool]:
         """统一有界枚举；未知总数靠末页证明完整，触及上限仍是截断。"""
         rows: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         reported_total = 0
         while len(rows) < cap:
+            if cancelled and cancelled():
+                raise InterruptedError("媒体库存读取已停止")
             limit = min(page_size, cap - len(rows))
             data = self._request(
                 f"/Users/{user_id}/Items",
@@ -706,6 +746,7 @@ class MediaServerClient:
 
     def _tmdb_identity_items(
         self, tmdb_id: str, media_type: str, parent_id: str,
+        batch: MediaIdentityBatch | None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """从统一库存枚举精确匹配，不依赖服务器未必支持的 ID 等值过滤。"""
         normalized_id = self._provider_tmdb_id({"Tmdb": tmdb_id})
@@ -718,26 +759,25 @@ class MediaServerClient:
         }
         if (parent_id or "").strip():
             params["ParentId"] = parent_id.strip()
-        items, _total, truncated = self._inventory_items(
-            self._user_id(), params=params, cap=10_000, page_size=500, deadline_at=None,
-        )
-        return [item for item in items if self._provider_tmdb_id(item.get("ProviderIds")) == normalized_id], truncated
+        return (batch or MediaIdentityBatch()).lookup(self, params, normalized_id)
 
     def has_tmdb_media(
-        self, tmdb_id: str, media_type: str, *, parent_id: str = ""
+        self, tmdb_id: str, media_type: str, *, parent_id: str = "",
+        identity_batch: MediaIdentityBatch | None = None,
     ) -> bool:
         """按精确身份核对；不完整库存只能证明存在，不能证明缺失。"""
-        items, truncated = self._tmdb_identity_items(tmdb_id, media_type, parent_id)
+        items, truncated = self._tmdb_identity_items(tmdb_id, media_type, parent_id, identity_batch)
         if not items and truncated:
             raise ValueError("媒体身份清单不完整，无法确认媒体不存在")
         return bool(items)
 
     def find_series_candidates_by_tmdb(
-        self, tmdb_id: str, limit: int = 20, *, parent_id: str = ""
+        self, tmdb_id: str, limit: int = 20, *, parent_id: str = "",
+        identity_batch: MediaIdentityBatch | None = None,
     ) -> SeriesSearchResult:
         """按 ProviderIds.Tmdb 精确返回剧集候选，避免标题别名导致漏判。"""
         normalized_limit = max(1, min((limit or 20), 20))
-        items, truncated = self._tmdb_identity_items(tmdb_id, "tv", parent_id)
+        items, truncated = self._tmdb_identity_items(tmdb_id, "tv", parent_id, identity_batch)
         candidates: list[SeriesCandidate] = []
         for item in items[:normalized_limit]:
             item_id = str(item.get("Id") or "").strip()

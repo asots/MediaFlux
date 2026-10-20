@@ -8,12 +8,13 @@ from unittest import TestCase
 from unittest.mock import AsyncMock, patch
 
 from app.modules.media_subscription_scheduler import MediaSubscriptionScheduler
+from app.clients.base import MediaIdentityBatch
 
 
 class _FakeThread:
     instances: list["_FakeThread"] = []
 
-    def __init__(self, *, target=None, args=(), name="", daemon=False):
+    def __init__(self, *, target=None, args: tuple = (), name="", daemon=False):
         self.target = target
         self.args = args
         self.name = name
@@ -100,19 +101,21 @@ class MediaSubscriptionSchedulerTests(TestCase):
             self.assertEqual(scheduler.run_due(), 2)
 
         self.assertEqual(sorted(scheduler._workers), [1, 2])
-        self.assertEqual([thread.args for thread in _FakeThread.instances], [(1,), (2,)])
+        self.assertEqual([thread.args[0] for thread in _FakeThread.instances], [1, 2])
+        self.assertIs(_FakeThread.instances[0].args[1], _FakeThread.instances[1].args[1])
 
     def test_execute_passes_shared_stop_event_to_service(self) -> None:
         scheduler = MediaSubscriptionScheduler()
         service = type("Service", (), {})()
         service.check_subscription = AsyncMock(return_value={})
+        batch = MediaIdentityBatch(cancelled=scheduler._stop_event.is_set)
         with patch(
             "app.modules.media_subscription_scheduler.get_media_subscription_service",
             return_value=service,
         ):
-            scheduler._execute(7)
+            scheduler._execute(7, batch)
         service.check_subscription.assert_awaited_once_with(
-            7, trigger="scheduler", cancel_event=scheduler._stop_event
+            7, trigger="scheduler", cancel_event=scheduler._stop_event, identity_batch=batch,
         )
 
     def test_stop_timeout_keeps_live_thread_references(self) -> None:

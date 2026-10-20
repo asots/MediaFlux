@@ -15,6 +15,7 @@ from typing import Any
 from app import database as db
 from app.clients.base import (
     DashboardData,
+    MediaIdentityBatch,
     MediaSearchResult,
     MediaServerClient,
     close_media_server_client,
@@ -538,6 +539,7 @@ def _media_identity_source_payload(
     client: MediaServerClient,
     tmdb_id: str,
     media_type: str,
+    identity_batch: MediaIdentityBatch | None = None,
 ) -> dict:
     """读取单个媒体源的精确 TMDB 身份，不依赖标题模糊搜索。"""
     try:
@@ -545,7 +547,7 @@ def _media_identity_source_payload(
             "server_type": server_type,
             "server_name": server_name,
             "status": "ready",
-            "present": client.has_tmdb_media(tmdb_id, media_type),
+            "present": client.has_tmdb_media(tmdb_id, media_type, identity_batch=identity_batch),
             "error": "",
         }
     except Exception as exc:
@@ -769,6 +771,7 @@ def _series_source_payload(
     max_episodes: int,
     include_specials: bool = False,
     library_name: str = "",
+    identity_batch: MediaIdentityBatch | None = None,
 ) -> dict:
     """先读取本地 Series 与集清单；Provider ID 仅用于确认身份。"""
     try:
@@ -791,14 +794,9 @@ def _series_source_payload(
             title_search = client.search_series_candidates(query, limit=6)
         provider_search = None
         if explicit_tmdb_id:
-            if parent_id:
-                provider_search = client.find_series_candidates_by_tmdb(
-                    explicit_tmdb_id, limit=20, parent_id=parent_id
-                )
-            else:
-                provider_search = client.find_series_candidates_by_tmdb(
-                    explicit_tmdb_id, limit=20
-                )
+            provider_search = client.find_series_candidates_by_tmdb(
+                explicit_tmdb_id, limit=20, parent_id=parent_id, identity_batch=identity_batch,
+            )
             provider_matches = [
                 item for item in provider_search.candidates
                 if (item.tmdb_id or "") == explicit_tmdb_id
@@ -1090,6 +1088,7 @@ def inspect_series_episode_sources(
     max_episodes: int = 2000,
     include_specials: bool = False,
     library_name: str = "",
+    identity_batch: MediaIdentityBatch | None = None,
 ) -> list[dict]:
     """并发核对各媒体服务器的剧集候选和本地季集集合。"""
     jobs: list[Callable[[], dict]] = []
@@ -1101,13 +1100,16 @@ def inspect_series_episode_sources(
                     server_type, server_name, client, query, tmdb_id, max_episodes,
                     include_specials,
                     library_name,
+                    identity_batch,
                 ),
             )
         )
     return _run_media_source_jobs(jobs)
 
 
-def inspect_media_identity_sources(tmdb_id: str, media_type: str) -> list[dict]:
+def inspect_media_identity_sources(
+    tmdb_id: str, media_type: str, *, identity_batch: MediaIdentityBatch | None = None,
+) -> list[dict]:
     """并发核对电影或剧集是否已按精确 TMDB ID 入库。"""
     jobs: list[Callable[[], dict]] = []
     for server_type, server_name, _web_url, client in _configured_media_sources():
@@ -1115,7 +1117,7 @@ def inspect_media_identity_sources(tmdb_id: str, media_type: str) -> list[dict]:
             lambda server_type=server_type, server_name=server_name, client=client: _run_owned_media_source_job(
                 client,
                 lambda: _media_identity_source_payload(
-                    server_type, server_name, client, tmdb_id, media_type
+                    server_type, server_name, client, tmdb_id, media_type, identity_batch
                 ),
             )
         )

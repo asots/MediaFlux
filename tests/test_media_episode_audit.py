@@ -83,7 +83,7 @@ class _FakeMediaClient:
         self.parent_ids.append(parent_id)
         return self.title_search
 
-    def find_series_candidates_by_tmdb(self, tmdb_id, limit=20, *, parent_id=""):
+    def find_series_candidates_by_tmdb(self, tmdb_id, limit=20, *, parent_id="", identity_batch=None):
         self.parent_ids.append(parent_id)
         return self.provider_search
 

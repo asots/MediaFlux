@@ -4,14 +4,88 @@ from __future__ import annotations
 
 import unittest
 import asyncio
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from app.clients.emby import EmbyClient
 from app.clients.jellyfin import JellyfinClient
+from app.clients.base import MediaIdentityBatch
 from app.modules.media_subscriptions import MediaSubscriptionService
 
 
 class MediaInventoryCompletenessTests(unittest.TestCase):
+    def test_one_batch_shares_identity_pages_across_service_calls_and_then_expires(self):
+        from app.services import inspect_series_episode_sources
+
+        rows = [self.item(n) for n in range(1, 2001)]
+        def page(path, *, params, **kwargs):
+            if params.get("HasTmdbId"):
+                offset, limit = params["StartIndex"], params["Limit"]
+                return {"Items": rows[offset:offset + limit], "TotalRecordCount": len(rows)}
+            return {"Items": [], "TotalRecordCount": 0}
+        def sources():
+            return [("jellyfin", "Synthetic", "", self.client(JellyfinClient))]
+
+        batch = MediaIdentityBatch(deadline_at=time.monotonic() + 30)
+        with patch("app.services._configured_media_sources", side_effect=sources), \
+                patch.object(JellyfinClient, "_request", side_effect=page) as request:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                results = list(pool.map(lambda n: inspect_series_episode_sources(
+                    "An alias", tmdb_id=str(n), identity_batch=batch,
+                ), range(1, 15)))
+            self.assertTrue(all(r[0]["status"] == "ready" and not r[0]["truncated"] for r in results))
+            scans = [c for c in request.call_args_list if c.kwargs["params"].get("HasTmdbId")]
+            self.assertEqual(len(scans), 4)  # 过去同样批次为 14 × 4。
+            request.reset_mock()
+            rows.clear()
+            # 写前复查不携带批次快照；必须看见实时库存变化。
+            fresh = inspect_series_episode_sources("An alias", tmdb_id="1")
+            self.assertEqual(fresh[0]["status"], "not_found")
+            self.assertTrue(any(c.kwargs["params"].get("HasTmdbId") for c in request.call_args_list))
+
+    def test_identity_batch_separates_accounts_types_and_parent_scopes(self):
+        batch = MediaIdentityBatch()
+        client = self.client(JellyfinClient)
+        with patch.object(client, "_request", return_value={"Items": [self.item(1)], "TotalRecordCount": 1}) as request:
+            for token, kind, parent in (("a", "tv", ""), ("a", "movie", ""), ("a", "movie", "x"), ("b", "movie", "x")):
+                client.token = token
+                self.assertTrue(client.has_tmdb_media("1", kind, parent_id=parent, identity_batch=batch))
+                self.assertFalse(client.has_tmdb_media("2", kind, parent_id=parent, identity_batch=batch))
+            self.assertEqual(request.call_count, 4)
+
+    def test_identity_batch_cancellation_and_deadline_apply_even_to_cached_results(self):
+        client = self.client(JellyfinClient)
+        stop = threading.Event()
+        batch = MediaIdentityBatch(deadline_at=time.monotonic() + 30, cancelled=stop.is_set)
+        with patch.object(client, "_request", return_value={"Items": [self.item(1)], "TotalRecordCount": 1}) as request:
+            self.assertTrue(client.has_tmdb_media("1", "movie", identity_batch=batch))
+            stop.set()
+            with self.assertRaises(InterruptedError):
+                client.has_tmdb_media("1", "movie", identity_batch=batch)
+            stop.clear()
+            batch.deadline_at = time.monotonic() - 1
+            with self.assertRaises(TimeoutError):
+                client.has_tmdb_media("1", "movie", identity_batch=batch)
+            self.assertEqual(request.call_count, 1)
+
+    def test_identity_batch_cancelled_between_pages_does_not_publish_partial_index(self):
+        client = self.client(JellyfinClient)
+        stop = threading.Event()
+        batch = MediaIdentityBatch(cancelled=stop.is_set)
+        def first_page(*args, **kwargs):
+            stop.set()
+            return {"Items": [self.item(n) for n in range(1, 501)], "TotalRecordCount": 1000}
+        with patch.object(client, "_request", side_effect=first_page) as request:
+            with self.assertRaises(InterruptedError):
+                client.has_tmdb_media("1", "movie", identity_batch=batch)
+            self.assertEqual(request.call_count, 1)
+        stop.clear()
+        with patch.object(client, "_request", return_value={"Items": [], "TotalRecordCount": 0}) as request:
+            self.assertFalse(client.has_tmdb_media("1", "movie", identity_batch=batch))
+            self.assertEqual(request.call_count, 1)
+
     @staticmethod
     def readers(client, *, cap=5):
         return {
