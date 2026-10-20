@@ -565,6 +565,7 @@ def register_specs(registry) -> None:
                             "resource_results",
                             "indexer_search",
                             "web_search",
+                            "web_read",
                             "offline_magnet",
                             "offline_ed2k",
                             "offline_http",

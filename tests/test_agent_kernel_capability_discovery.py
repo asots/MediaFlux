@@ -14,7 +14,8 @@ from app.agent.domain_catalog import build_tool_specs
 from app.agent.domains.system.capability_actions import (
     CAPABILITY_PARAMETERS,
     capability_arguments,
-    web_capability_status,
+    web_read_capability_status,
+    web_search_capability_status,
 )
 from app.agent.errors import AgentToolError, ToolPipelineError
 from app.agent.kernel.capabilities import (
@@ -446,11 +447,22 @@ def test_web_configuration_is_not_confused_with_provider_reachability(
         ),
         patch("app.agent.domains.system.capability_actions.config.get", return_value=key),
     ):
-        result = web_capability_status()
+        result = web_search_capability_status()
     assert result["status"] == status
     assert "private-api-key" not in json.dumps(result)
     if status == "configured":
         assert "实际调用核验" in result["reason"]
+
+
+@pytest.mark.parametrize("read_enabled", [True, False])
+def test_local_reader_configuration_does_not_require_tavily(read_enabled):
+    with (
+        patch("app.agent.domains.system.capability_actions.config.get_bool",
+              side_effect=lambda key, default=False: {"WEB_READ_ENABLED": read_enabled}.get(key, default)),
+        patch("app.agent.domains.system.capability_actions.config.get", return_value=""),
+    ):
+        assert web_search_capability_status()["status"] == "disabled"
+        assert web_read_capability_status()["status"] == ("configured" if read_enabled else "disabled")
 
 
 @pytest.mark.parametrize(

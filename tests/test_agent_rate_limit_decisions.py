@@ -253,20 +253,21 @@ def test_cancel_during_atomic_worker_does_not_refund_or_replay():
 
 
 @pytest.mark.parametrize('denial', ['quota', 'capacity', 'clock_anomaly'])
-def test_real_port_public_values_are_immutable_json_scalars(denial):
+@pytest.mark.parametrize(('tool_name', 'limit', 'retry_wait'), [('web.search', 6, 70.0), ('web.read', 12, 65.0)])
+def test_real_port_public_values_are_immutable_json_scalars(denial, tool_name, limit, retry_wait):
     wall=[120.0]
     limiter=rates.AgentRateLimiter(shared=True,wall_clock=lambda:wall[0],max_keys=1)
     limiter.reset()
     owner='private-owner:/root/not-public'
     async def exercise():
         port=policy.MediaFluxToolRateLimiter()
-        for _ in range(6):
-            assert await port.acquire(owner=owner,tool_name='web.search',cost=999,arguments={'private':'never-project'}) is None
+        for _ in range(limit):
+            assert await port.acquire(owner=owner,tool_name=tool_name,cost=999,arguments={'private':'never-project'}) is None
         if denial=='clock_anomaly':wall[0]=60.0
         denied_owner='different-owner' if denial=='capacity' else owner
         before=snapshot()
         with pytest.raises(ToolRateLimitError) as caught:
-            await port.acquire(owner=denied_owner,tool_name='web.read',cost=0,arguments={})
+            await port.acquire(owner=denied_owner,tool_name=tool_name,cost=0,arguments={})
         error=caught.value
         assert error.code=='rate_limited' and error.task_patch is None
         projection=error.rate_limit
@@ -278,9 +279,9 @@ def test_real_port_public_values_are_immutable_json_scalars(denial):
             assert projection[key] is None or type(projection[key]) is float
         assert projection['reason']==denial
         if denial=='quota':
-            assert dict(projection)=={'limit':6,'cost':1,'remaining':0,'retry_after_seconds':70.0,'retry_at_epoch':190.0,'reason':'quota'}
+            assert dict(projection)=={'limit':limit,'cost':1,'remaining':0,'retry_after_seconds':retry_wait,'retry_at_epoch':120.0+retry_wait,'reason':'quota'}
         elif denial=='capacity':
-            assert dict(projection)=={'limit':6,'cost':1,'remaining':6,'retry_after_seconds':120.0,'retry_at_epoch':240.0,'reason':'capacity'}
+            assert dict(projection)=={'limit':limit,'cost':1,'remaining':limit,'retry_after_seconds':120.0,'retry_at_epoch':240.0,'reason':'capacity'}
         else:
             assert projection['retry_after_seconds'] is None and projection['retry_at_epoch'] is None
         serialized=json.dumps(dict(projection),allow_nan=False,sort_keys=True)
@@ -441,3 +442,21 @@ def test_local_watchlist_reads_share_existing_default_budget_across_workers_with
     assert rates.tool_rate_limit_policy('discovery.search')[1] == 6
     assert rates.tool_rate_limit_policy('discovery.add_watchlist')[1] == 4
     assert rates.tool_rate_limit_policy('discovery.remove_watchlist')[1] == 4
+
+
+def test_real_port_search_and_local_read_have_independent_budgets():
+    limiter = rates.AgentRateLimiter(shared=True, wall_clock=lambda: 120.0)
+    limiter.reset()
+
+    async def exercise():
+        port = policy.MediaFluxToolRateLimiter()
+        for tool, limit in (("web.search", 6), ("web.read", 12)):
+            for _ in range(limit):
+                assert await port.acquire(owner="independent-web", tool_name=tool, cost=1, arguments={}) is None
+            with pytest.raises(ToolRateLimitError) as caught:
+                await port.acquire(owner="independent-web", tool_name=tool, cost=1, arguments={})
+            assert caught.value.rate_limit["reason"] == "quota"
+            assert caught.value.rate_limit["limit"] == limit
+
+    with patch.object(rates, "agent_rate_limiter", limiter):
+        asyncio.run(exercise())

@@ -74,6 +74,36 @@ class TavilySettingsBrowserTests(unittest.TestCase):
                 self.assertFalse(page.evaluate('document.documentElement.scrollWidth > innerWidth'))
                 self.assertEqual(errors, [])
 
+    def test_local_read_controls_are_independent_responsive_and_save_only_their_draft(self):
+        from app.routes.api import _AGENT_SETTINGS_DEFAULTS
+
+        for width in (320, 390, 1280):
+            with self.subTest(width=width):
+                page, errors = self._page(width, _AGENT_SETTINGS_DEFAULTS)
+                self._resolve_config(page)
+                page.locator('[data-settings-target="agent"]').click()
+                search = page.locator('[data-key="WEB_SEARCH_ENABLED"]')
+                read = page.locator('[data-key="WEB_READ_ENABLED"]')
+                self.assertFalse(search.is_checked())
+                self.assertTrue(read.is_checked())
+                self.assertFalse(read.is_disabled())
+                option = read.locator('..').locator('..')
+                option.scroll_into_view_if_needed()
+                before = self._rect(option)
+                read.locator('..').click()
+                self.assertFalse(read.is_checked())
+                self.assertFalse(search.is_checked())
+                self._assert_same_rect(before, self._rect(option))
+                page.locator('[data-key="WEB_READ_TIMEOUT_SECONDS"]').fill('15')
+                page.locator('[data-key="WEB_READ_CACHE_TTL_SECONDS"]').fill('120')
+                page.locator('#settings-panel-agent [data-save-settings]').click()
+                page.wait_for_function('window.__settingsWrites.length === 1')
+                self.assertEqual(page.evaluate('window.__settingsWrites[0]'), {
+                    "WEB_READ_ENABLED": "0", "WEB_READ_TIMEOUT_SECONDS": "15", "WEB_READ_CACHE_TTL_SECONDS": "120",
+                })
+                self.assertFalse(page.evaluate('document.documentElement.scrollWidth > innerWidth'))
+                self.assertEqual(errors, [])
+
     def test_new_key_clear_and_stale_response_do_not_test_or_display_the_wrong_key(self):
         page, errors = self._open(1280)
         button = page.locator('#testTavilyBtn')

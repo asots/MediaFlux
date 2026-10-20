@@ -212,6 +212,9 @@ class AgentSettingsUiTests(unittest.TestCase):
             "AGENT_LLM_MODEL",
             "AGENT_LLM_CONTEXT_WINDOW_TOKENS",
             "WEB_SEARCH_ENABLED",
+            "WEB_READ_ENABLED",
+            "WEB_READ_TIMEOUT_SECONDS",
+            "WEB_READ_CACHE_TTL_SECONDS",
             "TAVILY_API_KEY",
         ):
             self.assertIn(f'data-key="{key}"', agent_panel)
@@ -302,9 +305,12 @@ class AgentSettingsUiTests(unittest.TestCase):
             "发送下载后入库复核通知",
             "巡检间隔（小时）",
             "单次巡检剧集上限",
-            "启用 Tavily 网页搜索与读取",
+            "启用 Tavily 网页搜索",
+            "启用本地网页读取",
+            "本地网页读取缓存时间（秒）",
+            "本地网页读取超时（秒）",
             "Tavily API Key",
-            "Tavily 搜索与读取缓存时间（秒）",
+            "Tavily 搜索缓存时间（秒）",
             "Tavily 请求超时（秒）",
         ):
             self.assertIn(f'aria-label="{label}"', html)
@@ -1106,6 +1112,8 @@ class AgentSettingsUiTests(unittest.TestCase):
     def test_config_save_rejects_environment_managed_agent_field(self):
         for key, value in (
             ("TAVILY_TIMEOUT_SECONDS", "12"),
+            ("WEB_READ_TIMEOUT_SECONDS", "12"),
+            ("WEB_READ_ENABLED", "0"),
             ("AGENT_STREAM_DISPLAY_ENABLED", "0"),
         ):
             with self.subTest(key=key), patch(
@@ -1118,6 +1126,30 @@ class AgentSettingsUiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 409)
             self.assertIn(key, self._payload(response)["error"])
             persist.assert_not_called()
+
+    def test_local_reader_settings_validate_and_save_without_changing_tavily(self):
+        from app.routes.api import _AGENT_SETTINGS_DEFAULTS, _validate_web_access_updates
+
+        self.assertEqual(_AGENT_SETTINGS_DEFAULTS["WEB_READ_ENABLED"], "1")
+        self.assertEqual(_AGENT_SETTINGS_DEFAULTS["WEB_SEARCH_ENABLED"], "0")
+        values = {"WEB_READ_ENABLED": "0", "WEB_READ_TIMEOUT_SECONDS": "15", "WEB_READ_CACHE_TTL_SECONDS": "120"}
+        self.assertEqual(_validate_web_access_updates(values), values)
+        for key, value in (("WEB_READ_ENABLED", "invalid"), ("WEB_READ_TIMEOUT_SECONDS", "1"),
+                           ("WEB_READ_TIMEOUT_SECONDS", "31"), ("WEB_READ_CACHE_TTL_SECONDS", "29"),
+                           ("WEB_READ_CACHE_TTL_SECONDS", "86401")):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                _validate_web_access_updates({key: value})
+        with (
+            patch("app.routes.api.config.get", side_effect=lambda key, default="": _AGENT_SETTINGS_DEFAULTS.get(key, default)),
+            patch("app.routes.api.config.has_external_override", return_value=False),
+            patch("app.routes.api.config.set_and_save") as persist,
+            patch("app.services.clear_dashboard_cache"),
+            patch("app.agent.feature_gate.invalidate_agent_runtime_generation"),
+            patch("app.agent.kernel.bootstrap.invalidate_agent_kernel_runtime"),
+        ):
+            result = save_config(self._request(), values)
+        self.assertEqual(result, {"success": True})
+        persist.assert_called_once_with(values)
 
     def test_config_save_rejects_all_environment_managed_ui_fields_early(self):
         for key, value in (

@@ -51,7 +51,7 @@ class WebRequestLifecycleTests(IsolatedDatabaseTestCase):
             (
                 read,
                 "_restore_cached_result",
-                "_extract_tavily",
+                "_read_local",
                 lambda: read.read_web({"url": "https://example.com/article"}),
                 search.clear_web_search_cache,
                 web_request_singleflight,
@@ -78,7 +78,7 @@ class WebRequestLifecycleTests(IsolatedDatabaseTestCase):
             ok,
             "ok" if ok else "unavailable",
             "demo",
-            data={"url": "https://example.com/article"},
+            data={"url": "https://example.com/article", "cached": False},
             model_data={"chunks": ["demo"]},
         )
 
@@ -131,7 +131,8 @@ class WebRequestLifecycleTests(IsolatedDatabaseTestCase):
                 self.assertEqual(flight.active_count, 0)
 
     def test_budget_refund_failure_still_releases_request_lease(self):
-        for module, _, provider_name, request, clear, flight in self.cases()[:2]:
+        # 本地读取不再预留或退回 Tavily 额度；只有搜索需要验证额度异常。
+        for module, _, provider_name, request, clear, flight in self.cases()[:1]:
             with self.subTest(module=module.__name__):
                 clear()
 

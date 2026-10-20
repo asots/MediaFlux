@@ -257,23 +257,32 @@
                                             <h3 id="agent-search-heading">网页搜索与读取</h3>
                                             <span class="agent-card-badge">Tavily 检索</span>
                                         </div>
-                                        <p>通过 Tavily 搜索公开信息并提取指定网页正文；缓存、超时、结果数和每日额度均由本机约束。</p>
+                                        <p>Tavily 负责搜索，本机负责读取正文；两项可独立启用，关闭搜索不影响本地读取。</p>
                                     </div>
                                 </div>
-                                <label class="toggle agent-settings-master-toggle"><input type="checkbox" data-key="WEB_SEARCH_ENABLED" data-bool="1" aria-label="启用 Tavily 网页搜索与读取"><span class="toggle-slider"></span></label>
+                                <label class="toggle agent-settings-master-toggle"><input type="checkbox" data-key="WEB_SEARCH_ENABLED" data-bool="1" aria-label="启用 Tavily 网页搜索"><span class="toggle-slider"></span></label>
                             </header>
                             <p class="settings-managed-note agent-managed-badge" data-managed-note data-managed-keys="WEB_SEARCH_ENABLED,TAVILY_API_KEY,TAVILY_SEARCH_DEPTH,TAVILY_MAX_RESULTS,TAVILY_CACHE_TTL_SECONDS,TAVILY_DAILY_CREDIT_LIMIT,TAVILY_TIMEOUT_SECONDS" hidden></p>
                             <div class="agent-settings-option agent-settings-option-static">
-                                <span><strong>本机检索护栏</strong><small>仅只读抓取公开网页正文 · 自动过滤内网地址并受每日配额约束</small></span>
-                                <span class="agent-option-pill">SSRF 防护</span>
+                                <span><strong>本机检索护栏</strong><small>Tavily 搜索受本机每日额度约束，缓存命中不重复计费</small></span>
+                                <span class="agent-option-pill">搜索额度</span>
                             </div>
                             <div class="agent-settings-fields">
                                 <label class="agent-field agent-field-wide"><span>Tavily API Key</span><span class="field-control-with-action"><span class="field-control field-control-password"><input type="password" autocomplete="new-password" class="form-input" data-key="TAVILY_API_KEY" id="tavilyApiKeyInput" aria-label="Tavily API Key" placeholder="********"></span><button type="button" class="jump-btn tavily-test-btn" id="testTavilyBtn" disabled aria-label="测试 Tavily 密钥" aria-describedby="tavilyConnectionState" aria-busy="false"><i data-lucide="plug-zap" aria-hidden="true"></i><span>测试</span></button></span><small class="agent-model-hint tavily-connection-state" id="tavilyConnectionState" role="status" aria-live="polite" data-tone="idle">仅验证密钥，不保存、不搜索</small></label>
                                 <label class="agent-field"><span>搜索深度（Advanced 消耗 2 额度）</span><select class="form-select" data-key="TAVILY_SEARCH_DEPTH" aria-label="Tavily 搜索深度"><option value="basic">Basic</option><option value="advanced">Advanced</option></select></label>
                                 <label class="agent-field"><span>结果上限（每次返回 1–10 条）</span><span class="agent-input-unit"><input type="number" min="1" max="10" step="1" value="5" class="form-input" data-key="TAVILY_MAX_RESULTS" aria-label="Tavily 单次结果上限"><b>条</b></span></label>
-                                <label class="agent-field agent-field-wide agent-credit-field"><span>每日额度（防止失效调用）</span><span class="agent-input-unit"><input type="number" min="1" max="100000" step="1" value="100" class="form-input" data-key="TAVILY_DAILY_CREDIT_LIMIT" aria-label="Tavily 每日额度"><b>额度</b></span><small class="agent-field-subhint">按本机自然日统计检索与网页提取消耗；达到上限后当日自动熔断</small></label>
-                                <label class="agent-field"><span>搜索/读取缓存时间</span><span class="agent-input-unit"><input type="number" min="30" max="86400" step="1" value="900" class="form-input" data-key="TAVILY_CACHE_TTL_SECONDS" aria-label="Tavily 搜索与读取缓存时间（秒）"><b>秒</b></span></label>
+                                <label class="agent-field agent-field-wide agent-credit-field"><span>每日额度（防止失效调用）</span><span class="agent-input-unit"><input type="number" min="1" max="100000" step="1" value="100" class="form-input" data-key="TAVILY_DAILY_CREDIT_LIMIT" aria-label="Tavily 每日额度"><b>额度</b></span><small class="agent-field-subhint">按本机自然日统计Tavily 搜索消耗；达到上限后当日自动熔断</small></label>
+                                <label class="agent-field"><span>搜索缓存时间</span><span class="agent-input-unit"><input type="number" min="30" max="86400" step="1" value="900" class="form-input" data-key="TAVILY_CACHE_TTL_SECONDS" aria-label="Tavily 搜索缓存时间（秒）"><b>秒</b></span></label>
                                 <label class="agent-field"><span>请求超时（2–30 秒）</span><span class="agent-input-unit"><input type="number" min="2" max="30" step="1" value="10" class="form-input" data-key="TAVILY_TIMEOUT_SECONDS" aria-label="Tavily 请求超时（秒）"><b>秒</b></span></label>
+                            </div>
+                            <div class="agent-settings-option">
+                                <span><strong>本地正文读取</strong><small>无需 API Key，不消耗 Tavily 额度；仅访问公开网页，不执行 JavaScript、不使用登录态。</small></span>
+                                <label class="toggle"><input type="checkbox" data-key="WEB_READ_ENABLED" data-bool="1" aria-label="启用本地网页读取"><span class="toggle-slider"></span></label>
+                            </div>
+                            <p class="settings-managed-note agent-managed-badge" data-managed-note data-managed-keys="WEB_READ_ENABLED,WEB_READ_TIMEOUT_SECONDS,WEB_READ_CACHE_TTL_SECONDS" hidden></p>
+                            <div class="agent-settings-fields">
+                                <label class="agent-field"><span>读取缓存时间</span><span class="agent-input-unit"><input type="number" min="30" max="86400" step="1" value="900" class="form-input" data-key="WEB_READ_CACHE_TTL_SECONDS" aria-label="本地网页读取缓存时间（秒）"><b>秒</b></span></label>
+                                <label class="agent-field"><span>读取总超时（含跳转）</span><span class="agent-input-unit"><input type="number" min="2" max="30" step="1" value="10" class="form-input" data-key="WEB_READ_TIMEOUT_SECONDS" aria-label="本地网页读取超时（秒）"><b>秒</b></span></label>
                             </div>
                         </section>
 

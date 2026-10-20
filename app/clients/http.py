@@ -229,12 +229,14 @@ class FixedHostHttpClient:
         params: Mapping[str, str | int] | None = None,
         headers: Mapping[str, str] | None = None,
         max_redirects: int | None = None,
+        follow_redirects: bool = True,
     ) -> HttpResponse:
         attempt = 0
         while True:
             try:
                 return await self._request(
-                    "GET", url, params=params, headers=headers, max_redirects=max_redirects
+                    "GET", url, params=params, headers=headers, max_redirects=max_redirects,
+                    follow_redirects=follow_redirects,
                 )
             except httpx.TimeoutException:
                 if attempt == self.get_timeout_retries:
@@ -345,6 +347,7 @@ class FixedHostHttpClient:
         content: bytes | None = None,
         headers: Mapping[str, str] | None = None,
         max_redirects: int | None = None,
+        follow_redirects: bool = True,
     ) -> HttpResponse:
         verb = (method or "").upper()
         if verb not in {"GET", "POST"}:
@@ -373,7 +376,7 @@ class FixedHostHttpClient:
             ) as response:
                 _validate_response_encoding(response, require_identity_encoding=self.require_identity_encoding)
                 current_params = None
-                if response.status_code in _REDIRECT_CODES:
+                if follow_redirects and response.status_code in _REDIRECT_CODES:
                     location = response.headers.get("location", "").strip()
                     if not location:
                         raise HttpInvalidResponse("redirect response omitted Location")

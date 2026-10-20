@@ -80,7 +80,8 @@ _DISCOVERY_RUNTIME_KEYS = {
     "PROXY_URL",
 }
 
-_WEB_SEARCH_KEYS = {
+_WEB_ACCESS_KEYS = {
+    "WEB_READ_ENABLED", "WEB_READ_TIMEOUT_SECONDS", "WEB_READ_CACHE_TTL_SECONDS",
     "WEB_SEARCH_ENABLED", "TAVILY_API_KEY", "TAVILY_SEARCH_DEPTH",
     "TAVILY_MAX_RESULTS", "TAVILY_CACHE_TTL_SECONDS",
     "TAVILY_DAILY_CREDIT_LIMIT", "TAVILY_TIMEOUT_SECONDS",
@@ -132,6 +133,9 @@ _AGENT_SETTINGS_DEFAULTS = {
     "AGENT_LLM_GENERATION_PROFILES": "[]",
     "AGENT_LLM_BUDGET_PROFILES": "[]",
     "WEB_SEARCH_ENABLED": "0",
+    "WEB_READ_ENABLED": "1",
+    "WEB_READ_TIMEOUT_SECONDS": "10",
+    "WEB_READ_CACHE_TTL_SECONDS": "900",
     "TAVILY_SEARCH_DEPTH": "basic",
     "TAVILY_MAX_RESULTS": "5",
     "TAVILY_CACHE_TTL_SECONDS": "900",
@@ -200,7 +204,7 @@ _CONFIG_UI_SAVEABLE_KEYS = frozenset({
     *_AGENT_LLM_KEYS,
     "AGENT_STREAM_DISPLAY_ENABLED",
     *_AGENT_EPISODE_RESEARCH_KEYS,
-    *_WEB_SEARCH_KEYS,
+    *_WEB_ACCESS_KEYS,
     *_NSFW_ORGANIZE_KEYS,
     "DISCOVERY_ENABLED", "DISCOVERY_CACHE_TTL_SECONDS", "DISCOVERY_STALE_TTL_SECONDS",
     "DISCOVERY_RESOURCE_RESULTS_ENABLED",
@@ -438,12 +442,11 @@ def _validate_discovery_updates(data: dict[str, Any]) -> dict[str, str]:
 
 
 
-def _validate_web_search_updates(data: dict[str, Any]) -> dict[str, str]:
+def _validate_web_access_updates(data: dict[str, Any]) -> dict[str, str]:
     normalized: dict[str, str] = {}
-    if "WEB_SEARCH_ENABLED" in data:
-        normalized["WEB_SEARCH_ENABLED"] = _normalize_discovery_boolean(
-            "WEB_SEARCH_ENABLED", data["WEB_SEARCH_ENABLED"]
-        )
+    for key in ("WEB_SEARCH_ENABLED", "WEB_READ_ENABLED"):
+        if key in data:
+            normalized[key] = _normalize_discovery_boolean(key, data[key])
     if "TAVILY_API_KEY" in data and not _is_config_mask(data["TAVILY_API_KEY"]):
         key = str(data["TAVILY_API_KEY"] or "").strip()
         if "\r" in key or "\n" in key or len(key) > 512:
@@ -455,6 +458,8 @@ def _validate_web_search_updates(data: dict[str, Any]) -> dict[str, str]:
             raise ValueError("TAVILY_SEARCH_DEPTH 仅支持 basic 或 advanced")
         normalized["TAVILY_SEARCH_DEPTH"] = depth
     limits = {
+        "WEB_READ_TIMEOUT_SECONDS": (2, 30),
+        "WEB_READ_CACHE_TTL_SECONDS": (30, 86400),
         "TAVILY_MAX_RESULTS": (1, 10),
         "TAVILY_CACHE_TTL_SECONDS": (30, 86400),
         "TAVILY_DAILY_CREDIT_LIMIT": (1, 100000),
@@ -1244,7 +1249,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
             organize_policy_updates = _validate_organize_policy_updates(data)
             agent_llm_updates = _validate_agent_llm_updates(data)
             episode_research_updates = _validate_agent_episode_research_updates(data)
-            web_search_updates = _validate_web_search_updates(data)
+            web_access_updates = _validate_web_access_updates(data)
             login_wallpaper_updates = _validate_login_wallpaper_updates(data)
             nsfw_organize_updates = _validate_nsfw_organize_updates(data)
         except ValueError as exc:
@@ -1463,7 +1468,7 @@ def save_config(request: Request, data: Any = Body(default=None)):
             discovery_updates,
             media_workflow_updates,
             indexer_updates,
-            web_search_updates,
+            web_access_updates,
             ai_recognition_updates,
             organize_tavily_updates,
             organize_policy_updates,

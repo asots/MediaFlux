@@ -385,8 +385,11 @@ class _ResearchRun:
                 self.urls.add(url)
             return {"trust": "untrusted_external_evidence", "results": results}
         data = value.model_data if isinstance(value.model_data, dict) else value.data
-        if not isinstance(data, dict) or data.get("url") != url or value.data.get("url") != url:
+        if (not isinstance(data, dict) or data.get("requested_url") != url
+                or value.data.get("requested_url") != url or data.get("url") != value.data.get("url")):
             raise _error("web_url_mismatch")
+        # 输入仍必须来自本轮搜索；本地读取器已逐跳验证的公开重定向使用最终来源地址。
+        url = _public_url(data.get("url"))
         chunks = data.get("content_chunks")
         if not isinstance(chunks, list) or not chunks or any(not isinstance(x, str) for x in chunks):
             raise _error("invalid_web_evidence")
@@ -394,7 +397,7 @@ class _ResearchRun:
         _safe_text(text, 4000)
         safe = _safe_data({"url": url, "title": data.get("title", ""), "content_chunks": chunks,
                            "trust": "untrusted_external_evidence"})
-        self.web_evidence.append({"provider": "tavily", "url": url,
+        self.web_evidence.append({"provider": "web", "url": url,
                                   "sha256": hashlib.sha256(text.encode()).hexdigest()})
         return safe
 

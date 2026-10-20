@@ -51,9 +51,9 @@ class FeatureSummaryUnitTests(IsolatedDatabaseTestCase):
             result = summarize_feature_states({})
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "attention")
-        self.assertEqual(result.data["feature_count"], 10)
-        self.assertEqual(result.data["enabled_count"], 6)
-        self.assertEqual(result.data["available_count"], 3)
+        self.assertEqual(result.data["feature_count"], 11)
+        self.assertEqual(result.data["enabled_count"], 7)
+        self.assertEqual(result.data["available_count"], 4)
         self.assertEqual(result.data["disabled_count"], 4)
         self.assertEqual(result.data["attention_count"], 3)
         by_feature = {item["feature"]: item for item in result.data["features"]}
@@ -106,7 +106,7 @@ class FeatureSummaryUnitTests(IsolatedDatabaseTestCase):
         ):
             result = summarize_feature_states({})
         self.assertEqual(result.status, "ready")
-        self.assertEqual(result.data["available_count"], 7)
+        self.assertEqual(result.data["available_count"], 8)
         with (
             patch("app.agent.domains.configuration.feature_actions.config.get_bool", return_value=False),
             patch("app.agent.domains.configuration.feature_actions.config.get", return_value=""),
@@ -118,4 +118,4 @@ class FeatureSummaryUnitTests(IsolatedDatabaseTestCase):
             disabled = summarize_feature_states({})
         self.assertEqual(disabled.status, "disabled")
         self.assertEqual(disabled.data["available_count"], 0)
-        self.assertEqual(disabled.data["disabled_count"], 10)
+        self.assertEqual(disabled.data["disabled_count"], 11)

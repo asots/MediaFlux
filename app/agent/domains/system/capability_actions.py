@@ -124,18 +124,27 @@ def discover_capabilities(
     )
 
 
-def web_capability_status() -> dict[str, str]:
+def web_search_capability_status() -> dict[str, str]:
     if not config.get_bool("WEB_SEARCH_ENABLED"):
         return {
             "status": "disabled",
-            "reason": "公开网页搜索/读取已接入，但Web Search开关当前关闭。",
+            "reason": "公开网页搜索已接入，但Web Search开关当前关闭。",
         }
     if not (config.get("TAVILY_API_KEY", "") or "").strip():
         return {
             "status": "configuration_missing",
-            "reason": "公开网页搜索/读取已接入，但尚未配置Tavily API Key。",
+            "reason": "公开网页搜索已接入，但尚未配置Tavily API Key。",
         }
     return {
         "status": "configured",
         "reason": "开关与必要配置已就绪；网络可达性、密钥有效性与剩余额度须实际调用核验。",
+    }
+
+
+def web_read_capability_status() -> dict[str, str]:
+    if not config.get_bool("WEB_READ_ENABLED", True):
+        return {"status": "disabled", "reason": "本地网页读取开关当前关闭。"}
+    return {
+        "status": "configured",
+        "reason": "本机读取公开 HTTPS 正文，无需 Tavily Key 或额度；不执行 JavaScript，页面可读性须实际调用核验。",
     }

@@ -61,12 +61,18 @@ _FEATURES: dict[str, FeatureDefinition] = {
     ),
     "web_search": FeatureDefinition(
         key="WEB_SEARCH_ENABLED",
-        label="联网搜索与网页读取",
+        label="Tavily 联网搜索",
         default=False,
         effect_note=(
-            "仅影响后续显式联网搜索或公开网页读取；本次配置写入不会访问 Tavily 或消耗额度"
+            "仅影响后续显式联网搜索；本次配置写入不会访问 Tavily 或消耗额度"
         ),
         requires_tavily_key=True,
+    ),
+    "web_read": FeatureDefinition(
+        key="WEB_READ_ENABLED",
+        label="本地网页读取",
+        default=True,
+        effect_note="仅影响后续公开网页正文读取，不使用 Tavily Key 或额度，不执行 JavaScript 或使用登录态",
     ),
     "offline_magnet": FeatureDefinition(
         key="OFFLINE_MAGNET_ENABLED",

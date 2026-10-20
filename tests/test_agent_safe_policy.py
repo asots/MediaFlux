@@ -24,6 +24,8 @@ _POLICY_KEYS = {
     "TAVILY_CACHE_TTL_SECONDS",
     "TAVILY_DAILY_CREDIT_LIMIT",
     "TAVILY_TIMEOUT_SECONDS",
+    "WEB_READ_TIMEOUT_SECONDS",
+    "WEB_READ_CACHE_TTL_SECONDS",
     "DISCOVERY_CACHE_TTL_SECONDS",
     "DISCOVERY_STALE_TTL_SECONDS",
     "DOUBAN_CACHE_TTL_SECONDS",
@@ -57,6 +59,8 @@ class SafePolicyUnitTests(unittest.TestCase):
             {"policy": "web_search_max_results", "value": True},
             {"policy": "web_search_max_results", "value": 0},
             {"policy": "web_search_timeout_seconds", "value": 31},
+            {"policy": "web_read_timeout_seconds", "value": 1},
+            {"policy": "web_read_cache_ttl_seconds", "value": 86401},
             {"policy": "web_search_cache_ttl_seconds", "value": 29},
             {"policy": "web_search_daily_credit_limit", "value": 100001},
             {"policy": "discovery_cache_ttl_seconds", "value": 59},
@@ -105,7 +109,7 @@ class SafePolicyUnitTests(unittest.TestCase):
                 )
         rendered = repr((summary.to_dict(), preview.to_dict(), context))
         self.assertTrue(summary.ok)
-        self.assertEqual(summary.data["policy_count"], 11)
+        self.assertEqual(summary.data["policy_count"], 13)
         self.assertTrue(preview.ok)
         self.assertRegex(context, "^[0-9a-f]{64}$")
         self.assertNotIn(secret, rendered)

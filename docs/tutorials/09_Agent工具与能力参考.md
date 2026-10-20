@@ -481,7 +481,7 @@ provider.job.status                  查询当前会话冻结写计划的持久�
 | 本地推荐与公开推荐 | `media.recommend_from_library` 与 `discovery.recommend`；外部推荐不代表已经在库 |
 | 演员与作品详情 | `discovery.credits` 与 `discovery.detail`；缺少演职员数据时再核实其他来源 |
 | 三平台更新与 Bangumi 放送 | `discovery.anime_calendar` 与 `bangumi.calendar`；不能混用日期和来源完整性 |
-| 网页搜索与打开正文 | `web.search` 使用 Tavily Search，`web.read` 使用 Tavily Extract；二者均需 `WEB_SEARCH_ENABLED` 与 `TAVILY_API_KEY`，不是任意 HTTP/浏览器工具 |
+| 网页搜索与打开正文 | `web.search` 使用 Tavily Search，`web.read` 由本机直接获取并提取公开 HTTPS 正文，仅受独立 `WEB_READ_ENABLED` 控制，不使用 Key 或 Tavily 额度；搜索仍需 `WEB_SEARCH_ENABLED` 与 `TAVILY_API_KEY`，不是任意 HTTP/浏览器工具 |
 | 列云盘目录与刮削/清理 | `guangya.fs.query`；普通浏览不需要启动刮削或垃圾清理计划 |
 | 停止回合与停止任务 | 停止模型不撤销已经发生的业务写入，需查询并使用对应任务控制 |
 | 关闭元数据同步与取消积压 | `strm.metadata.set_enabled` 与 `strm.metadata.cancel_pending` 是不同操作 |

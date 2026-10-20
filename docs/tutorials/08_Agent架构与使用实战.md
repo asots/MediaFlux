@@ -55,7 +55,7 @@ Media Agent 是现有媒体业务的自然语言入口，不是第二套下载�
 | 需求 | 额外条件 |
 |---|---|
 | 实时网页搜索 | 开启 `WEB_SEARCH_ENABLED`，配置 `TAVILY_API_KEY`；仍受搜索额度、超时和缓存策略限制 |
-| 公开网页正文读取 | 同样需要 `WEB_SEARCH_ENABLED` 与 `TAVILY_API_KEY`，使用 Tavily Extract；只读公开 HTTPS 页面，不是登录态浏览器或任意内网访问工具 |
+| 公开网页正文读取 | 默认启用 `WEB_READ_ENABLED`，本机直接读取公开 HTTPS 正文，无需 Tavily Key 或额度；不执行 JavaScript，不是登录态浏览器或任意内网访问工具 |
 | 最近播放、未看推荐 | 媒体服务器可用，并能确定对应用户；建议明确配置 `JELLYFIN_USER_ID` 或 `EMBY_USER_ID` |
 | 全库巡检 | 单独配置 `AGENT_LIBRARY_PATROL_ENABLED`、周期及扫描上限；巡检通知还有独立开关 |
 | 下载后入库复核通知 | `AGENT_DOWNLOAD_VERIFICATION_NOTIFY_ENABLED`；是否形成可复核任务还取决于提交结果和媒体线索 |

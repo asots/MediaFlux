@@ -115,7 +115,7 @@ _TOOL_RATE_LIMIT_SCOPES = {
     "discovery.anime_calendar": "discovery-anime-calendar",
     "bangumi.calendar": "bangumi-calendar",
     "web.search": "web-access",
-    "web.read": "web-access",
+    "web.read": "web-read",
 }
 
 _TOOL_RATE_LIMITS = {
@@ -144,7 +144,7 @@ _TOOL_RATE_LIMITS = {
     "discovery.anime_calendar": 6,
     "bangumi.calendar": 6,
     "web.search": 6,
-    "web.read": 6,
+    "web.read": 12,
     "provider.capabilities": 12,
     "provider.query": 8,
     "provider.change.preview": 4,

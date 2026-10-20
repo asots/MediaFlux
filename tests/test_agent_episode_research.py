@@ -414,10 +414,10 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
             "results": [{"url": url, "title": title, "snippet": snippet}], "token": "private-token"})
         return url
 
-    def mock_read(self, url, *, content="The public episode order."):
+    def mock_read(self, url, *, content="The public episode order.", final_url=None):
         self.web_read.side_effect = None
-        self.web_read.return_value = ToolResult(True, "ok", "read", data={"url": url}, model_data={
-            "url": url, "title": "Episode order", "content_chunks": [content], "owner": "private-owner"})
+        self.web_read.return_value = ToolResult(True, "ok", "read", data={"url": final_url or url, "requested_url": url}, model_data={
+            "url": final_url or url, "requested_url": url, "title": "Episode order", "content_chunks": [content], "owner": "private-owner"})
 
     async def test_successful_web_evidence_contains_only_digest_not_raw_content(self):
         url = self.mock_search()
@@ -427,7 +427,7 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
                                       call("web_read", {"url": url})))
         result = await self.run_case(model)
         self.assertEqual(result["status"], "verified")
-        self.assertEqual(self.reader.calls[-1][-1], ({"provider": "tavily", "url": url,
+        self.assertEqual(self.reader.calls[-1][-1], ({"provider": "web", "url": url,
                          "sha256": hashlib.sha256(content.encode()).hexdigest()},))
         messages = " ".join(m.content for r in model.requests for m in r.messages)
         self.assertIn("untrusted_external_evidence", messages)
@@ -493,7 +493,7 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["status"], "failed")
         self.web_read.assert_not_called()
 
-    async def test_redirect_and_changed_search_url_are_rejected(self):
+    async def test_unrelated_read_result_and_changed_search_url_are_rejected(self):
         url = self.mock_search()
         self.mock_read("https://other.example.org/episodes")
         result = await self.run_case(ScriptedModel(rounds(
@@ -504,6 +504,17 @@ class EpisodeResearchRunnerTests(unittest.IsolatedAsyncioTestCase):
             call("web_search", {"query": "Test"}), call("web_read", {"url": url + "?page=2"}))), reader=FakeReader())
         self.assertEqual(result["status"], "failed")
         self.web_read.assert_not_called()
+
+    async def test_local_reader_verified_redirect_preserves_search_provenance(self):
+        url = self.mock_search()
+        final_url = "https://official.example/episodes"
+        self.mock_read(url, final_url=final_url)
+        result = await self.run_case(success_model(prefix=(
+            call("web_search", {"query": "Test episodes"}), call("web_read", {"url": url}),
+        )))
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(self.reader.calls[-1][-1][0]["url"], final_url)
+        self.assertEqual(self.reader.calls[-1][-1][0]["provider"], "web")
 
     async def test_search_whitelist_does_not_survive_another_session(self):
         url = self.mock_search()
