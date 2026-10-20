@@ -56,7 +56,6 @@ from app.modules.episode_mapping import (
     match_fractional_tmdb_special,
     season_episode_counts,
 )
-from app.modules.guangya_compensation import restore_guangya_file
 from app.modules.media_variant import (
     MediaVariant,
     classify_variant,
@@ -7248,18 +7247,6 @@ class Organizer:
             return result
 
         self._preview_conflicts_with_inventory(plans, rules, load_inventory)
-
-    def _restore_remote_file(
-        self,
-        item: GuangYaFile,
-        original_parent_id: str,
-        known_current_name: str,
-    ) -> None:
-        """三条整理写入链共享实际状态补偿，不以响应异常推断未提交。"""
-        restore_guangya_file(
-            self.client,
-            GuangYaFile(item.file_id, item.name, False, item.size, item.etag, original_parent_id),
-        )
 
     def _verify_remote_snapshot(self, expected: GuangYaFile, *, role: str) -> GuangYaFile:
         """在第一次写操作前复核远端对象，拒绝使用过期扫描快照。"""

@@ -16,6 +16,7 @@ from app.clients.guangya import GuangYaFile
 from app.modules.organize import OrganizePlan, OrganizeRules, Organizer
 from app.modules.organize_correction import OrganizeCorrectionService
 from app.modules.organize_execution import execute_organize_plans
+from app.modules.guangya_compensation import restore_guangya_file
 from app.modules.organize_probe_worker import OrganizeProbeWorker
 from app.modules.scraper import MatchResult
 from tests.support import IsolatedDatabaseTestCase
@@ -72,7 +73,7 @@ class ForegroundReplacementCompensationTests(IsolatedDatabaseTestCase):
         self.enterContext(patch("socket.socket.connect", side_effect=AssertionError("禁止外联")))
         self.enterContext(patch("socket.create_connection", side_effect=AssertionError("禁止外联")))
 
-    def _execute(self, cloud):
+    def _execute(self, cloud, companions=()):
         incoming = GuangYaFile("incoming", "Source.mkv", False, 200, "new-etag", "source")
         cloud.files[incoming.file_id] = incoming
         organizer = Organizer(client=cast(GuangYaClient, cloud), scraper=cast(TMDBScraper, object()))
@@ -92,7 +93,8 @@ class ForegroundReplacementCompensationTests(IsolatedDatabaseTestCase):
             )),
         ):
             execute_organize_plans(
-                organizer, [plan], OrganizeRules(target_dir_id="target"), stats, {},
+                organizer, [plan], OrganizeRules(target_dir_id="target"), stats,
+                {"incoming": list(companions)},
             )
         self.assertEqual((stats["failed"], stats["moved"]), (1, 0))
         self.assertEqual(cloud.files["incoming"].parent_id, "source")
@@ -166,6 +168,59 @@ class ForegroundReplacementCompensationTests(IsolatedDatabaseTestCase):
             ("move", ("incoming",), "source"),
             ("rename", "video", "Archive.mkv"),
         ])
+
+    def test_companion_failure_restores_whole_write_set_and_isolates_rollback_failure(self):
+        for rollback_fails in (False, True):
+            with self.subTest(rollback_fails=rollback_fails):
+                cloud = MemoryCloud()
+                companions = [
+                    GuangYaFile("nfo", "Source.nfo", False, 20, "nfo", "source"),
+                    GuangYaFile("poster", "Source.jpg", False, 30, "poster", "source"),
+                ]
+                cloud.files.update((item.file_id, replace(item)) for item in companions)
+                original_rename = cloud.rename
+
+                def rename(file_id, name):
+                    if rollback_fails and (file_id, name) == ("poster", "Source.jpg"):
+                        raise TimeoutError("补偿请求失败")
+                    result = original_rename(file_id, name)
+                    if (file_id, name) == ("poster", "Archive.jpg"):
+                        raise TimeoutError("服务端已改名，响应丢失")
+                    return result
+
+                with patch.object(cloud, "rename", side_effect=rename):
+                    log, _audit = self._execute(cloud, companions)
+                self.assertEqual(log["legacy_incomplete"], rollback_fails)
+                expected = {"video": ("target", "Archive.mkv"), "incoming": ("source", "Source.mkv")}
+                expected.update((item.file_id, (item.parent_id, item.name)) for item in companions)
+                if rollback_fails:
+                    expected["poster"] = ("target", "Archive.jpg")
+                self.assertEqual(
+                    {key: (item.parent_id, item.name) for key, item in cloud.files.items()}, expected,
+                )
+                items = {item["file_id"]: item for item in db.list_organize_log_items(log["id"])}
+                self.assertEqual(items["nfo"]["current_name"], "Source.nfo")
+                self.assertEqual(items["nfo"]["target_name"], "Archive.nfo")
+                self.assertEqual(items["poster"]["current_name"], "" if rollback_fails else "Source.jpg")
+                self.assertEqual(items["poster"]["target_name"], "Source.jpg")
+                self.assertEqual(cloud.calls, [
+                    ("rename", "video", "Archive.mkv.mediaflux-backup-video"),
+                    ("move", ("incoming",), "target"),
+                    ("rename", "incoming", "Archive.mkv"),
+                    ("move", ("nfo",), "target"),
+                    ("rename", "nfo", "Archive.nfo"),
+                    ("move", ("poster",), "target"),
+                    ("rename", "poster", "Archive.jpg"),
+                ] + ([] if rollback_fails else [
+                    ("rename", "poster", "Source.jpg"),
+                    ("move", ("poster",), "source"),
+                ]) + [
+                    ("rename", "nfo", "Source.nfo"),
+                    ("move", ("nfo",), "source"),
+                    ("rename", "incoming", "Source.mkv"),
+                    ("move", ("incoming",), "source"),
+                    ("rename", "video", "Archive.mkv"),
+                ])
 
 
 class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
@@ -344,10 +399,9 @@ class ReleaseChainCompensationTests(IsolatedDatabaseTestCase):
         cloud = MemoryCloud(unreadable=True)
         cloud.failed = True
         with self.assertRaises(RuntimeError):
-            Organizer(client=cast(GuangYaClient, cloud), scraper=cast(TMDBScraper, object()))._restore_remote_file(
+            restore_guangya_file(
+                cloud,
                 GuangYaFile("video", "Archive.mkv", False, 100, "etag", "target"),
-                "target",
-                "Archive.mkv",
             )
 
     def test_probe_interrupted_write_intent_freezes_instead_of_external_cancel(self):

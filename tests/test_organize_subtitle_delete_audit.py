@@ -6,6 +6,7 @@ from app.clients.guangya import GuangYaClient
 from app.modules.scraper import TMDBScraper
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import unittest
 import unittest.mock
@@ -16,6 +17,7 @@ from app.clients.guangya import GuangYaFile
 from app.modules.subtitle_identity import SubtitleIdentity, plan_subtitle_companions
 from app.modules.organize import OrganizePlan, OrganizeRules, Organizer
 from app.modules.organize_execution import execute_organize_plans
+from app.modules.organize_runtime import OrganizeTaskRuntime
 from app.modules.organize_postprocess import replacement_delete_block_reason
 from app.modules.organize_correction import OrganizeCorrectionService
 from app.modules.scraper import MatchResult
@@ -803,6 +805,83 @@ class DirectoryScrapeOrganizerSecretPersistenceTests(IsolatedDatabaseTestCase):
 
 
 class OrganizerSubtitleExecutionTests(unittest.TestCase):
+    def test_companion_names_agree_across_cloud_audit_inventory_and_strm(self):
+        class SnapshotClient(_VariantTreeClient):
+            def list_dir(self, parent_id="0"):
+                return [replace(item) for item in super().list_dir(parent_id)]
+
+            def file_info(self, file_id):
+                item = super().file_info(file_id)
+                return replace(item) if item is not None else None
+
+        for rename_enabled in (False, True):
+            with self.subTest(rename_enabled=rename_enabled):
+                incoming = cloud_file("incoming", "Variant.Movie.2026.mkv", etag="video")
+                client = SnapshotClient(incoming, cloud_file("placeholder", "placeholder.txt"))
+                originals = {
+                    "sub": "Variant.Movie.2026.chs.default.forced.SRT",
+                    "nfo": "variant.movie.2026.nfo",
+                }
+                client.tree["source"].extend(
+                    cloud_file(file_id, name, etag=file_id) for file_id, name in originals.items()
+                )
+                rules = OrganizeRules(
+                    target_dir_id="target", region_split=False, year_split=False,
+                    small_file_mb=0, clean_empty=False, link_strm=False,
+                    notify_enabled=False, library_notify=False, rename_enabled=rename_enabled,
+                )
+                runtime = OrganizeTaskRuntime()
+                organizer = Organizer(client=cast(GuangYaClient, client), scraper=cast(TMDBScraper, _VariantScraper()))
+                bound_names = []
+                write_names = {}
+
+                class WriteGuard:
+                    def __call__(self, *_args, **_kwargs):
+                        pass
+
+                    def bind_target_context(self, _plan, _target, *, companions, target_names):
+                        bound_names.extend(target_names)
+
+                    def before_companion_write(self, _plan, item, _target, target_name):
+                        write_names[item.file_id] = target_name
+
+                plans, stats = organizer.organize("source", rules, dry_run=True)
+                companions = [item for item in client.list_dir("source") if item.file_id in originals]
+                subtitles = plan_subtitle_companions([incoming], [item for item in companions if item.file_id == "sub"])
+                with patch("app.modules.organize.add_organize_log", return_value=1), patch(
+                    "app.modules.organize.add_organize_log_items"
+                ) as add_items, patch.object(organizer, "_before_plan_write", WriteGuard(), create=True):
+                    execute_organize_plans(
+                        organizer, plans, rules, stats, {plans[0].original_path: companions},
+                        {"incoming": subtitles.plans}, task_runtime=runtime,
+                    )
+
+                self.assertEqual((stats["moved"], stats["failed"], stats["metadata_moved"]), (1, 0, 2))
+                expected = dict(originals)
+                if rename_enabled:
+                    expected["sub"] = SubtitleIdentity.parse(originals["sub"]).target_name(plans[0].new_name)
+                    expected["nfo"] = plans[0].new_name.rsplit(".", 1)[0] + ".nfo"
+                else:
+                    self.assertEqual(client.renames, [])
+                self.assertEqual(write_names, expected)
+                self.assertEqual(set(bound_names[1:]), set(expected.values()))
+                snapshot = runtime.get_inventory("movie")
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                audits = {item["file_id"]: item for item in add_items.call_args.args[1]}
+                changes = {item["file_id"]: item for item in stats["strm_changes"]}
+                cached = {item.file_id: item for item in snapshot.files}
+                for file_id, name in expected.items():
+                    with self.subTest(file_id=file_id):
+                        remote = client.file_info(file_id)
+                        assert remote is not None
+                        self.assertEqual((remote.parent_id, remote.name), ("movie", name))
+                        self.assertEqual(audits[file_id]["original_name"], originals[file_id])
+                        self.assertEqual(audits[file_id]["current_name"], name)
+                        self.assertEqual(audits[file_id]["target_name"], name)
+                        self.assertEqual(changes[file_id]["name"], name)
+                        self.assertEqual(cached[file_id].name, name)
+
     def test_only_unique_subtitle_is_moved_and_renamed_canonically(self):
         incoming = cloud_file("incoming", "Variant.Movie.2026.mkv", size=2000, etag="new-gcid")
         placeholder = cloud_file("placeholder", "placeholder.txt", size=1)

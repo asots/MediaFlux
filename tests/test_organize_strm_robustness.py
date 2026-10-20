@@ -387,7 +387,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
 
     def test_remote_restore_requires_manual_review_without_blind_writes_when_lookup_fails(self) -> None:
         """状态不可读不能证明补偿完成，也不应盲目回放云端改名/移动。"""
-        from app.modules.guangya_compensation import GuangYaCompensationError
+        from app.modules.guangya_compensation import GuangYaCompensationError, restore_guangya_file
 
         operations: list[tuple] = []
 
@@ -405,9 +405,7 @@ class OrganizeRobustnessTests(IsolatedDatabaseTestCase):
 
         item = GuangYaFile("video", "Movie.mkv", False, 100, "etag", "source")
         with self.assertRaisesRegex(GuangYaCompensationError, "人工核验"):
-            Organizer(client=cast(GuangYaClient, Client()), scraper=cast(TMDBScraper, object()))._restore_remote_file(
-                item, "source", "Movie.mkv"
-            )
+            restore_guangya_file(Client(), item)
         self.assertEqual(operations, [])
 
     def test_remote_restore_waits_for_visibility_without_repeating_writes(self) -> None:

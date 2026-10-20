@@ -5,12 +5,13 @@ import threading
 import time
 from dataclasses import replace
 from inspect import getattr_static
-from typing import TYPE_CHECKING, Any, Callable, TypedDict
+from typing import TYPE_CHECKING, Any, Callable
 
 from app import database as db
 from app.clients.guangya import GuangYaFile
 from app.logger import get_logger
 from app.modules.directory_scrape_errors import safe_organize_failure
+from app.modules.guangya_compensation import restore_guangya_file
 from app.modules.organize_delete_audit import (
     DeleteCandidate,
     execute_recycle_bin_delete,
@@ -29,11 +30,6 @@ from app.modules.scraper import MatchResult
 
 if TYPE_CHECKING:
     from app.modules.organize import OrganizePlan, Organizer, OrganizeRules
-
-
-class _CompanionJournalEntry(TypedDict):
-    item: GuangYaFile
-    current_name: str
 
 
 logger = get_logger(__name__)
@@ -329,7 +325,7 @@ def execute_organize_plans(
         target_id: str = ""
         rollback_incomplete = False
         companion_rollback_errors: dict[str, str] = {}
-        companion_journal: list[_CompanionJournalEntry] = []
+        moved_metadata: list[tuple[GuangYaFile, str]] = []
         replacement_deleted = False
         companion_key = f"{p.original_path}:{normalized_stem(p.original_name)}"
         candidates = companion_files.get(p.original_path, [])
@@ -348,13 +344,10 @@ def execute_organize_plans(
             write_guard = getattr(organizer, "_before_plan_write", None)
             if write_guard is not None:
                 write_guard(p, "prepare")
-            organizer._verify_remote_snapshot(
-                GuangYaFile(
-                    p.file_id, p.original_name, False, p.size, p.etag,
-                    p.original_parent_id,
-                ),
-                role="待整理视频",
+            video_original = GuangYaFile(
+                p.file_id, p.original_name, False, p.size, p.etag, p.original_parent_id,
             )
+            organizer._verify_remote_snapshot(video_original, role="待整理视频")
             for item in companions:
                 organizer._verify_remote_snapshot(
                     GuangYaFile(
@@ -403,29 +396,31 @@ def execute_organize_plans(
             p.conflict_decision = conflict_decision
             p.conflict_note = conflict_note
             existing_original_name = existing.name if existing else ""
+            video_target_name = p.new_name if rules.rename_enabled and p.new_name else p.original_name
+            companion_targets = []
+            for item in companions:
+                target_name = item.name
+                if rules.rename_enabled:
+                    subtitle_plan = subtitle_plan_by_id.get(item.file_id)
+                    target_name = (
+                        subtitle_plan.target_name(video_target_name) if subtitle_plan is not None
+                        else companion_target_name(p.original_name, video_target_name, item.name)
+                    )
+                companion_targets.append((item, target_name))
             # 可选的授权范围在真实库存仲裁后再校验，且必须早于旧文件备份、移动或回收。
             if write_guard is not None:
                 bind_target = _optional_guard_method(write_guard, "bind_target_context")
                 if callable(bind_target):
-                    video_target_name = p.new_name if rules.rename_enabled and p.new_name else p.original_name
-                    companion_names = []
-                    for item in companions:
-                        subtitle_plan = subtitle_plan_by_id.get(item.file_id)
-                        name = (subtitle_plan.target_name(video_target_name) if subtitle_plan is not None
-                                else companion_target_name(p.original_name, video_target_name, item.name))
-                        companion_names.append(name if rules.rename_enabled else item.name)
-                    bind_target(p, target_id, companions=companions, target_names=[video_target_name, *companion_names])
+                    bind_target(p, target_id, companions=companions,
+                                target_names=[video_target_name, *(name for _, name in companion_targets)])
                 write_guard(p, "conflict", target_files=target_files)
             if existing and conflict_decision != "replace":
                 record_runtime_skip(
                     p, target_id, conflict_note or "目标存在同媒体文件，按冲突策略跳过",
                 )
                 continue
-            video_move_attempted = False
-            video_moved_to_target = False
-            moved_metadata: list[tuple[GuangYaFile, str]] = []
             actual_name = p.original_name
-            video_renamed = False
+            write_journal: list[tuple[GuangYaFile, str]] = []
             try:
                 if existing:
                     organizer._verify_remote_snapshot(existing, role="待替换旧文件")
@@ -433,30 +428,26 @@ def execute_organize_plans(
                     replacement_backup_name = (
                         f"{existing.name}.mediaflux-backup-{existing.file_id[-8:]}"
                     )
+                    write_journal.append((
+                        replace(existing, name=existing_original_name, parent_id=target_id), "replacement",
+                    ))
                     organizer.client.rename(existing.file_id, replacement_backup_name)
                     existing.name = replacement_backup_name
                     evidence_names[existing.file_id] = replacement_backup_name
                     stats["conflict"] += 1
                 # 目标目录创建和冲突判断也可能耗时；在真正移动前再次缩小
                 # 外部改名/移动造成的 TOCTOU 窗口。
-                organizer._verify_remote_snapshot(
-                    GuangYaFile(
-                        p.file_id, p.original_name, False, p.size, p.etag,
-                        p.original_parent_id,
-                    ),
-                    role="待整理视频",
-                )
+                organizer._verify_remote_snapshot(video_original, role="待整理视频")
                 if write_guard is not None:
                     write_guard(p, "commit")
-                video_move_attempted = True
+                if p.original_parent_id:
+                    write_journal.append((video_original, "video"))
                 organizer.client.move([p.file_id], target_id)
-                video_moved_to_target = True
-                if rules.rename_enabled and p.new_name and p.new_name != p.original_name:
-                    organizer.client.rename(p.file_id, p.new_name)
-                    actual_name = p.new_name
-                    video_renamed = True
+                if video_target_name != p.original_name:
+                    organizer.client.rename(p.file_id, video_target_name)
+                    actual_name = video_target_name
                     stats["renamed"] += 1
-                for item in companions:
+                for item, target_name in companion_targets:
                     organizer._verify_remote_snapshot(
                         GuangYaFile(
                             item.file_id, item.name, False, item.size, item.etag,
@@ -464,72 +455,34 @@ def execute_organize_plans(
                         ),
                         role="伴随文件",
                     )
-                    subtitle_plan = subtitle_plan_by_id.get(item.file_id)
-                    target_name = (
-                        subtitle_plan.target_name(actual_name)
-                        if subtitle_plan is not None
-                        else companion_target_name(p.original_name, actual_name, item.name)
-                    )
                     companion_guard = _optional_guard_method(write_guard, "before_companion_write")
                     if callable(companion_guard):
-                        companion_guard(p, item, target_id, target_name if rules.rename_enabled else item.name)
-                    journal_entry: _CompanionJournalEntry = {"item": item, "current_name": item.name}
-                    companion_journal.append(journal_entry)
+                        companion_guard(p, item, target_id, target_name)
+                    write_journal.append((
+                        replace(item, parent_id=item.parent_id or p.original_parent_id), "companion",
+                    ))
                     organizer.client.move([item.file_id], target_id)
-                    if rules.rename_enabled and target_name != item.name:
+                    if target_name != item.name:
                         organizer.client.rename(item.file_id, target_name)
-                        journal_entry["current_name"] = target_name
                     moved_metadata.append((item, target_name))
             except Exception:
-                for journal_entry in reversed(companion_journal):
-                    item = journal_entry["item"]
-                    current_name = (journal_entry["current_name"] or item.name)
+                # 所有写意图都先记录原快照；无论响应是否收到，按逆序回读并补偿。
+                for item, role in reversed(write_journal):
                     try:
-                        organizer._restore_remote_file(
-                            item,
-                            item.parent_id or p.original_parent_id,
-                            current_name,
-                        )
+                        restore_guangya_file(organizer.client, item)
                     except Exception as rollback_exc:
                         rollback_incomplete = True
-                        companion_rollback_errors[item.file_id] = (
-                            safe_organize_failure(rollback_exc)
-                        )
+                        if role == "companion":
+                            companion_rollback_errors[item.file_id] = safe_organize_failure(rollback_exc)
                         logger.error(
-                            "回滚伴随文件失败 file=%s type=%s",
-                            item.name, type(rollback_exc).__name__,
+                            "回滚整理文件失败 file=%s role=%s type=%s",
+                            item.name, role, type(rollback_exc).__name__,
                         )
-                if video_move_attempted and p.original_parent_id:
-                    try:
-                        organizer._restore_remote_file(
-                            GuangYaFile(
-                                p.file_id, p.original_name, False,
-                                p.size, p.etag, p.original_parent_id,
-                            ),
-                            p.original_parent_id,
-                            actual_name,
-                        )
-                        if video_renamed and stats.get("renamed", 0) > 0:
+                    else:
+                        if role == "video" and actual_name != p.original_name and stats.get("renamed", 0) > 0:
                             stats["renamed"] -= 1
-                    except Exception as rollback_exc:
-                        rollback_incomplete = True
-                        logger.error(
-                            "回滚新文件失败 file=%s type=%s",
-                            p.original_name, type(rollback_exc).__name__,
-                        )
-                if existing and replacement_backup_name:
-                    try:
-                        organizer._restore_remote_file(
-                            replace(existing, name=existing_original_name, parent_id=target_id),
-                            target_id, replacement_backup_name,
-                        )
-                        replacement_backup_name = ""
-                    except Exception as restore_exc:
-                        rollback_incomplete = True
-                        logger.error(
-                            "恢复旧文件名失败 file=%s type=%s",
-                            existing_original_name, type(restore_exc).__name__,
-                        )
+                        elif role == "replacement":
+                            replacement_backup_name = ""
                 raise
             if existing and replacement_backup_name:
                 candidate = DeleteCandidate(
@@ -564,7 +517,7 @@ def execute_organize_plans(
                             old_detail=old_detail, new_detail=new_detail,
                             target_files=refreshed,
                             scan_errors=list(stats.get("scan_errors") or []),
-                            move_succeeded=video_moved_to_target,
+                            move_succeeded=True,
                         )
                     except Exception as verify_exc:
                         logger.warning(
@@ -850,9 +803,8 @@ def execute_organize_plans(
                     ),
                     "target_parent_id": target_id,
                     "target_name": next((
-                        str(entry.get("current_name") or item.name)
-                        for entry in companion_journal
-                        if getattr(entry.get("item"), "file_id", "") == item.file_id
+                        name for moved_item, name in moved_metadata
+                        if moved_item.file_id == item.file_id
                     ), item.name),
                     "size": item.size, "etag": item.etag,
                     "status": "failed",
