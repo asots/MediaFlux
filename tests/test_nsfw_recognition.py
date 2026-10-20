@@ -276,6 +276,108 @@ class NsfwIdentifierTests(unittest.TestCase):
         assert extract_nsfw_identifier_result is not None
         self.assertEqual(extract_nsfw_identifier_result.code, "SSIS-001")
 
+    def test_domain_cleanup_keeps_release_identity_extension_and_part(self):
+        cases = (
+            ("SPRBD-019.FHD-www.52iv.net.mkv", "SPRBD-019", "SPRBD-019", None),
+            ("SPRBD-019.FHD-www.52iv.net-CD2.mkv", "SPRBD-019", "SPRBD-019", 2),
+            ("SPRBD-019.FHD-www.52iv.net.CD2.mkv", "SPRBD-019", "SPRBD-019", 2),
+            ("www.example.com@SSNI-999.FHD-52iv.net_CD2.mkv", "SSNI-999", "SSNI-999", 2),
+            ("foo.bar.example.com@ABC-123.FHD.mkv", "ABC-123", "ABC-123", None),
+            ("ABC-123.Release.Title-example.com.mkv", "ABC-123", "ABC-123", None),
+            ("SPRBD-019.FHD-52iv.net-CD2.mkv", "SPRBD-019", "SPRBD-019", 2),
+        )
+        for name, code, title, part_index in cases:
+            with self.subTest(name=name):
+                cleaned = clean_nsfw_release_text(name)
+                self.assertNotIn("52iv", cleaned.lower())
+                self.assertNotIn("example.com", cleaned.lower())
+                self.assertIn(code.split("-")[0], cleaned)
+                identifier = extract_nsfw_identifier(name)
+                self.assertIsNotNone(identifier)
+                assert identifier is not None
+                self.assertEqual(identifier.code, code)
+                self.assertEqual(clean_nsfw_archive_title(name), title)
+                part = extract_nsfw_multipart(name)
+                if part_index is None:
+                    self.assertIsNone(part)
+                else:
+                    self.assertIsNotNone(part)
+                    assert part is not None
+                    self.assertEqual(part.part_index, part_index)
+
+    def test_explicit_url_is_removed_without_using_its_number_as_identity(self):
+        for value in (
+            "https://SSNI-999.example.com/path",
+            "https://SSNI-999.example.com/path?next=/SSIS-001.mp4",
+            "ABC-123.1080p.example.com",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(clean_nsfw_release_text(value), "")
+                self.assertIsNone(extract_nsfw_identifier(value))
+                self.assertIsNone(extract_nsfw_multipart(value))
+                self.assertEqual(clean_nsfw_archive_title(value), "")
+
+    def test_configured_domain_cleanup_keeps_identity_without_http(self):
+        cases = (
+            ("SPRBD-019.FHD-spam.example.com-CD2.mkv", "SPRBD-019", "SPRBD-019", 2),
+            ("ABC-123.Release.Title-spam.example.com-CD2.mkv", "ABC-123", "ABC-123", 2),
+        )
+        for name, code, title, part_index in cases:
+            with self.subTest(name=name):
+                cleaned = clean_nsfw_release_text(name, "example.com")
+                self.assertNotIn("example.com", cleaned.lower())
+                identifier = extract_nsfw_identifier(name, "example.com")
+                self.assertIsNotNone(identifier)
+                assert identifier is not None
+                self.assertEqual(identifier.code, code)
+                self.assertEqual(clean_nsfw_archive_title(name, "example.com"), title)
+                part = extract_nsfw_multipart(name, "example.com")
+                self.assertIsNotNone(part)
+                assert part is not None
+                self.assertEqual(part.part_index, part_index)
+
+        for strip_domain in ("spam.example.com", "example.com"):
+            with self.subTest(name="SPRBD-019.FHD-52iv.net-CD2.mkv", strip_domain=strip_domain):
+                name = "SPRBD-019.FHD-52iv.net-CD2.mkv"
+                self.assertNotIn("52iv.net", clean_nsfw_release_text(name, strip_domain))
+                identifier = extract_nsfw_identifier(name, strip_domain)
+                self.assertIsNotNone(identifier)
+                assert identifier is not None
+                self.assertEqual(identifier.code, "SPRBD-019")
+                self.assertEqual(clean_nsfw_archive_title(name, strip_domain), "SPRBD-019")
+                part = extract_nsfw_multipart(name, strip_domain)
+                self.assertIsNotNone(part)
+                assert part is not None
+                self.assertEqual(part.part_index, 2)
+
+    def test_identifiers_inside_domains_are_not_used_as_release_identity(self):
+        cases = (
+            ("SPRBD-019.FHD-www.52iv.net.mkv", "SPRBD-019"),
+            ("https://SSNI-999.example.com/path", None),
+            ("SSNI-999.example.com/path", None),
+            ("www.SSNI-999.example.com/path", None),
+            ("www.example.com@ABC-123.FHD.mkv", "ABC-123"),
+        )
+        for name, expected in cases:
+            with self.subTest(name=name):
+                identifier = extract_nsfw_identifier(name)
+                self.assertEqual(identifier.code if identifier else None, expected)
+
+    def test_compact_and_part_tokens_survive_bare_domain_suffixes(self):
+        cases = (
+            ("KRI079C.52iv.net.mp4", "KRI-079", "KRI-079", None),
+            ("SSNI596C.example.com_CD2.mp4", "SSNI-596", "SSNI-596", 2),
+            ("ABC-123.CD2.example.com.mkv", "ABC-123", "ABC-123", 2),
+            ("https://SSNI-999.example.com/path/ABC-123.CD2.mkv", None, "", None),
+        )
+        for name, code, title, part_index in cases:
+            with self.subTest(name=name):
+                identifier = extract_nsfw_identifier(name)
+                self.assertEqual(identifier.code if identifier else None, code)
+                self.assertEqual(clean_nsfw_archive_title(name), title)
+                part = extract_nsfw_multipart(name)
+                self.assertEqual(part.part_index if part else None, part_index)
+
     def test_category_is_a_single_safe_path_segment(self):
         self.assertEqual(validate_category_name("成人内容"), "成人内容")
         for value in ("../adult", "成人/内容", "", "a" * 41):

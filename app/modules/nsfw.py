@@ -22,11 +22,12 @@ from app.modules.scraper import Candidate, MatchResult
 logger = get_logger(__name__)
 
 _DOMAIN_TOKEN_RE = re.compile(
-    r"(?i)(?<![\w@])(?:https?://)?(?:www\.)?"
+    r"(?i)(?<![a-z0-9])(?:https?://)?(?:www\.)?"
     r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"(?:com|net|org|tv|cc|me|cn|xyz|site|club|info|top|vip|pro|io)"
+    r"(?:com|net|org|tv|cc|me|cn|xyz|site|club|info|top|vip|pro|io)(?![a-z0-9])"
     r"(?:[/\\][^\s\[\]【】()]*)?"
 )
+_URL_TOKEN_RE = re.compile(r"(?i)https?://[^\s\[\]【】()]+")
 # 紧贴序号的独立 C 是发布尾缀，不属于番号；不吞掉任意字母/数字串。
 _CODE_SUFFIX = r"(?:C(?![A-Z0-9]))?"
 _FC2_RE = re.compile(r"(?i)(?<![A-Z0-9])FC2[\s._-]*(?:PPV[\s._-]*)?(\d{5,9})(?!\d)" + _CODE_SUFFIX)
@@ -55,7 +56,7 @@ _CODE_PREFIX_BLOCKLIST = {
     "VBR", "VIDEO", "WEB", "WEBRIP", "X264", "X265",
 }
 _RELEASE_NOISE_RE = re.compile(
-    r"(?i)(?:\b(?:1080p|2160p|720p|4k|8k|bluray|blu-ray|webrip|web-dl|h\.?26[45]|"
+    r"(?i)(?:\b(?:1080p|2160p|720p|4k|8k|fhd|bluray|blu-ray|webrip|web-dl|h\.?26[45]|"
     r"hevc|avc|x26[45]|aac|flac|dts(?:-?hd)?|ddp?\d(?:\.\d)?|hdr10\+?|dv)\b)"
 )
 _SAFE_CATEGORY_RE = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]{1,40}$")
@@ -228,8 +229,30 @@ def _code_alias_keys(number: str) -> tuple[str, ...]:
 
 
 def clean_nsfw_release_text(value: str, strip_domains: str = "") -> str:
-    text = (value or "")
-    text = _DOMAIN_TOKEN_RE.sub(" ", text)
+    text = _URL_TOKEN_RE.sub(" ", value or "")
+    filename = bool(_MEDIA_EXTENSION_RE.search(text))
+
+    def strip_domain(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token.lower().startswith("www.") or "/" in token or "\\" in token:
+            return " "
+        marker = re.search(r"(?i)(?<![a-z0-9])www\.", token)
+        if marker:
+            return token[:marker.start()] + " "
+        # 裸域名可能与发布名连写；仅在文件名内保留共享解析器认可的前导番号和分段。
+        identifier = _extract_nsfw_identifier(token) if filename else None
+        if identifier and token.startswith(identifier.matched_text):
+            end = len(identifier.matched_text)
+            for pattern in (_MULTIPART_LABEL_RE, _MULTIPART_NUMERIC_RE, _MULTIPART_ALPHA_RE):
+                part = pattern.match(token[end:])
+                if part:
+                    end += part.end()
+                    break
+            if _DOMAIN_TOKEN_RE.fullmatch(token[end:].lstrip("._-")):
+                return token[:end] + " "
+        return " "
+
+    text = _DOMAIN_TOKEN_RE.sub(strip_domain, text)
     configured = {
         item.strip().lower().lstrip(".")
         for item in re.split(r"[,，\s]+", (strip_domains or ""))
@@ -239,7 +262,7 @@ def clean_nsfw_release_text(value: str, strip_domains: str = "") -> str:
         if not re.fullmatch(r"[a-z0-9.-]{3,120}", domain):
             continue
         text = re.sub(
-            rf"(?i)(?<![\w@])(?:https?://)?(?:www\.)?{re.escape(domain)}"
+            rf"(?i)(?<![a-z0-9])(?:https?://)?(?:www\.)?{re.escape(domain)}(?![a-z0-9])"
             rf"(?:[/\\][^\s\[\]【】()]*)?",
             " ", text,
         )
@@ -248,7 +271,11 @@ def clean_nsfw_release_text(value: str, strip_domains: str = "") -> str:
 
 
 def extract_nsfw_identifier(value: str, strip_domains: str = "") -> NsfwIdentifier | None:
-    text = clean_nsfw_release_text(value, strip_domains)
+    return _extract_nsfw_identifier(clean_nsfw_release_text(value, strip_domains))
+
+
+def _extract_nsfw_identifier(text: str) -> NsfwIdentifier | None:
+    """单一番号语法；清洗边界和公开提取入口共用，不从 URL 恢复身份。"""
     match = _FC2_RE.search(text)
     if match:
         return NsfwIdentifier(f"FC2-PPV-{match.group(1)}", match.group(0), "fc2")
