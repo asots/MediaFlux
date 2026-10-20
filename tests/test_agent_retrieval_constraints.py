@@ -77,6 +77,23 @@ def test_read_tool_disclaimer_is_not_misread_as_a_download_capability():
     assert selection.names == ('source.search',)
 
 
+@pytest.mark.parametrize('subject', ['科幻电影', '国产动画剧集', '悬疑电影'])
+@pytest.mark.parametrize('exclusion', ['排除我的媒体库已有的', '排除已入库的内容'])
+def test_recommendations_survive_the_exclusion_supported_by_their_examples(catalog, subject, exclusion):
+    message = f'推荐3部2016到2025年的{subject}，{exclusion}，不要下载，给片名和年份。'
+    selection = CapabilityRetriever().retrieve(message, catalog)
+    assert 'discovery.recommend' in selection.names, selection.names
+
+
+def test_negative_example_clause_does_not_describe_a_tools_positive_action():
+    selected = read_tool('accounts.list', description='账户状态列表',
+                         examples=('列出账户，排除注销账户',))
+    wrong = read_tool('accounts.recent', description='列出近期账户', examples=('列出近期账户',))
+    catalog = ToolCatalog([selected, wrong])
+    result = CapabilityRetriever(minimum=1, maximum=1).retrieve('列出账户，排除注销账户', catalog)
+    assert result.names == ('accounts.list',)
+
+
 @pytest.mark.parametrize('message', ['不是让你删除，是让你检查目录', '并非叫你删除，检查目录就行', '没叫你删除，只检查目录'])
 def test_correction_clause_keeps_positive_goal(message):
     positive, terms, excluded = _query_terms(message)

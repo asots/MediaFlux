@@ -369,15 +369,12 @@ class CapabilityRetriever:
             tokens = _tokens(document)
             documents[tool.name] = tokens
             negative_documents[tool.name] = Counter(
-                _tokens(
-                    " ".join(
-                        (
-                            tool.name.replace(".", " "),
-                            tool.model_name.replace("_", " "),
-                            *tool.examples,
-                        )
-                    )
-                )
+                _tokens(" ".join((
+                    tool.name.replace(".", " "),
+                    tool.model_name.replace("_", " "),
+                    # 示例的排除条件不是工具执行的动作，不能反向惩罚支持它的工具。
+                    *(_query_terms(example)[0] for example in tool.examples),
+                )))
             )
             document_frequency.update(set(tokens))
         average_length = sum(len(tokens) for tokens in documents.values()) / max(
