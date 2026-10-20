@@ -510,6 +510,7 @@ def publish_confirmation_event(
     terminal: bool = False,
     error: bool = False,
     deliver_now: bool = True,
+    expected_confirmation_delivery: tuple[int, int] | None = None,
 ) -> bool:
     """把候选卡及其终态写入同一个可靠 Telegram 消息线程。"""
     from app.modules.telegram_notification_center import publish_notification_thread
@@ -535,6 +536,7 @@ def publish_confirmation_event(
             chat_id=chat_id,
             preferred_message_id=(message_id or 0),
             deliver_now=deliver_now,
+            expected_confirmation_delivery=expected_confirmation_delivery,
         )
     finally:
         if not terminal:
@@ -1257,7 +1259,7 @@ def _confirmation_result(row, payload: dict, candidate: dict) -> dict:
 
 
 def _confirmation_selected_event(row, payload: dict, candidate: dict) -> NotificationEvent:
-    """消费者启动工作前发布一次接纳状态；后续仅由终态回执更新同一张卡。"""
+    """随确认认领持久化接纳状态，所有排队项及时清除候选按钮。"""
     identity_label = {"metatube": "MetaTube", "clean_title": "清洗标题"}.get(
         str(candidate.get("provider") or "").strip().lower(), "TMDB",
     )
@@ -1346,14 +1348,6 @@ def _dispatch_confirmation_token(token: str) -> dict:
     if actor not in {"human", "agent"}:
         actor = "human"
     try:
-        # 必须先入通知队列再启动 worker。回调不再直接编辑消息，避免快速
-        # 失败/成功之后，迟到的“正在执行”覆写已送达终态。这里不等待 TG 网络。
-        if _confirmation_delivery_enabled(payload):
-            publish_confirmation_event(
-                _confirmation_selected_event(row, payload, candidate),
-                chat_id=chat_id, token=token,
-                message_id=_confirmation_message_id(payload), deliver_now=False,
-            )
         task = get_organize_manager().start_operation(
             "Agent 确认整理" if actor == "agent" else "Telegram 确认整理",
             reference,
@@ -1417,16 +1411,20 @@ def _dispatch_due_confirmation_delivery(token: str = "") -> bool:
         )
     chat_id = str(item["chat_id"] or "")
     token = str(item["confirmation_token"] or "").strip()
+    confirmation = db.get_organize_confirmation(token)
+    terminal = confirmation is None or confirmation["status"] not in {"queued", "running"}
     try:
-        # 领域事务 outbox 只保证确认终态与回执原子落库；后续发送、编辑、
-        # 重试与 message_id 维护全部由统一 Telegram outbox 接管。
+        # 接纳与终态复用同一回执；移交事务校验租约代数，迟到的接纳不能
+        # 覆盖更晚的终态。发送、编辑与 message_id 仍由统一 outbox 管理。
         accepted = publish_confirmation_event(
             event,
             chat_id=chat_id,
             token=token,
             message_id=item["message_id"],
-            terminal=True,
+            terminal=terminal,
             error=str(event.title).startswith(("❌", "⚠️")),
+            deliver_now=terminal,
+            expected_confirmation_delivery=(delivery_id, generation),
         )
     except Exception as exc:
         accepted = False
@@ -1817,6 +1815,11 @@ def start_confirmation(
             chat_id=chat_id,
             selected_index=selected_index,
             actor=normalized_actor,
+            event_json=(
+                serialize_notification_event(_confirmation_selected_event(preview, payload, candidate))
+                if _confirmation_delivery_enabled(payload) else ""
+            ),
+            message_id=_confirmation_message_id(payload),
         )
     except ValueError:
         # 两个相同回调可同时读到 pending；数据库只允许一个认领成功。
@@ -1855,6 +1858,7 @@ def start_confirmation(
             raise ValueError("确认操作已过期，请重新执行整理")
         raise
     # 原子入队时已经绑定 queue_id；此后不得清空 error，worker 可能已经失败。
+    _dispatch_due_confirmation_delivery(token)
     _dispatch_next_queued_confirmation()
     wake_confirmation_dispatcher()
     current = db.get_organize_confirmation(token) or row

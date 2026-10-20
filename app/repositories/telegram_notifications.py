@@ -34,6 +34,7 @@ def upsert_notification(
     event_json: str,
     preferred_message_id: int = 0,
     replace: bool = False,
+    expected_confirmation_delivery: tuple[int, int] | None = None,
 ) -> dict[str, Any] | None:
     """登记一次性事件或更新消息线程。
 
@@ -48,6 +49,15 @@ def upsert_notification(
     stamp = database.now()
     with database.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # 源回执与目标线程必须在同一写事务内校验/更新；只在移交前读取
+        # 租约会留下终态已发布、旧接纳随后覆写的窗口。
+        if expected_confirmation_delivery is not None and conn.execute(
+            "SELECT 1 FROM organize_confirmation_delivery_outbox "
+            "WHERE id=? AND lease_generation=? AND status='sending' "
+            "AND ?='confirmation:'||confirmation_token",
+            (*expected_confirmation_delivery, thread_key),
+        ).fetchone() is None:
+            return None
         row = conn.execute(
             "SELECT id,status,revision,delivered_revision,message_id,event_json,"
             "thread_key,topic,importance,chat_id FROM "

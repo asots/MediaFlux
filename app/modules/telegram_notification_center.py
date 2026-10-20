@@ -852,6 +852,7 @@ def _publish(
     delivery_route: Mapping[str, Any] | None = None,
     agent_continuation_delivery: Mapping[str, Any] | None = None,
     agent_effect_delivery: Mapping[str, Any] | None = None,
+    expected_confirmation_delivery: tuple[int, int] | None = None,
 ) -> NotificationPublishResult:
     normalized_importance = NotificationImportance(_importance(importance))
     normalized_topic = _topic(topic)
@@ -963,6 +964,7 @@ def _publish(
         event_json=event_json,
         preferred_message_id=(preferred_message_id or 0),
         replace=thread,
+        expected_confirmation_delivery=expected_confirmation_delivery,
     )
     if row is None:
         return NotificationPublishResult(False, status="invalid", event_key=key)
@@ -1140,6 +1142,7 @@ def publish_notification_thread(
     topic_enabled: bool = True,
     preferred_message_id: int = 0,
     deliver_now: bool = True,
+    expected_confirmation_delivery: tuple[int, int] | None = None,
 ) -> NotificationPublishResult:
     return _publish(
         thread_key,
@@ -1151,6 +1154,7 @@ def publish_notification_thread(
         topic_enabled=topic_enabled,
         preferred_message_id=preferred_message_id,
         deliver_now=deliver_now,
+        expected_confirmation_delivery=expected_confirmation_delivery,
     )
 
 

@@ -3238,9 +3238,10 @@ def bind_organize_confirmation_message(
 
 
 def claim_organize_confirmation(
-    token: str, *, chat_id: str, selected_index: int, actor: str = "human"
+    token: str, *, chat_id: str, selected_index: int, actor: str = "human",
+    event_json: str = "", message_id: int | None = None,
 ) -> sqlite3.Row:
-    """原子认领待确认按钮；过期、越权和重放统一拒绝。"""
+    """原子保存确认选择与接纳回执；过期、越权和重放统一拒绝。"""
     normalized_actor = (actor or "human").strip().lower()
     if normalized_actor not in {"human", "agent"}:
         raise ValueError("确认执行者无效")
@@ -3304,6 +3305,15 @@ def claim_organize_confirmation(
             )
             if cursor.rowcount != 1:
                 raise ValueError("该确认操作已处理")
+            if event_json:
+                telegram_notifications._enqueue_confirmation_delivery(
+                    conn,
+                    token=token,
+                    event_json=event_json,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    timestamp=timestamp,
+                )
             claimed = conn.execute(
                 "SELECT * FROM organize_confirmations WHERE id=?", (int(row["id"]),)
             ).fetchone()

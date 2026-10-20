@@ -743,6 +743,286 @@ class ConfirmationPersistenceTests(IsolatedDatabaseTestCase):
         self.assertEqual(row["selected_index"], 0)
         dispatcher.assert_called_once_with()
 
+    def test_busy_queue_removes_candidate_buttons_from_every_accepted_card(self):
+        tokens = []
+        original_ids = []
+        manager = SimpleNamespace(start_operation=lambda *args, **kwargs: {
+            "ok": False, "error": "busy",
+        })
+        with patch.object(notification_center._dispatch_stop, "is_set", return_value=True), patch(
+            "app.modules.telegram_notification_policy.notifications_enabled", return_value=True,
+        ), patch(
+            "app.modules.organize_tasks.get_organize_manager", return_value=manager,
+        ), patch.object(confirmation_module, "wake_confirmation_dispatcher", return_value=False):
+            for number in range(2):
+                group = self._group()
+                group["files"][0]["file_id"] = f"queued-{number}"
+                actions = create_confirmation_actions(group, OrganizeRules(), chat_id="100")
+                token = actions[0].callback_data.split(":")[1]
+                tokens.append(token)
+                confirmation_module.publish_confirmation_event(
+                    notifier.NotificationEvent("请选择候选", actions=actions),
+                    token=token, chat_id="100", message_id=77 + number, deliver_now=False,
+                )
+                item = get_notification(notification_thread_event_key(
+                    f"confirmation:{token}", topic=NotificationTopic.CONFIRMATION, chat_id="100",
+                ))
+                assert item is not None
+                original_ids.append(item["id"])
+
+            results = [start_confirmation(token, 0, chat_id="100") for token in tokens]
+            self.assertEqual([result["status"] for result in results], ["queued", "queued"])
+            self.assertEqual(results[1]["queue_position"], 1)
+            for number, token in enumerate(tokens):
+                with self.subTest(queue_item=number + 1):
+                    item = get_notification(notification_thread_event_key(
+                        f"confirmation:{token}", topic=NotificationTopic.CONFIRMATION, chat_id="100",
+                    ))
+                    assert item is not None
+                    event = notification_center.deserialize_notification_event(item["event_json"])
+                    self.assertIn("已选择", str(event.title))
+                    self.assertEqual(event.actions, ())
+                    self.assertEqual(item["id"], original_ids[number])
+                    self.assertEqual(item["message_id"], 77 + number)
+                    replay = start_confirmation(token, 0, chat_id="100")
+                    self.assertTrue(replay["replayed"])
+                    self.assertEqual(get_notification(item["event_key"]), item)
+                    with patch.object(
+                        notification_center, "edit_event_result",
+                        return_value=TelegramSendResult(ok=True, message_id=77 + number),
+                    ) as edit, patch.object(notification_center, "send_event_result") as send:
+                        self.assertTrue(notification_center.drain_telegram_notifications(
+                            limit=1, event_key=item["event_key"],
+                        ))
+                    edit.assert_called_once_with(event, chat_id="100", message_id=77 + number)
+                    send.assert_not_called()
+
+    def test_acceptance_receipt_survives_interruption_after_claim_commit(self):
+        actions = create_confirmation_actions(self._group(), OrganizeRules(), chat_id="100")
+        token = actions[0].callback_data.split(":")[1]
+        original_claim = db.claim_organize_confirmation
+
+        def interrupted_claim(*args, **kwargs):
+            original_claim(*args, **kwargs)
+            raise RuntimeError("interrupted after claim commit")
+
+        with patch.object(
+            db, "claim_organize_confirmation", side_effect=interrupted_claim,
+        ), self.assertRaisesRegex(RuntimeError, "interrupted after claim commit"):
+            start_confirmation(token, 0, chat_id="100")
+
+        row = db.get_organize_confirmation(token)
+        assert row is not None
+        self.assertEqual(row["status"], "queued")
+        delivery = db.get_organize_confirmation_delivery(token)
+        self.assertIsNotNone(delivery, "queued 认领提交时必须已经持久化接纳事件")
+        assert delivery is not None
+        event = notification_center.deserialize_notification_event(delivery["event_json"])
+        self.assertIn("已选择", str(event.title))
+        self.assertEqual(event.actions, ())
+
+        with patch.object(notification_center._dispatch_stop, "is_set", return_value=True), patch(
+            "app.modules.telegram_notification_policy.notifications_enabled", return_value=True,
+        ):
+            self.assertTrue(confirmation_module._dispatch_due_confirmation_delivery(token))
+        visible = notification_center.get_notification_thread_event(
+            f"confirmation:{token}", topic=NotificationTopic.CONFIRMATION, chat_id="100",
+        )
+        self.assertEqual(visible, event)
+
+    def test_acceptance_enqueue_failure_rolls_back_confirmation_claim(self):
+        actions = create_confirmation_actions(self._group(), OrganizeRules(), chat_id="100")
+        token = actions[0].callback_data.split(":")[1]
+        with patch.object(
+            db.telegram_notifications, "_enqueue_confirmation_delivery",
+            side_effect=RuntimeError("outbox write failed"),
+        ), patch.object(confirmation_module, "_dispatch_next_queued_confirmation"), patch.object(
+            confirmation_module, "wake_confirmation_dispatcher", return_value=False,
+        ), self.assertRaisesRegex(RuntimeError, "outbox write failed"):
+            start_confirmation(token, 0, chat_id="100")
+        row = db.get_organize_confirmation(token)
+        assert row is not None
+        self.assertEqual(row["status"], "pending")
+        self.assertIsNone(row["selected_index"])
+        self.assertIsNone(row["queued_at"])
+        self.assertEqual(row["task_id"], "")
+        self.assertIsNone(db.get_organize_confirmation_delivery(token))
+
+    def test_acceptance_handoff_failure_retries_without_reselecting(self):
+        actions = create_confirmation_actions(self._group(), OrganizeRules(), chat_id="100")
+        token = actions[0].callback_data.split(":")[1]
+        with patch.object(confirmation_module, "_dispatch_next_queued_confirmation"), patch.object(
+            confirmation_module, "wake_confirmation_dispatcher", return_value=False,
+        ), patch.object(confirmation_module, "publish_confirmation_event", return_value=False):
+            result = start_confirmation(token, 0, chat_id="100")
+        self.assertEqual(result["status"], "queued")
+        delivery = db.get_organize_confirmation_delivery(token)
+        self.assertIsNotNone(delivery)
+        assert delivery is not None
+        self.assertEqual(delivery["status"], "retry_wait")
+        self.assertEqual(delivery["attempts"], 1)
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE organize_confirmation_delivery_outbox SET next_attempt_at=? WHERE id=?",
+                (db.now(), delivery["id"]),
+            )
+        with patch.object(notification_center._dispatch_stop, "is_set", return_value=True), patch(
+            "app.modules.telegram_notification_policy.notifications_enabled", return_value=True,
+        ):
+            self.assertTrue(confirmation_module._dispatch_due_confirmation_delivery(token))
+            self.assertFalse(confirmation_module._dispatch_due_confirmation_delivery(token))
+        item = get_notification(notification_thread_event_key(
+            f"confirmation:{token}", topic=NotificationTopic.CONFIRMATION, chat_id="100",
+        ))
+        assert item is not None
+        event = notification_center.deserialize_notification_event(item["event_json"])
+        self.assertIn("已选择", str(event.title))
+        self.assertEqual(event.actions, ())
+        self.assertTrue(start_confirmation(token, 0, chat_id="100")["replayed"])
+        self.assertEqual(get_notification(item["event_key"]), item)
+
+    def test_terminal_handoff_rejects_inflight_acceptance_and_repeated_callback(self):
+        for terminal in ("completed", "failed"):
+            with self.subTest(terminal=terminal), patch.object(
+                notification_center._dispatch_stop, "is_set", return_value=True,
+            ), patch(
+                "app.modules.telegram_notification_policy.notifications_enabled", return_value=True,
+            ):
+                group = self._group()
+                group["files"][0]["file_id"] = f"concurrent-{terminal}"
+                actions = create_confirmation_actions(group, OrganizeRules(), chat_id="100")
+                token = actions[0].callback_data.split(":")[1]
+                confirmation_module.publish_confirmation_event(
+                    notifier.NotificationEvent("请选择候选", actions=actions),
+                    token=token, chat_id="100", message_id=77, deliver_now=False,
+                )
+                with patch.object(confirmation_module, "_dispatch_due_confirmation_delivery"), patch.object(
+                    confirmation_module, "_dispatch_next_queued_confirmation",
+                ), patch.object(confirmation_module, "wake_confirmation_dispatcher", return_value=False):
+                    start_confirmation(token, 0, chat_id="100")
+                self.assertIsNotNone(db.get_organize_confirmation_delivery(token))
+                acceptance_ready = threading.Event()
+                resume_acceptance = threading.Event()
+                original_upsert = notification_center.upsert_notification
+
+                def delayed_acceptance(*args, **kwargs):
+                    event = notification_center.deserialize_notification_event(kwargs["event_json"])
+                    if "已选择" in str(event.title):
+                        acceptance_ready.set()
+                        if not resume_acceptance.wait(timeout=5):
+                            raise RuntimeError("acceptance handoff timed out")
+                    return original_upsert(*args, **kwargs)
+
+                with patch.object(
+                    notification_center, "upsert_notification", side_effect=delayed_acceptance,
+                ), ThreadPoolExecutor(max_workers=1) as executor:
+                    pending = executor.submit(confirmation_module._dispatch_due_confirmation_delivery, token)
+                    try:
+                        self.assertTrue(acceptance_ready.wait(timeout=5))
+                        self.assertIsNotNone(db.claim_queued_organize_confirmation(token))
+                        common = dict(
+                            event_json=notification_center.serialize_notification_event(
+                                notifier.NotificationEvent(terminal),
+                            ),
+                            chat_id="100", message_id=77,
+                        )
+                        if terminal == "completed":
+                            db.complete_organize_confirmation_with_delivery(token, result_json="{}", **common)
+                        else:
+                            db.fail_organize_confirmation_with_delivery(
+                                token, error="specific failure", retryable=False, **common,
+                            )
+                        self.assertTrue(confirmation_module._dispatch_due_confirmation_delivery(token))
+                        event_key = notification_thread_event_key(
+                            f"confirmation:{token}", topic=NotificationTopic.CONFIRMATION, chat_id="100",
+                        )
+                        terminal_item = get_notification(event_key)
+                        delivery = db.get_organize_confirmation_delivery(token)
+                        assert delivery is not None
+                        terminal_delivery = dict(delivery)
+                    finally:
+                        resume_acceptance.set()
+                    self.assertTrue(pending.result(timeout=5))
+
+                self.assertEqual(get_notification(event_key), terminal_item)
+                delivery = db.get_organize_confirmation_delivery(token)
+                assert delivery is not None
+                self.assertEqual(dict(delivery), terminal_delivery)
+                visible = notification_center.get_notification_thread_event(
+                    f"confirmation:{token}", topic=NotificationTopic.CONFIRMATION, chat_id="100",
+                )
+                assert visible is not None
+                self.assertEqual(visible.title, terminal)
+                self.assertEqual(visible.actions, ())
+                if terminal == "completed":
+                    replay = start_confirmation(token, 0, chat_id="100")
+                    self.assertTrue(replay["replayed"])
+                    self.assertEqual(replay["status"], terminal)
+                else:
+                    with self.assertRaisesRegex(ValueError, "已处理"):
+                        start_confirmation(token, 0, chat_id="100")
+                self.assertEqual(get_notification(event_key), terminal_item)
+                row = db.get_organize_confirmation(token)
+                assert row is not None
+                self.assertEqual(row["status"], terminal)
+                self.assertEqual(row["error"], "specific failure" if terminal == "failed" else "")
+
+    def test_consumer_finishes_before_claim_returns_without_late_acceptance(self):
+        for terminal in ("completed", "failed"):
+            with self.subTest(terminal=terminal), patch.object(
+                notification_center._dispatch_stop, "is_set", return_value=True,
+            ), patch(
+                "app.modules.telegram_notification_policy.notifications_enabled", return_value=True,
+            ):
+                group = self._group()
+                group["files"][0]["file_id"] = f"fast-consumer-{terminal}"
+                actions = create_confirmation_actions(group, OrganizeRules(), chat_id="100")
+                token = actions[0].callback_data.split(":")[1]
+                original_claim = db.claim_organize_confirmation
+
+                def execute(*_args, **_kwargs):
+                    common = dict(
+                        event_json=notification_center.serialize_notification_event(
+                            notifier.NotificationEvent(terminal),
+                        ),
+                        chat_id="100", message_id=77,
+                    )
+                    if terminal == "completed":
+                        db.complete_organize_confirmation_with_delivery(token, result_json="{}", **common)
+                    else:
+                        db.fail_organize_confirmation_with_delivery(
+                            token, error="specific failure", retryable=False, **common,
+                        )
+                    confirmation_module._dispatch_due_confirmation_delivery(token)
+
+                def claim_with_fast_consumer(*args, **kwargs):
+                    row = original_claim(*args, **kwargs)
+                    # queued 提交后、认领返回前，另一个消费者已经执行到终态。
+                    self.assertTrue(_dispatch_next_queued_confirmation()["ok"])
+                    return row
+
+                manager = SimpleNamespace(start_operation=lambda _name, _reference, callback: (
+                    callback() or {"ok": True, "task_id": "fast-worker"}
+                ))
+                with patch.object(db, "claim_organize_confirmation", side_effect=claim_with_fast_consumer), patch(
+                    "app.modules.organize_tasks.get_organize_manager", return_value=manager,
+                ), patch.object(confirmation_module, "_execute_confirmation", side_effect=execute), patch.object(
+                    confirmation_module, "wake_confirmation_dispatcher", return_value=False,
+                ):
+                    result = start_confirmation(token, 0, chat_id="100")
+
+                self.assertEqual(result["status"], terminal)
+                event_key = notification_thread_event_key(
+                    f"confirmation:{token}", topic=NotificationTopic.CONFIRMATION, chat_id="100",
+                )
+                item = get_notification(event_key)
+                assert item is not None
+                event = notification_center.deserialize_notification_event(item["event_json"])
+                self.assertEqual(event.title, terminal)
+                self.assertEqual(event.actions, ())
+                self.assertFalse(confirmation_module._dispatch_due_confirmation_delivery(token))
+                self.assertEqual(get_notification(event_key), item)
+
     def test_new_click_does_not_bypass_older_queued_confirmation(self):
         older_group = self._group()
         older_group["directory"] = "先点击但仍在排队"
