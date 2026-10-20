@@ -105,11 +105,18 @@
                 </div>
             </div>
             <div class="rss-batchbar" id="rssBatchbar">
-                <label class="rss-check-all"><input type="checkbox" id="entryCheckAll"><span>全选列表</span></label>
+                <label class="rss-check-all"><input type="checkbox" id="entryCheckAll"><span>全选本页</span></label>
                 <span id="rssSelectedCount">已选择 0 条</span>
                 <div class="rss-batch-actions"><button type="button" class="jump-btn" id="batchDownloadBtn" disabled><i data-lucide="download"></i>批量下载</button><button type="button" class="jump-btn" id="batchProcessedBtn" disabled><i data-lucide="check-check"></i>标记已处理</button><button type="button" class="jump-btn" id="batchPendingBtn" disabled><i data-lucide="rotate-ccw"></i>标记未处理</button></div>
             </div>
             <div id="entryList" class="rss-entry-list subscription-rss-entry-list" aria-live="polite" aria-busy="false"></div>
+            <nav class="table-pagination" aria-label="RSS 条目分页">
+                <span class="table-pagination-info" id="rssEntryPageInfo" aria-live="polite">正在读取条目</span>
+                <div class="table-pagination-actions">
+                    <button type="button" class="jump-btn" id="rssEntryPrev" disabled onclick="loadEntries({offset:Math.max(0,rssEntryPage.offset-rssEntryPage.limit)})"><i data-lucide="chevron-left"></i><span>上一页</span></button>
+                    <button type="button" class="jump-btn" id="rssEntryNext" disabled onclick="loadEntries({offset:rssEntryPage.offset+rssEntryPage.limit})"><span>下一页</span><i data-lucide="chevron-right"></i></button>
+                </div>
+            </nav>
         </div>
     </section>
 
@@ -264,6 +271,7 @@ let rssEntriesController = null;
 let rssBatchBusy = false;
 let rssSubsLoaded = false;
 let rssEntriesLoaded = false;
+let rssEntryPage = {offset:0,limit:100,total:0,has_more:false,filters:''};
 let rssPanelLoadPromise = null;
 let rssStatsHydrated = false;
 
@@ -635,7 +643,16 @@ function toggleEntry(id,checked){
     updateBatchbar();
 }
 
-async function loadEntries({preserve=true}={}){
+function updateEntryPagination(busy=false){
+    const {offset,total,has_more}=rssEntryPage;
+    document.getElementById('rssEntryPageInfo').textContent=rssEntriesLoaded
+        ?`显示 ${entries.length?offset+1:0}–${entries.length?offset+entries.length:0} / 共 ${total} 条`
+        :(busy?'正在读取条目':'条目未加载');
+    document.getElementById('rssEntryPrev').disabled=busy||offset===0;
+    document.getElementById('rssEntryNext').disabled=busy||!has_more;
+}
+
+async function loadEntries({preserve=true,offset=0}={}){
     rssEntriesController?.abort();
     const controller=new AbortController();
     rssEntriesController=controller;
@@ -648,10 +665,14 @@ async function loadEntries({preserve=true}={}){
     if(sid)params.push('subscription_id='+encodeURIComponent(sid));
     if(st)params.push('status='+encodeURIComponent(st));
     if(keyword)params.push('q='+encodeURIComponent(keyword));
+    const filters=params.join('&');
+    if(filters!==rssEntryPage.filters)offset=0;
+    params.push('offset='+offset,'limit='+rssEntryPage.limit);
     const list=document.getElementById('entryList');
     const refreshButton=document.getElementById('refreshRssEntries');
     setRssButtonBusy(refreshButton,true,'刷新');
     list.setAttribute('aria-busy','true');
+    updateEntryPagination(true);
     const hadContent=list.childElementCount>0;
     let skeletonTimer=null;
     if(!hadContent||!preserve){
@@ -666,9 +687,11 @@ async function loadEntries({preserve=true}={}){
         if(!response.ok)throw new Error(payload.error||'订阅条目读取失败');
         if(requestId!==rssEntriesRequestId)return;
         await settleRssSkeleton(list);if(requestId!==rssEntriesRequestId)return;
-        const rows=Array.isArray(payload)?payload:[];
+        if(!Array.isArray(payload.items))throw new Error('订阅条目分页数据无效');
+        const rows=payload.items;
         entries=rows;
         rssEntriesLoaded=true;
+        rssEntryPage={offset:payload.offset,limit:payload.limit,total:payload.total,has_more:payload.has_more,filters};
         const releaseHeight=preserve&&hadContent?lockRssListHeight(list):()=>{};
         if(selectionRevisionAtStart===rssSelectionRevision){
             selectedEntries.clear();
@@ -724,7 +747,7 @@ async function loadEntries({preserve=true}={}){
     }finally{
         if(skeletonTimer)window.clearTimeout(skeletonTimer);
         if(rssEntriesController===controller)rssEntriesController=null;
-        if(requestId===rssEntriesRequestId){setRssButtonBusy(refreshButton,false);list.setAttribute('aria-busy','false');}
+        if(requestId===rssEntriesRequestId){setRssButtonBusy(refreshButton,false);list.setAttribute('aria-busy','false');updateEntryPagination();}
     }
 }
 

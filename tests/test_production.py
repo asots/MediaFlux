@@ -5922,11 +5922,11 @@ class SecurityTests(InitializedWebTestCase):
             status="success", keyword="demo", limit=20, offset=20
         )
 
-        with patch("app.database.list_rss_entries", return_value=[]) as entries:
+        with patch("app.database.list_rss_entries", return_value=db.RSSEntryPage([], 0)) as entries:
             searched = self.client.get("/api/rss/entries?q=episode", headers=headers)
         self.assertEqual(searched.status_code, 200)
         entries.assert_called_once_with(
-            sub_id=None, status=None, keyword="episode", limit=300, order="unprocessed_first"
+            sub_id=None, status=None, keyword="episode", limit=100, offset=0, order="unprocessed_first"
         )
 
         from app.modules.rss_scheduler import RSSScheduler

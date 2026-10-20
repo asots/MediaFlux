@@ -5,6 +5,7 @@ import re
 import sqlite3
 import unicodedata
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from app.modules.media_identity import normalize_tmdb_id
@@ -527,6 +528,14 @@ def _reconcile_rss_download_entries_conn(conn: sqlite3.Connection) -> None:
         _sync_rss_download_entries_conn(conn, int(row[0]), db.now())
 
 
+@dataclass(frozen=True)
+class RSSEntryPage:
+    items: list[sqlite3.Row]
+    total: int
+    offset: int = 0
+    limit: int = 300
+
+
 def list_rss_entries(
     sub_id: int | None = None,
     status: str | None = None,
@@ -534,16 +543,16 @@ def list_rss_entries(
     limit: int = 300,
     *,
     order: str = "published_desc",
-    include_total: bool = False,
-) -> list[sqlite3.Row]:
+    offset: int = 0,
+) -> RSSEntryPage:
     filters, params = _rss_entry_filters(sub_id, status, keyword)
-    # 同一次查询快照计数，LIMIT 只约束返回行数，不截断业务积压数量。
-    total_projection = "COUNT(*) OVER () AS total_count," if include_total else ""
-    sql = (f"SELECT {total_projection}e.*, i.name AS sub_name,COALESCE(m.media_key,'') AS media_key,"
+    source_sql = (
+        " FROM rss_entries e LEFT JOIN rss_items i ON e.rss_item_id=i.id "
+        "LEFT JOIN rss_entry_media m ON m.rss_entry_id=e.id" + _RSS_REQUEST_JOIN + filters
+    )
+    sql = ("SELECT e.*, i.name AS sub_name,COALESCE(m.media_key,'') AS media_key,"
            "m.season AS media_season,m.episode AS media_episode,"
-           "COALESCE(m.skip_reason,'') AS skip_reason," + _rss_delivery_columns() +
-           " FROM rss_entries e LEFT JOIN rss_items i ON e.rss_item_id=i.id "
-           "LEFT JOIN rss_entry_media m ON m.rss_entry_id=e.id" + _RSS_REQUEST_JOIN + filters)
+           "COALESCE(m.skip_reason,'') AS skip_reason," + _rss_delivery_columns() + source_sql)
     if order == "received_desc":
         sql += " ORDER BY e.id DESC"
     elif order == "received_asc":
@@ -561,10 +570,14 @@ def list_rss_entries(
         )
     else:
         raise ValueError("RSS 条目排序方式无效")
-    sql += " LIMIT ?"
-    params.append(max(1, limit))
+    limit, offset = max(1, limit), max(0, offset)
+    sql += " LIMIT ? OFFSET ?"
     with db.get_conn() as conn:
-        return conn.execute(sql, params).fetchall()
+        # 显式读事务保证计数与条目同一快照；越界空页也能返回真实总数。
+        conn.execute("BEGIN")
+        total = conn.execute("SELECT COUNT(*)" + source_sql, params).fetchone()[0]
+        rows = conn.execute(sql, [*params, limit, offset]).fetchall()
+    return RSSEntryPage(rows, total, offset, limit)
 
 
 def purge_processed_rss_entries(retention_days: int = 7) -> int:

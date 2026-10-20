@@ -169,7 +169,7 @@ class RSSAutoCancellationTests(unittest.TestCase):
                 self.backend.assert_not_called()
                 self.cloud_backend.assert_not_called()
                 self.assertTrue(result.get("conflict") or result.get("cancelled"))
-                pending = db.list_rss_entries(sub_id=self.sid, status="pending")
+                pending = db.list_rss_entries(sub_id=self.sid, status="pending").items
                 self.assertEqual(len(pending), 0)
                 current = db.get_rss_subscription(self.sid)
                 assert current is not None
@@ -188,7 +188,7 @@ class RSSAutoCancellationTests(unittest.TestCase):
         self.engine.parser = Mock(parse=Mock(return_value=[self._entry()]), last_error_code="")
         self.engine.refresh(self.sid)
         db.update_rss_subscription(self.sid, {"enabled": 0, "action": "subscribe"})
-        entry = db.list_rss_entries(sub_id=self.sid, status="pending")[0]
+        entry = db.list_rss_entries(sub_id=self.sid, status="pending").items[0]
         result = self.engine.download(int(entry["id"]))
         self.assertTrue(result["ok"])
         self.backend.assert_called_once()
@@ -207,7 +207,7 @@ class RSSAutoCancellationTests(unittest.TestCase):
         self.assertTrue(result.get("cancelled"))
         self.assertTrue(result["review_required"])
         self.assertEqual(result["outcome_unknown_count"], 1)
-        self.assertEqual(len(db.list_rss_entries(sub_id=self.sid, status="pending")), 4)
+        self.assertEqual(len(db.list_rss_entries(sub_id=self.sid, status="pending").items), 4)
         with db.get_conn() as conn:
             requests = conn.execute("SELECT status,qb_status FROM download_requests").fetchall()
         self.assertEqual([row["qb_status"] for row in requests], ["outcome_unknown"])
@@ -263,13 +263,13 @@ class RSSAutoCancellationTests(unittest.TestCase):
         self.assertEqual(result["downloaded"], 4)
         self.assertEqual(result["deferred"], 16)
         self.assertTrue(result["cancelled"])
-        self.assertEqual(len(db.list_rss_entries(sub_id=self.sid, status="pending")), 16)
+        self.assertEqual(len(db.list_rss_entries(sub_id=self.sid, status="pending").items), 16)
 
     def test_manual_batch_download_remains_allowed_when_paused(self):
         self.engine.parser = Mock(parse=Mock(return_value=[self._entry()]), last_error_code="")
         self.engine.refresh(self.sid)
         db.update_rss_subscription(self.sid, {"enabled": 0, "action": "subscribe"})
-        entry = db.list_rss_entries(sub_id=self.sid, status="pending")[0]
+        entry = db.list_rss_entries(sub_id=self.sid, status="pending").items[0]
         result = self.engine.download_many([int(entry["id"])])
         self.assertEqual(result["success_count"], 1)
         self.backend.assert_called_once()

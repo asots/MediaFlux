@@ -100,11 +100,11 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(first["status"], "pending")
         self.assertEqual(second["status"], "skipped")
-        rows = db.list_rss_entries(sub_id=second_sub)
+        rows = db.list_rss_entries(sub_id=second_sub).items
         self.assertEqual(str(rows[0]["skip_reason"]), "相同 TMDB 剧集已在 RSS 队列或下载记录中")
         self.assertTrue(bool(rows[0]["processed"]))
         self.assertEqual(db.update_rss_entries_processed([int(rows[0]["id"])], False), 1)
-        restored = db.list_rss_entries(sub_id=second_sub)[0]
+        restored = db.list_rss_entries(sub_id=second_sub).items[0]
         self.assertEqual(str(restored["status"]), "pending")
         self.assertEqual(str(restored["skip_reason"]), "")
 
@@ -166,7 +166,7 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
 
         self.assertEqual(result["library_skipped"], 1)
         self.assertEqual(result["new"], 1)
-        rows = db.list_rss_entries(sub_id=sid)
+        rows = db.list_rss_entries(sub_id=sid).items
         self.assertEqual(str(rows[0]["status"]), "skipped")
         self.assertEqual(str(rows[0]["skip_reason"]), "媒体库已存在该剧集")
 
@@ -207,7 +207,7 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
         library_lookup.assert_not_called()
         self.assertTrue(result["media_binding_bypassed"])
         self.assertEqual(result["binding_bypass_reason"], "tmdb_title_mismatch")
-        rows = db.list_rss_entries(sub_id=sid)
+        rows = db.list_rss_entries(sub_id=sid).items
         self.assertEqual(str(rows[0]["status"]), "pending")
         self.assertEqual(str(rows[0]["skip_reason"]), "")
         with db.get_conn() as conn:
@@ -238,7 +238,7 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
         library_lookup.assert_not_called()
         self.assertTrue(result["media_binding_bypassed"])
         self.assertEqual(result["binding_bypass_reason"], "tmdb_title_unverified")
-        rows = db.list_rss_entries(sub_id=sid)
+        rows = db.list_rss_entries(sub_id=sid).items
         self.assertEqual(str(rows[0]["status"]), "pending")
         self.assertEqual(str(rows[0]["skip_reason"]), "")
 
@@ -293,7 +293,7 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["detected_series_count"], 2)
         self.assertEqual(result["library_skipped"], 0)
         self.assertEqual(result["semantic_duplicates"], 0)
-        rows = db.list_rss_entries(sub_id=sid)
+        rows = db.list_rss_entries(sub_id=sid).items
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(str(row["status"]) == "pending" for row in rows))
         with db.get_conn() as conn:
@@ -332,7 +332,7 @@ class RSSMediaDedupeTests(IsolatedDatabaseTestCase):
         self.assertEqual(result["binding_bypass_reason"], "series_unresolved")
         self.assertEqual(result["detected_series_count"], 1)
         self.assertEqual(result["unresolved_series_count"], 1)
-        rows = db.list_rss_entries(sub_id=sid)
+        rows = db.list_rss_entries(sub_id=sid).items
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(str(row["status"]) == "pending" for row in rows))
         with db.get_conn() as conn:

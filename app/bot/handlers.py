@@ -1923,7 +1923,7 @@ def _register_commands(bot, telebot):
         logger.info("收到 Telegram RSS 下载命令 chat=%s", getattr(msg.chat, "id", ""))
         parts = str(getattr(msg, "text", "") or "").split()
         if len(parts) < 2:
-            rows = db.list_rss_entries(status="pending", limit=6)
+            rows = db.list_rss_entries(status="pending", limit=6).items
             if not rows:
                 _reply_to_source(bot,
                     msg,

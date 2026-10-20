@@ -68,7 +68,7 @@ class RssDirectoryPickerLayerBrowserTests(unittest.TestCase):
             "gy_target_dir": "old-dir", "gy_target_dir_name": "原有目录",
         }
         fixtures = {
-            "/api/rss/subscriptions": [subscription], "/api/rss/entries": [],
+            "/api/rss/subscriptions": [subscription], "/api/rss/entries": {"items": [], "offset": 0, "limit": 100, "total": 0, "has_more": False},
             "/api/rss/stats": {}, "/api/subscriptions/stats": {},
         }
 

@@ -2081,6 +2081,7 @@ from app.repositories.media_subscriptions import (  # noqa: E402,F401
 # ===== RSS 订阅、条目状态机与诊断 =====
 # 统一数据访问门面：schema/migration 由 init_db 集中持有。
 from app.repositories.rss import (  # noqa: E402,F401
+    RSSEntryPage,
     add_rss_entry_with_media,
     add_rss_subscription,
     claim_pending_rss_qb_entries,

@@ -230,7 +230,7 @@ def list_rss_entry_summaries(arguments: dict[str, Any]) -> ToolResult:
         status=status,
         limit=arguments["limit"],
         order="received_desc",
-    )
+    ).items
     entries: list[dict[str, Any]] = []
     for row in rows:
         failure_code = str(row["failure_code"] or "")

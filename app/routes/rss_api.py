@@ -1,6 +1,7 @@
 """RSS API 路由：订阅项管理、刷新、条目预览、手动下载。"""
 from __future__ import annotations
 
+from typing import Annotated
 from fastapi import APIRouter, Body, Query, Request
 
 from app import database as db
@@ -128,6 +129,8 @@ def list_entries(
     subscription_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
     q: str = Query(default=""),
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=300)] = 100,
 ):
     require_api_login(request)
     try:
@@ -135,14 +138,15 @@ def list_entries(
     except (TypeError, ValueError):
         return api_error("订阅 ID 无效", 400)
     status = status or None
-    rows = db.list_rss_entries(
+    page = db.list_rss_entries(
         sub_id=sid,
         status=status,
         keyword=q.strip(),
-        limit=300,
+        limit=limit,
+        offset=offset,
         order="unprocessed_first",
     )
-    return api_response([{
+    return api_response({"items": [{
         "id": r["id"],
         "subscription_id": r["rss_item_id"],
         "sub_name": r["sub_name"],
@@ -157,7 +161,8 @@ def list_entries(
         "media_episode": r["media_episode"],
         "skip_reason": r["skip_reason"] or "",
         "created_at": r["created_at"],
-    } for r in rows])
+    } for r in page.items], "total": page.total, "offset": page.offset, "limit": page.limit,
+        "has_more": page.offset + len(page.items) < page.total})
 
 
 @router.post("/entries/batch-download")

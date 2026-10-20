@@ -74,7 +74,7 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
                 rid, eid, _ = self.accepted(backend)
                 self.fail_request(rid, backend)
                 response = rss_api.list_entries(cast(Request, None), subscription_id=None, status="failed", q="")
-                row = next(row for row in json.loads(bytes(response.body)) if row["id"] == eid)
+                row = next(row for row in json.loads(bytes(response.body))["items"] if row["id"] == eid)
                 self.assertEqual((row["status"], row["processed"]), ("downloaded", True))
                 self.assertEqual(row["delivery"]["request_id"], rid)
                 self.assertTrue(row["delivery"]["failed"])
@@ -439,7 +439,7 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
         get_rss_entry_result_17 = db.get_rss_entry(second)
         assert get_rss_entry_result_17 is not None
         self.assertEqual(get_rss_entry_result_17["status"], "skipped")
-        self.assertEqual(db.list_rss_entries(sub_id=sid)[0]["skip_reason"], "")
+        self.assertEqual(db.list_rss_entries(sub_id=sid).items[0]["skip_reason"], "")
 
     def test_current_unknown_receipt_blocks_other_resources(self):
         for status in ("outcome_unknown", "manual_review"):

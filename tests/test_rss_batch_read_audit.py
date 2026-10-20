@@ -191,11 +191,11 @@ class RSSBatchReadAuditTests(InitializedWebTestCase):
                 for _ in range(2):
                     response = client.get("/api/rss/entries", params={"subscription_id": self.sid, "q": "  Episode  "})
                     self.assertEqual(response.status_code, 200)
-                    self.assertEqual([row["id"] for row in response.json()], [first, second])
-                    listing.assert_called_with(sub_id=self.sid, status=None, keyword="Episode", limit=300, order="unprocessed_first")
+                    self.assertEqual([row["id"] for row in response.json()["items"]], [first, second])
+                    listing.assert_called_with(sub_id=self.sid, status=None, keyword="Episode", limit=100, offset=0, order="unprocessed_first")
                 response = client.get("/api/rss/entries", params={"subscription_id": self.sid, "status": "downloaded", "q": "Episode"})
-                self.assertEqual([row["id"] for row in response.json()], [second])
-                listing.assert_called_with(sub_id=self.sid, status="downloaded", keyword="Episode", limit=300, order="unprocessed_first")
+                self.assertEqual([row["id"] for row in response.json()["items"]], [second])
+                listing.assert_called_with(sub_id=self.sid, status="downloaded", keyword="Episode", limit=100, offset=0, order="unprocessed_first")
                 self.assertEqual(client.get("/api/rss/entries?subscription_id=bad").status_code, 400)
 
     def test_authenticated_web_batch_retries_both_backends_without_replaying_unknown(self):

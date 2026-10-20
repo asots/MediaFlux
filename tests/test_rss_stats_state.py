@@ -43,6 +43,70 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
     def test_entry_creation_exposes_only_the_media_aware_api(self) -> None:
         self.assertFalse(hasattr(db, "add_rss_entry"))
 
+    def test_paginated_entries_cover_all_matches_and_empty_page_keeps_total(self):
+        sid = db.add_rss_subscription("paged", "https://example.invalid/feed")
+        with db.get_conn() as conn:
+            conn.executemany(
+                "INSERT INTO rss_entries(rss_item_id,title,guid,status,processed,payload,created_at) "
+                "VALUES(?,?,?,'pending',0,'{}',?)",
+                [(sid, f"match-{n}", f"guid-{n}", db.now()) for n in range(301)],
+            )
+        ids = []
+        for offset in (0, 100, 200, 300, 400):
+            page = db.list_rss_entries(sub_id=sid, status="pending", keyword="match", limit=100, offset=offset, order="unprocessed_first")
+            self.assertEqual(page.total, 301)
+            self.assertEqual(page.offset, offset)
+            self.assertEqual(page.limit, 100)
+            self.assertEqual(len(page.items), min(100, max(0, 301-offset)))
+            ids.extend(row["id"] for row in page.items)
+        self.assertEqual(len(set(ids)), 301)
+        self.assertEqual(len(ids), 301)
+        empty = db.list_rss_entries(sub_id=sid, keyword="absent", limit=100, offset=100)
+        self.assertEqual((empty.items, empty.total), ([], 0))
+
+    def test_paged_route_reports_total_and_validates_page_bounds(self):
+        from fastapi import FastAPI
+        from app.routes import rss_api
+        sid, ids = self._seed()
+        app = FastAPI()
+        app.include_router(rss_api.router)
+        with patch.object(rss_api, "require_api_login"), TestClient(app) as client:
+            result = client.get('/api/rss/entries', params={"subscription_id": sid, "limit": 2}).json()
+            self.assertEqual(result["total"], 5)
+            self.assertEqual(len(result["items"]), 2)
+            self.assertTrue(result["has_more"])
+            end = client.get('/api/rss/entries', params={"subscription_id": sid, "offset": 20, "limit": 2}).json()
+            self.assertEqual((end["items"], end["total"], end["has_more"]), ([], 5, False))
+            filtered = client.get('/api/rss/entries', params={"subscription_id": sid, "status": "pending", "q": "entry-0"}).json()
+            self.assertEqual(filtered["total"], 1)
+            self.assertEqual(filtered["items"][0]["id"], ids[0])
+            for query in ('offset=-1', 'limit=0', 'limit=301', 'offset=bad'):
+                self.assertEqual(client.get('/api/rss/entries?'+query).status_code, 422)
+
+    def test_page_count_and_rows_share_one_database_snapshot(self):
+        self._seed()
+        connect = db._connect
+        inserted = False
+        def traced_connect():
+            conn = connect()
+            def trace(sql):
+                nonlocal inserted
+                if sql.startswith("SELECT e.*") and not inserted:
+                    inserted = True
+                    other = connect()
+                    try:
+                        other.execute("DELETE FROM rss_entries")
+                        other.commit()
+                    finally:
+                        other.close()
+            conn.set_trace_callback(trace)
+            return conn
+        with patch.object(db, "_connect", side_effect=traced_connect):
+            page = db.list_rss_entries(limit=100)
+        self.assertTrue(inserted)
+        self.assertEqual(page.total, 5)
+        self.assertEqual(len(page.items), 5)
+
     def test_duplicate_guid_insert_is_atomic_and_returns_none(self) -> None:
         sid = db.add_rss_subscription("dedupe", "https://example.invalid/dedupe")
         first = db.add_rss_entry_with_media(sid, "first", "same-guid")["id"]
@@ -69,13 +133,13 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
         middle = db.add_rss_entry_with_media(sid, "middle", "middle", pub_date="2026-08-14 12:00")["id"]
         unknown = db.add_rss_entry_with_media(sid, "unknown", "unknown", pub_date="not-a-date")["id"]
 
-        rows = db.list_rss_entries(sub_id=sid)
+        rows = db.list_rss_entries(sub_id=sid).items
 
         self.assertEqual(
             [int(row["id"]) for row in rows],
             [int(newest), int(middle), int(oldest), int(unknown)],
         )
-        received = db.list_rss_entries(sub_id=sid, order="received_desc")
+        received = db.list_rss_entries(sub_id=sid, order="received_desc").items
         self.assertEqual(int(received[0]["id"]), int(unknown))
 
     def test_unprocessed_sort_precedes_limit_and_preserves_filters(self) -> None:
@@ -87,12 +151,12 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
             processed = db.add_rss_entry_with_media(sid, f"keep processed {i}", f"new-{i}", pub_date="2026-10-04 12:00")["id"]
             seed_rss_entry_state(processed, "downloaded")
         for _ in range(2):
-            rows = db.list_rss_entries(sub_id=sid, keyword="keep", order="unprocessed_first", limit=300)
+            rows = db.list_rss_entries(sub_id=sid, keyword="keep", order="unprocessed_first", limit=300).items
             self.assertEqual([row["id"] for row in rows[:2]], [failed, pending])
             self.assertEqual(len(rows), 300)
-        filtered = db.list_rss_entries(sub_id=sid, status="pending", keyword="pending", order="unprocessed_first")
+        filtered = db.list_rss_entries(sub_id=sid, status="pending", keyword="pending", order="unprocessed_first").items
         self.assertEqual([row["id"] for row in filtered], [pending])
-        self.assertNotIn(pending, [row["id"] for row in db.list_rss_entries(sub_id=sid, limit=300)])
+        self.assertNotIn(pending, [row["id"] for row in db.list_rss_entries(sub_id=sid, limit=300).items])
 
     def test_repeated_entry_reads_do_not_scan_or_write_legacy_history(self) -> None:
         sid = db.add_rss_subscription(
@@ -128,14 +192,15 @@ class RSSStatsStateTests(IsolatedDatabaseTestCase):
 
         with patch.object(db, "_connect", side_effect=traced_connect):
             for _ in range(10):
-                rows = db.list_rss_entries(limit=300)
+                rows = db.list_rss_entries(limit=300).items
                 self.assertEqual(len(rows), 300)
 
-        self.assertEqual(len(statements), 10)
-        self.assertTrue(all(statement.lstrip().upper().startswith("SELECT") for statement in statements))
+        queries = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+        self.assertEqual(len(queries), 20)  # 每页一次计数、一次读取，共用读事务。
+        self.assertTrue(all(statement.lstrip().upper().startswith(("SELECT", "BEGIN", "COMMIT")) for statement in statements))
         # 列表按 canonical key 读取当前请求投影，不扫描历史日志、不逐条补写。
         self.assertFalse(any("download_log" in statement for statement in statements))
-        self.assertTrue(all("LEFT JOIN download_request_keys" in statement for statement in statements))
+        self.assertTrue(all("LEFT JOIN download_request_keys" in statement for statement in queries))
         self.assertFalse(any(statement.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))
                              for statement in statements))
 

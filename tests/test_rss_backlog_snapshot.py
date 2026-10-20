@@ -57,19 +57,20 @@ class RSSBacklogSnapshotTests(unittest.TestCase):
         self.assertEqual(result["filtered"], 20)
         self.assertEqual(result["deferred"], 331)
         self.assertEqual(
-            len(db.list_rss_entries(sub_id=self.sid, status="skipped")), 20
+            len(db.list_rss_entries(sub_id=self.sid, status="skipped").items), 20
         )
 
-    def test_counted_projection_keeps_bounded_rows_and_default_api_shape(self):
+    def test_counted_page_keeps_bounded_rows_and_total_on_empty_results(self):
         self.seed(451)
         page = db.list_rss_entries(
-            sub_id=self.sid, status="pending", include_total=True
+            sub_id=self.sid, status="pending",
         )
-        self.assertEqual(len(page), 300)
-        self.assertEqual({row["total_count"] for row in page}, {451})
+        self.assertEqual(len(page.items), 300)
+        self.assertEqual(page.total, 451)
         ordinary = db.list_rss_entries(sub_id=self.sid, status="pending", limit=1)
-        self.assertNotIn("total_count", ordinary[0].keys())
+        self.assertEqual(ordinary.total, 451)
+        self.assertNotIn("total_count", ordinary.items[0].keys())
         self.assertEqual(
-            db.list_rss_entries(sub_id=self.sid, status="failed", include_total=True),
-            [],
+            db.list_rss_entries(sub_id=self.sid, status="failed"),
+            db.RSSEntryPage([], 0),
         )

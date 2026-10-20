@@ -1309,10 +1309,10 @@ class RSSEngine:
             return refreshed
         if not auto_guard():
             return {"refresh": refreshed, "error": RSS_REFRESH_CONFLICT_ERROR, "conflict": True}
-        rows = db.list_rss_entries(
-            sub_id=sub_id, status="pending", order="received_desc", include_total=True,
+        page = db.list_rss_entries(
+            sub_id=sub_id, status="pending", order="received_desc",
         )
-        pending_total = int(rows[0]["total_count"]) if rows else 0
+        rows, pending_total = page.items, page.total
         subscription = db.get_rss_subscription(sub_id)
         exclude = self._split_keywords(
             str(subscription["exclude_keywords"] or "") if subscription else ""

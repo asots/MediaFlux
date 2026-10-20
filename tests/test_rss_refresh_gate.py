@@ -334,10 +334,10 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             "outcome_unknown_count": 0,
             "review_required": False,
         })
-        rows = [{"id": item, "title": f"Episode {item}", "total_count": 25} for item in range(1, 26)]
+        rows = [{"id": item, "title": f"Episode {item}"} for item in range(1, 26)]
 
         with patch(
-            "app.modules.rss.db.list_rss_entries", return_value=rows,
+            "app.modules.rss.db.list_rss_entries", return_value=SimpleNamespace(items=rows, total=len(rows)),
         ), patch(
             "app.modules.rss.db.get_rss_subscription",
             return_value={"id": 7, "enabled": 1, "action": "download", "exclude_keywords": ""},
@@ -362,10 +362,10 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             "existing_count": 0, "unverified_count": 0, "failure_count": 0,
             "outcome_unknown_count": 0, "review_required": False,
         })
-        rows = [{"id": item, "title": f"Episode {item}", "total_count": 105} for item in range(1, 106)]
+        rows = [{"id": item, "title": f"Episode {item}"} for item in range(1, 106)]
 
         with patch(
-            "app.modules.rss.db.list_rss_entries", return_value=rows,
+            "app.modules.rss.db.list_rss_entries", return_value=SimpleNamespace(items=rows, total=len(rows)),
         ), patch(
             "app.modules.rss.db.get_rss_subscription",
             return_value={"id": 7, "enabled": 1, "action": "download", "exclude_keywords": ""},
@@ -625,7 +625,7 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
         with patch.object(
             engine, "refresh", return_value={"total": 1, "new": 1, "skipped": 0}
         ), patch(
-            "app.modules.rss.db.list_rss_entries", return_value=[{"id": 17, "title": "普通资源", "total_count": 1}]
+            "app.modules.rss.db.list_rss_entries", return_value=SimpleNamespace(items=[{"id": 17, "title": "普通资源"}], total=1)
         ), patch.object(
             engine,
             "download_many",
@@ -987,9 +987,9 @@ class RSSRefreshSurfaceTests(IsolatedDatabaseTestCase):
             side_effect=lambda key, default="": "100" if key == "TG_CHAT_ID" else default,
         ), patch("app.database.list_rss_subscriptions", return_value=[{
             "id": 1, "name": "mikanani", "enabled": 1,
-        }]), patch("app.database.list_rss_entries", return_value=[{
+        }]), patch("app.database.list_rss_entries", return_value=SimpleNamespace(items=[{
             "id": 9, "title": "示例 RSS 条目",
-        }]):
+        }], total=1)):
             handlers._register_commands(bot, self._telebot_types())
             refresh_handler = next(
                 handler for filters, handler in bot.message_handlers

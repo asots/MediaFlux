@@ -2830,6 +2830,7 @@ body:has(.discovery-dialog[open]) { overflow: hidden; }
 .table-pagination-actions { display: flex; align-items: center; gap: 7px; }
 .table-pagination-actions .jump-btn { width: auto; }
 .table-pagination-actions .jump-btn:disabled { opacity: .42; cursor: not-allowed; }
+.subscription-rss-card .table-pagination-actions .jump-btn { min-height: 44px; }
 .logs-table input[type="checkbox"] { accent-color: var(--accent); }
 .logs-table col.origin-col { width: 10%; min-width: 112px; }
 .logs-table col.path-col { width: 30%; }

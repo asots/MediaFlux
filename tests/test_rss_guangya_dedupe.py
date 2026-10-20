@@ -349,8 +349,8 @@ class RSSDownloadRetryFeedbackTests(IsolatedDatabaseTestCase):
                 with patch.object(self.dispatcher, "_submit_guangya") as gy, patch.object(self.dispatcher, "_submit_qb") as qb:
                     repeated = self.dispatcher.resubmit_download_request(result["request_id"], backend)
                     self.assertFalse(repeated["ok"])
-                    db.list_rss_entries()
-                    db.list_rss_entries()
+                    db.list_rss_entries().items
+                    db.list_rss_entries().items
                     gy.assert_not_called()
                     qb.assert_not_called()
 
@@ -360,7 +360,7 @@ class RSSDownloadRetryFeedbackTests(IsolatedDatabaseTestCase):
                 entry, request = self.failed_entry(backend)
                 assert request is not None
                 db.update_download_request(request, status="submitted", targets="both", **{f"{peer}_status": "submitted"})
-                db.list_rss_entries()
+                db.list_rss_entries().items
                 get_rss_entry_result_13 = db.get_rss_entry(entry)
                 assert get_rss_entry_result_13 is not None
                 self.assertEqual(get_rss_entry_result_13["status"], "failed")
