@@ -323,7 +323,7 @@ def list_media_subscription_workflows(
         ).fetchall()
         admission_rows = conn.execute(
             "SELECT a.subscription_id,a.status AS admission_status,"
-            "r.status AS request_status,r.qb_status,r.gy_status,r.organize_status,"
+            "r.status,r.targets,r.error,r.qb_status,r.gy_status,r.organize_status,"
             "r.local_import_status,r.strm_status "
             "FROM media_download_admissions a "
             "LEFT JOIN download_requests r ON r.id=a.request_id "
@@ -342,11 +342,12 @@ def list_media_subscription_workflows(
     for row in admission_rows:
         workflow = result[int(row["subscription_id"])]
         admission_status = str(row["admission_status"] or "")
-        request_status = str(row["request_status"] or "")
+        request_status = str(row["status"] or "")
+        target_error = _completed_request_target_error(row)
         # 准入已进入终态就代表这一集不再有进行中的工作。下载请求行可能仍
         # 停留在 submitted（例如网盘侧完成后没有回写），若继续按请求状态
         # 判定，已入库的订阅会永远显示「已推送，等待下载」。
-        if admission_status in {"completed", "released", "cancelled"}:
+        if admission_status in {"released", "cancelled"} or (admission_status == "completed" and not target_error):
             continue
         post_statuses = {
             str(row["organize_status"] or ""),
@@ -354,7 +355,7 @@ def list_media_subscription_workflows(
             str(row["strm_status"] or ""),
         }
         backend_statuses = {str(row["qb_status"] or ""), str(row["gy_status"] or "")}
-        if request_status == "manual_review" or "requires_manual" in post_statuses:
+        if target_error or request_status == "manual_review" or "requires_manual" in post_statuses:
             workflow["manual_review_count"] += 1
         elif (
             admission_status == "failed"
@@ -1166,6 +1167,20 @@ def list_active_media_download_admissions(subscription_id: int | None = None) ->
         ).fetchall()
 
 
+def _completed_request_target_error(request) -> str:
+    """请求根 completed 仅代表传输已终止，不能掩盖用户所选目标的部分失败。"""
+    if str(request["status"] or "") != "completed":
+        return ""
+    targets = str(request["targets"] or "")
+    failed = [label for target, label, key in (
+        ("qb", "qB", "qb_status"), ("guangya", "光鸭", "gy_status"),
+    ) if targets in {target, "both"} and str(request[key] or "") == "failed"]
+    if not failed:
+        return ""
+    detail = str(request["error"] or "请在下载记录中仅重试失败目标")
+    return redact_sensitive_text(f"下载目标未全部完成（{'、'.join(failed)}）：{detail}")[:500]
+
+
 def _download_request_admission_projection(
     request, stamp: str,
 ) -> tuple[str, str, str | None] | None:
@@ -1174,7 +1189,10 @@ def _download_request_admission_projection(
     status = ""
     completed_at = None
     error = ""
-    if request_status == "cancelled":
+    if target_error := _completed_request_target_error(request):
+        # 成功目标仍受本次准入保护；不能释放 media_key 后重新下载两个目标。
+        status, error = "processing", target_error
+    elif request_status == "cancelled":
         status = "cancelled"
         completed_at = stamp
         error = str(request["error"] or "下载请求已取消")[:500]
@@ -1224,7 +1242,7 @@ def _sync_media_download_admissions_conn(
     params = (request_id,) if request_id is not None else ()
     try:
         rows = conn.execute(
-            "SELECT a.id,r.status,r.error,r.organize_started,r.organize_status,r.organize_error,"
+            "SELECT a.id,r.status,r.targets,r.qb_status,r.gy_status,r.error,r.organize_started,r.organize_status,r.organize_error,"
             "r.strm_status,r.strm_error,r.local_import_status,r.local_import_error "
             "FROM media_download_admissions a JOIN download_requests r ON r.id=a.request_id "
             "WHERE a.status IN ('claimed','dispatching','submitted','downloading','processing')"
@@ -1320,7 +1338,7 @@ def reconcile_media_download_admissions(
             query_params.append(expected_revision)
         rows = conn.execute(
             "SELECT a.id,a.media_key,a.request_id,a.status AS admission_status,"
-            "r.id AS request_exists,r.status,r.error,"
+            "r.id AS request_exists,r.status,r.targets,r.qb_status,r.gy_status,r.error,"
             "r.organize_started,r.organize_status,r.organize_error,"
             "r.strm_status,r.strm_error,r.local_import_status,r.local_import_error "
             "FROM media_download_admissions a "
@@ -1339,7 +1357,7 @@ def reconcile_media_download_admissions(
             status = ""
             error = ""
             completed_at = None
-            if media_key in keys:
+            if media_key in keys and not _completed_request_target_error(row):
                 status = "completed"
                 completed_at = stamp
             else:

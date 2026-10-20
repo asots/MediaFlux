@@ -122,6 +122,56 @@ class MediaAdmissionProjectionConsistencyTests(unittest.TestCase):
             len(db.list_active_media_download_admissions(self.subscription)), 1
         )
 
+    def test_partial_both_targets_keep_attention_and_duplicate_guard_until_recovered(self):
+        for episode, (failed_field, present) in enumerate(
+            ((field, present) for field in ('qb_status', 'gy_status') for present in (False, True)), 70
+        ):
+            with self.subTest(failed_field=failed_field, present=present):
+                fields = dict(status='completed', targets='both', qb_status='completed', gy_status='completed',
+                              organize_status='completed', local_import_status='completed', strm_status='completed')
+                fields[failed_field] = 'failed'
+                request, admission, key = self.seed(episode, **fields)
+                db.sync_media_download_admission_for_request(request)
+                expected = self.view(admission)
+                self.assertEqual(expected[0], 'processing')
+                self.assertIn('下载目标未全部完成', expected[1])
+                self.assertIsNone(expected[2])
+                db.reconcile_startup_media_download_admissions()
+                db.reconcile_media_download_admissions(self.subscription, {key} if present else set(), expected_revision=1)
+                self.assertEqual(self.view(admission), expected)
+                workflow = db.list_media_subscription_workflows([self.subscription])[self.subscription]
+                self.assertEqual(workflow['manual_review_count'], 1)
+                self.assertEqual(workflow['processing_count'], 0)
+                alternative = db.replace_media_subscription_candidates(self.subscription, key, season=1, episode=episode,
+                    candidates=[{'result_id':f'alternative-{episode}', 'title':key}], expires_at='2099-01-01 00:00:00')[0]
+                self.assertIsNone(db.claim_media_download_admission(media_key=key, tmdb_id='1', media_type='tv',
+                    subscription_id=self.subscription, candidate_id=alternative, season=1, episode=episode, subscription_revision=1))
+                db.update_download_request(request, status='downloading', **{failed_field:'submitted'})
+                db.sync_media_download_admission_for_request(request)
+                self.assertEqual(self.view(admission)[:2], ('downloading', ''))
+                saved = db.get_download_request(request)
+                assert saved is not None
+                self.assertEqual(saved['gy_status' if failed_field == 'qb_status' else 'qb_status'], 'completed')
+                db.update_download_request(request, status='completed', **{failed_field:'completed'})
+                db.reconcile_media_download_admissions(self.subscription, {key}, expected_revision=1)
+                self.assertEqual(self.view(admission)[:2], ('completed', ''))
+                self.assertEqual(db.list_media_subscription_workflows([self.subscription])[self.subscription]['manual_review_count'], 0)
+
+    def test_historical_completed_admission_does_not_hide_failed_requested_target(self):
+        _, admission, _ = self.seed(status='completed', targets='both', qb_status='completed', gy_status='failed')
+        db.update_media_download_admission(admission, status='completed', error='')
+        workflow = db.list_media_subscription_workflows([self.subscription])[self.subscription]
+        self.assertEqual(workflow['manual_review_count'], 1)
+        self.assertEqual(self.view(admission)[:2], ('completed', ''))  # 展示事实，不改写历史行。
+
+    def test_unrequested_backend_failure_does_not_block_local_completion(self):
+        request, admission, key = self.seed(status='completed', targets='qb', qb_status='completed', gy_status='failed')
+        db.sync_media_download_admission_for_request(request)
+        self.assertEqual(self.view(admission)[:2], ('processing', ''))
+        db.reconcile_media_download_admissions(self.subscription, {key}, expected_revision=1)
+        self.assertEqual(self.view(admission)[:2], ('completed', ''))
+        self.assertEqual(db.list_media_subscription_workflows([self.subscription])[self.subscription]['manual_review_count'], 0)
+
     def test_mixed_batch_keeps_local_presence_precedence_and_bounded_reads(self):
         from contextlib import contextmanager
 
