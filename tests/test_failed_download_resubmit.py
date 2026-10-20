@@ -321,6 +321,12 @@ class FailedDownloadResubmitTests(InitializedWebTestCase):
         _request_id, entry_id = self.resource()
         _healthy_request, healthy_entry = self.resource(organize_status="completed", organize_started=1)
         rows = [self.snapshot(entry_id), self.snapshot(healthy_entry)]
+        with db.get_conn() as conn:
+            conn.executemany(
+                "INSERT INTO rss_entry_media(rss_entry_id,skip_reason,created_at,updated_at) "
+                "VALUES(?,'keep','old','old')",
+                [(entry_id,), (healthy_entry,)],
+            )
         self.assertEqual(db.update_rss_entries_processed_snapshot(rows, False), 0)
         get_rss_entry_result_5 = db.get_rss_entry(entry_id)
         assert get_rss_entry_result_5 is not None
@@ -328,6 +334,18 @@ class FailedDownloadResubmitTests(InitializedWebTestCase):
         get_rss_entry_result_6 = db.get_rss_entry(healthy_entry)
         assert get_rss_entry_result_6 is not None
         self.assertEqual(get_rss_entry_result_6["status"], "downloaded")
+        with db.get_conn() as conn:
+            media = conn.execute("SELECT skip_reason,updated_at FROM rss_entry_media WHERE rss_entry_id IN (?,?)",
+                                 (entry_id, healthy_entry)).fetchall()
+        self.assertEqual([tuple(row) for row in media], [("keep", "old"), ("keep", "old")])
+        # 普通显式入口只更新合格条目；Agent 快照入口则必须全批次原子拒绝。
+        self.assertEqual(db.update_rss_entries_processed([entry_id, healthy_entry], False), 1)
+        with db.get_conn() as conn:
+            media = {row["rss_entry_id"]: row["skip_reason"] for row in conn.execute(
+                "SELECT rss_entry_id,skip_reason FROM rss_entry_media WHERE rss_entry_id IN (?,?)",
+                (entry_id, healthy_entry),
+            )}
+        self.assertEqual(media, {entry_id: "", healthy_entry: "keep"})
 
     def test_retry_fence_blocks_backend_or_peer_becoming_active_after_capability_check(self):
         for field in ("gy_status", "qb_status"):

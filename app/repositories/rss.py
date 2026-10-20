@@ -711,6 +711,7 @@ def claim_pending_rss_qb_entries(
         return rows
 
 
+_RSS_MAX_RETRIES = 5
 _RSS_QB_RETRY_FAILURE_CODES = (
     "qb_unavailable",
     "qb_rate_limited",
@@ -789,7 +790,7 @@ def _rss_retry_eligibility_sql(default_method: str) -> tuple[str, tuple[str, ...
     cooldown_codes = ",".join("?" for _ in _RSS_COOLDOWN_FAILURE_CODES)
     condition = (
         "COALESCE(rss_entries.failure_retryable,0)=1 "
-        "AND COALESCE(rss_entries.retry_count,0)<5 "
+        f"AND COALESCE(rss_entries.retry_count,0)<{_RSS_MAX_RETRIES} "
         f"AND rss_entries.failure_code IN ({safe_codes}) "
         f"AND (({method}='qb' AND rss_entries.failure_code IN ({qb_codes})) "
         f"OR ({method}='guangya' AND rss_entries.failure_code IN ({gy_codes}))) "
@@ -988,31 +989,36 @@ def _rss_processed_update_condition(processed: bool) -> str:
     )
 
 
-def update_rss_entries_processed(entry_ids: list[int], processed: bool) -> int:
-    ids = list(dict.fromkeys(item for item in entry_ids))
-    if not ids:
-        return 0
+def _update_rss_entries_processed_conn(conn: sqlite3.Connection, ids: list[int], processed: bool) -> int:
+    """在调用方事务内同步条目状态与跳过原因；只触及当前可变更的条目。"""
     placeholders = ",".join("?" for _ in ids)
     status = "skipped" if processed else "pending"
     processed_at = db.now() if processed else None
     condition = _rss_processed_update_condition(processed)
-    with db.get_conn() as conn:
-        cur = conn.execute(
-            f"UPDATE rss_entries SET processed=?, processed_at=?, status=?, "
-            f"failure_code=CASE WHEN {int(processed)}=1 AND failure_code IN ('qb_outcome_unknown','guangya_outcome_unknown',"
-            "'submission_outcome_unknown') THEN failure_code ELSE '' END, failure_retryable=0, failed_at=NULL "
-            f"WHERE id IN ({placeholders}) AND {condition} RETURNING id",
-            [1 if processed else 0, processed_at, status, *ids],
+    cur = conn.execute(
+        f"UPDATE rss_entries SET processed=?, processed_at=?, status=?, "
+        f"failure_code=CASE WHEN {int(processed)}=1 AND failure_code IN ('qb_outcome_unknown','guangya_outcome_unknown',"
+        "'submission_outcome_unknown') THEN failure_code ELSE '' END, failure_retryable=0, failed_at=NULL "
+        f"WHERE id IN ({placeholders}) AND {condition} RETURNING id",
+        [1 if processed else 0, processed_at, status, *ids],
+    )
+    updated_ids = [int(row[0]) for row in cur.fetchall()]
+    if updated_ids:
+        updated_placeholders = ",".join("?" for _ in updated_ids)
+        conn.execute(
+            f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
+            f"WHERE rss_entry_id IN ({updated_placeholders})",
+            [db.now(), *updated_ids],
         )
-        updated_ids = [int(row[0]) for row in cur.fetchall()]
-        if updated_ids:
-            updated_placeholders = ",".join("?" for _ in updated_ids)
-            conn.execute(
-                f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
-                f"WHERE rss_entry_id IN ({updated_placeholders})",
-                [db.now(), *updated_ids],
-            )
-        return len(updated_ids)
+    return len(updated_ids)
+
+
+def update_rss_entries_processed(entry_ids: list[int], processed: bool) -> int:
+    ids = list(dict.fromkeys(entry_ids))
+    if not ids:
+        return 0
+    with db.get_conn() as conn:
+        return _update_rss_entries_processed_conn(conn, ids, processed)
 
 
 def update_rss_entries_processed_snapshot(
@@ -1051,8 +1057,6 @@ def update_rss_entries_processed_snapshot(
 
     ids = [item["id"] for item in normalized]
     placeholders = ",".join("?" for _ in ids)
-    target_status = "skipped" if processed else "pending"
-    processed_at = db.now() if processed else None
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
@@ -1072,28 +1076,11 @@ def update_rss_entries_processed_snapshot(
         if current != normalized:
             conn.rollback()
             return 0
-        condition = _rss_processed_update_condition(processed)
-        cur = conn.execute(
-            f"UPDATE rss_entries SET processed=?,processed_at=?,status=?,"
-            f"failure_code=CASE WHEN {int(processed)}=1 AND failure_code IN ('qb_outcome_unknown','guangya_outcome_unknown',"
-            "'submission_outcome_unknown') THEN failure_code ELSE '' END, failure_retryable=0, failed_at=NULL "
-            f"WHERE id IN ({placeholders}) AND {condition}",
-            [
-                1 if processed else 0,
-                processed_at,
-                target_status,
-                *ids,
-            ],
-        )
-        if (cur.rowcount or 0) != len(normalized):
+        updated = _update_rss_entries_processed_conn(conn, ids, processed)
+        if updated != len(normalized):
             conn.rollback()
             return 0
-        conn.execute(
-            f"UPDATE rss_entry_media SET skip_reason='',updated_at=? "
-            f"WHERE rss_entry_id IN ({placeholders})",
-            [db.now(), *ids],
-        )
-        return (cur.rowcount or 0)
+        return updated
 
 
 def get_rss_manual_review_summary(sub_id: int) -> dict[str, int]:
@@ -1106,7 +1093,8 @@ def get_rss_manual_review_summary(sub_id: int) -> dict[str, int]:
             "THEN 1 ELSE 0 END) AS outcome_unknown_count, "
             "COUNT(*) AS failed_count "
             "FROM rss_entries WHERE rss_item_id=? AND status='failed' "
-            "AND COALESCE(processed,0)=0 AND COALESCE(failure_retryable,0)=0",
+            "AND COALESCE(processed,0)=0 AND (COALESCE(failure_retryable,0)=0 "
+            f"OR COALESCE(retry_count,0)>={_RSS_MAX_RETRIES})",
             (sub_id,),
         ).fetchone()
     return {

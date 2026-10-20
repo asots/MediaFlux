@@ -574,6 +574,29 @@ class RSSRefreshGateTests(IsolatedDatabaseTestCase):
             restarted._execute(sid, "subscribe")
         self.assertEqual(db.kv_get(restarted._alert_key(sid), "missing"), "")
 
+    def test_exhausted_retry_alert_survives_empty_refresh_and_scheduler_restart(self):
+        sid = self._subscription("scheduler-exhausted")
+        eid = int(db.add_rss_entry_with_media(sid, "耗尽重试", "exhausted")["id"])
+        db.record_rss_entry_failure(eid, "qb_unavailable", True)
+        with db.get_conn() as conn:
+            conn.execute("UPDATE rss_entries SET retry_count=5 WHERE id=?", (eid,))
+        scheduler = RSSScheduler()
+        with patch("app.modules.rss_scheduler.RSSEngine") as engine, patch(
+            "app.modules.telegram_notification_center.publish_notification_event", return_value=True,
+        ) as publisher:
+            engine.return_value.auto_download.return_value = {"failed": 1}
+            engine.return_value.refresh.return_value = {"total": 0, "new": 0}
+            scheduler._execute(sid, "download")
+            before = db.kv_get(scheduler._alert_key(sid), "")
+            self.assertIn("partial_failure", before)
+            for instance in (scheduler, RSSScheduler()):
+                instance._execute(sid, "subscribe")
+                self.assertEqual(db.kv_get(scheduler._alert_key(sid), ""), before)
+            publisher.assert_called_once()
+            db.update_rss_entries_processed([eid], True)
+            scheduler._execute(sid, "subscribe")
+            self.assertEqual(db.kv_get(scheduler._alert_key(sid), "missing"), "")
+
     def test_recovery_clears_old_persisted_signature_after_new_alert_delivery_fails(self):
         scheduler = RSSScheduler()
         db.kv_set(
