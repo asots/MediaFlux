@@ -563,30 +563,24 @@ class AgentTurn:
     async def prepare_tools(self) -> None:
         lease = self.tool_context.lease
         reference_kinds = tuple(self.state.ref_kinds | ({"telegram_reference"} if self.agent_input.reply_context.get("reference_handle") or any(row.get("reply_context", {}).get("reference_handle") for row in self.state.conversation) else set()))
+        history = capability_retrieval_context(
+            self.state, current_turn=self.current_user_index is not None and not self.sensitive_input,
+        )
+        context = {
+            **history,
+            "owner": self.agent_input.owner, "session_id": self.agent_input.session_id,
+            "request_id": self.agent_input.request_id, "channel": self.agent_input.channel,
+            "generation": lease.generation, "turn_id": lease.turn_id,
+            "has_task": bool(self.state.metadata.get("task")),
+            "reference_kinds": reference_kinds,
+            "has_current_reference": bool(self.agent_input.reply_context.get("text")),
+        }
         selection = None if self.explaining or self.agent_input.initial_read_tool else self.session.retriever.retrieve(
-            self.contextual_message,
-            self.session.catalog,
-            context={
-                "owner": self.agent_input.owner,
-                "session_id": self.agent_input.session_id,
-                "channel": self.agent_input.channel,
-                "reference_kinds": reference_kinds,
-                **capability_retrieval_context(
-                    self.state, current_turn=self.current_user_index is not None and not self.sensitive_input,
-                ),
-                "has_current_reference": bool(self.agent_input.reply_context.get("text")),
-            },
+            self.contextual_message, self.session.catalog, context=context,
         )
         self.discovery = CapabilityDiscovery(
             self.session.catalog,
-            context={
-                "owner": self.agent_input.owner, "session_id": self.agent_input.session_id,
-                "request_id": self.agent_input.request_id, "channel": self.agent_input.channel,
-                "generation": lease.generation, "turn_id": lease.turn_id,
-                "has_pending_effect": bool(self.state.pending_effect_plan_id),
-                "has_task": bool(self.state.metadata.get("task")),
-                "reference_kinds": reference_kinds,
-            },
+            context=context,
             maximum=self.session.limits.capability_window,
         )
         # 接力的整个回合只开放 READ，能力发现 callback 也不能加载写工具。
@@ -613,8 +607,12 @@ class AgentTurn:
         readbacks = tuple(self.session.catalog.get(name) for name in (
             effect.tool.metadata.get("related_tools", ()) if effect else ()
         ) if self.session.catalog.has(name) and self.session.catalog.get(name).effect is ToolEffect.READ)
+        # 历史调用仍在模型上下文中，其只读 Schema 按剩余容量续用，避免换话题
+        # 后同一能力突然不可调用。当前查询优先；仍由唯一窗口重查可见性与授权。
+        recent_reads = tuple(self.session.catalog.get(name) for name in history["recent_tool_names"]
+            if self.session.catalog.has(name) and self.session.catalog.get(name).effect is ToolEffect.READ)
         self.selected_tools = () if self.explaining else self.discovery.window(
-            selection.tools if selection else (),
+            (selection.tools if selection else ()) + recent_reads,
             ((initial_tool,) if initial_tool else ()) + ((source_spec,) if source_spec else ()) + readbacks)
         if initial_tool is not None:
             if initial_tool not in self.selected_tools:

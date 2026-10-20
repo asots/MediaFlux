@@ -101,6 +101,56 @@ def request():
 
 
 class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_followup_reuses_recent_read_schema_even_after_session_rebuild(self):
+        invoked = []
+        target = read_tool('metadata.cast', handler=lambda a, c: invoked.append(c.session_id) or {'summary': '演员表'})
+        session, model = session_for([target], [
+            [call('agent.capabilities', {'tool_names': [target.name]}, 'discover')],
+            [call(target.model_name, call_id='first')], final(),
+            [call(target.model_name, call_id='followup')], final(),
+        ])
+        await collect(session.run(request()))
+        # Rebuild the executor from the same stored conversation, not a process cache.
+        rebuilt = AgentSession(model=model, catalog=session.catalog,
+            retriever=WrongInitialRetriever(), pipeline=session.pipeline,
+            state_store=session.state_store)
+        events = await collect(rebuilt.run(replace(request(), message='接着查下一部')))
+        self.assertIn(target.model_name, [tool['name'] for tool in model.requests[3].tools])
+        self.assertEqual(invoked, ['session-1', 'session-1'])
+        self.assertFalse([e for e in events if e.type is AgentEventType.TOOL_FAILED])
+        self.assertFalse([e for e in events if e.type is AgentEventType.CAPABILITIES_SELECTED
+                          and e.payload.get('reason') == 'discovery'])
+
+    async def test_recent_read_schema_still_rechecks_current_visibility_and_session(self):
+        for restriction in ('availability', 'authorize', 'context', 'other_session', 'capacity'):
+            with self.subTest(restriction=restriction):
+                enabled = [True]
+                target = replace(read_tool('metadata.cast'),
+                    availability=(lambda context: enabled[0]) if restriction == 'availability' else None,
+                    authorize=(lambda context: enabled[0]) if restriction == 'authorize' else None)
+                session, model = session_for([target], [
+                    [call('agent.capabilities', {'tool_names': [target.name]})],
+                    [call(target.model_name)], final(), final(),
+                ])
+                await collect(session.run(request()))
+                enabled[0] = False
+                if restriction == 'context':
+                    session.catalog = ToolCatalog([capability_tool(), read_tool('noise.status'),
+                        replace(target, context_requirements=frozenset({'missing_scope'}))])
+                if restriction == 'capacity':
+                    session.limits = replace(session.limits, capability_window=2)
+                    other = read_tool('noise.second')
+                    session.catalog.register(other)
+                    session.retriever.retrieve = lambda *a, **k: CapabilitySelection(
+                        (session.catalog.get('noise.status'), other), {})
+                followup = replace(request(), session_id='other') if restriction == 'other_session' else request()
+                await collect(session.run(followup))
+                names = [tool['name'] for tool in model.requests[3].tools]
+                self.assertNotIn(target.model_name, names)
+                if restriction == 'capacity':
+                    self.assertIn('noise__status', names)
+                    self.assertIn('noise__second', names)
+
     async def test_initial_prompt_can_identify_a_tool_missed_by_lexical_retrieval(self):
         session, model = session_for([read_tool("metadata.cast", description="查询演职员")], [final()])
         await collect(session.run(request()))
@@ -297,6 +347,10 @@ class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             AgentEventType.EFFECT_COMPLETED, [event.type for event in confirmed]
         )
+        model.rounds.append([*final(), ModelEvent(ModelEventType.FINISH, finish_reason='stop')])
+        await collect(session.run(replace(request(), message='现在只查询另一件事')))
+        self.assertNotIn(target.model_name, [tool['name'] for tool in model.requests[-1].tools])
+        self.assertEqual(written, ['queue-v1'])  # History never grants another write.
 
     async def test_failed_projection_does_not_grant_discovered_tools(self):
         class FailedProjection(DefaultProjector):
