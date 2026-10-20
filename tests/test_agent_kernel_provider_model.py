@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import asyncio
 from typing import Callable
 from app.clients.http import FixedHostHttpClient
 from typing import cast
@@ -955,3 +957,76 @@ class ParallelToolCallPermissionTests(unittest.IsolatedAsyncioTestCase):
                             {"type": "tool_result", "tool_use_id": cid, "content": f"result-{index}"}
                             for index, cid in enumerate(call_ids)
                         ]})
+
+
+class ProtocolTraceRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_text_delta_is_visible_before_the_next_sse_event(self):
+        gate = asyncio.Event()
+
+        async def gated_chunks():
+            yield b'data: {"type": "response.output_text.delta", "delta": "\xe5\xa2\x9e"}\n\n'
+            await gate.wait()
+            yield b'data: {"type": "response.completed", "response": {"status": "completed"}}\n\n'
+
+        stream = iter_protocol_model_events(gated_chunks(), protocol="responses")
+        first = await asyncio.wait_for(anext(stream), timeout=1)
+        self.assertEqual(first.text, "增")
+        self.assertFalse(gate.is_set())
+        gate.set()
+        rest = await collect(stream)
+        self.assertEqual(rest[-1].type, ModelEventType.FINISH)
+
+    async def test_private_state_failure_keeps_events_yielded_before_it(self):
+        stream = iter_protocol_model_events(chunks([
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": "已输出"}},
+            {"type": "content_block_start", "index": 1,
+             "content_block": {"type": "thinking", "thinking": "secret"}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+            {"type": "message_stop"},
+        ]), protocol="anthropic_messages")
+        seen = []
+        with self.assertRaisesRegex(ModelProviderError, "私有状态块未闭合"):
+            async for event in stream:
+                seen.append(event)
+        self.assertEqual([event.text for event in seen if event.text], ["已输出"])
+        self.assertNotIn(ModelEventType.FINISH, [event.type for event in seen])
+
+    async def test_chat_same_frame_error_keeps_usage_and_text_before_invalid_tool(self):
+        # 先有usage/text，随后同一SSE帧中的非法容器报错；不能整帧缓存后丢掉前缀。
+        stream = iter_protocol_model_events(chunks([{
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            "choices": [{"index": 0, "delta": {"content": "已输出", "tool_calls": 1}}],
+        }]), protocol="chat_completions")
+        seen = []
+        with self.assertRaises(TypeError):
+            async for event in stream:
+                seen.append(event)
+        self.assertEqual([event.type for event in seen], [ModelEventType.USAGE, ModelEventType.TEXT_DELTA])
+        self.assertEqual(seen[-1].text, "已输出")
+
+    async def test_anthropic_stop_flushes_text_tail_before_invalid_call(self):
+        stream = iter_protocol_model_events(chunks([
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "<"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+            {"type": "content_block_stop", "index": 0},
+        ]), protocol="anthropic_messages")
+        seen = []
+        with self.assertRaisesRegex(ModelProviderError, "原生身份无效"):
+            async for event in stream:
+                seen.append(event)
+        self.assertEqual([(event.type, event.text) for event in seen], [(ModelEventType.TEXT_DELTA, "<")])
+
+    async def test_repeated_responses_done_frames_emit_one_call_and_one_finish(self):
+        item = {"type": "function_call", "id": "item-1", "call_id": "call-1",
+                "name": "inspect", "arguments": '{"value":1}'}
+        done = {"type": "response.output_item.done", "output_index": 0, "item": item}
+        events = await collect(iter_protocol_model_events(chunks([
+            {"type": "response.output_item.added", "output_index": 0, "item": item},
+            done,
+            done,
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]), protocol="responses"))
+        calls = [event.tool_call for event in events if event.tool_call is not None]
+        self.assertEqual([call.call_id for call in calls], ["call-1"])
+        self.assertEqual(sum(event.type is ModelEventType.FINISH for event in events), 1)

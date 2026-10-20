@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any, Literal, NoReturn
 
@@ -250,53 +250,53 @@ def _usage_dict(value: Any, protocol: str) -> dict[str, int]:
     return usage.to_dict() if usage is not None else {}
 
 
-async def iter_protocol_model_events(
-    chunks: AsyncIterator[bytes], *, protocol: str, max_response_bytes: int = 2 * 1024 * 1024
-) -> AsyncIterator[ModelEvent]:
-    """把三个 Provider 的真实 SSE 统一为 Kernel ModelEvent。"""
-    normalized = resolve_protocol(protocol)
-    reasoning = ReasoningDeltaFilter()
-    calls: dict[str, dict[str, Any]] = {}
-    emitted_calls: set[str] = set()
-    finish_reason = ""
-    completed = False
-    native_blocks: dict[int, dict[str, Any]] = {}
-    chat_reasoning = ""
-    invalid_private = False
-    repair_calls = False
-    open_private_blocks: set[int] = set()
-    text_filters: dict[int, ReasoningDeltaFilter] = {}
+@dataclass(slots=True)
+class _ProtocolState:
+    protocol: str
+    reasoning: ReasoningDeltaFilter = field(default_factory=ReasoningDeltaFilter)
+    calls: dict[str, dict[str, Any]] = field(default_factory=dict)
+    emitted_calls: set[str] = field(default_factory=set)
+    finish_reason: str = ""
+    completed: bool = False
+    native_blocks: dict[int, dict[str, Any]] = field(default_factory=dict)
+    chat_reasoning: str = ""
+    invalid_private: bool = False
+    repair_calls: bool = False
+    open_private_blocks: set[int] = field(default_factory=set)
+    text_filters: dict[int, ReasoningDeltaFilter] = field(default_factory=dict)
 
-    def anthropic_text(index: int, text: str | None = None) -> str:
+    def anthropic_text(self, index: int, text: str | None = None) -> str:
         # Lookahead belongs to its native block, not the next text/tool block.
         # Both public deltas and replay layout consume the same filtered bytes.
-        visible = (text_filters.pop(index).finalize() if text is None
-                   else text_filters.setdefault(index, ReasoningDeltaFilter()).feed(text))
-        block = native_blocks.setdefault(index, {"type": "text", "text": ""})
+        visible = (self.text_filters.pop(index).finalize() if text is None
+                   else self.text_filters.setdefault(index, ReasoningDeltaFilter()).feed(text))
+        block = self.native_blocks.setdefault(index, {"type": "text", "text": ""})
         block["text"] += visible
         return visible
 
-    def text_event(value: Any, index: int | None = None) -> ModelEvent | None:
+    def text_event(self, value: Any, index: int | None = None) -> ModelEvent | None:
         if not isinstance(value, str) or not value:
             return None
-        visible = reasoning.feed(value) if index is None else anthropic_text(index, value)
+        visible = self.reasoning.feed(value) if index is None else self.anthropic_text(index, value)
         return ModelEvent(ModelEventType.TEXT_DELTA, text=visible) if visible else None
 
+    @staticmethod
     def call_key(*, index: Any = None, item_id: Any = None) -> str:
         if item_id not in {None, ""}:
             return f"id:{item_id}"
         return f"index:{index if index is not None else 0}"
 
-    def decode_call(raw: dict[str, Any]):
+    def decode_call(self, raw: dict[str, Any]):
         try:
             parsed = parse_native_call(raw.get("call_id"), raw.get("name"), raw.get("arguments"),
-                                       allow_argument_errors=normalized in {"responses", "chat_completions"},
-                                       require_identity=normalized == "anthropic_messages")
+                                       allow_argument_errors=self.protocol in {"responses", "chat_completions"},
+                                       require_identity=self.protocol == "anthropic_messages")
         except ToolArgumentsDecodeError as exc:
-            if normalized == "anthropic_messages" and exc.reason == "invalid_json":
+            if self.protocol == "anthropic_messages" and exc.reason == "invalid_json":
                 _reject_unreplayable_anthropic_arguments(
-                    list(calls.values()), [native_blocks[index] for index in sorted(native_blocks)],
-                    private_complete=not open_private_blocks,
+                    list(self.calls.values()),
+                    [self.native_blocks[index] for index in sorted(self.native_blocks)],
+                    private_complete=not self.open_private_blocks,
                 )
             failure = {"too_large": "模型工具参数过大", "invalid_json": "模型工具参数不是有效 JSON",
                        "not_object": "模型工具参数必须是对象"}[exc.reason]
@@ -306,282 +306,290 @@ async def iter_protocol_model_events(
             return parsed
         raise ModelProviderError(failure)
 
-    async def emit_call(key: str) -> AsyncIterator[ModelEvent]:
-        if key in emitted_calls:
-            return
-        raw = calls.get(key)
+    def emit_call(self, key: str) -> ModelEvent | None:
+        if key in self.emitted_calls:
+            return None
+        raw = self.calls.get(key)
         if not raw:
-            return
-        parsed = decode_call(raw)
-        if repair_calls or normalized == "anthropic_messages":
+            return None
+        parsed = self.decode_call(raw)
+        if self.repair_calls or self.protocol == "anthropic_messages":
             call_id, name = parsed.call_id, parsed.name
         else:
             name = str(raw.get("name") or "").strip()
             call_id = str(raw.get("call_id") or raw.get("id") or key).strip()
         if not name:
-            return
-        if parsed.argument_error and not completed:
-            return
-        emitted_calls.add(key)
-        yield ModelEvent(
+            return None
+        if parsed.argument_error and not self.completed:
+            return None
+        self.emitted_calls.add(key)
+        return ModelEvent(
             ModelEventType.TOOL_CALL_COMPLETED,
             tool_call=ModelToolCall(call_id=call_id, name=name, arguments=parsed.arguments,
                                     argument_error=parsed.argument_error, raw_arguments=parsed.raw_arguments),
         )
 
-    async for event in _iter_sse_json(_bounded_response_bytes(chunks, max_response_bytes)):
-        if event.get("__done__"):
-            completed = normalized == "chat_completions"
-            break
-        if normalized == "responses":
-            event_type = str(event.get("type") or "")
-            if event_type == "response.output_text.delta":
-                if output := text_event(event.get("delta")):
-                    yield output
-            elif event_type == "response.output_item.added":
-                item = event.get("item")
-                if isinstance(item, dict) and item.get("type") == "function_call":
-                    key = call_key(
-                        index=event.get("output_index"), item_id=item.get("id")
-                    )
-                    conflict = key in calls
-                    calls[key] = {
-                        "identity_conflict": conflict,
-                        "id": item.get("id"),
-                        "call_id": item.get("call_id"),
-                        "name": item.get("name"),
-                        "arguments": item.get("arguments"),
-                    }
-            elif event_type == "response.function_call_arguments.delta":
-                key = call_key(
-                    index=event.get("output_index"), item_id=event.get("item_id")
-                )
-                raw = calls.setdefault(key, {})
-                raw["arguments"] = _append_tool_arguments(
-                    raw.get("arguments"), event.get("delta")
-                )
-            elif event_type in {"response.function_call_arguments.done", "response.output_item.done"}:
-                arguments_done = event_type == "response.function_call_arguments.done"
-                item = event if arguments_done else event.get("item")
-                if not arguments_done and isinstance(item, dict):
-                    native_blocks[int(event.get("output_index", 0))] = item
-                if isinstance(item, dict) and (arguments_done or item.get("type") == "function_call"):
-                    key = call_key(
-                        index=event.get("output_index"),
-                        item_id=event.get("item_id") if arguments_done else item.get("id"),
-                    )
-                    raw = calls.setdefault(key, {})
-                    if arguments_done:
-                        native_blocks.setdefault(int(event.get("output_index", 0)), {"type": "function_call", **raw})
-                    if not arguments_done:
-                        if any(raw.get(field) not in (None, "", item.get(field)) for field in ("id", "call_id", "name")):
-                            raw["identity_conflict"] = True
-                        raw.update({field: item.get(field) for field in ("id", "call_id", "name")})
-                    arguments = item.get("arguments")
-                    # 兼容渠道的完成帧可能只含空占位，不能抹掉已经收到的参数增量。
-                    # 显式 {} 仍是有效的完整参数；不完整增量仍由 JSON 校验拒绝。
-                    if arguments is not None and (not isinstance(arguments, str) or arguments.strip()):
-                        raw["arguments"] = arguments
-                    async for output in emit_call(key):
-                        yield output
-            elif event_type == "response.completed":
-                response = event.get("response")
-                if isinstance(response, dict):
-                    usage = _usage_dict(response, "responses")
-                    if usage:
-                        yield ModelEvent(ModelEventType.USAGE, usage=usage)
-                    finish_reason = str(response.get("status") or "")
-                completed = True
-                break
-            elif event_type == "response.incomplete":
-                raise UncommittableModelTurn("Responses API 未完整结束")
-            elif event_type in {"response.failed", "error"}:
-                raise ModelProviderError("Responses API 未完整结束")
-            continue
 
-        if normalized == "chat_completions":
-            usage = _usage_dict(event, "chat_completions")
-            if usage:
-                yield ModelEvent(ModelEventType.USAGE, usage=usage)
-            choices = event.get("choices")
-            if not isinstance(choices, list):
-                continue
-            for choice_index, choice in enumerate(choices):
-                if not isinstance(choice, dict) or choice.get("index", choice_index) != 0:
-                    continue
-                delta = choice.get("delta")
-                if isinstance(delta, dict):
-                    if "reasoning_content" in delta and not isinstance(delta["reasoning_content"], str):
-                        invalid_private = True
-                    if isinstance(delta.get("reasoning_content"), str):
-                        chat_reasoning += delta["reasoning_content"]
-                    if output := text_event(delta.get("content")):
-                        yield output
-                    for tool_call in delta.get("tool_calls") or ():
-                        if not isinstance(tool_call, dict):
-                            continue
-                        key = call_key(index=tool_call.get("index"))
-                        raw = calls.setdefault(key, {})
-                        if tool_call.get("id"):
-                            if raw.get("call_id") not in (None, "", tool_call["id"]):
-                                raw["identity_conflict"] = True
-                            raw["call_id"] = tool_call["id"]
-                        function = tool_call.get("function")
-                        if isinstance(function, dict):
-                            if function.get("name"):
-                                if not isinstance(function["name"], str):
-                                    raw["identity_conflict"] = True
-                                raw["name"] = str(raw.get("name") or "") + str(
-                                    function["name"]
-                                )
-                            raw["arguments"] = _append_tool_arguments(
-                                raw.get("arguments"), function.get("arguments")
-                            )
-                reason = str(choice.get("finish_reason") or "")
-                if reason:
-                    finish_reason = reason
-            continue
-
-        event_type = str(event.get("type") or "")
-        if event_type == "message_start":
-            message = event.get("message")
-            usage = (
-                _usage_dict(message, "anthropic_messages")
-                if isinstance(message, dict)
-                else {}
+def _consume_responses_event(state: _ProtocolState, event: dict[str, Any]) -> Iterator[ModelEvent]:
+    event_type = str(event.get("type") or "")
+    if event_type == "response.output_text.delta":
+        if output := state.text_event(event.get("delta")):
+            yield output
+    elif event_type == "response.output_item.added":
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "function_call":
+            key = state.call_key(index=event.get("output_index"), item_id=item.get("id"))
+            conflict = key in state.calls
+            state.calls[key] = {
+                "identity_conflict": conflict,
+                "id": item.get("id"),
+                "call_id": item.get("call_id"),
+                "name": item.get("name"),
+                "arguments": item.get("arguments"),
+            }
+    elif event_type == "response.function_call_arguments.delta":
+        key = state.call_key(index=event.get("output_index"), item_id=event.get("item_id"))
+        raw = state.calls.setdefault(key, {})
+        raw["arguments"] = _append_tool_arguments(raw.get("arguments"), event.get("delta"))
+    elif event_type in {"response.function_call_arguments.done", "response.output_item.done"}:
+        arguments_done = event_type == "response.function_call_arguments.done"
+        item = event if arguments_done else event.get("item")
+        if not arguments_done and isinstance(item, dict):
+            state.native_blocks[int(event.get("output_index", 0))] = item
+        if isinstance(item, dict) and (arguments_done or item.get("type") == "function_call"):
+            key = state.call_key(
+                index=event.get("output_index"),
+                item_id=event.get("item_id") if arguments_done else item.get("id"),
             )
-            if usage:
-                yield ModelEvent(ModelEventType.USAGE, usage=usage)
-        elif event_type == "content_block_start":
-            block = event.get("content_block")
-            if not isinstance(block, dict):
-                continue
-            index = int(event.get("index", 0))
-            if block.get("type") in {"thinking", "redacted_thinking"}:
-                open_private_blocks.add(index)
-                fields = ("type", "thinking", "signature") if block["type"] == "thinking" else ("type", "data")
-                native_blocks[index] = {field: block[field] for field in fields if field in block}
-            if block.get("type") == "text":
-                if output := text_event(block.get("text"), index):
-                    yield output
-            elif block.get("type") == "tool_use":
-                native_blocks[index] = {"type": "tool_ref", "call_id": block.get("id")}
-                key = call_key(index=index)
-                if key in calls:
-                    raise ModelProviderError("模型工具原生身份冲突")
-                calls[key] = {
-                    "call_id": block.get("id"),
-                    "name": block.get("name"),
-                    "arguments": block.get("input"),
-                }
-        elif event_type == "content_block_delta":
-            delta = event.get("delta")
-            if not isinstance(delta, dict):
-                continue
-            index = int(event.get("index", 0))
-            if delta.get("type") in {"thinking_delta", "signature_delta"}:
-                field = "thinking" if delta["type"] == "thinking_delta" else "signature"
-                block = native_blocks.get(index)
-                if block is None or block.get("type") != "thinking" or index not in open_private_blocks or not isinstance(delta.get(field), str):
-                    raise ModelProviderError("Provider 私有状态增量无效")
-                if field in block and not isinstance(block[field], str):
-                    raise ModelProviderError("Provider 私有状态字段无效")
-                block[field] = block.get(field, "") + delta[field]
-            if delta.get("type") == "text_delta":
-                if output := text_event(delta.get("text"), index):
-                    yield output
-            elif delta.get("type") == "input_json_delta":
-                key = call_key(index=event.get("index"))
-                raw = calls.setdefault(key, {})
-                raw["arguments"] = _append_tool_arguments(
-                    raw.get("arguments"), delta.get("partial_json")
-                )
-        elif event_type == "content_block_stop":
-            index = int(event.get("index", 0))
-            if index in text_filters:
-                tail = anthropic_text(index)
-                if tail:
-                    yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
-            open_private_blocks.discard(index)
-            key = call_key(index=event.get("index"))
-            async for output in emit_call(key):
+            raw = state.calls.setdefault(key, {})
+            if arguments_done:
+                state.native_blocks.setdefault(int(event.get("output_index", 0)), {"type": "function_call", **raw})
+            else:
+                if any(raw.get(field) not in (None, "", item.get(field)) for field in ("id", "call_id", "name")):
+                    raw["identity_conflict"] = True
+                raw.update({field: item.get(field) for field in ("id", "call_id", "name")})
+            arguments = item.get("arguments")
+            # 完成帧的空占位不能抹掉参数增量；显式 {} 仍是完整参数。
+            if arguments is not None and (not isinstance(arguments, str) or arguments.strip()):
+                raw["arguments"] = arguments
+            if output := state.emit_call(key):
                 yield output
-        elif event_type == "message_delta":
-            delta = event.get("delta")
-            if isinstance(delta, dict) and delta.get("stop_reason"):
-                finish_reason = str(delta["stop_reason"])
-            usage = _usage_dict(event, "anthropic_messages")
-            if usage:
-                yield ModelEvent(ModelEventType.USAGE, usage=usage)
-        elif event_type == "message_stop":
-            completed = True
-            break
+    elif event_type == "response.completed":
+        response = event.get("response")
+        usage = _usage_dict(response, "responses") if isinstance(response, dict) else {}
+        if usage:
+            yield ModelEvent(ModelEventType.USAGE, usage=usage)
+        if isinstance(response, dict):
+            state.finish_reason = str(response.get("status") or "")
+        state.completed = True
+    elif event_type == "response.incomplete":
+        raise UncommittableModelTurn("Responses API 未完整结束")
+    elif event_type in {"response.failed", "error"}:
+        raise ModelProviderError("Responses API 未完整结束")
 
-    if not completed:
+
+def _consume_chat_completions_event(state: _ProtocolState, event: dict[str, Any]) -> Iterator[ModelEvent]:
+    usage = _usage_dict(event, "chat_completions")
+    if usage:
+        yield ModelEvent(ModelEventType.USAGE, usage=usage)
+    choices = event.get("choices")
+    if not isinstance(choices, list):
+        return
+    for choice_index, choice in enumerate(choices):
+        if not isinstance(choice, dict) or choice.get("index", choice_index) != 0:
+            continue
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            if "reasoning_content" in delta and not isinstance(delta["reasoning_content"], str):
+                state.invalid_private = True
+            if isinstance(delta.get("reasoning_content"), str):
+                state.chat_reasoning += delta["reasoning_content"]
+            if output := state.text_event(delta.get("content")):
+                yield output
+            for tool_call in delta.get("tool_calls") or ():
+                if not isinstance(tool_call, dict):
+                    continue
+                key = state.call_key(index=tool_call.get("index"))
+                raw = state.calls.setdefault(key, {})
+                if tool_call.get("id"):
+                    if raw.get("call_id") not in (None, "", tool_call["id"]):
+                        raw["identity_conflict"] = True
+                    raw["call_id"] = tool_call["id"]
+                function = tool_call.get("function")
+                if isinstance(function, dict):
+                    if function.get("name"):
+                        if not isinstance(function["name"], str):
+                            raw["identity_conflict"] = True
+                        raw["name"] = str(raw.get("name") or "") + str(function["name"])
+                    raw["arguments"] = _append_tool_arguments(
+                        raw.get("arguments"), function.get("arguments")
+                    )
+        reason = str(choice.get("finish_reason") or "")
+        if reason:
+            state.finish_reason = reason
+
+
+def _consume_anthropic_event(state: _ProtocolState, event: dict[str, Any]) -> Iterator[ModelEvent]:
+    event_type = str(event.get("type") or "")
+    if event_type == "message_start":
+        message = event.get("message")
+        usage = _usage_dict(message, "anthropic_messages") if isinstance(message, dict) else {}
+        if usage:
+            yield ModelEvent(ModelEventType.USAGE, usage=usage)
+    elif event_type == "content_block_start":
+        block = event.get("content_block")
+        if not isinstance(block, dict):
+            return
+        index = int(event.get("index", 0))
+        if block.get("type") in {"thinking", "redacted_thinking"}:
+            state.open_private_blocks.add(index)
+            fields = ("type", "thinking", "signature") if block["type"] == "thinking" else ("type", "data")
+            state.native_blocks[index] = {field: block[field] for field in fields if field in block}
+        if block.get("type") == "text":
+            if output := state.text_event(block.get("text"), index):
+                yield output
+        elif block.get("type") == "tool_use":
+            state.native_blocks[index] = {"type": "tool_ref", "call_id": block.get("id")}
+            key = state.call_key(index=index)
+            if key in state.calls:
+                raise ModelProviderError("模型工具原生身份冲突")
+            state.calls[key] = {
+                "call_id": block.get("id"),
+                "name": block.get("name"),
+                "arguments": block.get("input"),
+            }
+    elif event_type == "content_block_delta":
+        delta = event.get("delta")
+        if not isinstance(delta, dict):
+            return
+        index = int(event.get("index", 0))
+        if delta.get("type") in {"thinking_delta", "signature_delta"}:
+            field = "thinking" if delta["type"] == "thinking_delta" else "signature"
+            block = state.native_blocks.get(index)
+            if (block is None or block.get("type") != "thinking"
+                    or index not in state.open_private_blocks or not isinstance(delta.get(field), str)):
+                raise ModelProviderError("Provider 私有状态增量无效")
+            if field in block and not isinstance(block[field], str):
+                raise ModelProviderError("Provider 私有状态字段无效")
+            block[field] = block.get(field, "") + delta[field]
+        elif delta.get("type") == "text_delta":
+            if output := state.text_event(delta.get("text"), index):
+                yield output
+        elif delta.get("type") == "input_json_delta":
+            key = state.call_key(index=event.get("index"))
+            raw = state.calls.setdefault(key, {})
+            raw["arguments"] = _append_tool_arguments(raw.get("arguments"), delta.get("partial_json"))
+    elif event_type == "content_block_stop":
+        index = int(event.get("index", 0))
+        if index in state.text_filters:
+            tail = state.anthropic_text(index)
+            if tail:
+                yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
+        state.open_private_blocks.discard(index)
+        if output := state.emit_call(state.call_key(index=event.get("index"))):
+            yield output
+    elif event_type == "message_delta":
+        delta = event.get("delta")
+        if isinstance(delta, dict) and delta.get("stop_reason"):
+            state.finish_reason = str(delta["stop_reason"])
+        usage = _usage_dict(event, "anthropic_messages")
+        if usage:
+            yield ModelEvent(ModelEventType.USAGE, usage=usage)
+    elif event_type == "message_stop":
+        state.completed = True
+
+
+async def _finalize_protocol_events(state: _ProtocolState) -> AsyncIterator[ModelEvent]:
+    if not state.completed:
         raise UncommittableModelTurn("Provider 流在完成事件前中断")
     try:
-        finish_reason = provider_finish_reason(normalized, finish_reason)
+        state.finish_reason = provider_finish_reason(state.protocol, state.finish_reason)
     except ProviderStreamError as exc:
         raise UncommittableModelTurn(str(exc)) from exc
-    if normalized in {"responses", "chat_completions", "anthropic_messages"}:
+    if state.protocol in {"responses", "chat_completions", "anthropic_messages"}:
         # Validate the complete batch before emitting deferred calls. Checking
         # only previously emitted calls makes identity depend on stream order.
-        parsed_calls = [decode_call(raw) for raw in calls.values()]
-        repair_calls = any(call.argument_error for call in parsed_calls)
+        parsed_calls = [state.decode_call(raw) for raw in state.calls.values()]
+        state.repair_calls = any(call.argument_error for call in parsed_calls)
         try:
-            if normalized == "anthropic_messages":
+            if state.protocol == "anthropic_messages":
                 validate_repair_batch(parsed_calls, [(raw.get("call_id"), raw.get("name"))
-                                                     for raw in calls.values()], require_identity=True)
-            if repair_calls:
+                                                     for raw in state.calls.values()], require_identity=True)
+            if state.repair_calls:
                 validate_repair_batch(parsed_calls, [(raw.get("call_id"), raw.get("name"))
-                                                     for raw in calls.values()])
-                for key, raw in calls.items():
+                                                     for raw in state.calls.values()])
+                for key, raw in state.calls.items():
                     for field in ("call_id", "name"):
                         # Ordinary Responses calls can already be emitted. A
                         # mixed turn cannot retroactively repair those events.
-                        if key in emitted_calls and raw[field] != raw[field].strip():
+                        if key in state.emitted_calls and raw[field] != raw[field].strip():
                             raise ValueError("Previously normalized identity")
                     if raw.get("identity_conflict"):
                         raise ValueError("Conflicting native identity")
         except ValueError:
             raise ModelProviderError("模型工具参数或原生身份无效") from None
-    for key in list(calls):
-        async for output in emit_call(key):
+    for key in list(state.calls):
+        output = state.emit_call(key)
+        if output:
             yield output
-    tail = reasoning.finalize()
+    tail = state.reasoning.finalize()
     if tail:
         yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
-    for index in list(text_filters):
-        tail = anthropic_text(index)
+    for index in list(state.text_filters):
+        tail = state.anthropic_text(index)
         if tail:
             yield ModelEvent(ModelEventType.TEXT_DELTA, text=tail)
-    blocks = [native_blocks[index] for index in sorted(native_blocks)]
-    if repair_calls and invalid_private:
+    blocks = [state.native_blocks[index] for index in sorted(state.native_blocks)]
+    if state.repair_calls and state.invalid_private:
         raise ModelProviderError("参数错误回合的私有状态无效")
     layout = ""
-    if normalized == "anthropic_messages":
-        if open_private_blocks:
+    if state.protocol == "anthropic_messages":
+        if state.open_private_blocks:
             raise ModelProviderError("Provider 私有状态块未闭合")
         try:
             layout = anthropic_private_layout(blocks)
         except ValueError:
             raise ModelProviderError("Provider 私有状态格式无效") from None
-    elif normalized == "responses":
-        layout = responses_private_layout(blocks, required=repair_calls)
-        if repair_calls:
+    elif state.protocol == "responses":
+        layout = responses_private_layout(blocks, required=state.repair_calls)
+        if state.repair_calls:
             try:
                 validate_repair_layout(blocks)
             except ValueError:
                 raise ModelProviderError("参数错误回合的私有状态无效") from None
             refs = [block["call_id"] for block in blocks if block.get("type") == "function_call"]
-            if sorted(refs) != sorted(raw["call_id"] for raw in calls.values()):
+            if sorted(refs) != sorted(raw["call_id"] for raw in state.calls.values()):
                 raise ModelProviderError("参数错误回合缺少完整原生关联状态")
-    elif chat_reasoning:
-        layout = json.dumps([{"type": "reasoning_content", "text": chat_reasoning}], ensure_ascii=False)
-    elif repair_calls:
+    elif state.chat_reasoning:
+        layout = json.dumps([{"type": "reasoning_content", "text": state.chat_reasoning}], ensure_ascii=False)
+    elif state.repair_calls:
         layout = "[]"
-    private_state = _provider_state(normalized, "", "", layout) if layout else None
-    yield ModelEvent(ModelEventType.FINISH, finish_reason=finish_reason, provider_state=private_state)
+    private_state = _provider_state(state.protocol, "", "", layout) if layout else None
+    yield ModelEvent(ModelEventType.FINISH, finish_reason=state.finish_reason, provider_state=private_state)
+
+
+async def iter_protocol_model_events(
+    chunks: AsyncIterator[bytes], *, protocol: str, max_response_bytes: int = 2 * 1024 * 1024
+) -> AsyncIterator[ModelEvent]:
+    """把三个 Provider 的真实 SSE 统一为 Kernel ModelEvent。"""
+    normalized = resolve_protocol(protocol)
+    state = _ProtocolState(normalized)
+    consumer = {
+        "responses": _consume_responses_event,
+        "chat_completions": _consume_chat_completions_event,
+        "anthropic_messages": _consume_anthropic_event,
+    }.get(normalized)
+    async for event in _iter_sse_json(_bounded_response_bytes(chunks, max_response_bytes)):
+        if event.get("__done__"):
+            state.completed = normalized == "chat_completions"
+            break
+        if consumer is not None:
+            for output in consumer(state, event):
+                yield output
+        if state.completed:
+            break
+    async for output in _finalize_protocol_events(state):
+        yield output
 
 
 def _history_for_protocol(
