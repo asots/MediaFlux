@@ -35,6 +35,7 @@ from app.discovery.registry import (
     validate_request,
 )
 from app.logger import get_logger
+from app.repositories.discovery import count_media_watchlist
 
 _DISCOVERY_CLOSED_MESSAGE = "探索服务已关闭，请重试"
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -496,8 +497,13 @@ class DiscoveryService:
         return database.delete_media_watchlist(provider, external_id, media_type)
 
     @staticmethod
-    def list_watchlist() -> list[dict[str, Any]]:
-        return [dict(row) for row in database.list_media_watchlist()]
+    def list_watchlist(*, limit: int = 200, before_number: int | None = None) -> dict[str, Any]:
+        limit = max(1, min(limit, 200))
+        rows = database.list_media_watchlist(limit=limit + 1, before_number=before_number)
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return {"items": [dict(row) for row in rows], "total": count_media_watchlist(), "has_more": has_more,
+                "next": {"before_number": rows[-1]["id"], "limit": limit} if has_more else None}
 
     def lookup_tmdb_mapping(
         self, provider: str, external_id: str, media_type: str, title: str, year: str = ""

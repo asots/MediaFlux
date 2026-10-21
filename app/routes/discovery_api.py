@@ -231,10 +231,12 @@ async def map_media(request: Request, data: Any = Body(default=None)):
 
 
 @router.get("/watchlist")
-def watchlist(request: Request):
+def watchlist(request: Request, limit: int = Query(default=200, ge=1, le=200),
+              before_number: int | None = Query(default=None, ge=1)):
     require_api_login(request)
     try:
-        return api_response([_watchlist_payload(dict(row)) for row in get_discovery_service().list_watchlist()])
+        page = get_discovery_service().list_watchlist(limit=limit, before_number=before_number)
+        return api_response({**page, "items": [_watchlist_payload(row) for row in page["items"]]})
     except (TypeError, ValueError) as exc:
         return api_error(str(exc), 500)
 

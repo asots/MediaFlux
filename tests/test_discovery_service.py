@@ -701,11 +701,11 @@ class DiscoveryServiceTests(unittest.TestCase):
         self.service.add_watchlist(first)
         self.service.add_watchlist(first)
         self.service.add_watchlist(second)
-        listed = self.service.list_watchlist()
+        listed = self.service.list_watchlist()["items"]
         self.assertEqual([(item["provider"], item["external_id"]) for item in listed], [("douban", "10"), ("tmdb", "10")])
         self.assertTrue(self.service.remove_watchlist("tmdb", "movie", "10"))
         self.assertFalse(self.service.remove_watchlist("tmdb", "movie", "10"))
-        self.assertEqual(self.service.list_watchlist()[0]["provider"], "douban")
+        self.assertEqual(self.service.list_watchlist()["items"][0]["provider"], "douban")
 
     def test_normalized_identifiers_are_used_for_registry_lookup(self):
         page = self.service.list_items(" TMDB ", " POPULAR ", " MOVIE ", 1, {})

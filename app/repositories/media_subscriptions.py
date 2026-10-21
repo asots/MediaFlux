@@ -255,7 +255,8 @@ def get_media_subscription_by_identity(tmdb_id: str, media_type: str) -> sqlite3
 
 
 def list_media_subscriptions(
-    *, status: str = "", enabled: bool | None = None, limit: int = 200, offset: int = 0
+    *, status: str = "", enabled: bool | None = None, limit: int = 200, offset: int = 0,
+    before: tuple[str, int] | None = None,
 ) -> list[sqlite3.Row]:
     clauses: list[str] = ["deleted_at IS NULL"]
     params: list[Any] = []
@@ -265,12 +266,27 @@ def list_media_subscriptions(
     if enabled is not None:
         clauses.append("enabled=?")
         params.append(int(enabled))
+    if before is not None:
+        clauses.append("(updated_at<? OR (updated_at=? AND id<?))")
+        params.extend((before[0], before[0], before[1]))
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     params.extend((max(1, min((limit or 200), 500)), max(0, (offset or 0))))
     with get_conn() as conn:
         return conn.execute(
             f"SELECT * FROM media_subscriptions{where} ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?",
             params,
+        ).fetchall()
+
+
+def list_media_subscriptions_by_identity(identities: Iterable[tuple[str, str]]) -> list[sqlite3.Row]:
+    keys = sorted({key for key in identities if key[0] and key[1] in {"movie", "tv"}})
+    if not keys:
+        return []
+    placeholders = ",".join("(?,?)" for _ in keys)
+    with get_conn() as conn:
+        return conn.execute(
+            f"SELECT * FROM media_subscriptions WHERE deleted_at IS NULL AND (tmdb_id,media_type) IN ({placeholders})",
+            [value for key in keys for value in key],
         ).fetchall()
 
 

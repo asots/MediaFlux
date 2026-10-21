@@ -334,3 +334,8 @@ def get_media_watchlist_statistics() -> list[sqlite3.Row]:
             "FROM media_watchlist"
             ") WHERE type_rank <= 3 ORDER BY media_type,id DESC"
         ).fetchall()
+
+
+def count_media_watchlist() -> int:
+    with _database().get_conn() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM media_watchlist").fetchone()[0])

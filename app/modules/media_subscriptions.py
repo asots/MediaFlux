@@ -28,6 +28,7 @@ from app.modules.episode_resource_ranking import rank_episode_search
 from app.modules.media_identity import build_media_key
 from app.repositories.media_subscriptions import (
     MediaSubscriptionError,
+    list_media_subscriptions_by_identity,
     normalize_subscription_interval,
     normalize_subscription_seasons,
     validate_subscription_scope,
@@ -469,13 +470,29 @@ class MediaSubscriptionService:
         workflows = db.list_media_subscription_workflows([subscription_id])
         return _public_subscription(row, workflow=workflows.get(subscription_id))
 
-    def list_subscriptions(self, *, status: str = "", enabled: bool | None = None) -> list[dict[str, Any]]:
-        rows = db.list_media_subscriptions(status=status, enabled=enabled)
+    @staticmethod
+    def _subscription_rows(rows) -> list[dict[str, Any]]:
         workflows = db.list_media_subscription_workflows(row["id"] for row in rows)
         return [
             _public_subscription(row, workflow=workflows.get(int(row["id"])))
             for row in rows
         ]
+
+    def list_subscriptions(self, *, status: str = "", enabled: bool | None = None,
+                           limit: int = 200, before: tuple[str, int] | None = None) -> dict[str, Any]:
+        limit = max(1, min(limit, 200))
+        rows = db.list_media_subscriptions(status=status, enabled=enabled, limit=limit + 1, before=before)
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return {"items": self._subscription_rows(rows), "total": db.count_media_subscriptions(status=status, enabled=enabled),
+                "has_more": has_more, "next": {
+                    "before_updated_at": rows[-1]["updated_at"], "before_id": rows[-1]["id"], "limit": limit,
+                    "status": status, "enabled": "" if enabled is None else str(int(enabled)),
+                } if has_more else None}
+
+    def subscriptions_by_identity(self, identities: Iterable[tuple[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
+        rows = self._subscription_rows(list_media_subscriptions_by_identity(identities))
+        return {(row["tmdb_id"], row["media_type"]): row for row in rows}
 
     def list_runs(self, *, subscription_id: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
         return [_public_run(row) for row in db.list_media_subscription_runs(

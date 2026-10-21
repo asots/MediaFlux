@@ -57,6 +57,14 @@ def _optional_bool(value: str) -> bool | None:
     raise MediaSubscriptionError("enabled 查询参数无效")
 
 
+def _watchlist_tmdb_id(row: dict[str, Any], external_id_map: dict[tuple[str, str, str], Any]) -> str:
+    provider, external_id, media_type = (str(row.get(key) or "") for key in ("provider", "external_id", "media_type"))
+    if provider == "tmdb":
+        return external_id
+    mapping = external_id_map.get((provider, external_id, media_type))
+    return str(mapping["tmdb_id"] or "") if mapping is not None and bool(mapping["confirmed"]) else ""
+
+
 def _watchlist_row(
     row: dict[str, Any],
     subscription_map: dict[tuple[str, str], dict[str, Any]],
@@ -65,11 +73,7 @@ def _watchlist_row(
     provider = str(row.get("provider") or "")
     external_id = str(row.get("external_id") or "")
     media_type = str(row.get("media_type") or "")
-    tmdb_id = external_id if provider == "tmdb" else ""
-    if not tmdb_id:
-        mapping = external_id_map.get((provider, external_id, media_type))
-        if mapping is not None and bool(mapping["confirmed"]):
-            tmdb_id = str(mapping["tmdb_id"] or "")
+    tmdb_id = _watchlist_tmdb_id(row, external_id_map)
     subscription = subscription_map.get((tmdb_id, media_type)) if tmdb_id else None
     poster_key = str(row.get("poster_key") or "")
     poster_url = (
@@ -108,15 +112,21 @@ def list_media_subscriptions(
     request: Request,
     status: str = Query(default=""),
     enabled: str = Query(default=""),
+    limit: int = Query(default=200, ge=1, le=200),
+    before_id: int | None = Query(default=None, ge=1),
+    before_updated_at: str | None = Query(default=None, max_length=40),
 ):
     require_api_login(request)
     try:
         normalized_status = (status or "").strip().lower()
         if normalized_status not in _ALLOWED_LIST_STATUS:
             raise MediaSubscriptionError("status 查询参数无效")
+        if (before_id is None) != (before_updated_at is None):
+            raise MediaSubscriptionError("订阅续页必须同时提供时间和编号")
         return api_response(get_media_subscription_service().list_subscriptions(
             status=normalized_status,
             enabled=_optional_bool(enabled),
+            limit=limit, before=(before_updated_at, before_id) if before_updated_at is not None and before_id is not None else None,
         ))
     except MediaSubscriptionError as exc:
         return _service_error(exc)
@@ -227,14 +237,11 @@ def list_media_subscription_runs(
 
 
 @router.get("/watchlist")
-def list_watchlist(request: Request):
+def list_watchlist(request: Request, limit: int = Query(default=200, ge=1, le=200),
+                   before_number: int | None = Query(default=None, ge=1)):
     require_api_login(request)
-    subscriptions = get_media_subscription_service().list_subscriptions()
-    subscription_map = {
-        (str(item.get("tmdb_id") or ""), str(item.get("media_type") or "")): item
-        for item in subscriptions
-    }
-    rows = [dict(row) for row in get_discovery_service().list_watchlist()]
+    page = get_discovery_service().list_watchlist(limit=limit, before_number=before_number)
+    rows = page["items"]
     external_id_map = db.list_media_external_ids([
         (
             str(row.get("provider") or ""),
@@ -244,10 +251,13 @@ def list_watchlist(request: Request):
         for row in rows
         if str(row.get("provider") or "") != "tmdb"
     ])
-    return api_response([
+    subscription_map = get_media_subscription_service().subscriptions_by_identity(
+        (_watchlist_tmdb_id(row, external_id_map), str(row.get("media_type") or "")) for row in rows
+    )
+    return api_response({**page, "items": [
         _watchlist_row(row, subscription_map, external_id_map)
         for row in rows
-    ])
+    ]})
 
 
 @router.post("/media/from-watchlist")

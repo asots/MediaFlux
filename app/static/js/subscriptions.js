@@ -420,6 +420,23 @@
         }
     }
 
+    async function collectPages(path, signal) {
+        const base = new URL(path, window.location.origin);
+        const rows = [];
+        let next = null;
+        do {
+            const url = new URL(base);
+            for (const [key, value] of Object.entries(next || {})) url.searchParams.set(key, value);
+            const page = await apiJSON(`${url.pathname}${url.search}`, {}, signal);
+            if (!Array.isArray(page.items) || (page.has_more && (!page.next || JSON.stringify(page.next) === JSON.stringify(next)))) {
+                throw new Error('列表续页信息不完整，请刷新重试');
+            }
+            rows.push(...page.items);
+            next = page.has_more ? page.next : null;
+        } while (next);
+        return rows;
+    }
+
     async function loadMedia({preserve = true} = {}) {
         state.mediaController?.abort();
         const controller = new AbortController();
@@ -440,11 +457,11 @@
         const status = elements.mediaStatus.value;
         try {
             const query = status ? `?status=${encodeURIComponent(status)}` : '';
-            const rows = await apiJSON(`/api/subscriptions/media${query}`, {}, controller.signal);
+            const rows = await collectPages(`/api/subscriptions/media${query}`, controller.signal);
             if (requestId !== state.mediaRequestId) return;
             await settleSkeleton(elements.mediaList);
             if (requestId !== state.mediaRequestId) return;
-            state.media = Array.isArray(rows) ? rows : [];
+            state.media = rows;
             state.loaded.media = true;
             const releaseHeight = preserve && hadContent ? lockElementHeight(elements.mediaList) : () => {};
             renderMediaList(state.media);
@@ -561,11 +578,11 @@
             if (requestId === state.watchlistRequestId && !elements.watchlist.childElementCount) showSkeleton(elements.watchlist, 6, 'watchlist');
         }, 320);
         try {
-            const rows = await apiJSON('/api/subscriptions/watchlist', {}, controller.signal);
+            const rows = await collectPages('/api/subscriptions/watchlist', controller.signal);
             if (requestId !== state.watchlistRequestId) return;
             await settleSkeleton(elements.watchlist);
             if (requestId !== state.watchlistRequestId) return;
-            state.watchlist = Array.isArray(rows) ? rows : [];
+            state.watchlist = rows;
             state.loaded.watchlist = true;
             const releaseHeight = preserve && hadContent ? lockElementHeight(elements.watchlist) : () => {};
             renderWatchlist(state.watchlist);

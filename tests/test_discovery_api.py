@@ -70,12 +70,12 @@ class FakeDiscoveryService:
     async def map_to_tmdb_async(self, *args, **kwargs):
         return self.map_to_tmdb(*args, **kwargs)
 
-    def list_watchlist(self):
-        return [{
+    def list_watchlist(self, **_kwargs):
+        return {"items": [{
             "provider": "douban", "external_id": "7", "media_type": "movie",
             "title": "Movie", "year": "1999",
             "poster_key": "img3.doubanio.com/view/photo/s_ratio_poster/public/p7.jpg",
-        }]
+        }], "total": 1, "has_more": False, "next": None}
 
     def add_watchlist(self, card):
         return None
@@ -598,7 +598,7 @@ class DiscoveryAPITests(_BaseClientTests):
         self.assertEqual(listed.status_code, 200)
         self.assertNotIn("poster_key", listed.text)
         self.assertNotIn("img3.doubanio.com", listed.text)
-        self.assertTrue(listed.json()[0]["poster_url"].startswith("/discovery-poster/douban/"))
+        self.assertTrue(listed.json()["items"][0]["poster_url"].startswith("/discovery-poster/douban/"))
         self.assertEqual(removed.status_code, 200)
 
 

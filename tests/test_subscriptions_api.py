@@ -21,6 +21,62 @@ from tests.support import IsolatedDatabaseTestCase
 
 
 class SubscriptionAPITests(IsolatedDatabaseTestCase):
+    def test_complete_lists_use_stable_cursors_and_page_identity_subscription_lookup(self):
+        from app.discovery.service import DiscoveryService
+
+        self.login()
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM media_watchlist")
+        with patch("app.routes.subscriptions_api.get_discovery_service", return_value=DiscoveryService), patch(
+            "app.routes.discovery_api.get_discovery_service", return_value=DiscoveryService
+        ), patch.object(db, "now", return_value="2026-10-21 10:00:00"):
+            empty = self.client.get("/api/subscriptions/media").json()
+            self.assertEqual(empty, {"items": [], "total": 0, "has_more": False, "next": None})
+            self.assertEqual(self.client.get("/api/subscriptions/watchlist").json(), empty)
+            for number in range(1, 202):
+                db.add_media_subscription(provider="tmdb", external_id=str(number), tmdb_id=str(number), media_type="tv", title=f"Test {number}")
+                if number == 200:
+                    boundary = self.client.get("/api/subscriptions/media").json()
+                    self.assertEqual((len(boundary["items"]), boundary["has_more"], boundary["next"]), (200, False, None))
+            for number in [*range(2, 502), 1]:
+                db.add_media_watchlist("tmdb", str(number), "tv", f"Test {number}", "2026", "")
+            media = self.client.get("/api/subscriptions/media?limit=200").json()
+            self.assertEqual((len(media["items"]), media["total"], media["has_more"]), (200, 201, True))
+            # 页间新增以及删除已读项不能让 offset 漂移而漏掉旧订阅。
+            db.add_media_subscription(provider="tmdb", external_id="202", tmdb_id="202", media_type="tv", title="New")
+            with db.get_conn() as conn:
+                conn.execute("UPDATE media_subscriptions SET deleted_at=? WHERE id=?", (db.now(), media["items"][0]["id"]))
+            last = self.client.get("/api/subscriptions/media", params=media["next"]).json()
+            self.assertEqual([item["tmdb_id"] for item in last["items"]], ["1"])
+            self.assertFalse(last["has_more"])
+            self.assertEqual(self.client.get("/api/subscriptions/media", params={"before_id": 1}).status_code, 400)
+
+            watch = self.client.get("/api/subscriptions/watchlist?limit=200").json()
+            self.assertEqual((len(watch["items"]), watch["total"], watch["has_more"]), (200, 501, True))
+            oldest = next(item for item in watch["items"] if item["external_id"] == "1")
+            self.assertEqual(oldest["subscription"]["tmdb_id"], "1")
+            seen = [item["external_id"] for item in watch["items"]]
+            db.add_media_watchlist("tmdb", "9999", "tv", "New", "2026", "")
+            db.delete_media_watchlist("tmdb", watch["items"][1]["external_id"], "tv")
+            while watch["has_more"]:
+                watch = self.client.get("/api/subscriptions/watchlist", params=watch["next"]).json()
+                seen.extend(item["external_id"] for item in watch["items"])
+            self.assertEqual(len(seen), 501)
+            self.assertEqual(len(set(seen)), 501)
+            self.assertNotIn("9999", seen)
+            with patch.dict("os.environ", {"DISCOVERY_ENABLED": "1"}):
+                discovery = self.client.get("/api/discovery/watchlist?limit=1").json()
+            self.assertEqual(len(discovery["items"]), 1)
+            self.assertEqual(discovery["total"], 501)
+            self.assertTrue(discovery["has_more"])
+            with db.get_conn() as conn:
+                conn.execute("UPDATE media_subscriptions SET status='paused',enabled=0 WHERE tmdb_id IN ('197','199')")
+            filtered = self.client.get("/api/subscriptions/media", params={"status": "paused", "enabled": "0", "limit": 1}).json()
+            self.assertEqual((filtered["total"], filtered["items"][0]["tmdb_id"]), (2, "199"))
+            filtered_last = self.client.get("/api/subscriptions/media", params=filtered["next"]).json()
+            self.assertEqual([item["tmdb_id"] for item in filtered_last["items"]], ["197"])
+            self.assertFalse(filtered_last["has_more"])
+
     def setUp(self) -> None:
         with db.get_conn() as conn:
             conn.execute("DELETE FROM media_download_admissions")
@@ -71,7 +127,6 @@ class SubscriptionAPITests(IsolatedDatabaseTestCase):
     def test_thin_routes_forward_crud_check_and_candidate_scope(self) -> None:
         headers = self.login()
         service = Mock()
-        service.list_subscriptions.return_value = []
         service.create_subscription = AsyncMock(return_value={
             "created": True,
             "subscription": {"id": 7, "tmdb_id": "86034", "media_type": "tv"},
@@ -144,9 +199,9 @@ class SubscriptionAPITests(IsolatedDatabaseTestCase):
             "created_at": "2026-08-30 12:00:00",
         } for index in range(500)]
         discovery = Mock()
-        discovery.list_watchlist.return_value = rows
+        discovery.list_watchlist.return_value = {"items": rows, "total": len(rows), "has_more": False, "next": None}
         service = Mock()
-        service.list_subscriptions.return_value = []
+        service.subscriptions_by_identity.return_value = {}
         with patch(
             "app.routes.subscriptions_api.get_discovery_service",
             return_value=discovery,
@@ -160,7 +215,7 @@ class SubscriptionAPITests(IsolatedDatabaseTestCase):
             response = self.client.get("/api/subscriptions/watchlist", headers=headers)
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(len(response.json()), 500)
+        self.assertEqual(len(response.json()["items"]), 500)
         batch_lookup.assert_called_once()
         self.assertEqual(len(batch_lookup.call_args.args[0]), 500)
 
@@ -176,13 +231,11 @@ class SubscriptionAPITests(IsolatedDatabaseTestCase):
             "created_at": "2026-08-09 12:00:00",
         }]
         discovery = Mock()
-        discovery.list_watchlist.return_value = watchlist
         discovery.map_to_tmdb_async = AsyncMock(return_value={
             "confirmed": False,
             "candidates": [{"tmdb_id": "999", "title": "测试动画"}],
         })
         service = Mock()
-        service.list_subscriptions.return_value = []
         with patch("app.routes.subscriptions_api.get_discovery_service", return_value=discovery), patch(
             "app.routes.subscriptions_api.get_media_subscription_service", return_value=service
         ), patch(
@@ -372,7 +425,6 @@ class SubscriptionMappingAsyncContractTests(unittest.IsolatedAsyncioTestCase):
         entered = threading.Event()
         release = threading.Event()
         discovery = Mock()
-        discovery.list_watchlist.return_value = self._watchlist()
 
         def slow_map(*_args, **_kwargs):
             entered.set()
@@ -420,7 +472,6 @@ class SubscriptionMappingAsyncContractTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
         finished = threading.Event()
         discovery = Mock()
-        discovery.list_watchlist.return_value = self._watchlist()
 
         def slow_map(*_args, **_kwargs):
             entered.set()

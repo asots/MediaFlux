@@ -199,7 +199,7 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
                     )
                     return
             body = request.post_data_json if request.post_data else None
-            self.requests.append(dict(method=request.method, path=path, body=body))
+            self.requests.append(dict(method=request.method, path=path, query=url.query, body=body))
             key = (request.method, path)
             if key in self.hold_transport:
                 self.pending[self.hold_transport.pop(key)] = route
@@ -209,7 +209,7 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
                 route.fulfill(status=status, json=payload)
                 return
             if path == MEDIA and request.method == "GET":
-                route.fulfill(json=SUBSCRIPTIONS)
+                route.fulfill(json={"items": SUBSCRIPTIONS, "total": len(SUBSCRIPTIONS), "has_more": False, "next": None})
                 return
             if path.startswith(MEDIA + "/") and request.method == "PUT":
                 route.fulfill(json={"created": False})
@@ -218,7 +218,7 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
                 route.fulfill(json={})
                 return
             if path == "/api/subscriptions/watchlist":
-                route.fulfill(json=[])
+                route.fulfill(json={"items": [], "total": 0, "has_more": False, "next": None})
                 return
             if path == "/api/guangya/token/validate":
                 route.fulfill(json={"has_access_token": True, "valid": True})
@@ -590,6 +590,45 @@ class UiEditSessionRecoveryBrowserTests(unittest.TestCase):
             "请选择下方正确的 TMDB", page.locator("#mediaSubFormStatus").inner_text()
         )
         self.assertTrue(page.locator("#mediaSubSaveBtn").is_enabled())
+
+    def test_subscription_center_automatically_loads_all_cursor_pages(self):
+        media = [{**SUBSCRIPTIONS[0], "id": number, "tmdb_id": str(number)} for number in range(1, 202)]
+        watch = [{"provider": "tmdb", "external_id": str(number), "media_type": "tv",
+                  "title": f"收藏 {number}", "year": "2026", "poster_url": "", "subscription": None}
+                 for number in range(1, 502)]
+        self.replies[("GET", MEDIA)] = [
+            (200, {"items": media[:200], "total": 201, "has_more": True,
+                   "next": {"before_id": 2, "before_updated_at": "2026-10-21 10:00:00", "limit": 200}}),
+            (200, {"items": media[200:], "total": 201, "has_more": False, "next": None}),
+        ]
+        self.replies[("GET", "/api/subscriptions/watchlist")] = [
+            (200, {"items": watch[start:start + 200], "total": 501, "has_more": start < 400,
+                   "next": {"before_number": 501 - start - 200, "limit": 200} if start < 400 else None})
+            for start in (0, 200, 400)
+        ]
+        page = self.make_page("rss")
+        self.assertEqual(page.locator('[data-subscription-id]').count(), 201)
+        page.locator('[data-subscription-tab="watchlist"]').click()
+        page.wait_for_function("document.querySelectorAll('.subscription-watch-card').length === 501")
+        self.assertEqual(page.locator('#subscriptionWatchlistBadge').inner_text(), "501")
+        self.assertTrue(any("before_id=2" in item["query"] for item in self.requests))
+        self.assertEqual(sum("before_number=" in item["query"] for item in self.requests), 2)
+
+    def test_failed_continuation_does_not_replace_current_list_with_a_partial_page(self):
+        page = self.make_page("rss")
+        self.replies[("GET", MEDIA)] = [
+            (200, {"items": [{**SUBSCRIPTIONS[0], "id": 999}], "total": 2, "has_more": True,
+                   "next": {"before_id": 999, "before_updated_at": "2026-10-21 10:00:00"}}),
+            (503, {"error": "续页暂不可用"}),
+        ]
+        self.hold_reply(MEDIA, "list-refresh", method="GET")
+        page.locator('#refreshMediaSubscriptions').click()
+        self.wait_reply("list-refresh")
+        self.assertEqual(page.locator('[data-subscription-id]').count(), len(SUBSCRIPTIONS))
+        self.release_reply("list-refresh")
+        page.wait_for_function("!document.getElementById('refreshMediaSubscriptions').disabled")
+        self.assertEqual(page.locator('[data-subscription-id]').count(), len(SUBSCRIPTIONS))
+        self.assertEqual(page.locator('[data-subscription-id="999"]').count(), 0)
 
     def test_media_success_waiting_for_refresh_cannot_alert_over_new_editor(self):
         page = self.make_page("rss")
