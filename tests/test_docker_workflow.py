@@ -161,9 +161,9 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn("npm ci --ignore-scripts --no-audit --no-fund", test_job)
         self.assertIn("--require-hashes -r requirements-release-runtime.lock", test_job)
         self.assertIn('python -m pip install "pytest==9.1.1"', test_job)
-        self.assertIn('python -m pip install "ruff==0.16.5"', test_job)
+        self.assertIn('python -m pip install "ruff==0.17.1"', test_job)
         self.assertIn('version("pytest") == "9.1.1"', test_job)
-        self.assertIn('version("ruff") == "0.16.5"', test_job)
+        self.assertIn('version("ruff") == "0.17.1"', test_job)
         self.assertIn(
             "ruff check app packaging tests --select F,E9",
             test_job,
@@ -199,7 +199,7 @@ class DockerWorkflowTests(unittest.TestCase):
 
     def test_regression_browser_cases_are_in_required_browser_job(self) -> None:
         browser_job = self.text.split("  browser:", 1)[1].split("  smoke:", 1)[0]
-        self.assertIn('python -m pip install "playwright==1.62.0"', browser_job)
+        self.assertIn('python -m pip install "playwright==1.64.0"', browser_job)
         modules = browser_job.split("modules = (", 1)[1].split(")", 1)[0]
         for module in (
             "tests.test_node_fixes_agent_feedback",
@@ -236,11 +236,18 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn("smoke", jobs["build"]["needs"])
         self.assertIn("pip-audit --disable-pip --require-hashes --progress-spinner off -r requirements-release-runtime.lock", workflow)
         self.assertIn("npm audit --package-lock-only --ignore-scripts --audit-level=low --registry=https://registry.npmjs.org", workflow)
+        self.assertIn("npm install --global npm@12.2.0 --ignore-scripts", workflow)
         base = security["jobs"]["runtime-base"]["steps"][-1]["run"]
         self.assertIn("Dockerfile", base)
         self.assertIn("trivy:0.76.1@sha256:", base)
         self.assertIn("--pkg-types os --ignore-unfixed --exit-code 1", base)
         self.assertNotIn("docker.sock", base)
+        builder = security["jobs"]["static-builder"]["steps"][-1]["run"]
+        self.assertIn("--target static-builder", builder)
+        self.assertIn("tls.rootCertificates", builder)
+        self.assertIn("/etc/ssl/certs/ca-certificates.crt", builder)
+        self.assertIn("--input /scan/static-builder.tar", builder)
+        self.assertNotIn("docker.sock", builder)
         for bypass in ("continue-on-error", "--ignore-vuln", "--omit=dev", "|| true", "--fix"):
             self.assertNotIn(bypass, workflow)
 
@@ -272,7 +279,8 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn('PYTHONUNBUFFERED: "1"', test_job)
         self.assertNotIn("| tail", test_job)
         self.assertIn("actions/setup-node@v6", test_job)
-        self.assertIn('node-version: "24"', test_job)
+        self.assertIn('node-version: "24.22.1"', test_job)
+        self.assertIn("npm install --global npm@12.2.0 --ignore-scripts", test_job)
 
     def test_candidate_manifest_and_arm64_runtime_are_verified_before_promotion(
         self,

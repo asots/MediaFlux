@@ -80,8 +80,11 @@ class StaticAssetBuildTests(unittest.TestCase):
 
     def test_package_manifest_pins_minifier_versions(self) -> None:
         package = json.loads((self.ROOT / "package.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["devDependencies"]["terser"], "5.50.0")
+        self.assertEqual(package["packageManager"], "npm@12.2.0")
+        self.assertEqual(package["devDependencies"]["terser"], "5.51.2")
         self.assertEqual(package["devDependencies"]["lightningcss"], "1.33.0")
+        self.assertEqual(package["devDependencies"]["lucide"], "1.61.0")
+        self.assertEqual(package["devDependencies"]["gsap"], "3.15.0")
         self.assertTrue((self.ROOT / "package-lock.json").is_file())
 
     def test_output_preserves_every_static_asset_path(self) -> None:
@@ -130,8 +133,17 @@ class StaticAssetBuildTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
 
     def test_preminified_vendor_assets_are_copied_byte_for_byte(self) -> None:
-        for relative in ("js/lucide.min.js", "js/vendor/gsap.min.js"):
+        vendors = {
+            "js/lucide.min.js": "lucide/dist/umd/lucide.min.js",
+            "js/vendor/gsap.min.js": "gsap/dist/gsap.min.js",
+        }
+        for relative, package_path in vendors.items():
             with self.subTest(relative=relative):
+                self.assertEqual(
+                    self._sha256(self.STATIC_ROOT / relative),
+                    self._sha256(self.ROOT / "node_modules" / package_path),
+                    "本地 vendor 必须与锁定 npm 包一致，保证漏洞扫描覆盖实际发布文件",
+                )
                 self.assertEqual(
                     self._sha256(self.STATIC_ROOT / relative),
                     self._sha256(self.output / relative),

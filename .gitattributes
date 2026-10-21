@@ -1,0 +1,3 @@
+# 保持锁定第三方发布文件原始字节，不为清理空白修改供应方产物。
+app/static/js/lucide.min.js -whitespace
+app/static/js/vendor/gsap.min.js -whitespace

@@ -30,10 +30,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '24.22.1'
           package-manager-cache: false
       - name: Audit static build dependencies including devDependencies
-        run: npm audit --package-lock-only --ignore-scripts --audit-level=low --registry=https://registry.npmjs.org
+        run: |
+          npm install --global npm@12.2.0 --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          npm audit --package-lock-only --ignore-scripts --audit-level=low --registry=https://registry.npmjs.org
 
   runtime-base:
     runs-on: ubuntu-latest
@@ -47,3 +49,29 @@ jobs:
           echo 'OS gate blocks published fixes; unresolved distribution advisories still require review.'
           docker run --rm ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c \
             image --image-src remote --scanners vuln --pkg-types os --ignore-unfixed --exit-code 1 "$image"
+
+  static-builder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify actual build-stage trust stores and OS packages
+        run: |
+          docker build --pull --target static-builder -t mediaflux-static-security .
+          docker run --rm --network none --entrypoint node mediaflux-static-security -e '
+            const fs = require("node:fs"), tls = require("node:tls");
+            const {X509Certificate} = require("node:crypto");
+            const assert = require("node:assert/strict");
+            const revoked = "86:A1:EC:BA:08:9C:4A:8D:3B:BE:27:34:C6:12:BA:34:1D:81:3E:04:3C:F9:E8:A8:62:CD:5C:57:A3:6B:BE:6B";
+            const system = fs.readFileSync("/etc/ssl/certs/ca-certificates.crt", "utf8")
+              .match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g);
+            for (const [label, roots] of [["Node", tls.rootCertificates], ["OS", system]]) {
+              assert(roots && roots.length > 0, label + " CA store missing");
+              assert(!roots.some(pem => new X509Certificate(pem).fingerprint256 === revoked), label + " trusts revoked emSign G3");
+              console.log(label + ": revoked G3 absent");
+            }
+          '
+          docker save mediaflux-static-security -o "$RUNNER_TEMP/static-builder.tar"
+          docker run --rm -v "$RUNNER_TEMP:/scan:ro" \
+            ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c \
+            image --input /scan/static-builder.tar --scanners vuln --pkg-types os --ignore-unfixed --exit-code 1

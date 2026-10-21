@@ -1,8 +1,12 @@
 FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d AS static-builder
 
+# 固定镜像仍需更新同发行版安全补丁（CA bundle、zlib），再执行 npm。
+RUN apk upgrade --no-cache
+
 WORKDIR /src
 
 COPY package.json package-lock.json ./
+RUN npm install --global npm@12.2.0 --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
 RUN npm ci --ignore-scripts --no-audit --no-fund
 
 COPY packaging/scripts/minify_static.mjs /src/packaging/scripts/minify_static.mjs

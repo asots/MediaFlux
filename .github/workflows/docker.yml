@@ -32,7 +32,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v6
-        with: {node-version: "24", package-manager-cache: false}
+        with: {node-version: "24.22.1", package-manager-cache: false}
 
       - uses: actions/setup-python@v6
         with:
@@ -42,14 +42,15 @@ jobs:
 
       - name: Install dependencies
         run: |
+          npm install --global npm@12.2.0 --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
           npm ci --ignore-scripts --no-audit --no-fund
           python -m pip install --require-hashes -r requirements-release-runtime.lock
           python -m pip install "pytest==9.1.1"
-          python -m pip install "ruff==0.16.5"
+          python -m pip install "ruff==0.17.1"
           python -m pip install "pyrefly==1.4.0"
           python -m pip install "types-PyYAML==6.0.12.20260906" "types-croniter==6.2.4.20261006"
           python -c 'from importlib.metadata import version; assert version("pytest") == "9.1.1"'
-          python -c 'from importlib.metadata import version; assert version("ruff") == "0.16.5"'
+          python -c 'from importlib.metadata import version; assert version("ruff") == "0.17.1"'
           python -c 'from importlib.metadata import version; assert version("pyrefly") == "1.4.0"'
           python -m pip check
 
@@ -94,8 +95,8 @@ jobs:
       - name: Install browser test dependencies
         run: |
           python -m pip install --require-hashes -r requirements-release-runtime.lock
-          python -m pip install "playwright==1.62.0"
-          python -c 'from importlib.metadata import version; assert version("playwright") == "1.62.0"'
+          python -m pip install "playwright==1.64.0"
+          python -c 'from importlib.metadata import version; assert version("playwright") == "1.64.0"'
           python -m pip check
 
       - name: Verify system Chrome or Chromium

@@ -51,6 +51,11 @@ class DockerRuntimeContractTests(unittest.TestCase):
         self.assertIn("# 后台调度器与 Telegram Bot 采用进程内单例", self.dockerfile)
 
     def test_build_identity_arguments_are_scoped_after_dependency_installation(self) -> None:
+        self.assertIn("RUN npm install --global npm@12.2.0 --ignore-scripts", self.dockerfile)
+        self.assertLess(
+            self.dockerfile.index("RUN apk upgrade --no-cache"),
+            self.dockerfile.index("RUN npm ci"),
+        )
         dependencies = self.dockerfile.index("RUN pip install --no-cache-dir --require-hashes")
         metadata = self.dockerfile.index('RUN case "${TARGETARCH:-amd64}"')
         for name in ("VERSION_REF", "GIT_SHA", "SOURCE_DATE_EPOCH", "TARGETARCH"):
@@ -259,7 +264,7 @@ class DockerRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("mediaflux.py backup list", deploy)
         self.assertIn("ls -lah /app/db/backups", deploy)
         self.assertIn("Pull Request、`main` 推送与 `v<SemVer>` 标签", development)
-        self.assertIn("Playwright 1.62.0", development)
+        self.assertIn("Playwright 1.64.0", development)
         self.assertIn("二者通过后执行 amd64 容器运行", development)
         self.assertIn("仅 `v<SemVer>` 标签继续构建", development)
         self.assertNotIn("支持定时扫描或下载完成自动触发", readme)
@@ -280,8 +285,8 @@ class DockerRuntimeContractTests(unittest.TestCase):
         }
         self.assertTrue(playwright_modules, "没有发现任何原生 Playwright 测试，不能空跑门禁")
         self.assertNotIn("needs", browser)
-        self.assertIn('python -m pip install "playwright==1.62.0"', browser_runs)
-        self.assertIn('version("playwright") == "1.62.0"', browser_runs)
+        self.assertIn('python -m pip install "playwright==1.64.0"', browser_runs)
+        self.assertIn('version("playwright") == "1.64.0"', browser_runs)
         for executable in (
             "google-chrome",
             "google-chrome-stable",
