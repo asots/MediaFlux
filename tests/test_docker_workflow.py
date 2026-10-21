@@ -221,6 +221,29 @@ class DockerWorkflowTests(unittest.TestCase):
         self.assertIn("pip-compile with Python 3.13", header)
         self.assertNotIn("pip-compile with Python 3.12", header)
 
+    def test_dependency_security_is_daily_and_blocks_release_without_bypasses(self) -> None:
+        workflow = Path(".github/workflows/dependency-security.yml").read_text(encoding="utf-8")
+        security = yaml.safe_load(workflow)
+        # PyYAML 的 YAML 1.1 将未加引号的 on 解析成 True。
+        triggers = security.get("on", security.get(True))
+        self.assertIn("workflow_call", triggers)
+        self.assertIn("workflow_dispatch", triggers)
+        self.assertEqual(triggers["schedule"], [{"cron": "17 2 * * *"}])
+        self.assertEqual(security["permissions"], {"contents": "read"})
+        jobs = yaml.safe_load(self.text)["jobs"]
+        self.assertEqual(jobs["dependency-security"]["uses"], "./.github/workflows/dependency-security.yml")
+        self.assertIn("dependency-security", jobs["smoke"]["needs"])
+        self.assertIn("smoke", jobs["build"]["needs"])
+        self.assertIn("pip-audit --disable-pip --require-hashes --progress-spinner off -r requirements-release-runtime.lock", workflow)
+        self.assertIn("npm audit --package-lock-only --ignore-scripts --audit-level=low --registry=https://registry.npmjs.org", workflow)
+        base = security["jobs"]["runtime-base"]["steps"][-1]["run"]
+        self.assertIn("Dockerfile", base)
+        self.assertIn("trivy:0.76.1@sha256:", base)
+        self.assertIn("--pkg-types os --ignore-unfixed --exit-code 1", base)
+        self.assertNotIn("docker.sock", base)
+        for bypass in ("continue-on-error", "--ignore-vuln", "--omit=dev", "|| true", "--fix"):
+            self.assertNotIn(bypass, workflow)
+
     def test_full_test_job_has_dependency_free_source_syntax_gate(self) -> None:
         test_job = self.text.split("  test:", 1)[1].split("  smoke:", 1)[0]
         self.assertIn("python -m compileall -q app packaging tests", test_job)
