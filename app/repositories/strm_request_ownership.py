@@ -333,7 +333,7 @@ def _update_strm_owner_state(
         }
         if claimed_targets and int(owner["generation"]) > 0 and not failure_leases:
             return False  # 该请求已无本轮仍有效的目标，不能用迟到失败重新盖章。
-    from app.repositories.download_requests import _update_download_request_conn
+    from app.repositories.download_requests import _update_download_request_conn, download_postprocess_failure
 
     if not _update_download_request_conn(conn, int(owner["request_id"]), fields, stamp):
         return False
@@ -354,7 +354,7 @@ def _update_strm_owner_state(
         ).fetchone()
         projection = _download_request_admission_projection(updated, stamp)
         if projection is not None and projection[0] == "processing":
-            prior_error = f"下载后处理失败（STRM 联动）：{old_error or '请在下载记录中重试'}"[:500]
+            prior_error = download_postprocess_failure("strm", old_error)
             conn.execute(
                 "UPDATE media_download_admissions SET status='processing',error='',completed_at=NULL,updated_at=? "
                 "WHERE request_id=? AND status='failed' AND error IN (?,?) "

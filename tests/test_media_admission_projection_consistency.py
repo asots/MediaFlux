@@ -10,6 +10,13 @@ from tests.support import isolated_test_database
 
 
 class MediaAdmissionProjectionConsistencyTests(unittest.TestCase):
+    def test_persisted_failure_labels_do_not_follow_display_label_changes(self):
+        for episode, (stage, label) in enumerate((("organize", "自动整理"), ("local_import", "本地入库"), ("strm", "STRM 联动")), 300):
+            with self.subTest(stage=stage):
+                request, admission, _ = self.seed(episode, status="completed", **{f"{stage}_status": "failed", f"{stage}_error": "failed-stage"})
+                db.sync_media_download_admission_for_request(request)
+                self.assertEqual(self.view(admission)[:2], ("failed", f"下载后处理失败（{label}）：failed-stage"))
+
     def test_postprocessing_attention_is_consistent_and_retains_admission_until_recovered(self):
         from app.routes.downloads_api import _attention_stages
         from app.agent.domains.downloads.actions import download_request_public_summary

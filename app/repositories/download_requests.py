@@ -171,6 +171,12 @@ def download_postprocess_issues(row) -> list[dict[str, str]]:
     return issues
 
 
+def download_postprocess_failure(key: str, detail: str) -> str:
+    """持久失败回执的稳定格式，生成与冷恢复匹配共用，不随 UI 标签变化。"""
+    label = {"organize": "自动整理", "local_import": "本地入库", "strm": "STRM 联动"}[key]
+    return f"下载后处理失败（{label}）：{detail or '请在下载记录中重试'}"[:500]
+
+
 _DOWNLOAD_ATTENTION_BASE_WHERE = (
     "status IN ('failed','manual_review') OR "
     "qb_status IN ('failed','manual_review') OR gy_status IN ('failed','manual_review') OR "

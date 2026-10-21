@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Iterable, TypedDict
 
 from app.logger import redact_sensitive_text
-from app.repositories.download_requests import download_postprocess_issues
+from app.repositories.download_requests import download_postprocess_failure, download_postprocess_issues
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -1230,7 +1230,7 @@ def _download_request_admission_projection(
         if failed_stage is not None:
             status = "failed"
             completed_at = stamp
-            error = f"下载后处理失败（{failed_stage['label']}）：{failed_stage['error'] or '请在下载记录中重试'}"[:500]
+            error = download_postprocess_failure(failed_stage["key"], failed_stage["error"])
         else:
             status = "processing"
             error = "；".join(f"{item['label']}：{item['error'] or '需要处理，请查看原任务；无需重复下载'}" for item in issues)
