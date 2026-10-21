@@ -5,6 +5,8 @@
     let files=[];
     let inspectGeneration=0;
     let inspectController=null;
+    let submitting=false;
+    let targetSelected=false;
 
     const escapeHtml=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const formatSize=size=>{
@@ -24,6 +26,12 @@
         tag.className = 'share-status-badge ' + tone;
         window.renderLucideIcons?.(tag);
     }
+    function renderActionButton(id,busy,label,icon){
+        const button=document.getElementById(id);
+        button.disabled=busy;
+        button.innerHTML=`<i data-lucide="${busy?'loader-2':icon}" class="${busy?'spin':''}"></i> ${label}`;
+        window.renderLucideIcons?.(button);
+    }
     function selectedIds(){
         return [...document.querySelectorAll('.share-file-check:checked')].map(el=>el.value);
     }
@@ -34,21 +42,19 @@
         document.getElementById('shareSelectionCount').textContent=`已选择 ${selected.length} / ${files.length} 项`;
         document.getElementById('shareCheckAll').checked=files.length>0&&selected.length===files.length;
         document.getElementById('shareCheckAll').indeterminate=selected.length>0&&selected.length<files.length;
-        document.getElementById('restoreShareBtn').disabled=!validPreview||!selected.length;
-        document.getElementById('shareTransferSummary').textContent=validPreview?`${selected.length} 项将转存到「${document.getElementById('shareTargetDirName').value}」`:'尚未解析分享链接';
+        document.getElementById('restoreShareBtn').disabled=submitting||!validPreview||!selected.length;
+        if(validPreview&&!submitting) document.getElementById('shareTransferSummary').textContent=`${selected.length} 项将转存到「${document.getElementById('shareTargetDirName').value}」`;
     }
     function invalidateSharePreview(message=''){
         const hadPreview=Boolean(previewId||files.length||inspectController);
         inspectGeneration+=1;
         inspectController?.abort();
         inspectController=null;
-        const inspectButton=document.getElementById('inspectShareBtn');
-        inspectButton.disabled=false;
-        inspectButton.innerHTML='<i data-lucide="scan-line"></i> 解析分享';
-        window.renderLucideIcons?.(inspectButton);
+        renderActionButton('inspectShareBtn',false,'解析分享','scan-line');
         previewId='';
         previewUrl='';
         files=[];
+        document.getElementById('shareTransferSummary').textContent='尚未解析分享链接';
         document.getElementById('shareFileToolbar').hidden=true;
         document.getElementById('shareFileList').replaceChildren();
         updateSelection();
@@ -79,9 +85,8 @@
         const generation=inspectGeneration;
         const controller=new AbortController();
         inspectController=controller;
-        const btn=document.getElementById('inspectShareBtn');
-        btn.disabled=true; btn.innerHTML='<i data-lucide="loader-2" class="spin"></i> 解析中...'; setState('解析中');
-        window.renderLucideIcons?.(btn);
+        renderActionButton('inspectShareBtn',true,'解析分享','scan-line');
+        setState('解析中');
         try{
             const response=await fetch('/api/share/inspect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url}),signal:controller.signal});
             const data=await response.json();
@@ -104,9 +109,7 @@
         }finally{
             if(generation===inspectGeneration){
                 inspectController=null;
-                btn.disabled=false;
-                btn.innerHTML='<i data-lucide="scan-line"></i> 解析分享';
-                window.renderLucideIcons?.(btn);
+                renderActionButton('inspectShareBtn',false,'解析分享','scan-line');
             }
         }
     }
@@ -128,7 +131,7 @@
         openGuangYaDirectoryPicker({
             modalId:'shareDirModal',
             title:'选择转存目标目录',
-            onSelect:(directory)=>renderTarget(directory),
+            onSelect:(directory)=>{targetSelected=true;renderTarget(directory);},
         });
     }
     async function saveDefaultTarget(){
@@ -146,13 +149,20 @@
         finally{btn.disabled=false;}
     }
     const wait=milliseconds=>new Promise(resolve=>window.setTimeout(resolve,milliseconds));
-    async function followShareRequest(requestId,targetName){
+    function renderTransferStatus(state,message,summary,tone=''){
+        setState(state,tone);
+        document.getElementById('shareMessage').textContent=message;
+        document.getElementById('shareTransferSummary').textContent=summary;
+    }
+    async function followShareRequest(requestId,targetName,generation){
         let queryFailures=0;
         for(let attempt=0;attempt<45;attempt+=1){
             await wait(2000);
+            if(generation!==inspectGeneration)return;
             try{
                 const response=await fetch(`/api/share/requests/${encodeURIComponent(requestId)}`,{headers:{Accept:'application/json'},cache:'no-store'});
                 const data=await response.json();
+                if(generation!==inspectGeneration)return;
                 if(!response.ok) throw new Error(data.error||'状态查询失败');
                 queryFailures=0;
                 if(!data.terminal){
@@ -160,57 +170,53 @@
                     continue;
                 }
                 if(data.success){
-                    setState('转存成功','is-success');
-                    document.getElementById('shareMessage').textContent=`转存请求 ${requestId} 已完成 · 目标「${data.target_dir_name||targetName}」`;
-                    document.getElementById('shareTransferSummary').textContent='本次转存已完成';
+                    renderTransferStatus('转存成功',`转存请求 ${requestId} 已完成 · 目标「${data.target_dir_name||targetName}」`,'本次转存已完成','is-success');
                 }else{
-                    setState(data.status==='manual_review'?'需要核对':'转存失败','is-danger');
-                    document.getElementById('shareMessage').textContent=data.error||`转存请求 ${requestId} 未完成，请重新解析后重试`;
-                    document.getElementById('shareTransferSummary').textContent='请核对目标目录或重新解析分享链接';
+                    renderTransferStatus(data.status==='manual_review'?'需要核对':'转存失败',data.error||`转存请求 ${requestId} 未完成，请重新解析后重试`,'请核对目标目录或重新解析分享链接','is-danger');
                 }
                 return;
             }catch(error){
-                queryFailures+=1;
-                if(queryFailures>=3){
-                    setState('状态待确认','');
-                    document.getElementById('shareMessage').textContent=`转存请求 ${requestId} 已受理，但暂时无法查询状态，请稍后在下载或日志页面核对`;
-                    document.getElementById('shareTransferSummary').textContent='请求仍可能在后台执行';
+                if(generation!==inspectGeneration)return;
+                if(++queryFailures>=3){
+                    renderTransferStatus('状态待确认',`转存请求 ${requestId} 已受理，但暂时无法查询状态，请稍后在下载或日志页面核对`,'请求仍可能在后台执行');
                     return;
                 }
             }
         }
-        setState('仍在处理','');
-        document.getElementById('shareMessage').textContent=`转存请求 ${requestId} 仍在处理，请稍后在下载或日志页面核对`;
-        document.getElementById('shareTransferSummary').textContent='请求已受理并在后台继续执行';
+        renderTransferStatus('仍在处理',`转存请求 ${requestId} 仍在处理，请稍后在下载或日志页面核对`,'请求已受理并在后台继续执行');
     }
 
     async function restoreShare(){
+        if(submitting)return;
         const ids=selectedIds();
         const currentUrl=document.getElementById('shareUrl').value.trim();
         if(!previewId||!ids.length||previewUrl!==currentUrl){invalidateSharePreview('分享链接已变化，请重新解析后再转存');return;}
-        const restorePreviewId=previewId;
-        const targetName=document.getElementById('shareTargetDirName').value;
-        const confirmed=await appConfirm({title:'确认分享转存',message:`把 ${ids.length} 项文件转存到「${targetName}」。该操作将在云盘直接执行。`,confirmText:'开始转存'});if(!confirmed)return;
-        if(previewId!==restorePreviewId||previewUrl!==document.getElementById('shareUrl').value.trim()){invalidateSharePreview('分享链接已变化，请重新解析后再转存');return;}
-        const btn=document.getElementById('restoreShareBtn'); btn.disabled=true;btn.innerHTML='<i data-lucide="loader-2" class="spin"></i> 转存中...';
-        window.renderLucideIcons?.(btn);
+        // 确认与提交共用同一份参数；异步回执只属于发起时的预览。
+        const generation=inspectGeneration;
+        const body={preview_id:previewId,file_ids:ids,target_dir_id:document.getElementById('shareTargetDir').value,target_dir_name:document.getElementById('shareTargetDirName').value};
+        const targetName=body.target_dir_name;
+        submitting=true;updateSelection();
         try{
-            const response=await fetch('/api/share/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({preview_id:restorePreviewId,file_ids:ids,target_dir_id:document.getElementById('shareTargetDir').value,target_dir_name:targetName})});
-            const data=await response.json();if(!response.ok)throw new Error(data.error||'转存失败');
-            previewId='';
-            previewUrl='';
+            const confirmed=await appConfirm({title:'确认分享转存',message:`把 ${ids.length} 项文件转存到「${targetName}」。该操作将在云盘直接执行。`,confirmText:'开始转存'});
+            if(!confirmed||generation!==inspectGeneration)return;
+            renderActionButton('restoreShareBtn',true,'执行转存','cloud-download');
+            const response=await fetch('/api/share/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+            const data=await response.json();
+            if(generation!==inspectGeneration)return;
+            if(!response.ok)throw new Error(data.error||'转存失败');
+            previewId='';previewUrl='';
             if(response.status===202||(data.accepted&&data.duplicate)){
-                setState('请求处理中','');
-                document.getElementById('shareMessage').textContent=`相同请求正在处理${data.request_id?` · 请求 ${data.request_id}`:''}`;
-                document.getElementById('shareTransferSummary').textContent='已复用正在执行的转存请求，正在跟踪结果';
-                if(data.request_id) await followShareRequest(data.request_id,targetName);
+                renderTransferStatus('请求处理中',`相同请求正在处理${data.request_id?` · 请求 ${data.request_id}`:''}`,'已复用正在执行的转存请求，正在跟踪结果');
+                if(data.request_id) void followShareRequest(data.request_id,targetName,generation);
             }else{
-                setState('转存成功','is-success');document.getElementById('shareMessage').textContent=`已成功转存 ${data.count||0} 项到「${data.target_dir_name||targetName}」`;document.getElementById('shareTransferSummary').textContent='本次转存已完成';
+                renderTransferStatus('转存成功',`已成功转存 ${data.count||0} 项到「${data.target_dir_name||targetName}」`,'本次转存已完成','is-success');
             }
-        }catch(error){setState('转存失败','is-danger');document.getElementById('shareMessage').textContent=error.message;btn.disabled=false;}
-        finally{
-            btn.innerHTML='<i data-lucide="cloud-download"></i> 执行转存';
-            window.renderLucideIcons?.(btn);
+        }catch(error){
+            if(generation===inspectGeneration){setState('转存失败','is-danger');document.getElementById('shareMessage').textContent=error.message;}
+        }finally{
+            submitting=false;
+            renderActionButton('restoreShareBtn',false,'执行转存','cloud-download');
+            updateSelection();
         }
     }
     document.getElementById('inspectShareBtn').addEventListener('click',inspectShare);
@@ -219,9 +225,8 @@
     document.getElementById('pickShareTargetBtn').addEventListener('click',openTargetPicker);
     document.getElementById('saveShareTargetBtn').addEventListener('click',saveDefaultTarget);
     document.getElementById('restoreShareBtn').addEventListener('click',restoreShare);
-    loadAppConfig().then(config=>renderTarget({
-        id:config.GY_SHARE_TARGET_DIR||'0',
-        name:config.GY_SHARE_TARGET_DIR_NAME||'根目录',
-    })).catch(()=>renderTarget({id:'0',name:'根目录'}));
+    loadAppConfig().catch(()=>({})).then(config=>{
+        if(!targetSelected)renderTarget({id:config.GY_SHARE_TARGET_DIR||'0',name:config.GY_SHARE_TARGET_DIR_NAME||'根目录'});
+    });
 })();
 </script>
