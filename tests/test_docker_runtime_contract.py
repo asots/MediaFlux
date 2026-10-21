@@ -353,7 +353,7 @@ class DockerRuntimeContractTests(unittest.TestCase):
 
     def test_dockerfile_pins_multiarch_base_and_hashed_runtime_lock(self) -> None:
         self.assertIn(
-            "FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a",
+            "FROM python:3.13-slim@sha256:cf50a4f6ac4f026458b08d5222023d700ac806410dff5e9ca8728fa44f2b850f",
             self.dockerfile,
         )
         self.assertIn("COPY requirements-release-runtime.lock", self.dockerfile)

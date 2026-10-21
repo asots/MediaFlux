@@ -178,12 +178,12 @@ class StaticAssetDockerContractTests(unittest.TestCase):
         dockerfile = (self.ROOT / "Dockerfile").read_text(encoding="utf-8")
         builder = (
             "FROM --platform=$BUILDPLATFORM "
-            "node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 "
+            "node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d "
             "AS static-builder"
         )
         runtime = (
             "FROM python:3.13-slim@sha256:"
-            "ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a"
+            "cf50a4f6ac4f026458b08d5222023d700ac806410dff5e9ca8728fa44f2b850f"
         )
         self.assertIn(builder, dockerfile)
         self.assertIn("RUN npm ci --ignore-scripts --no-audit --no-fund", dockerfile)
