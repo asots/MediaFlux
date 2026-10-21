@@ -21,6 +21,7 @@ from app.modules.telegram_notification_policy import (
     NotificationTopic,
 )
 from app.notifier import NotificationEvent, safe_int
+from app.modules.organize_results import organize_strm_error
 
 _PENDING_STRM_STATES = frozenset({
     "已排队",
@@ -291,7 +292,7 @@ def build_organize_lifecycle_event(
     stopped = bool(stats.get("stopped"))
     scan_incomplete = _scan_incomplete(stats)
     non_confirmation_attention = bool(
-        stopped or scan_incomplete or counts["skipped"] or counts["failed"]
+        stopped or scan_incomplete or counts["skipped"] or counts["failed"] or organize_strm_error(stats)
     )
     attention = bool(
         non_confirmation_attention or counts["confirm"]

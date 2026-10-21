@@ -133,7 +133,7 @@ class OrganizeWholeSourceSingleWriterTests(unittest.TestCase):
         ), patch.object(
             organizer, "_run_execution_stage", side_effect=execute
         ), patch.object(
-            organizer, "_run_post_actions", side_effect=post_actions
+            organizer, "trigger_post_actions", side_effect=post_actions
         ):
             plans, _stats = organizer._organize(context, rules)
 

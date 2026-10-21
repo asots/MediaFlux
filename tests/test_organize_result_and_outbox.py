@@ -18,6 +18,20 @@ from app.modules.strm_notifications import build_strm_detail_messages
 class OrganizeResultSchemaTests(unittest.TestCase):
     """Task 6.1：版本化结构化结果。"""
 
+    def test_rejected_handoff_is_attention_without_reclassifying_moved_files(self):
+        from app.modules.telegram_organize_lifecycle import build_organize_lifecycle_event
+        from app.repositories.organize_operation_jobs import sanitize_organize_operation_result
+
+        stats = {"total": 1, "moved": 1, "failed": 0,
+                 "strm": {"ok": False, "error": "STRM 调度器正在停止", "secret": "private-value"}}
+        persisted = sanitize_organize_operation_result({"stats": stats})
+        self.assertEqual(persisted["stats"]["strm"], {"ok": False, "error": "STRM 调度器正在停止"})
+        self.assertEqual(sanitize_organize_operation_result(persisted), persisted)
+        self.assertEqual(persisted["stats"]["failed"], 0)
+        event = build_organize_lifecycle_event(stats, source_name="test", strm_status="启动失败", media_refresh="未触发")
+        self.assertEqual(event.state, "partial")
+        self.assertTrue(str(event.title).startswith("⚠️"))
+
     def test_result_exposes_counters_groups_and_strm_without_log_parsing(self):
         result = build_organize_result(
             {

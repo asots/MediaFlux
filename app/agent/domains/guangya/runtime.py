@@ -13,7 +13,7 @@ from app.agent.domains.shared_arguments import (
     _safe_timestamp,
 )
 from app.agent.models import Evidence, ToolContext, ToolResult
-from app.modules.organize_results import read_organize_result
+from app.modules.organize_results import organize_strm_error, read_organize_result
 from app.repositories.organize_operation_jobs import (
     CLOUD_COPY_PENDING_CODE,
     sanitize_organize_operation_result,
@@ -44,7 +44,9 @@ def _safe_result(raw: dict[str, Any]) -> dict[str, Any]:
 
     payload: dict[str, Any] = {}
     if isinstance(stats, dict):
-        payload["stats"] = {key: _bounded_int(value) for key, value in stats.items()}
+        payload["stats"] = {key: value if key == "strm" else _bounded_int(value) for key, value in stats.items()}
+        if isinstance(nested_result, dict) and isinstance(nested_result.get("strm"), dict):
+            payload["stats"]["strm"] = nested_result["strm"]
     if "operation_items" in raw:
         payload["operation_items"] = raw["operation_items"]
     elif isinstance(nested_result, dict) and "operation_items" in nested_result:
@@ -63,6 +65,9 @@ def _project_guangya_status(
     running = task_status in {"running", "stopping"}
     safe_result = _safe_result(raw)
     stats = safe_result.get("stats", {})
+    handoff_error = organize_strm_error(stats)
+    if handoff_error and task_status == "completed":
+        task_status = "partial"
     # 整源扫描与下载后续整理是同一业务的两个阶段；保留入队事实，而非伪报入库完成。
     result = raw.get("result") or raw.get("stats") or {}
     resumed_ids = result.get("resumed_download_ids", []) if isinstance(result, dict) else []
@@ -127,6 +132,9 @@ def _project_guangya_status(
 
     # 只公开有明确统计依据的故障阶段，不转发 Provider 原始异常或私有路径。
     problems = []
+    if handoff_error:
+        problems.append(handoff_error)
+        suggestions.append("已完成的云端变更无需重复执行；恢复 STRM 调度后执行同步补齐，不要重新下载或整理。")
     if task_status in {"partial", "failed", "manual_review"}:
         if raw.get("error_code") == "GuangYaFSChangeStale":
             attempted = any(item.get("status") not in {"not_started", "blocked"} for item in safe_result.get("operation_items", []))

@@ -34,7 +34,7 @@ from app.modules.download_staging_cleanup import (
 )
 from app.modules.media_probe import resolve_media_probe_workers
 from app.modules.organize import Organizer, OrganizeRules, resolve_organize_workers
-from app.modules.organize_results import build_organize_result, read_organize_result
+from app.modules.organize_results import build_organize_result, organize_strm_error, read_organize_result
 from app.modules.organize_runtime import OrganizeTaskRuntime
 from app.modules.organize_sources import normalize_organize_sources
 from app.modules.process_lock import CrossProcessLock
@@ -182,9 +182,11 @@ def _operation_result_status(result: object) -> str:
     stats = result.get("stats")
     if not isinstance(stats, dict):
         return "completed"
+    if organize_strm_error(stats):
+        return "partial"
     for key in (
         "failed", "replacement_cleanup_failed", "empty_dir_cleanup_failed",
-        "source_dir_cleanup_failed", "audit_failures", "strm_trigger_failed",
+        "source_dir_cleanup_failed", "audit_failures",
         "verification_failed", "stopped", "scan_errors",
     ):
         value = stats.get(key)
@@ -2111,6 +2113,10 @@ class OrganizeTaskManager:
                         partial, status, message = True, "partial", "整理已结束，下载目录清理仍需核验"
             # 任务汇总可以是 partial，但单个下载仍按自己的来源结果收尾。
             request_base_status = status
+            # 变更已结算：联动拒绝只能补同步，不能反向标记移动失败或重跑下载整理。
+            if not stopped and (handoff_error := organize_strm_error(aggregate)):
+                status, message = "partial", "云端整理已结束，STRM 联动未受理；无需重复整理"
+                blocked_reason = "；".join(filter(None, (blocked_reason, handoff_error)))
             if not stopped and int(aggregate.get("unresolved_skipped") or 0):
                 status, message = "partial", "部分媒体未匹配到元数据，请核对整理日志"
             structured_result = build_organize_result(

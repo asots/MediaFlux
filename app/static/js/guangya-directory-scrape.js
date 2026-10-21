@@ -1132,13 +1132,16 @@
             const stats = task.result?.stats || {};
             const failures = countTaskFailures(stats);
             const pending = Number(stats.pending_confirmation || 0);
-            if (failures > 0 || task.status === 'partial') {
-                const visibleFailures = Math.max(1, failures);
-                setRowState(row, action, 'error', `${visibleFailures} 项处理失败`);
+            const handoffFailed = stats.strm?.ok === false && !stats.strm.skipped;
+            if (failures > 0 || task.status === 'partial' || handoffFailed) {
+                const label = handoffFailed && !failures ? 'STRM 联动未受理' : `${Math.max(1, failures)} 项处理失败`;
+                setRowState(row, action, 'error', label);
                 window.appAlert?.({
                     type: 'warning',
                     title: '目录刮削部分完成',
-                    message: `${visibleFailures} 项处理失败，请到整理日志查看详情。`,
+                    message: handoffFailed
+                        ? `${stats.strm.error || label}。已完成的云端变更无需重复整理；恢复 STRM 调度后执行同步补齐。${failures ? '另有整理失败项，请查看整理日志。' : ''}`
+                        : `${label}，请到整理日志查看详情。`,
                 });
                 return true;
             }

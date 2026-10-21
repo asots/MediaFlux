@@ -2177,6 +2177,81 @@ class DirectoryScrapeServiceTests(unittest.TestCase):
 
 
 class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
+    def test_strm_handoff_survives_execution_persistence_and_agent_query(self):
+        import threading
+        from contextlib import ExitStack
+        from app.agent.domains.guangya.runtime import guangya_organize_status
+        from app.agent.models import ToolContext
+        from app.modules.directory_scrape_errors import DirectoryScrapeGoneError
+        from app.modules.organize_tasks import OrganizeTaskManager
+        from app.modules.scheduler import STRMScheduler
+        from app.repositories.organize_operation_jobs import (
+            claim_organize_operation_job, enqueue_organize_operation_job,
+            get_organize_operation_job, organize_operation_public_ref,
+        )
+
+        for durable in (False, True):
+            for outcome in ("stopping", "persistence_failed", "exception", "accepted"):
+                with self.subTest(durable=durable, outcome=outcome), ExitStack() as stack:
+                    self.setUp()
+                    stack.callback(self.service.close)
+                    self.rules = replace(self.rules, link_strm=True)
+                    inspection = self.service.inspect("owner", "movie-dir")
+                    preview = self.service.preview("owner", inspection["inspection_id"], "1726", "movie")
+                    scheduler = STRMScheduler()
+                    if outcome == "stopping":
+                        scheduler._stop_event.set()
+                    elif outcome == "persistence_failed":
+                        stack.enter_context(patch.object(scheduler, "_persist_change_targets", return_value=False))
+                    elif outcome == "exception":
+                        stack.enter_context(patch.object(scheduler, "trigger", side_effect=RuntimeError("token=private-audit-token")))
+                    else:
+                        stack.enter_context(patch.object(scheduler, "trigger", return_value={"ok": True, "queued": True}))
+                    stack.enter_context(patch("app.modules.organize.get", side_effect=lambda key, default="": {
+                        "GY_STRM_BASE_URL": "http://play.invalid", "STRM_ROOT": "/tmp/isolated-audit",
+                    }.get(key, default)))
+                    stack.enter_context(patch("app.modules.scheduler.get_scheduler", return_value=scheduler))
+                    manager = OrganizeTaskManager()
+                    manager._lock = cast(CrossProcessLock, threading.Lock())
+                    manager._lock.acquire()
+                    stack.enter_context(patch.object(manager, "_wake_download_tracker"))
+                    execute = lambda: self.service.execute_preview("owner", preview["preview_id"])
+                    if durable:
+                        created, _ = enqueue_organize_operation_job(job_kind="agent_directory_scrape", owner="owner",
+                            operation="目录刮削", reference="test", payload={"version": 1}, dedupe_key=outcome)
+                        task_id = created["job_id"]
+                        claimed = claim_organize_operation_job(task_id)
+                        assert claimed is not None
+                        manager._task = {"id": task_id, "status": "running"}
+                        stack.enter_context(patch.object(manager, "_execute_durable_operation", side_effect=lambda _row: execute()))
+                        manager._run_durable_operation(dict(claimed))
+                        saved = get_organize_operation_job(task_id)
+                        assert saved is not None
+                        task = dict(saved)
+                        result = json.loads(saved["result_json"])
+                    else:
+                        task_id = "handoff-test"
+                        manager._task = {"id": task_id, "status": "running"}
+                        manager._run_operation(task_id, "目录刮削", "test", execute)
+                        task = manager._task
+                        result = task["result"]
+                    self.assertEqual(task["status"], "completed" if outcome == "accepted" else "partial")
+                    self.assertGreater(result["stats"]["moved"], 0)
+                    self.assertEqual(result["stats"]["strm"]["ok"], outcome == "accepted")
+                    with self.assertRaises(DirectoryScrapeGoneError):
+                        self.service.execute_preview("owner", preview["preview_id"])
+                    if durable:
+                        stack.enter_context(patch("app.modules.organize_tasks.get_organize_manager", return_value=manager))
+                        stack.enter_context(patch.object(manager, "status", return_value={}))
+                        response = guangya_organize_status({"operation_ref": organize_operation_public_ref(task_id)}, ToolContext(owner="owner"))
+                        self.assertEqual(response.ok, outcome == "accepted")
+                        self.assertEqual(response.data["task"]["stats"]["strm"]["ok"], outcome == "accepted")
+                        self.assertNotIn("private-audit-token", json.dumps(response.data))
+                        if outcome != "accepted":
+                            assert response.error is not None
+                            self.assertIn("STRM", response.error)
+                            self.assertIn("无需重复", "".join(response.suggestions))
+
     def setUp(self):
         from app.modules.directory_media import DirectoryMediaInspector
         from app.modules.directory_scrape import (

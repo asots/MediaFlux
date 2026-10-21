@@ -123,6 +123,7 @@ from app.modules.organize_postprocess import (
 from app.modules.organize_results import (  # noqa: F401
     _format_phase_timing,
     _format_scan_summary,
+    organize_strm_error,
 )
 from app.modules.organize_rules import (  # noqa: F401
     _ORGANIZE_RULE_SERVER_ONLY_FIELDS,
@@ -2576,38 +2577,7 @@ class Organizer:
             time.monotonic() - cleanup_started, 3
         )
         if post_actions and not context.cancelled():
-            self._run_post_actions(stats, rules, source_name=source_name)
-
-    def _run_post_actions(
-        self, stats: dict, rules: OrganizeRules, *, source_name: str = "",
-    ) -> None:
-        """单来源整理结束后的 STRM 联动与结果通知。
-
-        组级流水线在全部媒体组结束后调用一次，避免每组重复触发同步和通知。
-        """
-        unsafe_partial = bool(
-            stats.get("failed")
-            or stats.get("scan_errors")
-            or stats.get("protected_staging_dirs")
-            or stats.get("replacement_cleanup_failed")
-        )
-        if rules.link_strm and stats.get("moved", 0) and (
-            not unsafe_partial or stats.get("strm_changes")
-        ):
-            self._post_organize_link(
-                stats, rules, force_incremental=unsafe_partial,
-            )
-        elif rules.link_strm and unsafe_partial:
-            stats["strm"] = {
-                "ok": False,
-                "skipped": True,
-                "error": "整理存在失败项且没有已确认的变更清单，已停止 STRM 同步",
-            }
-        if not rules.notify_enabled or not rules.library_notify:
-            self._schedule_agent_recognition_reviews(
-                stats, rules, source_name=source_name
-            )
-        self._publish_or_update_task_summary(stats, rules, source_name=source_name)
+            self.trigger_post_actions(stats, rules, source_name=source_name, strm_debounce_seconds=0)
 
     # ===== 整理主流程 =====
     def organize(self, source_dir_id: str, rules: OrganizeRules,
@@ -2775,8 +2745,8 @@ class Organizer:
                 )
             plans = planning_result.plans
             if context.post_actions and not context.cancelled():
-                self._run_post_actions(
-                    stats, rules, source_name=context.source_name,
+                self.trigger_post_actions(
+                    stats, rules, source_name=context.source_name, strm_debounce_seconds=0,
                 )
         stats["total_elapsed_seconds"] = round(time.monotonic() - total_started, 3)
         if self._probe_budget is not None:
@@ -3248,7 +3218,7 @@ class Organizer:
         self._publish_group_progress(context, stats, progress)
 
         if context.post_actions and not context.cancelled():
-            self._run_post_actions(stats, rules, source_name=context.source_name)
+            self.trigger_post_actions(stats, rules, source_name=context.source_name, strm_debounce_seconds=0)
         stats["total_elapsed_seconds"] = round(time.monotonic() - total_started, 3)
         logger.info(
             "媒体组并行流水线完成 source=%s workers=%s groups=%s/%s moved=%s failed=%s total=%.3fs",
@@ -3469,7 +3439,7 @@ class Organizer:
         self._publish_group_progress(context, stats, progress)
 
         if context.post_actions and not context.cancelled():
-            self._run_post_actions(stats, rules, source_name=context.source_name)
+            self.trigger_post_actions(stats, rules, source_name=context.source_name, strm_debounce_seconds=0)
         stats["total_elapsed_seconds"] = round(time.monotonic() - total_started, 3)
         logger.info(
             "媒体组流水线完成 source=%s groups=%s/%s moved=%s failed=%s total=%.3fs",
@@ -4198,6 +4168,7 @@ class Organizer:
                 chat_id=chat_id,
                 strm_status=strm_status,
                 media_refresh=media_refresh,
+                error=organize_strm_error(stats),
                 topic_enabled=rules.notify_enabled and rules.library_notify,
             )
             if updated.status != "missing_thread":

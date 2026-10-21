@@ -13,7 +13,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from app.agent.public_safety import sanitize_resource_title
+from app.agent.public_safety import sanitize_public_text, sanitize_resource_title
 from app.modules.web_secret import get_web_secret
 from app.repositories.agent_jobs import agent_job_owner_digest
 
@@ -232,7 +232,7 @@ def sanitize_organize_operation_result(value: object) -> dict[str, Any]:
     """仅保留安全统计与有界、脱敏的逐项执行回执。"""
     if not isinstance(value, dict):
         return {}
-    stats: dict[str, int | float] = {}
+    stats: dict[str, Any] = {}
     raw_stats = value.get("stats")
     if isinstance(raw_stats, dict):
         for key, raw in raw_stats.items():
@@ -242,6 +242,14 @@ def sanitize_organize_operation_result(value: object) -> dict[str, Any]:
                 stats[str(key)] = max(0, raw)
             elif isinstance(raw, float):
                 stats[str(key)] = max(0.0, round(raw, 3))
+        handoff = raw_stats.get("strm")
+        if isinstance(handoff, dict) and isinstance(handoff.get("ok"), bool):
+            stats["strm"] = {
+                key: handoff[key] for key in ("ok", "queued", "running", "skipped")
+                if isinstance(handoff.get(key), bool)
+            }
+            if not handoff["ok"]:
+                stats["strm"]["error"] = sanitize_public_text(handoff.get("error"), limit=300) or "STRM 联动未受理"
 
     result: dict[str, Any] = {}
     if isinstance(raw_stats, dict):

@@ -1008,6 +1008,36 @@ class GuangYaDirectoryScrapeBrowserTests(unittest.TestCase):
             binding["action"],
         ))
 
+    def test_task_polling_distinguishes_strm_rejection_from_failed_cloud_moves(self):
+        binding = self._bind(is_directory=True, left=180, top=80)
+        self.page.evaluate("""() => {
+            window.appConfirm = async () => true;
+            window.__alerts = [];
+            window.appAlert = async (value) => { window.__alerts.push(value); };
+            const originalFetch = window.fetch;
+            window.fetch = async (path, options = {}) => {
+                if (String(path).endsWith('/run')) {
+                    return {ok: true, json: async () => ({task_id: 'handoff-test'})};
+                }
+                if (String(path) === '/api/guangya/organize/status') {
+                    return {ok: true, json: async () => ({operation_history: [{
+                        id: 'handoff-test', status: 'partial', result: {stats: {
+                            moved: 1, failed: 0, strm: {ok: false, error: 'STRM 调度器正在停止'},
+                        }},
+                    }]})};
+                }
+                return originalFetch(path, options);
+            };
+        }""")
+        self._open_button(binding)
+        self.page.locator('[data-scrape-action="auto"]').click()
+        self.page.wait_for_function("() => window.__alerts.some(item => item.title === '目录刮削部分完成')")
+        alert = self.page.evaluate("window.__alerts.find(item => item.title === '目录刮削部分完成')")
+        self.assertIn("STRM 调度器正在停止", alert["message"])
+        self.assertIn("无需重复整理", alert["message"])
+        self.assertNotIn("1 项处理失败", alert["message"])
+        self.assertFalse(self.page_errors)
+
     def test_task_polling_shares_one_status_request_for_concurrent_tasks(self):
         first = self._bind(is_directory=True, left=180, top=80)
         second = self._bind(is_directory=True, left=220, top=120)

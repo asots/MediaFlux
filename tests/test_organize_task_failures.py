@@ -167,6 +167,38 @@ class ManualSourceRootCleanupTests(unittest.TestCase):
 
 
 class OrganizeTaskFailureTests(unittest.TestCase):
+    def test_strm_rejection_keeps_completed_cloud_work_without_requeuing_it(self):
+        manager = OrganizeTaskManager()
+        organizer = MagicMock()
+        organizer.organize.return_value = ([], {"total": 1, "moved": 1, "failed": 0})
+
+        def reject_handoff(stats, *_args, **_kwargs):
+            stats["strm"] = {"ok": False, "error": "STRM 调度器正在停止"}
+
+        with patch("app.modules.organize_tasks.Organizer", return_value=organizer), patch(
+            "app.modules.organize_tasks.threading.Thread", _ImmediateThread
+        ), patch("app.modules.organize_tasks.db.add_task_run", return_value=77), patch(
+            "app.modules.organize_tasks.db.finish_task_run"
+        ) as finish, patch("app.modules.organize_tasks.db.update_download_request"), patch(
+            "app.modules.organize_tasks.db.update_download_request_and_sync_media_admission"
+        ) as update_request, patch("app.modules.organize_tasks.db.get_download_request", return_value=None), patch(
+            "app.modules.organize_tasks.Organizer.trigger_post_actions", side_effect=reject_handoff
+        ), patch("app.modules.organize_tasks._publish_download_lifecycles", return_value=False), patch.object(
+            manager, "_cleanup_download_staging", return_value={}
+        ):
+            result = manager.start([{"id": "source", "name": "源目录"}],
+                OrganizeRules(target_dir_id="target", link_strm=True), download_request_ids=[91])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(manager.task_status()["status"], "partial")
+        self.assertEqual(finish.call_args.args[1], "partial")
+        final = update_request.call_args_list[-1].kwargs
+        self.assertEqual(final["organize_status"], "completed")
+        self.assertNotIn("organize_started", final)  # 不重置已领取的整理请求。
+        self.assertEqual(final["strm_status"], "failed")
+        self.assertIn("正在停止", final["strm_error"])
+        organizer.organize.assert_called_once()
+
     def test_failure_is_persisted_and_sent_to_trigger_chat(self):
         manager = OrganizeTaskManager()
         organizer = MagicMock()

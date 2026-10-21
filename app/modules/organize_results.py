@@ -5,6 +5,7 @@ Web、Telegram 和调度器都直接消费该结构，禁止从自由格式日�
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 # 递增规则：仅追加字段不升版本；语义变化或字段移除必须升版本并保留读取兼容。
@@ -23,6 +24,14 @@ def _int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def organize_strm_error(stats: Mapping[str, Any]) -> str:
+    """联动拒绝与云端执行分开结算；已排队或主动跳过不伪报同步失败。"""
+    handoff = stats.get("strm")
+    if isinstance(handoff, dict) and handoff.get("ok") is False and not handoff.get("skipped"):
+        return str(handoff.get("error") or "STRM 联动未受理")[:500]
+    return "STRM 联动未受理" if _int(stats.get("strm_trigger_failed")) > 0 else ""
 
 
 def _dict_list(value: object) -> list[dict[str, Any]]:
