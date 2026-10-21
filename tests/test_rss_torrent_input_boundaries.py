@@ -55,14 +55,10 @@ class _TorrentBoundaryCase(unittest.TestCase):
         client.close = Mock()
         return client
 
-    def invoke(self, mode, url, client, *, rules=None, indexes=(0,)):
+    def invoke(self, mode, url, client, *, rules=None):
         rules = rules or self.rules
         with patch.object(offline.OfflineRules, "from_config", return_value=rules):
-            if mode == "automatic":
-                return offline.submit_offline(url, client=client)
-            if mode == "preview":
-                return offline.preview_offline_selection(url, client=client, rules=rules)
-            return offline.submit_offline_selection(url, list(indexes), client=client, rules=rules)
+            return offline.submit_offline(url, client=client, isolate_task=mode == "isolated")
 
 
 class RSSTorrentEnclosureBoundaryTests(_TorrentBoundaryCase):
@@ -161,7 +157,7 @@ class RSSTorrentEnclosureBoundaryTests(_TorrentBoundaryCase):
 class TorrentTransportBoundaryTests(_TorrentBoundaryCase):
     def test_public_http_and_https_torrents_use_pinned_transport_in_all_entries(self):
         for scheme in ("http", "https"):
-            for mode in ("automatic", "preview", "manual"):
+            for mode in ("automatic", "isolated"):
                 with self.subTest(scheme=scheme, mode=mode):
                     client = self.cloud()
                     result = self.invoke(mode, f"{scheme}://feed.invalid/movie.torrent", client)
@@ -280,12 +276,12 @@ class TorrentTransportBoundaryTests(_TorrentBoundaryCase):
     def test_ordinary_http_video_still_uses_http_policy_not_torrent_fetch(self):
         for scheme in ("http", "https"):
             for enabled in (False, True):
-                for mode in ("automatic", "preview", "manual"):
+                for mode in ("automatic", "isolated"):
                     with self.subTest(scheme=scheme, enabled=enabled, mode=mode):
                         client = self.cloud({})
                         result = self.invoke(
                             mode, f"{scheme}://feed.invalid/Movie.mkv", client,
-                            rules=replace(self.rules, http_enabled=enabled, magnet_enabled=False), indexes=(),
+                            rules=replace(self.rules, http_enabled=enabled, magnet_enabled=False),
                         )
                         self.assertEqual(result["ok"], enabled, result)
                         self.assertEqual(client.torrent_resolve_calls, [])
@@ -294,7 +290,7 @@ class TorrentTransportBoundaryTests(_TorrentBoundaryCase):
 
     def test_http_torrent_invalid_bytes_fail_closed_and_redacted(self):
         for body in (b"", b"fixture-secret not bencode", b"\xff\xfe", TORRENT[:-2]):
-            for mode in ("automatic", "preview", "manual"):
+            for mode in ("automatic", "isolated"):
                 with self.subTest(body=body, mode=mode):
                     self.handler = lambda request: httpx.Response(200, content=body)
                     client = self.cloud()
@@ -303,7 +299,7 @@ class TorrentTransportBoundaryTests(_TorrentBoundaryCase):
                     self.assertNotIn("fixture-secret", json.dumps(result))
                     self.assertEqual(client.resolve_calls + client.torrent_resolve_calls + client.selection_calls + client.legacy_calls, [])
                     client.create_dir.assert_not_called()
-        self.assertEqual(len(self.requests), 12)
+        self.assertEqual(len(self.requests), 8)  # 四类无效载荷 × 直接/隔离两条现行路径
 
     def test_http_torrent_read_and_redirect_budgets_remain_bounded(self):
         self.handler = lambda request: httpx.Response(200, headers={"Content-Length": str(rss._RSS_MAX_RESPONSE_BYTES + 1)})

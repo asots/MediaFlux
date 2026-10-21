@@ -76,16 +76,11 @@ class OfflineResolutionFailureTests(unittest.TestCase):
             (self.http_error(503), "torrent_http_error", True, "HTTP 503", 503),
         )
         for error, code, retryable, message, status in failures:
-            for entry in ("automatic", "preview", "manual"):
-                with self.subTest(code=code, status=status, entry=entry):
+            for isolated in (False, True):
+                with self.subTest(code=code, status=status, isolated=isolated):
                     client = self.client()
                     with patch("app.modules.rss._fetch_rss_payload", side_effect=error):
-                        if entry == "automatic":
-                            result = offline.submit_offline(url, client=cast(GuangYaClient, client), isolate_task=True)
-                        elif entry == "preview":
-                            result = offline.preview_offline_selection(url, client=cast(GuangYaClient, client), rules=self.rules)
-                        else:
-                            result = offline.submit_offline_selection(url, [0], client=cast(GuangYaClient, client), rules=self.rules)
+                        result = offline.submit_offline(url, client=cast(GuangYaClient, client), isolate_task=isolated)
                     self.assert_safe_failure(result, client, message)
                     self.assertEqual(result["failure_code"], code)
                     self.assertEqual(result["retryable"], retryable)
@@ -145,18 +140,13 @@ class OfflineResolutionFailureTests(unittest.TestCase):
                 summary = public_dispatch_summary({"failed": ["guangya"], "error": result["error"]})
                 self.assertEqual(summary["error"], message)
 
-    def test_preview_manual_and_automatic_share_safe_failures_without_extra_http_replays(self):
+    def test_direct_and_isolated_submissions_share_safe_failures_without_http_replays(self):
         # 客户端已承担有界 HTTP 重试；外层磁力轮询只等待成功但尚无元数据的响应。
         for protocol_url in (self.url, "https://example.invalid/video.mp4", "ed2k://|file|video.mp4|42|hash|/"):
-            for entry in ("automatic", "preview", "manual"):
-                with self.subTest(entry=entry, url=protocol_url.split(":")[0]):
+            for isolated in (False, True):
+                with self.subTest(isolated=isolated, url=protocol_url.split(":")[0]):
                     client = self.client(self.http_error(403))
-                    if entry == "automatic":
-                        result = offline.submit_offline(protocol_url, client=cast(GuangYaClient, client), isolate_task=True)
-                    elif entry == "preview":
-                        result = offline.preview_offline_selection(protocol_url, client=cast(GuangYaClient, client), rules=self.rules)
-                    else:
-                        result = offline.submit_offline_selection(protocol_url, selected_indexes=[0], client=cast(GuangYaClient, client), rules=self.rules)
+                    result = offline.submit_offline(protocol_url, client=cast(GuangYaClient, client), isolate_task=isolated)
                     self.assert_safe_failure(result, client, "HTTP 403")
                     self.assertEqual(result["failure_code"], "guangya_auth_failed")
                     self.assertFalse(result["retryable"])
@@ -176,17 +166,11 @@ class OfflineResolutionFailureTests(unittest.TestCase):
                 self.assertEqual(result["resolve_attempts"], 4)
                 self.assert_no_writes(client)
 
-    def test_manual_selection_marks_empty_and_resolver_excluded_manifests_retryable(self):
-        for payload, selected_indexes in (
-            ({"data": {"files": []}}, [0]),
-            (RESOLVE_EXCLUDED_ONLY_FIXTURE, [0]),
-        ):
+    def test_empty_and_resolver_excluded_magnet_manifests_are_retryable(self):
+        for payload in ({"data": {"files": []}}, RESOLVE_EXCLUDED_ONLY_FIXTURE):
             with self.subTest(payload=payload):
                 client = self.client(payload=payload)
-                result = offline.submit_offline_selection(
-                    self.url, selected_indexes=selected_indexes,
-                    client=cast(GuangYaClient, client), rules=self.rules,
-                )
+                result = offline.submit_offline(self.url, client=cast(GuangYaClient, client))
 
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["failure_code"], "guangya_manifest_unavailable")
@@ -194,16 +178,11 @@ class OfflineResolutionFailureTests(unittest.TestCase):
                 self.assert_no_writes(client)
 
     def test_not_logged_in_is_nonretryable_auth_failure_without_resolution(self):
-        for entry in ("automatic", "manual"):
-            with self.subTest(entry=entry):
+        for isolated in (False, True):
+            with self.subTest(isolated=isolated):
                 client = self.client(payload=RESOLVE_SUBFILES_FIXTURE)
                 client.logged_in = False
-                if entry == "automatic":
-                    result = offline.submit_offline(self.url, client=cast(GuangYaClient, client))
-                else:
-                    result = offline.submit_offline_selection(
-                        self.url, selected_indexes=[0], client=cast(GuangYaClient, client), rules=self.rules,
-                    )
+                result = offline.submit_offline(self.url, client=cast(GuangYaClient, client), isolate_task=isolated)
 
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["error"], "光鸭未登录")

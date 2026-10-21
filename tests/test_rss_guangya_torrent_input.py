@@ -168,37 +168,26 @@ class RssGuangyaTorrentInputTests(RssTorrentFixture):
         self.assertTrue(again["ok"])
         self.assertEqual(len(client.selection_calls), 1)
 
-    def test_preview_and_manual_selection_use_same_torrent_conversion(self):
-        for mode in ("preview", "manual"):
-            with self.subTest(mode=mode):
+    def test_direct_and_isolated_submission_preserve_original_torrent(self):
+        for isolated in (False, True):
+            with self.subTest(isolated=isolated):
                 client = self.client()
-                if mode == "preview":
-                    result = offline.preview_offline_selection(
-                        TORRENT_URL, client=cast(GuangYaClient, client), rules=self.rules
-                    )
-                    self.assertEqual(result["default_selected_indexes"], [0])
-                    self.assertEqual(client.selection_calls, [])
-                else:
-                    result = offline.submit_offline_selection(
-                        TORRENT_URL, [0], client=cast(GuangYaClient, client), rules=self.rules
-                    )
-                    self.assertEqual(client.selection_calls[0]["file_indexes"], [0])
-                    self.assertTrue(
-                        client.selection_calls[0]["url"].startswith("magnet:?")
-                    )
+                result = offline.submit_offline(TORRENT_URL, client=cast(GuangYaClient, client), isolate_task=isolated)
                 self.assertTrue(result["ok"], result)
+                self.assertEqual(client.selection_calls[0]["file_indexes"], [0])
+                self.assertTrue(client.selection_calls[0]["url"].startswith("magnet:?"))
                 self.assertEqual(client.torrent_resolve_calls, [TORRENT])
                 self.assertEqual(client.resolve_calls, [])
                 self.assertEqual(client.legacy_calls, [])
 
     def test_bad_html_timeout_and_hash_mismatch_never_fall_back_to_http_task(self):
-        for mode in ("automatic", "preview", "manual"):
+        for isolated in (False, True):
             for bad in (
                 b"<html>denied</html>",
                 TORRENT.replace(b"Movie", b"Other"),
                 TimeoutError("https://private.invalid/?passkey=fixture-secret"),
             ):
-                with self.subTest(mode=mode, failure=type(bad).__name__):
+                with self.subTest(isolated=isolated, failure=type(bad).__name__):
                     client = self.client()
                     self.fetch.side_effect = bad if isinstance(bad, Exception) else None
                     self.fetch.return_value = (bad, {})
@@ -206,18 +195,9 @@ class RssGuangyaTorrentInputTests(RssTorrentFixture):
                     with patch.object(
                         offline.OfflineRules, "from_config", return_value=rules
                     ):
-                        if mode == "automatic":
-                            result = offline.submit_offline(
-                                TORRENT_URL, client=cast(GuangYaClient, client), isolate_task=True
-                            )
-                        elif mode == "preview":
-                            result = offline.preview_offline_selection(
-                                TORRENT_URL, client=cast(GuangYaClient, client), rules=rules
-                            )
-                        else:
-                            result = offline.submit_offline_selection(
-                                TORRENT_URL, [0], client=cast(GuangYaClient, client), rules=rules
-                            )
+                        result = offline.submit_offline(
+                            TORRENT_URL, client=cast(GuangYaClient, client), isolate_task=isolated
+                        )
                     self.assertFalse(result["ok"])
                     self.assertEqual(client.legacy_calls, [])
                     self.assertEqual(client.selection_calls, [])

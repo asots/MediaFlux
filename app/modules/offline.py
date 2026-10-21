@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import re
-import secrets
-import threading
 import time
 from dataclasses import dataclass
-from typing import Iterable, Any, Callable
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
@@ -252,118 +250,6 @@ def _resolve_offline_manifest(
         source_label, attempts, diagnostic,
     )
     return OfflineManifestResolution(last_response, last_files, attempts, diagnostic)
-
-
-@dataclass(frozen=True)
-class OfflinePreviewSnapshot:
-    preview_id: str
-    url: str
-    title: str
-    rules: OfflineRules
-    target_dir_id: str
-    target_dir_name: str
-    file_indexes: tuple[int, ...]
-    locked_indexes: tuple[int, ...]
-    expires_at: float
-
-
-class OfflinePreviewStore:
-    """一次性短期预览快照；提交 claim 后立即失效，避免整单重放。"""
-
-    def __init__(
-        self,
-        ttl_seconds: float = 10 * 60,
-        clock: Callable[[], float] = time.monotonic,
-        token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24),
-        max_entries: int = 1024,
-    ) -> None:
-        self._ttl_seconds = max(1.0, float(ttl_seconds))
-        self._clock = clock
-        self._token_factory = token_factory
-        self._max_entries = max(1, max_entries)
-        self._entries: dict[str, OfflinePreviewSnapshot] = {}
-        self._lock = threading.RLock()
-
-    @property
-    def ttl_seconds(self) -> int:
-        return int(self._ttl_seconds)
-
-    def _prune_locked(self, now: float) -> None:
-        for preview_id in [
-            key for key, snapshot in self._entries.items()
-            if snapshot.expires_at <= now
-        ]:
-            self._entries.pop(preview_id, None)
-
-    def create(
-        self,
-        *,
-        url: str,
-        title: str,
-        rules: OfflineRules,
-        target_dir_id: str,
-        target_dir_name: str,
-        file_indexes: list[int],
-        locked_indexes: list[int],
-    ) -> str:
-        preview_id = (self._token_factory() or "").strip()
-        if not preview_id:
-            raise RuntimeError("无法生成离线预览标识")
-        now = self._clock()
-        snapshot = OfflinePreviewSnapshot(
-            preview_id=preview_id,
-            url=(url or "").strip(),
-            title=(title or "").strip(),
-            rules=rules,
-            target_dir_id=(target_dir_id or "0"),
-            target_dir_name=(target_dir_name or ""),
-            file_indexes=tuple(value for value in file_indexes),
-            locked_indexes=tuple(value for value in locked_indexes),
-            expires_at=now + self._ttl_seconds,
-        )
-        with self._lock:
-            self._prune_locked(now)
-            self._entries.pop(preview_id, None)
-            self._entries[preview_id] = snapshot
-            while len(self._entries) > self._max_entries:
-                oldest_id = next(iter(self._entries))
-                self._entries.pop(oldest_id, None)
-        return preview_id
-
-    def claim(
-        self,
-        preview_id: str,
-        *,
-        url: str,
-        title: str,
-        rules: OfflineRules,
-    ) -> OfflinePreviewSnapshot:
-        key = (preview_id or "").strip()
-        now = self._clock()
-        with self._lock:
-            self._prune_locked(now)
-            snapshot = self._entries.get(key)
-            if snapshot is None:
-                raise ValueError("预览已过期或已使用，请重新解析")
-            context_matches = (
-                snapshot.url == (url or "").strip()
-                and snapshot.title == (title or "").strip()
-                and snapshot.rules == rules
-            )
-            self._entries.pop(key, None)
-            if not context_matches:
-                raise ValueError("预览上下文已变化，请重新解析")
-            return snapshot
-
-    @property
-    def entry_count(self) -> int:
-        with self._lock:
-            self._prune_locked(self._clock())
-            return len(self._entries)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._entries.clear()
 
 
 @dataclass(frozen=True)
@@ -838,201 +724,6 @@ def submit_offline(url: str, title: str = "", client: GuangYaClient | None = Non
             close_guangya_client(client)
 
 
-def preview_offline_selection(url: str, title: str = "", client: GuangYaClient | None = None,
-                              rules: OfflineRules | None = None) -> dict:
-    """解析离线资源并返回可调整的默认文件选集。"""
-    rules = rules or OfflineRules.from_config()
-    decision = analyze_offline_url(url, title=title, rules=rules)
-    result = {
-        **decision.as_dict(),
-        "ok": False,
-        "has_file_tree": False,
-        "files": [],
-        "default_selected_indexes": [],
-        "error": "" if decision.allowed else decision.reason,
-    }
-    if not decision.allowed:
-        return result
-    owned_client = client is None
-    client = client or GuangYaClient()
-    try:
-        if not client.logged_in:
-            result["error"] = "光鸭未登录"
-            return result
-        try:
-            url, torrent_data = _prepare_offline_resource(url)
-            resolution = _resolve_offline_manifest(
-                client, url, decision.protocol, torrent_data=torrent_data,
-            )
-            choices = build_offline_file_choices(resolution.files, rules)
-        except Exception as exc:
-            result.update(_manifest_failure(exc))
-            return result
-        if decision.protocol == "magnet" and not choices:
-            result["resolve_attempts"] = resolution.attempts
-            result["resolve_diagnostic"] = resolution.diagnostic
-            result["error"] = "磁力资源未解析到可验证的文件列表"
-            return result
-        result.update({
-            "ok": True,
-            "has_file_tree": bool(choices),
-            "files": choices,
-            "default_selected_indexes": [item["index"] for item in choices if item["selected"]],
-            "error": "",
-        })
-        return result
-    finally:
-        if owned_client:
-            close_guangya_client(client)
-
-
-def submit_offline_selection(url: str, selected_indexes: list[int] | None,
-                             title: str = "", client: GuangYaClient | None = None,
-                             rules: OfflineRules | None = None,
-                             expected_target_dir_id: str = "",
-                             expected_target_dir_name: str = "") -> dict:
-    """重新解析资源、验证客户端索引并创建选集任务。"""
-    rules = rules or OfflineRules.from_config()
-    decision = analyze_offline_url(url, title=title, rules=rules)
-    base = {"ok": False, "decision": decision.as_dict(), "error": ""}
-    if not decision.allowed:
-        return {**base, "error": decision.reason}
-    if expected_target_dir_id and (
-        decision.target_dir_id != expected_target_dir_id
-        or decision.target_dir_name != expected_target_dir_name
-    ):
-        return {**base, "error": "预览目标已变化，请重新解析"}
-    owned_client = client is None
-    client = client or GuangYaClient()
-    try:
-        if not client.logged_in:
-            return {
-                **base, "error": "光鸭未登录",
-                "failure_code": "guangya_auth_failed", "retryable": False,
-            }
-        try:
-            url, torrent_data = _prepare_offline_resource(url)
-            resolution = _resolve_offline_manifest(
-                client, url, decision.protocol, torrent_data=torrent_data,
-            )
-            files = resolution.files
-        except Exception as exc:
-            return {**base, **_manifest_failure(exc)}
-
-        try:
-            requested = _normalize_selected_indexes(selected_indexes or [])
-        except ValueError as exc:
-            return {**base, "error": str(exc)}
-
-        if not files:
-            if decision.protocol == "magnet":
-                return {
-                    **base, "resolve_attempts": resolution.attempts,
-                    "resolve_diagnostic": resolution.diagnostic,
-                    "error": "磁力资源未解析到可验证的文件列表",
-                    "failure_code": "guangya_manifest_unavailable", "retryable": True,
-                }
-            if requested:
-                return {**base, "error": "资源没有可验证的文件列表，请重新预览"}
-            try:
-                created = client.add_offline_task(
-                    url=url,
-                    target_dir_id=decision.target_dir_id,
-                    task_type=decision.protocol,
-                )
-            except Exception as exc:
-                # 旧式 HTTP/ED2K 接口没有可复核的文件树；请求一旦发出，连接异常
-                # 无法证明上游未创建任务。标记为结果未知，阻止调用方立即重复提交。
-                return {
-                    **base,
-                    "error": f"光鸭任务创建结果待核对: {exc}",
-                    "outcome_unknown": True,
-                    "review_required": True,
-                }
-            if isinstance(created, dict):
-                ok = bool(created.get("ok"))
-                task_ids = [str(item) for item in (created.get("task_ids") or []) if str(item)]
-                batch_count = int(created.get("batch_count") or (1 if ok else 0))
-                create_error = str(created.get("error") or "")
-            else:
-                ok = bool(created)
-                task_ids = []
-                batch_count = 1 if ok else 0
-                create_error = ""
-            return {
-                **base,
-                "ok": ok,
-                "error": "" if ok else (create_error or "光鸭任务创建失败"),
-                "selection_mode": "legacy",
-                "selected_count": 0,
-                "task_ids": task_ids,
-                "batch_count": batch_count,
-            }
-
-        if not requested:
-            return {**base, "error": "至少选择一个文件"}
-        available = {int(item["index"]) for item in files}
-        invalid = [index for index in requested if index not in available]
-        if invalid:
-            return {**base, "error": f"选择中包含不存在的文件索引: {', '.join(map(str, invalid))}"}
-        choices = build_offline_file_choices(files, rules, skip_samples=False)
-        allowed = {int(item["index"]) for item in choices if item.get("selected")}
-        forbidden = [index for index in requested if index not in allowed]
-        if forbidden:
-            reasons = {
-                int(item["index"]): str(item.get("exclude_reason") or "不符合下载规则")
-                for item in choices
-            }
-            detail = "；".join(f"{index}: {reasons.get(index, '不符合下载规则')}" for index in forbidden)
-            error = f"选择中包含被下载规则排除的文件: {detail}"
-            if decision.protocol == "magnet" and _resolver_excluded_only(files):
-                return {
-                    **base, "error": error,
-                    "failure_code": "guangya_manifest_unavailable", "retryable": True,
-                }
-            return {**base, "error": error}
-        try:
-            created: dict[str, Any] = client.add_offline_selection(url, decision.target_dir_id, requested)
-        except Exception as exc:
-            return {**base, "error": f"光鸭任务创建失败: {exc}"}
-        if not created.get("ok", True):
-            return {
-                **base,
-                "partial_success": bool(created.get("partial_success")),
-                "outcome_unknown": bool(created.get("outcome_unknown")),
-                "tracking_incomplete": bool(created.get("tracking_incomplete")),
-                "selection_mode": "files",
-                "selected_count": int(created.get("selected_count", len(requested))),
-                "completed_batches": int(created.get("completed_batches", 0)),
-                "task_ids": list(created.get("task_ids") or []),
-                "completed_indexes": list(created.get("completed_indexes") or []),
-                "remaining_indexes": list(created.get("remaining_indexes") or requested),
-                "failed_batch": created.get("failed_batch"),
-                "batch_count": int(created.get("batch_count", 0)),
-                "error": str(created.get("error") or "光鸭任务创建失败"),
-            }
-        completed_batches: Any = created.get("completed_batches", created.get("batch_count", 0))
-        return {
-            **base,
-            "ok": True,
-            "partial_success": False,
-            "outcome_unknown": False,
-            "tracking_incomplete": bool(created.get("tracking_incomplete")),
-            "error": "",
-            "selection_mode": "files",
-            "selected_count": int(created.get("selected_count", len(requested))),
-            "task_ids": list(created.get("task_ids") or []),
-            "batch_count": int(created.get("batch_count", 0)),
-            "completed_batches": int(completed_batches),
-            "completed_indexes": list(created.get("completed_indexes") or requested),
-            "remaining_indexes": [],
-            "failed_batch": None,
-        }
-    finally:
-        if owned_client:
-            close_guangya_client(client)
-
-
 def rules_summary(rules: OfflineRules | None = None) -> dict:
     rules = rules or OfflineRules.from_config()
     return {
@@ -1056,9 +747,9 @@ def rules_summary(rules: OfflineRules | None = None) -> dict:
 
 
 def build_offline_file_choices(
-    files: list[dict], rules: OfflineRules, *, skip_samples: bool = True,
+    files: list[dict], rules: OfflineRules,
 ) -> list[dict]:
-    """默认不选样片；显式手选仍校验用户规则及解析器排除项。"""
+    """统一离线提交按用户规则和解析器排除项筛选文件，并排除样片。"""
     allowed_exts = set(rules.allowed_exts or DEFAULT_VIDEO_EXTS)
     minimum_size = max(0, rules.min_file_mb) * 1024 * 1024
     choices: list[dict] = []
@@ -1084,8 +775,8 @@ def build_offline_file_choices(
                 reason = "扩展名不允许"
             if not reason and minimum_size and item["size"] < minimum_size:
                 reason = f"小于 {rules.min_file_mb} MB"
-            if not reason and skip_samples and is_sample_media_path(item["name"]):
-                reason = "样片默认不下载，可在预览中明确选择"
+            if not reason and is_sample_media_path(item["name"]):
+                reason = "样片不自动下载"
         item.update({
             "selected": not reason,
             "locked": locked,
@@ -1093,22 +784,6 @@ def build_offline_file_choices(
         })
         choices.append(item)
     return choices
-
-
-def validate_preview_indexes(snapshot: OfflinePreviewSnapshot, values: list[int]) -> list[int]:
-    """先按预览快照限制选择范围；提交阶段仍需重新解析做第二次验证。"""
-    requested = _normalize_selected_indexes(values)
-    available = set(snapshot.file_indexes)
-    invalid = [index for index in requested if index not in available]
-    if invalid:
-        raise ValueError(f"选择中包含不属于该预览的文件索引: {', '.join(map(str, invalid))}")
-    locked = set(snapshot.locked_indexes)
-    forbidden = [index for index in requested if index in locked]
-    if forbidden:
-        raise ValueError(f"选择中包含解析器禁止的文件索引: {', '.join(map(str, forbidden))}")
-    if available and not requested:
-        raise ValueError("至少选择一个文件")
-    return requested
 
 
 def detect_protocol(url: str) -> str:
@@ -1158,21 +833,3 @@ def normalize_video_extensions(raw: str) -> tuple[str, ...]:
     if not values:
         return DEFAULT_VIDEO_EXTS
     return tuple(item for item in values if item in _DEFAULT_VIDEO_EXT_SET)
-
-
-def _normalize_selected_indexes(values: Iterable[int | str | float]) -> list[int]:
-    result: list[int] = []
-    seen: set[int] = set()
-    for value in values:
-        if isinstance(value, bool):
-            raise ValueError("文件索引必须为非负整数")
-        try:
-            index = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("文件索引必须为非负整数") from exc
-        if index < 0:
-            raise ValueError("文件索引必须为非负整数")
-        if index not in seen:
-            seen.add(index)
-            result.append(index)
-    return result
