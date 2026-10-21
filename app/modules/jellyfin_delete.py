@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,14 +30,14 @@ from app.modules.organize_delete_audit import (
 from app.modules.organize_rules import DEFAULT_ORGANIZE_VIDEO_EXTS
 from app.modules.organize_tasks import _protected_organize_root_ids
 from app.modules.strm import (
+    STRM_OPERATION_LOCK,
     STRM_SUBDIR,
     _fingerprint_matches,
     _strm_target,
     configured_strm_source_plans,
     safe_path_component,
-    trigger_cloud_changes,
 )
-from app.repositories.strm import list_strm_file_owners, list_strm_path_owners
+from app.repositories.strm import list_strm_file_owners, list_strm_path_owners, retire_deleted_strm_files
 
 logger = get_logger(__name__)
 MAX_DELETE_PATHS = 1000
@@ -409,7 +409,8 @@ def execute_delete(payload: dict, expected: tuple[DeleteTarget, ...]) -> dict:
         raise DirectoryScrapeConflictError("映射或 STRM 索引已变化，请重新发起删除")
     client = GuangYaClient()
     completed = []
-    attempted_sources: set[str] = set()
+    retired_targets = []
+    write_attempted = False
     error = ""
     stats: dict[str, Any] = {}
     try:
@@ -455,12 +456,13 @@ def execute_delete(payload: dict, expected: tuple[DeleteTarget, ...]) -> dict:
             if candidate != candidates[file_id]:
                 raise DirectoryScrapeConflictError("云端对象在执行前发生变化，已停止后续删除")
             _check_inventory(client, inventories, file_guards.get(file_id, ()), removed, fresh_listings)
-            attempted_sources.update(item.source_id for item in references.get(file_id, [target]))
+            write_attempted = True
             audit = execute_recycle_bin_delete(
                 client, trigger="jellyfin_delete", reason="Jellyfin 用户主动确认删除媒体及其所属伴随文件",
                 candidate=candidate, safe_failure_message="云端删除结果未能确认，请在 MF 核对删除审计，不要盲目重试",
             )
             completed.append({"file_id": file_id, "audit_id": audit["audit_id"]})
+            retired_targets.extend(asdict(item) for item in references.get(file_id, [target]))
             removed.add(file_id)
         # 不调用递归目录删除。云端新增内容会让安全空目录删除拒绝，绝不会被顺带删除。
         organizer = Organizer(client=client, recognition_enabled=False)
@@ -486,19 +488,27 @@ def execute_delete(payload: dict, expected: tuple[DeleteTarget, ...]) -> dict:
                 raise DirectoryScrapeConflictError("媒体已回收，但目录清理未完成；请核对删除审计")
             if directory_id in full_roots and not report["cleaned"]:
                 raise DirectoryScrapeConflictError("作品目录存在新增或未处理内容，已保留目录")
-    except Exception as exc:  # noqa: BLE001 - 未知结果不重放，部分成功仍触发来源校准。
+    except Exception as exc:  # noqa: BLE001 - 未知结果不重放，只退役已确认回收的对象。
         error = public_error_message(exc) if isinstance(exc, DirectoryScrapePublicError) else (
             "云端删除结果未能确认，请在 MF 核对删除审计，不要盲目重试"
-            if attempted_sources else "删除前校验失败，未执行云端删除，请检查光鸭连接或文件状态"
+            if write_attempted else "删除前校验失败，未执行云端删除，请检查光鸭连接或文件状态"
         )
         logger.warning("Jellyfin 联动删除未完成 type=%s completed=%s", type(exc).__name__, len(completed))
     finally:
         close_guangya_client(client)
-        if attempted_sources:
-            operations = [{"op": "trash", "source": {"parent_id": source_id}} for source_id in attempted_sources]
-            stats.update(trigger_cloud_changes(operations, sources={source_id: "/" for source_id in attempted_sources}))
-    if stats.get("strm_trigger_failed"):
-        error = error or "云端文件已移入回收站，但 STRM 联动未启动，请在 MF 手动同步"
+    if retired_targets:
+        try:
+            # 等已在途的扫描/安装完成后，再原子退役；不扫描任何来源目录。
+            if not STRM_OPERATION_LOCK.acquire():
+                raise RuntimeError("STRM 写锁不可用")
+            try:
+                stats.update(retire_deleted_strm_files(retired_targets))
+            finally:
+                STRM_OPERATION_LOCK.release()
+        except Exception as exc:
+            logger.warning("Jellyfin 删除后索引收尾未完成 type=%s", type(exc).__name__)
+            stats["strm_retire_failed"] = 1
+            error = error or "云端文件已移入回收站，但 STRM 索引收尾未完成，请在 MF 核对后同步"
     media_ids = {target.file_id for target in expected}
     media_deleted = sum(item["file_id"] in media_ids for item in completed)
     return {"ok": not error, "completed": len(completed), "error": error, "items": completed,

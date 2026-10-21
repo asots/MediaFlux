@@ -331,6 +331,47 @@ def delete_strm_index_ids(
         return cur.rowcount
 
 
+def retire_deleted_strm_files(files: Iterable[dict[str, Any]]) -> dict[str, int]:
+    """退役已确认回收的对象，不碰本地文件、不触发扫描或媒体库刷新。
+
+    调用方持有 STRM_OPERATION_LOCK，防止扫描及元数据安装重建索引。
+    旧路径凭据沿用既有恢复流程：Jellyfin 本地删除失败时，下次同步仍能
+    按指纹处理残留，而不是丢失所有权后留下孤儿文件。
+    """
+    counts = {"strm_indexes_retired": 0, "metadata_jobs_cancelled": 0}
+    stamp = db.now()
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for item in files:
+            source_id, file_id = item["source_id"], item["file_id"]
+            for prefix in ("guangya:", "guangya-meta:"):
+                source = prefix + source_id
+                row = conn.execute(
+                    "SELECT * FROM strm_index WHERE source=? AND file_id=?",
+                    (source, file_id),
+                ).fetchone()
+                if row is not None:
+                    if (tuple(row[key] for key in ("etag", "size", "filename"))
+                        != (item["etag"], item["size"], item["name"]) or (
+                            prefix == "guangya:" and item.get("path") and
+                            (row["strm_path"], row["content_fingerprint"])
+                            != (item["path"], item["fingerprint"])
+                        )):
+                        raise ValueError("已回收对象的 STRM 索引身份发生变化，已保留索引等待核对")
+                    conn.execute(_RECORD_PATHS + "AND file_id=?", (stamp, source, file_id))
+                    conn.execute("DELETE FROM strm_index WHERE id=?", (row["id"],))
+                    counts["strm_indexes_retired"] += 1
+            counts["metadata_jobs_cancelled"] += conn.execute(
+                _CANCEL_METADATA_JOB,
+                ("Jellyfin 已确认云端对象移入回收站", stamp, "guangya", source_id, file_id),
+            ).rowcount
+            for action in ("generate", "metadata"):
+                db._resolve_strm_failure_for_item_conn(
+                    conn, source_id, file_id, action, timestamp=stamp,
+                )
+    return counts
+
+
 # ===== STRM 伴随元数据下载队列 =====
 
 DEFAULT_STRM_METADATA_LEASE_SECONDS = 900
@@ -789,6 +830,13 @@ def recover_stale_strm_metadata_jobs(
         return (cur.rowcount or 0)
 
 
+_CANCEL_METADATA_JOB = (
+    "UPDATE strm_metadata_queue SET status='cancelled',dirty=0,revision=revision+1,"
+    "lease_owner='',lease_until=0,last_error_type='Cancelled',last_error=?,updated_at=? "
+    "WHERE provider=? AND source_id=? AND file_id=? AND status<>'cancelled'"
+)
+
+
 def cancel_strm_metadata_job(
     source_id: str, file_id: str, *, provider: str = "guangya", reason: str = "",
 ) -> bool:
@@ -796,9 +844,7 @@ def cancel_strm_metadata_job(
     stamp = database.now()
     with database.get_conn() as conn:
         cur = conn.execute(
-            "UPDATE strm_metadata_queue SET status='cancelled',dirty=0,revision=revision+1,"
-            "lease_owner='',lease_until=0,last_error_type='Cancelled',last_error=?,updated_at=? "
-            "WHERE provider=? AND source_id=? AND file_id=? AND status<>'cancelled'",
+            _CANCEL_METADATA_JOB,
             (
                 _sanitize_metadata_error(reason or "远端元数据已删除"), stamp,
                 (provider or "guangya"), source_id, file_id,

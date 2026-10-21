@@ -9,7 +9,7 @@ import re
 import socket
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
@@ -92,7 +92,8 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
         self.provider = Mock(spec=("logged_in", "file_info", "list_dir", "delete"))
         self.factory = self.enterContext(patch.object(deletion, "GuangYaClient", return_value=self.provider))
         self.close = self.enterContext(patch.object(deletion, "close_guangya_client"))
-        self.sync = self.enterContext(patch.object(deletion, "trigger_cloud_changes", return_value={"strm_triggered": 1}))
+        self.sync = self.enterContext(patch.object(strm, "trigger_cloud_changes", side_effect=AssertionError("Jellyfin 删除不得触发来源扫描")))
+        self.addCleanup(self.sync.assert_not_called)
         self.manager = Mock()
         self.enterContext(patch.object(routes, "get_organize_manager", return_value=self.manager))
         network = self.enterContext(patch.object(socket.socket, "connect", side_effect=AssertionError("禁止测试连接网络")))
@@ -101,7 +102,7 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
 
     def reset_case(self):
         with db.get_conn() as conn:
-            for table in ("organize_delete_audit", "strm_index", "download_requests"):
+            for table in ("organize_delete_audit", "strm_index", "strm_path_cleanup", "strm_metadata_queue", "download_requests"):
                 conn.execute(f"DELETE FROM {table}")
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="jellyfin-delete-"))).resolve()
         self.media_root = self.root / "strm" / strm.STRM_SUBDIR
@@ -124,7 +125,6 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
         self.provider.delete.return_value = None
         for mock in (self.factory, self.close, self.sync, self.manager):
             mock.reset_mock()
-        self.sync.return_value = {"strm_triggered": 1}
         self.manager.start_operation.return_value = {"ok": True, "task_id": "jellyfin-delete-task"}
 
     def store_node(self, item):
@@ -388,13 +388,13 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
         )
         return request_id
 
-    def assert_synced(self, *source_ids):
-        self.sync.assert_called_once()
-        args, kwargs = self.sync.call_args
-        self.assertEqual(kwargs, {"sources": {source_id: "/" for source_id in source_ids}})
-        self.assertEqual({(op["op"], op["source"]["parent_id"]) for op in args[0]},
-                         {("trash", source_id) for source_id in source_ids})
-        self.assertEqual(len(args[0]), len(source_ids))
+    def assert_retired(self, *source_ids):
+        self.sync.assert_not_called()
+        with db.get_conn() as conn:
+            rows = conn.execute("SELECT * FROM strm_path_cleanup").fetchall()
+        self.assertEqual({row["source"].split(":", 1)[1] for row in rows}, set(source_ids))
+        for row in rows:
+            self.assertEqual(list_strm_path_owners(row["strm_path"]), [])
 
     def test_active_download_and_organize_states_protect_the_whole_batch(self):
         states = [(status, "") for status in
@@ -442,9 +442,9 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
                 self.assertTrue(result["ok"], result)
                 self.assertEqual(result["completed"], 1)
                 self.provider.delete.assert_called_once_with(["file-a"])
-                self.assert_synced("source-a", "source-b")
+                self.assert_retired("source-a", "source-b")
 
-    def test_success_persists_audit_before_write_and_preserves_local_index_for_sync(self):
+    def test_success_retires_exact_index_but_leaves_local_file_for_jellyfin(self):
         path = self.seed()
         original = path.read_bytes()
         payload = self.payload(path)
@@ -465,10 +465,10 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
         self.assertEqual(audit["status"], "success")
         self.assertEqual(result["items"], [{"file_id": "file-a", "audit_id": audit["id"]}])
         self.assertEqual(path.read_bytes(), original)
-        self.assertEqual(len(list_strm_path_owners(str(path))), 1)
+        self.assertEqual(list_strm_path_owners(str(path)), [])
         self.assertTrue({"season-a", "source-a", "library", "0"}.issubset(
             {item.args[0] for item in self.provider.list_dir.call_args_list}))
-        self.assert_synced("source-a")
+        self.assert_retired("source-a")
         self.close.assert_called_once_with(self.provider)
 
     def test_read_failure_reports_no_write_and_write_failure_is_never_retried(self):
@@ -492,9 +492,10 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
                     self.assertIn("重试", result["error"])
                     self.provider.delete.assert_called_once_with(["file-a"])
                     self.assertEqual(self.audits()[0]["status"], "failed")
-                    self.assert_synced("source-a")
+                    self.assert_retired()
+                    self.assertEqual(len(list_strm_path_owners(str(path))), 1)
 
-    def test_partial_failure_reports_only_confirmed_deletes_and_syncs_attempted_sources(self):
+    def test_partial_failure_retires_only_confirmed_deletes(self):
         paths = [self.seed(f"file-{key}", f"source-{key}") for key in "abc"]
         payload = self.payload(*reversed(paths))
         self.provider.delete.side_effect = [None, TimeoutError("unknown write outcome"), None]
@@ -506,19 +507,92 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.provider.delete.call_args_list, [call(["file-a"]), call(["file-b"])])
         self.assertEqual([(row["file_id"], row["status"]) for row in self.audits()],
                          [("file-a", "success"), ("file-b", "failed")])
-        self.assert_synced("source-a", "source-b")
-        self.assertTrue(all(path.is_file() and list_strm_path_owners(str(path)) for path in paths))
+        self.assert_retired("source-a")
+        self.assertTrue(all(path.is_file() for path in paths))
+        self.assertEqual(list_strm_path_owners(str(paths[0])), [])
+        self.assertTrue(all(list_strm_path_owners(str(path)) for path in paths[1:]))
 
-    def test_sync_failure_does_not_rewrite_a_successful_cloud_delete(self):
+    def test_retirement_failure_does_not_rewrite_a_successful_cloud_delete(self):
         path = self.seed()
         payload = self.payload(path)
-        self.sync.return_value = {"strm_trigger_failed": 1}
-        result = deletion.execute_delete(payload, deletion.prepare_delete(payload))
+        with patch.object(deletion, "retire_deleted_strm_files", side_effect=RuntimeError("storage secret")):
+            result = deletion.execute_delete(payload, deletion.prepare_delete(payload))
         self.assertFalse(result["ok"])
         self.assertEqual(result["completed"], 1)
         self.assertIn("STRM", result["error"])
         self.provider.delete.assert_called_once_with(["file-a"])
         self.assertEqual(self.audits()[0]["status"], "success")
+        self.assertEqual(len(list_strm_path_owners(str(path))), 1)
+        self.assertNotIn("storage secret", json.dumps(result))
+        self.assertTrue(deletion.STRM_OPERATION_LOCK.acquire(blocking=False))
+        deletion.STRM_OPERATION_LOCK.release()
+
+    def test_retirement_is_idempotent_and_never_touches_unselected_files_or_refreshes(self):
+        selected, neighbor = self.seed(), self.seed("neighbor", "source-a")
+        targets = deletion.prepare_delete(self.payload(selected))
+        self.assertTrue(deletion.execute_delete(self.payload(selected), targets)["ok"])
+        counts = deletion.retire_deleted_strm_files([asdict(target) for target in targets])
+        self.assertEqual(counts, {"strm_indexes_retired": 0, "metadata_jobs_cancelled": 0})
+        self.assert_retired("source-a")
+        self.assertTrue(selected.is_file())
+        self.assertTrue(neighbor.is_file())
+        self.assertEqual(len(list_strm_path_owners(str(neighbor))), 1)
+        with db.get_conn() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM strm_refresh_outbox").fetchone()[0], 0)
+        # 重复整个请求在预检阶段被拒绝，不重放云端写操作。
+        with self.assertRaises(DirectoryScrapePublicError):
+            deletion.prepare_delete(self.payload(selected))
+        self.provider.delete.assert_called_once_with(["file-a"])
+
+    def test_retirement_conflict_rolls_back_indexes_and_cleanup_credentials(self):
+        paths = [self.seed(), self.seed("file-b", "source-b")]
+        targets = deletion.prepare_delete(self.payload(*paths))
+        with db.get_conn() as conn:
+            conn.execute("UPDATE strm_index SET etag='replacement' WHERE file_id='file-b'")
+        with self.assertRaisesRegex(ValueError, "身份发生变化"):
+            deletion.retire_deleted_strm_files([asdict(target) for target in targets])
+        self.assertTrue(all(list_strm_path_owners(str(path)) for path in paths))
+        self.assert_retired()
+
+    def test_native_delete_failure_keeps_precise_recovery_credentials(self):
+        from app.modules.strm_recovery import recover_pending_paths
+
+        for native_deleted in (True, False):
+            with self.subTest(native_deleted=native_deleted):
+                self.reset_case()
+                selected, neighbor = self.seed(), self.seed("neighbor", "source-a")
+                self.assertTrue(deletion.execute_delete(
+                    self.payload(selected), deletion.prepare_delete(self.payload(selected)),
+                )["ok"])
+                if native_deleted:
+                    selected.unlink()
+                # 后续已有同步可收尾：没有新回调/扫描器，没有扩大到相邻文件。
+                stats = {"cleaned": 0, "metadata_cleaned": 0}
+                recover_pending_paths(
+                    "guangya:source-a", str(self.media_root.parent), stats,
+                    valid_ids={"neighbor"}, only_file_ids={"file-a"},
+                )
+                self.assertFalse(selected.exists())
+                self.assertTrue(neighbor.is_file())
+                self.assertEqual(stats["cleaned"], int(not native_deleted))
+                self.assert_retired()
+
+    def test_native_failure_recovery_does_not_delete_replacement_contents(self):
+        from app.modules.strm_recovery import recover_pending_paths
+
+        selected = self.seed()
+        self.assertTrue(deletion.execute_delete(
+            self.payload(selected), deletion.prepare_delete(self.payload(selected)),
+        )["ok"])
+        selected.write_bytes(b"new user contents")
+        stats = {"cleaned": 0, "metadata_cleaned": 0}
+        recover_pending_paths(
+            "guangya:source-a", str(self.media_root.parent), stats,
+            valid_ids=set(), only_file_ids={"file-a"},
+        )
+        self.assertEqual(selected.read_bytes(), b"new user contents")
+        self.assertEqual(stats["recovery_pending"], 1)
+        self.assert_retired("source-a")
 
     def test_per_item_rechecks_are_linear_in_batch_size(self):
         paths = [self.seed(f"file-{index}") for index in range(6)]
@@ -659,7 +733,7 @@ class JellyfinDeleteTests(IsolatedDatabaseTestCase):
                 self.assertEqual(result["completed"], 1)
                 self.assertEqual([item["file_id"] for item in result["items"]], ["file-a"])
                 self.provider.delete.assert_called_once_with(["file-a"])
-                self.assert_synced("source-a")
+                self.assert_retired("source-a")
                 statuses = [(row["file_id"], row["status"]) for row in self.audits()]
                 self.assertEqual(statuses, [("file-a", "success")] +
                                  ([("file-b", "blocked")] if change == "download" else []))

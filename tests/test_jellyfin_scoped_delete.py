@@ -290,7 +290,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
         for row in successes:
             if row["file_id"] in deleted_files:
                 self.assertEqual(row["trigger"], "jellyfin_delete")
-        self.fx.assert_synced(*sources)
+        self.fx.assert_retired(*sources)
         self.fx.close.assert_called_once_with(self.cloud.provider)
 
     def test_movie_dedicated_directory_recycles_every_file_and_removes_tree(self):
@@ -318,9 +318,39 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
                 self.assertEqual(self.cloud.deleted_directories[-1], "movie")
                 self.assertNotIn("movie", self.cloud.nodes)
                 self.assertIn("source-a", self.cloud.nodes)
-                # 同步在测试中被隔离：本轮不能私自删除本地文件或索引。
+                # 只退役已删除对象的索引，本地文件仍由 Jellyfin 原生删除。
                 self.assertTrue(path.exists())
-                self.assertEqual(len(list_strm_path_owners(str(path))), 1)
+                self.assertEqual(list_strm_path_owners(str(path)), [])
+
+    def test_retirement_cancels_inflight_metadata_without_touching_other_jobs(self):
+        path, root = self.movie()
+        self.file("nfo", "Movie.nfo", "movie")
+        local_nfo = root / "Movie.nfo"
+        local_nfo.write_bytes(b"metadata")
+        db.upsert_strm_index(
+            "guangya-meta:source-a", "nfo", "etag-nfo", 100, "Movie.nfo",
+            str(local_nfo), legacy.fingerprint(local_nfo.read_bytes()),
+        )
+        db.enqueue_strm_metadata_jobs([
+            {"source_id": "source-a", "file_id": file_id, "filename": filename,
+             "etag": "etag-" + file_id, "size": 100, "parent_id": "movie"}
+            for file_id, filename in (("nfo", "Movie.nfo"), ("unrelated", "Other.nfo"))
+        ])
+        job = db.claim_due_strm_metadata_jobs(owner="test-worker", limit=1)[0]
+        lease = {"expected_lease_generation": job["lease_generation"],
+                 "expected_revision": job["revision"], "expected_owner": "test-worker"}
+        self.assertTrue(db.strm_metadata_job_is_current(job["id"], **lease))
+        result = self.execute(self.payload("movie", root, path))
+        self.assert_success(result, {"movie-video", "nfo"})
+        self.assertEqual(result["stats"]["strm_indexes_retired"], 2)
+        self.assertEqual(result["stats"]["metadata_jobs_cancelled"], 1)
+        self.assertEqual(list_strm_path_owners(str(local_nfo)), [])
+        self.assertEqual(local_nfo.read_bytes(), b"metadata")
+        self.assertFalse(db.strm_metadata_job_is_current(job["id"], **lease))
+        self.assertEqual(db.settle_strm_metadata_job(job["id"], **lease), "stale")
+        with db.get_conn() as conn:
+            states = {row["file_id"]: row["status"] for row in conn.execute("SELECT * FROM strm_metadata_queue")}
+        self.assertEqual(states, {"nfo": "cancelled", "unrelated": "queued"})
 
     def test_movie_mixed_directory_only_recycles_selected_stem_companions(self):
         path, root = self.movie()
@@ -807,7 +837,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.cloud.deleted_files, {"movie-video"})
         self.assertTrue({"movie", "nfo"} <= self.cloud.nodes.keys())
         self.cloud.provider.delete_empty_directory.assert_not_called()
-        self.fx.assert_synced("source-a")
+        self.fx.assert_retired("source-a")
 
     def test_companion_changed_after_first_recycle_is_preserved_with_its_directory(
         self,
@@ -833,7 +863,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
                 self.assertEqual(self.cloud.deleted_files, {"movie-video"})
                 self.assertTrue({"movie", "nfo"} <= self.cloud.nodes.keys())
                 self.cloud.provider.delete_empty_directory.assert_not_called()
-                self.fx.assert_synced("source-a")
+                self.fx.assert_retired("source-a")
 
     def test_new_cloud_video_and_unknown_file_after_first_recycle_are_preserved(self):
         for kind in ("movie", "season", "series"):
@@ -859,7 +889,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
                 self.assertFalse(
                     {"new-video", "new-unknown"} & self.cloud.deleted_files
                 )
-                self.fx.assert_synced("source-a")
+                self.fx.assert_retired("source-a")
 
     def test_directory_move_or_rename_after_first_write_preserves_remaining_companion(
         self,
@@ -909,7 +939,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
                         for row in self.fx.audits()
                     )
                 )
-                self.fx.assert_synced("source-a")
+                self.fx.assert_retired("source-a")
 
     def test_provider_without_guarded_cleanup_retains_empty_directory_not_recursive_delete(
         self,
@@ -921,7 +951,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.cloud.deleted_files, {"movie-video"})
         self.assertIn("movie", self.cloud.nodes)
         self.cloud.provider.delete_empty_directory.assert_not_called()
-        self.fx.assert_synced("source-a")
+        self.fx.assert_retired("source-a")
 
     def test_active_download_and_pending_organize_protect_scope_before_first_write(
         self,
@@ -984,7 +1014,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
         self.assertEqual(self.cloud.deleted_files, {"movie-video"})
         self.assertTrue({"movie", "nfo"} <= self.cloud.nodes.keys())
         self.cloud.provider.delete_empty_directory.assert_not_called()
-        self.fx.assert_synced("source-a")
+        self.fx.assert_retired("source-a")
 
     def test_companion_recycle_failure_records_partial_audit_and_does_not_remove_directory(
         self,
@@ -1009,7 +1039,7 @@ class JellyfinScopedDeleteTests(IsolatedDatabaseTestCase):
         )
         self.assertTrue({"movie", "nfo"} <= self.cloud.nodes.keys())
         self.cloud.provider.delete_empty_directory.assert_not_called()
-        self.fx.assert_synced("source-a")
+        self.fx.assert_retired("source-a")
 
     def test_scoped_api_still_accepts_writer_callback_without_cloud_work_at_202(self):
         path, root = self.movie()
