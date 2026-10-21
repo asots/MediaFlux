@@ -908,26 +908,6 @@ def cancel_retired_strm_metadata_jobs(
     return cancelled
 
 
-def requeue_strm_metadata_jobs(job_ids: Iterable[int | str] | None) -> int:
-    ids = [int(item) for item in (job_ids or []) if str(item).strip().isdigit()]
-    if not ids:
-        return 0
-    database = db
-    stamp = database.now()
-    updated = 0
-    with database.get_conn() as conn:
-        for job_id in ids:
-            cur = conn.execute(
-                "UPDATE strm_metadata_queue SET status='queued',dirty=0,attempts=0,"
-                "next_attempt_at=?,completed_at=NULL,lease_owner='',lease_until=0,"
-                "last_error_type='',last_error='',updated_at=? WHERE id=? "
-                "AND status IN ('failed','retry_wait','cancelled')",
-                (stamp, stamp, job_id),
-            )
-            updated += (cur.rowcount or 0)
-    return updated
-
-
 def count_strm_metadata_jobs(*, provider: str = "guangya") -> dict[str, int]:
     summary = {
         "queued": 0, "running": 0, "retry_wait": 0,

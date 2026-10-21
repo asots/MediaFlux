@@ -2135,7 +2135,6 @@ from app.repositories.strm import (  # noqa: E402,F401
     release_strm_change_targets,
     renew_strm_change_target_leases,
     renew_strm_metadata_job_lease,
-    requeue_strm_metadata_jobs,
     reschedule_strm_change_targets,
     seconds_until_next_strm_change_target,
     settle_strm_metadata_job,
