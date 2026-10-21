@@ -2,6 +2,7 @@
 import json
 import re
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 from starlette.requests import Request
@@ -82,6 +83,38 @@ class OrganizeLogClearTests(unittest.TestCase):
         self.assertIsNone(db.get_organize_log(cloud))
         self.assertIsNone(db.get_organize_log(token_log))
         self.assertIsNotNone(db.get_organize_confirmation("review-token"))
+
+    def test_local_page_clear_and_timeline_share_confirmation_protection(self):
+        pending = self.local("requires_manual", "pending")
+        referenced = self.local("failed", "reviewing")
+        finished = self.local("completed", "finished")
+        db.create_organize_confirmation(
+            token="local-pending", fingerprint="local-pending", chat_id="", source_name="", directory_path="/",
+            payload={"local_task_id": pending}, expires_at="2099-01-01 00:00:00",
+        )
+        db.create_organize_confirmation(
+            token="local-review", fingerprint="local-review", chat_id="", source_name="", directory_path="/",
+            payload={"local_task_id": referenced}, expires_at="2099-01-01 00:00:00",
+        )
+        result = db.delete_local_media_tasks([pending, referenced, finished, 999999])
+        self.assertEqual(result, {"requested": 4, "deleted": 1, "skipped_busy": 2, "missing": 1})
+        self.assertEqual(db.clear_organize_logs(origin="local")["skipped_busy"], 2)
+        self.assertIsNotNone(db.get_local_media_task(pending))
+        self.assertIsNotNone(db.get_local_media_task(referenced))
+        with db.get_conn() as conn:
+            conn.execute("UPDATE organize_confirmations SET status='completed'")
+        self.assertEqual(db.delete_local_media_tasks([referenced])["deleted"], 1)
+        # 确认已结束后仍可显式放弃人工任务；批量清空不会替用户做此决定。
+        self.assertEqual(db.clear_organize_logs(origin="local")["deleted"], 0)
+        self.assertEqual(db.delete_local_media_tasks([pending])["deleted"], 1)
+
+    def test_local_repository_does_not_coerce_invalid_task_ids(self):
+        task = self.local("failed", "kept")
+        invalid_ids: list[Any] = [True, 1.9, "1", -1, 0]
+        for value in invalid_ids:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                db.delete_local_media_tasks([value])
+        self.assertIsNotNone(db.get_local_media_task(task))
 
     def test_children_outside_filter_and_other_owner_survive(self):
         parent = self.cloud("failed", "parent")

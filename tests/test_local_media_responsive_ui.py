@@ -1,9 +1,37 @@
 import re
+import json
+import subprocess
 import unittest
 from pathlib import Path
 
 
 class LocalMediaResponsiveUITests(unittest.TestCase):
+    def test_task_page_loader_reads_all_pages_and_rejects_partial_or_stalled_results(self):
+        source = Path('app/static/js/local-media.js').read_text(encoding='utf-8')
+        loader = source[source.index('    async function loadTaskPages()'):source.index('    const categoryLabels')]
+        script = r'''
+import assert from 'node:assert/strict';
+const run = new Function('api', LOADER + '; return loadTaskPages();');
+const calls = [];
+const pages = [
+  {tasks:[{id:502},{id:501}],has_more:true,next:501},
+  {tasks:[{id:2},{id:1}],has_more:false,next:null},
+];
+const result = await run(async path => {calls.push(path);return pages.shift();});
+assert.deepEqual(result.tasks.map(task=>task.id), [502,501,2,1]);
+assert.deepEqual(calls, ['/api/local-media/tasks','/api/local-media/tasks?before_id=501']);
+let count = 0;
+await assert.rejects(run(async()=>{
+  if(count++)throw new Error('page failed');
+  return {tasks:[{id:2}],has_more:true,next:2};
+}),/page failed/);
+await assert.rejects(run(async()=>({tasks:[{id:2}],has_more:true,next:2})),/分页游标无效/);
+await assert.rejects(run(async()=>({has_more:false})),/响应结构无效/);
+console.log('page loader: complete, failure, invalid cursor, malformed response PASS');
+'''.replace('LOADER', json.dumps(loader))
+        result = subprocess.run(['node', '--input-type=module', '-e', script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_organize_log_controls_detail_and_mobile_selection_contract(self):
         template = Path("app/templates/local_media.html").read_text(encoding="utf-8")
         js = Path("app/static/js/local-media.js").read_text(encoding="utf-8")

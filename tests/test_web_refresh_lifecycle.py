@@ -26,8 +26,70 @@ def _run_node(script: str) -> None:
 
 
 class LocalMediaRefreshLifecycleTests(unittest.TestCase):
+    def test_clear_selection_batches_once_and_keeps_unacknowledged_items_selected(self):
+        source = (ROOT / "app/static/js/local-media.js").read_text(encoding="utf-8")
+        clear_tasks = _extract(
+            source, "    async function clearSelectedTasks()", "    function openSource(",
+        )
+        script = textwrap.dedent(
+            f"""
+            const assert = require('node:assert/strict');
+            const selectedTaskIds = new Set();
+            const calls = [], alerts = [], busy = [];
+            let confirm = true, failAt = 0, refreshes = 0, confirmations = 0;
+            const $ = () => ({{}});
+            const setBusy = (button, value) => busy.push(value);
+            const updateTaskSelectionState = () => {{}};
+            const loadAll = async () => {{refreshes++;}};
+            const appAlert = alert => alerts.push(alert);
+            const appConfirm = async () => {{confirmations++; return confirm;}};
+            const api = async (path, options) => {{
+                assert.equal(path, '/api/local-media/tasks');
+                assert.equal(options.method, 'DELETE');
+                const body = JSON.parse(options.body);
+                assert.equal(body.confirm, 'CLEAR');
+                calls.push(body.ids);
+                if (calls.length === failAt) throw new Error('batch unavailable');
+                return {{deleted: body.ids.length, skipped_busy: 0}};
+            }};
+            {clear_tasks}
+            (async () => {{
+                for (let i = 1; i <= 501; i++) selectedTaskIds.add(i);
+                await clearSelectedTasks();
+                assert.deepEqual(calls.map(ids => ids.length), [500, 1]);
+                assert.equal(new Set(calls.flat()).size, 501);
+                assert.equal(confirmations, 1);
+                assert.equal(selectedTaskIds.size, 0);
+                assert.equal(refreshes, 1);
+                assert.match(alerts.at(-1).message, /已清除 501 条/);
+                assert.deepEqual(busy, [true, false]);
+
+                calls.length = 0; failAt = 2;
+                for (let i = 1; i <= 1001; i++) selectedTaskIds.add(i);
+                await clearSelectedTasks();
+                assert.deepEqual(calls.map(ids => ids.length), [500, 500]);
+                assert.deepEqual([...selectedTaskIds], Array.from({{length:501}}, (_,i)=>501+i));
+                assert.equal(refreshes, 2);
+                assert.equal(alerts.at(-1).title, '日志未全部清除');
+                assert.match(alerts.at(-1).message, /已确认清除 500 条/);
+                assert.match(alerts.at(-1).message, /batch unavailable/);
+                assert.equal(busy.at(-1), false);
+
+                calls.length = 0; confirm = false;
+                await clearSelectedTasks();
+                assert.equal(calls.length, 0);
+                assert.equal(selectedTaskIds.size, 501);
+                assert.equal(refreshes, 2);
+            }})().catch(error => {{console.error(error); process.exit(1);}});
+            """
+        )
+        _run_node(script)
+
     def test_partial_refresh_keeps_old_items_and_item_button_reports_failure(self):
         source = (ROOT / "app/static/js/local-media.js").read_text(encoding="utf-8")
+        load_pages = _extract(
+            source, "    async function loadTaskPages()", "    const categoryLabels",
+        )
         load_all = _extract(
             source,
             "    function loadAll(manual = false, {includeItems = false} = {}) {",
@@ -56,6 +118,7 @@ class LocalMediaRefreshLifecycleTests(unittest.TestCase):
             let currentTab = 'manual';
             let mediaBrowseRequestSerial = 0;
             const alerts = [];
+            let taskPageFailure = false;
             const renders = {{sources: 0, tasks: 0, items: 0}};
             const elements = {{
               lmRefreshBtn: {{}}, lmRefreshItemsBtn: {{}}, lmSourceGrid: {{}},
@@ -80,9 +143,13 @@ class LocalMediaRefreshLifecycleTests(unittest.TestCase):
             const setRefreshFailure = () => {{}};
             const api = async (path) => {{
               if (path.endsWith('/sources')) return {{sources: [{{id: 'new-source'}}]}};
-              if (path.endsWith('/tasks')) return {{tasks: [{{id: 'new-task'}}]}};
+              if (path.endsWith('/tasks')) return taskPageFailure
+                ? {{tasks: [{{id: 2}}], has_more: true, next: 2}}
+                : {{tasks: [{{id: 'new-task'}}]}};
+              if (path.includes('/tasks?')) throw new Error('task page unavailable');
               throw new Error('items unavailable');
             }};
+            {load_pages}
             {load_all}
             {refresh_items}
             (async () => {{
@@ -101,6 +168,10 @@ class LocalMediaRefreshLifecycleTests(unittest.TestCase):
               assert.equal(alerts.at(-1).type, 'error');
               assert.equal(alerts.at(-1).title, '条目刷新失败');
               assert.deepEqual(mediaItems, [{{id: 'old-item'}}]);
+              taskPageFailure = true;
+              const failedPage = await loadAll();
+              assert.equal(failedPage.resources.tasks.ok, false);
+              assert.deepEqual(tasks, [{{id: 'new-task'}}]);
             }})().catch((error) => {{console.error(error); process.exit(1);}});
             """
         )

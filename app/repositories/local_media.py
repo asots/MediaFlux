@@ -887,7 +887,7 @@ def get_local_media_task(task_id: int, *, owner: str = "admin"):
     return LocalMediaTask.from_row(row) if row else None
 
 
-def list_local_media_tasks(*, owner: str = "admin", status: str = "", limit: int = 200):
+def list_local_media_tasks(*, owner: str = "admin", status: str = "", limit: int = 200, before_id: int = 0):
     from app.modules.local_media_models import LOCAL_TASK_STATUSES, LocalMediaTask
 
     sql = "SELECT * FROM local_media_tasks WHERE owner=?"
@@ -897,6 +897,9 @@ def list_local_media_tasks(*, owner: str = "admin", status: str = "", limit: int
             raise ValueError("不支持的本地媒体任务状态")
         sql += " AND status=?"
         params.append(status)
+    if before_id:
+        sql += " AND id<?"
+        params.append(before_id)
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(max(1, min(limit, 1000)))
     with db.get_conn() as conn:
@@ -945,43 +948,48 @@ def list_waiting_local_media_tasks(*, owner: str = "admin", limit: int = 500):
     return [LocalMediaTask.from_row(row) for row in rows]
 
 
+def can_clear_local_media_task(task_id: int, status: str, active_confirmations: set[str]) -> bool:
+    # 显式选中仍可放弃尚未认领的人工任务；有可执行确认卡时必须保留。
+    return (status in _LOCAL_MEDIA_TERMINAL_TASK_STATUSES or status == "requires_manual") and str(task_id) not in active_confirmations
+
+
 def delete_local_media_tasks(
     task_ids: list[int], *, owner: str = "admin"
 ) -> dict[str, int]:
-    """删除指定的非运行中本地整理日志；关联条目和步骤由外键级联清理。"""
-    from app.modules.local_media_models import LOCAL_BUSY_TASK_STATUSES
+    """显式清理非运行中且无未决确认引用的日志；关联步骤由外键级联清理。"""
 
     safe_owner = _local_media_owner(owner)
     normalized_ids: list[int] = []
     for raw_task_id in task_ids:
-        task_id = raw_task_id
-        if task_id > 0 and task_id not in normalized_ids:
-            normalized_ids.append(task_id)
+        if isinstance(raw_task_id, bool) or not isinstance(raw_task_id, int) or raw_task_id <= 0:
+            raise ValueError("日志 ID 必须是正整数")
+        if raw_task_id not in normalized_ids:
+            normalized_ids.append(raw_task_id)
     if not normalized_ids:
         return {"requested": 0, "deleted": 0, "skipped_busy": 0, "missing": 0}
     if len(normalized_ids) > 500:
         raise ValueError("单次最多清除 500 条本地整理日志")
 
     placeholders = ",".join("?" for _ in normalized_ids)
-    busy_placeholders = ",".join("?" for _ in LOCAL_BUSY_TASK_STATUSES)
     with db.get_conn() as conn:
-        deleted = conn.execute(
-                f"DELETE FROM local_media_tasks WHERE owner=? AND id IN ({placeholders}) "
-                f"AND status NOT IN ({busy_placeholders})",
-                [safe_owner, *normalized_ids, *LOCAL_BUSY_TASK_STATUSES],
-            ).rowcount
-        remaining_rows = conn.execute(
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
             f"SELECT id,status FROM local_media_tasks WHERE owner=? AND id IN ({placeholders})",
             [safe_owner, *normalized_ids],
         ).fetchall()
-        remaining = {int(row["id"]): str(row["status"]) for row in remaining_rows}
+        _, active_tasks, _ = db.active_organize_confirmation_refs(conn)
+        selected = [row["id"] for row in rows if can_clear_local_media_task(row["id"], row["status"], active_tasks)]
+        deleted = 0
+        if selected:
+            deleted = conn.execute(
+                f"DELETE FROM local_media_tasks WHERE owner=? AND id IN ({','.join('?' for _ in selected)})",
+                [safe_owner, *selected],
+            ).rowcount
     return {
         "requested": len(normalized_ids),
         "deleted": deleted,
-        "skipped_busy": sum(
-            status in LOCAL_BUSY_TASK_STATUSES for status in remaining.values()
-        ),
-        "missing": len(normalized_ids) - deleted - len(remaining),
+        "skipped_busy": len(rows) - deleted,
+        "missing": len(normalized_ids) - len(rows),
     }
 
 

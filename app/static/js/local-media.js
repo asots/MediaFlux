@@ -16,6 +16,22 @@
         return data;
     };
 
+    async function loadTaskPages() {
+        const rows = [];
+        let before = 0;
+        do {
+            const page = await api('/api/local-media/tasks' + (before ? `?before_id=${before}` : ''));
+            if (!Array.isArray(page.tasks)) throw new Error('整理日志响应结构无效');
+            rows.push(...page.tasks);
+            if (!page.has_more) return {tasks: rows};
+            const next = Number(page.next);
+            if (!Number.isSafeInteger(next) || next <= 0 || (before && next >= before)) {
+                throw new Error('整理日志分页游标无效');
+            }
+            before = next;
+        } while (before);
+    }
+
     const categoryLabels = {
         default: '默认', movie: '电影', tv: '剧集', anime: '动漫',
         documentary: '纪录片', variety: '综艺', concert: '演唱会', kids: '儿童',
@@ -277,7 +293,7 @@
                 ? `<button class="jump-btn" type="button" data-retry="${task.id}"><i data-lucide="rotate-ccw"></i>重试</button>`
                 : '';
         const selected = selectedTaskIds.has(Number(task.id));
-        const selectTitle = task.clearable ? '选择此条整理日志' : '运行中的日志暂不可清除';
+        const selectTitle = task.clearable ? '选择此条整理日志' : '运行中或仍有待执行确认的日志不可清除';
         return `
             <tr data-task-row="${task.id}" class="${selected ? 'is-selected' : ''}">
                 <td class="lm-task-select-cell" data-label="选择"><input class="lm-task-row-select" type="checkbox" data-task-select="${task.id}" ${selected ? 'checked' : ''} ${task.clearable ? '' : 'disabled'} aria-label="${esc(selectTitle)}" title="${esc(selectTitle)}"></td>
@@ -698,7 +714,7 @@
                     const names = shouldLoadItems ? ['sources', 'tasks', 'items'] : ['sources', 'tasks'];
                     const settled = await Promise.allSettled([
                         api('/api/local-media/sources'),
-                        api('/api/local-media/tasks'),
+                        loadTaskPages(),
                         ...(shouldLoadItems ? [api(mediaItemsUrl())] : []),
                     ]);
                     const resources = {};
@@ -974,28 +990,38 @@
         if (!ids.length) return;
         const ok = await appConfirm({
             title: '清除选中的整理日志',
-            message: `将清除 ${ids.length} 条已选日志。运行中的任务会自动跳过；不会删除、移动或修改任何媒体文件。`,
+            message: `将清除 ${ids.length} 条已选日志。运行中或仍有待执行确认的记录会自动跳过；不会删除、移动或修改任何媒体文件。`,
             confirmText: '清除日志',
             danger: true,
         });
         if (!ok) return;
         const button = $('lmClearTasksBtn');
         setBusy(button, true, '清除中');
+        let deleted = 0, skipped = 0, processed = 0;
         try {
-            const result = await api('/api/local-media/tasks', {
-                method: 'DELETE',
-                body: JSON.stringify({confirm: 'CLEAR', ids}),
-            });
-            selectedTaskIds.clear();
+            for (let offset = 0; offset < ids.length; offset += 500) {
+                const batch = ids.slice(offset, offset + 500);
+                const result = await api('/api/local-media/tasks', {
+                    method: 'DELETE',
+                    body: JSON.stringify({confirm: 'CLEAR', ids: batch}),
+                });
+                deleted += Number(result.deleted || 0);
+                skipped += Number(result.skipped_busy || 0);
+                processed += batch.length;
+                batch.forEach((id) => selectedTaskIds.delete(id));
+            }
             await loadAll();
-            const skipped = Number(result.skipped_busy || 0);
             appAlert({
                 type: skipped ? 'warning' : 'success',
                 title: skipped ? '日志已部分清除' : '整理日志已清除',
-                message: `已清除 ${Number(result.deleted || 0)} 条${skipped ? `，跳过 ${skipped} 条运行中记录` : ''}。媒体文件未受影响。`,
+                message: `已清除 ${deleted} 条${skipped ? `，保留 ${skipped} 条运行中或仍有待执行确认的记录` : ''}。媒体文件未受影响。`,
             });
         } catch (error) {
-            appAlert({type: 'error', title: '清除失败', message: error.message});
+            await loadAll();
+            appAlert({
+                type: 'error', title: processed ? '日志未全部清除' : '清除失败',
+                message: `${error.message}。已确认清除 ${deleted} 条、保留 ${skipped} 条；其余请求未确认完成，未自动重试。剩余可清除记录仍保持选中。`,
+            });
         } finally {
             setBusy(button, false, '清除选中');
             updateTaskSelectionState();

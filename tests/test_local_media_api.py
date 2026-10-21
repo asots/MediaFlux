@@ -54,6 +54,92 @@ class LocalMediaAPITests(IsolatedDatabaseTestCase):
         self.assertEqual(response.status_code, 302)
         return self._token(self.client.get("/settings").text)
 
+    def test_task_list_detail_and_clear_preserve_pending_confirmation(self):
+        headers = {"X-CSRF-Token": self.login()}
+        source = db.create_local_media_source("confirmation", "", "", str(self.local_root))
+        task = db.create_local_media_task(source, "", str(self.local_root / "Pending.mkv"))
+        db.update_local_media_task(task, status="requires_manual")
+        db.create_organize_confirmation(
+            token="pending", fingerprint="pending", chat_id="", source_name="", directory_path="/",
+            payload={"local_task_id": task}, expires_at="2099-01-01 00:00:00",
+        )
+        for state in ("requires_manual", "failed"):
+            with self.subTest(state=state):
+                db.update_local_media_task(task, status=state)
+                listed = self.client.get('/api/local-media/tasks')
+                self.assertEqual(listed.status_code, 200)
+                self.assertFalse(listed.json()['tasks'][0]['clearable'])
+                detail = self.client.get(f'/api/local-media/tasks/{task}')
+                self.assertFalse(detail.json()['task']['clearable'])
+                cleared = self.client.request('DELETE', '/api/local-media/tasks', headers=headers,
+                                              json={"confirm": "CLEAR", "ids": [task]})
+                self.assertEqual(cleared.status_code, 200)
+                self.assertEqual(cleared.json()['deleted'], 0)
+                self.assertEqual(cleared.json()['skipped_busy'], 1)
+                self.assertIsNotNone(db.get_local_media_task(task))
+
+    def test_fractional_ids_are_rejected_before_service_or_delete(self):
+        headers = {"X-CSRF-Token": self.login()}
+        source = db.create_local_media_source("fraction", "", "", str(self.local_root))
+        task = db.create_local_media_task(source, "", str(self.local_root / "Kept.mkv"))
+        db.update_local_media_task(task, status="failed")
+        for value in (task + 0.9, True, str(task) + '.9'):
+            with self.subTest(value=value):
+                response = self.client.request('DELETE', '/api/local-media/tasks', headers=headers,
+                                               json={"confirm": "CLEAR", "ids": [value]})
+                self.assertEqual(response.status_code, 400)
+                self.assertIsNotNone(db.get_local_media_task(task))
+        with patch('app.routes.local_media_api.get_local_media_service') as service:
+            response = self.client.post('/api/local-media/inspect', headers=headers, json={"source_id": source + .9})
+        self.assertEqual(response.status_code, 400)
+        service.assert_not_called()
+
+    def test_task_list_reads_source_names_once_for_the_whole_page(self):
+        self.login()
+        source = db.create_local_media_source("shared-source", "", "", str(self.local_root))
+        for index in range(12):
+            task = db.create_local_media_task(source, "", str(self.local_root / f"{index}.mkv"))
+            db.update_local_media_task(task, status="completed")
+        original_connect = db._connect
+        queries = []
+
+        def connect():
+            conn = original_connect()
+            conn.set_trace_callback(queries.append)
+            return conn
+
+        with patch.object(db, '_connect', side_effect=connect):
+            response = self.client.get('/api/local-media/tasks')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()['tasks']), 12)
+        self.assertEqual({row['source_name'] for row in response.json()['tasks']}, {'shared-source'})
+        reads = [sql for sql in queries if sql.lstrip().upper().startswith('SELECT') and 'FROM local_media_sources' in sql]
+        self.assertEqual(len(reads), 1, reads)
+
+    def test_task_pagination_reaches_old_manual_task_without_duplicates_after_insert(self):
+        self.login()
+        source = db.create_local_media_source("paged-source", "", "", str(self.local_root))
+        oldest = db.create_local_media_task(source, "", str(self.local_root / "Old.mkv"))
+        db.update_local_media_task(oldest, status="requires_manual")
+        for index in range(500):
+            task = db.create_local_media_task(source, "", str(self.local_root / f"History-{index}.mkv"))
+            db.update_local_media_task(task, status="completed")
+        first = self.client.get('/api/local-media/tasks').json()
+        self.assertEqual(len(first['tasks']), 500)
+        self.assertTrue(first['has_more'])
+        newest = db.create_local_media_task(source, "", str(self.local_root / "New.mkv"))
+        db.update_local_media_task(newest, status="completed")
+        second = self.client.get('/api/local-media/tasks', params={"before_id": first['next']}).json()
+        self.assertEqual([row['id'] for row in second['tasks']], [oldest])
+        self.assertFalse(second['has_more'])
+        self.assertIsNone(second['next'])
+        ids = [row['id'] for row in [*first['tasks'], *second['tasks']]]
+        self.assertEqual(len(set(ids)), 501)
+        self.assertNotIn(newest, ids)
+        filtered = self.client.get('/api/local-media/tasks', params={"status": "requires_manual"}).json()
+        self.assertEqual([row['id'] for row in filtered['tasks']], [oldest])
+        self.assertEqual(self.client.get('/api/local-media/tasks?before_id=-1').status_code, 422)
+
     def test_source_and_item_lists_load_targets_once_for_all_sources(self):
         self.login()
         expected_ready = {}

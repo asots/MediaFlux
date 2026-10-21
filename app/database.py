@@ -1490,6 +1490,7 @@ def claim_organize_log_operations_batch(
 
 # 操作步骤与可逆业务快照由同一仓储持有；保留原有数据库门面。
 from app.repositories.organize_history import (  # noqa: E402,F401
+    active_organize_confirmation_refs,
     add_organize_operation_step,
     capture_organize_business_snapshot,
     finish_organize_operation_step,
@@ -1609,34 +1610,18 @@ def clear_organize_logs(
         # 选取范围和删除同一事务，避免状态转为执行中后仍按旧快照清理。
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
-            f"SELECT t.origin,t.id,t.status,l.file_id,l.operation_token FROM ({sql}) t "
+            f"SELECT t.origin,t.id,t.status,t.raw_status,l.file_id,l.operation_token FROM ({sql}) t "
             "LEFT JOIN organize_log l ON t.origin='guangya' AND l.id=t.id", params,
         ).fetchall()
-        active_files, active_local, active_tokens = set(), set(), set()
-        for ref in conn.execute(
-            "SELECT token,payload_json FROM organize_confirmations "
-            "WHERE status IN ('pending','queued','running')"
-        ):
-            active_tokens.add("recognition-confirm:" + ref["token"])
-            try:
-                payload = json.loads(ref["payload_json"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            active_local.add(str(payload.get("local_task_id") or ""))
-            files = payload.get("files")
-            if isinstance(files, list):
-                active_files.update(str(item.get("file_id") or "") for item in files if isinstance(item, dict))
-        active_files.discard("")
+        active_files, active_local, active_tokens = active_organize_confirmation_refs(conn)
         selected: dict[str, list[int]] = {"guangya": [], "local": []}
         for row in rows:
             row_origin = row["origin"]
+            # 批量清空不是放弃人工任务；显式选中的本地清理仍保留原有放弃入口。
             protected = row["status"] in {"manual", "processing"} or (
-                row_origin == "local" and str(row["id"]) in active_local
-            ) or (row_origin == "guangya" and (
-                row["file_id"] in active_files or row["operation_token"] in active_tokens
-            ))
+                not can_clear_local_media_task(row["id"], row["raw_status"], active_local)
+                if row_origin == "local" else row["file_id"] in active_files or row["operation_token"] in active_tokens
+            )
             if protected:
                 skipped[row_origin] += 1
             else:
@@ -4345,6 +4330,7 @@ from app.repositories.local_media import (  # noqa: E402,F401
     _normalize_local_media_task_path,
     add_local_media_operation_step,
     add_local_media_task_item,
+    can_clear_local_media_task,
     claim_local_media_confirmation_task,
     claim_local_media_task,
     create_and_link_qb_local_media_task,

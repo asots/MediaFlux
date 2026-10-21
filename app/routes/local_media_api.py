@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, Query, Request
 from fastapi.responses import JSONResponse
 
 from app import database as db
@@ -16,10 +16,8 @@ from app.modules.local_media_candidates import (
     candidate_payload,
     discover_local_media_directory_candidates,
 )
-from app.modules.local_media_models import (
-    LOCAL_BUSY_TASK_STATUSES,
-    LOCAL_MEDIA_CATEGORIES,
-)
+from app.modules.local_media_models import LOCAL_MEDIA_CATEGORIES
+from app.repositories.local_media import can_clear_local_media_task
 from app.modules.local_media_notifications import notify_local_media_task
 from app.modules.local_media_recognition_summary import (
     merge_recognition_summaries,
@@ -64,14 +62,17 @@ def _text(payload: dict, key: str, *, required: bool = False, max_length: int = 
     return text
 
 
-def _integer(payload: dict, key: str, default: int, minimum: int, maximum: int) -> int:
-    value = payload.get(key, default)
-    if isinstance(value, bool):
-        raise ValueError(f"{key} 必须是整数")
+def _integer_value(value: Any, error: str) -> int:
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise ValueError(error)
     try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} 必须是整数") from exc
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(error) from exc
+
+
+def _integer(payload: dict, key: str, default: int, minimum: int, maximum: int) -> int:
+    number = _integer_value(payload.get(key, default), f"{key} 必须是整数")
     if not minimum <= number <= maximum:
         raise ValueError(f"{key} 超出允许范围")
     return number
@@ -90,14 +91,7 @@ def _optional_integer(
     value = payload.get(key)
     if value is None or value == "":
         return None
-    if isinstance(value, bool):
-        raise ValueError(f"{label}必须是整数")
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{label}必须是整数") from exc
-    if isinstance(value, float) and not value.is_integer():
-        raise ValueError(f"{label}必须是整数")
+    number = _integer_value(value, f"{label}必须是整数")
     if isinstance(value, str) and str(number) != value.strip():
         raise ValueError(f"{label}必须是整数")
     if not minimum <= number <= maximum:
@@ -143,11 +137,10 @@ def _task_display_name(task) -> str:
     return str(getattr(task, "title", "") or "").strip() or content_name
 
 
-def _task_payload(task) -> dict:
-    source = db.get_local_media_source(task.source_id, owner=_OWNER)
+def _task_payload(task, source_name: str, active_confirmations: set[str]) -> dict:
     return {
         "id": task.id, "source_id": task.source_id,
-        "source_name": source.name if source else "已删除来源",
+        "source_name": source_name,
         "content_name": Path(task.content_path).name,
         "display_name": _task_display_name(task),
         "title": str(getattr(task, "title", "") or ""),
@@ -157,7 +150,7 @@ def _task_payload(task) -> dict:
         "season": getattr(task, "season_override", None),
         "episode": getattr(task, "episode_override", None),
         "numbering_mode": getattr(task, "numbering_mode", "auto") or "auto",
-        "clearable": task.status not in LOCAL_BUSY_TASK_STATUSES,
+        "clearable": can_clear_local_media_task(task.id, task.status, active_confirmations),
         "error": task.error, "warning": task.warning,
         "confirmation_actor": getattr(task, "confirmation_actor", "") or "",
         "created_at": task.created_at, "updated_at": task.updated_at,
@@ -166,7 +159,10 @@ def _task_payload(task) -> dict:
 
 
 def _task_detail_payload(task) -> dict:
-    payload = _task_payload(task)
+    with db.get_conn() as conn:
+        _, active_confirmations, _ = db.active_organize_confirmation_refs(conn)
+    source = db.get_local_media_source(task.source_id, owner=_OWNER)
+    payload = _task_payload(task, source.name if source else "已删除来源", active_confirmations)
     payload.update({
         "content_path": task.content_path,
         "qb_hash": task.qb_hash,
@@ -563,11 +559,18 @@ def scan_existing_media(request: Request):
 
 
 @router.get("/tasks")
-def list_tasks(request: Request, status: str = ""):
+def list_tasks(request: Request, status: str = "", before_id: int = Query(default=0, ge=0, le=2**63 - 1)):
     require_api_login(request)
     try:
-        tasks = db.list_local_media_tasks(owner=_OWNER, status=status, limit=500)
-        return {"tasks": [_task_payload(item) for item in tasks]}
+        page = db.list_local_media_tasks(owner=_OWNER, status=status, limit=501, before_id=before_id)
+        tasks, has_more = page[:500], len(page) > 500
+        sources = {source.id: source.name for source in db.list_local_media_sources(owner=_OWNER)}
+        with db.get_conn() as conn:
+            _, active_confirmations, _ = db.active_organize_confirmation_refs(conn)
+        return {
+            "tasks": [_task_payload(item, sources.get(item.source_id, "已删除来源"), active_confirmations) for item in tasks],
+            "has_more": has_more, "next": tasks[-1].id if has_more else None,
+        }
     except Exception as exc:
         return _safe_error(exc)
 
@@ -584,17 +587,7 @@ def clear_tasks(request: Request, data: dict | None = Body(default=None)):
             raise ValueError("请选择需要清除的本地整理日志")
         if len(raw_ids) > 500:
             raise ValueError("单次最多清除 500 条本地整理日志")
-        task_ids: list[int] = []
-        for value in raw_ids:
-            if isinstance(value, bool):
-                raise ValueError("日志 ID 必须是正整数")
-            try:
-                task_id = int(value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("日志 ID 必须是正整数") from exc
-            if task_id <= 0:
-                raise ValueError("日志 ID 必须是正整数")
-            task_ids.append(task_id)
+        task_ids = [_integer({"日志 ID": value}, "日志 ID", 0, 1, 2**63 - 1) for value in raw_ids]
         return db.delete_local_media_tasks(task_ids, owner=_OWNER)
     except Exception as exc:
         return _safe_error(exc)

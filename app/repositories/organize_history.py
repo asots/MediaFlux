@@ -12,6 +12,28 @@ _BUSINESS_LOG_FIELDS = (
 _FINISH_FIELDS = {"status", "operation_type", "current_parent_id", "current_name", "error"}
 
 
+def active_organize_confirmation_refs(conn: sqlite3.Connection) -> tuple[set[str], set[str], set[str]]:
+    """在调用方事务内读取仍可执行的确认引用，供日志两入口和页面共用。"""
+    files, tasks, tokens = set(), set(), set()
+    for ref in conn.execute(
+        "SELECT token,payload_json FROM organize_confirmations WHERE status IN ('pending','queued','running')"
+    ):
+        tokens.add("recognition-confirm:" + ref["token"])
+        try:
+            payload = json.loads(ref["payload_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        tasks.add(str(payload.get("local_task_id") or ""))
+        members = payload.get("files")
+        if isinstance(members, list):
+            files.update(str(item.get("file_id") or "") for item in members if isinstance(item, dict))
+    files.discard("")
+    tasks.discard("")
+    return files, tasks, tokens
+
+
 def list_related_organize_logs(log_id: int) -> list[sqlite3.Row]:
     """同一云端主文件的其它历史记录；只提供导航，不替换任一历史快照。"""
     with db.get_conn() as conn:
