@@ -31,6 +31,7 @@ from app.modules.qb_control import (
 from app.repositories.download_requests import (
     can_retry_download_local_import,
     download_display_title,
+    download_postprocess_issues,
     retry_download_local_import,
 )
 from app.web import api_error, api_response, require_api_login
@@ -171,15 +172,7 @@ def _attention_stages(row) -> list[dict[str, str]]:
         append("qb", "qB", qb_status, backend_error("qb"))
     if gy_status in {"failed", "manual_review"}:
         append("guangya", "光鸭", gy_status, backend_error("guangya"))
-    local_status = str(row["local_import_status"] or "")
-    if local_status == "failed":
-        append("local_import", "本地入库", local_status, row["local_import_error"])
-    organize_status = str(row["organize_status"] or "")
-    if int(row["organize_started"] or 0) < 0 or organize_status in {"failed", "requires_manual"}:
-        append("organize", "自动整理", organize_status or "failed", row["organize_error"])
-    strm_status = str(row["strm_status"] or "")
-    if strm_status in {"failed", "partial"}:
-        append("strm", "STRM 同步", strm_status, row["strm_error"])
+    stages.extend(download_postprocess_issues(row))
     cleanup_status = str(row["gy_staging_cleanup_status"] or "")
     if cleanup_status in {"retained", "failed"}:
         append(

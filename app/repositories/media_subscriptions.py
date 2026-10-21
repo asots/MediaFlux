@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Iterable, TypedDict
 
 from app.logger import redact_sensitive_text
+from app.repositories.download_requests import download_postprocess_issues
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -282,6 +283,7 @@ class _SubscriptionWorkflow(TypedDict):
     processing_count: int
     manual_review_count: int
     failed_count: int
+    attention_reasons: list[str]
 
 
 def list_media_subscription_workflows(
@@ -302,6 +304,7 @@ def list_media_subscription_workflows(
             "processing_count": 0,
             "manual_review_count": 0,
             "failed_count": 0,
+            "attention_reasons": [],
         }
         for subscription_id in ids
     }
@@ -324,7 +327,8 @@ def list_media_subscription_workflows(
         admission_rows = conn.execute(
             "SELECT a.subscription_id,a.status AS admission_status,"
             "r.status,r.targets,r.error,r.qb_status,r.gy_status,r.organize_status,"
-            "r.local_import_status,r.strm_status "
+            "r.local_import_status,r.strm_status,r.organize_started,"
+            "r.local_import_error,r.organize_error,r.strm_error "
             "FROM media_download_admissions a "
             "LEFT JOIN download_requests r ON r.id=a.request_id "
             f"WHERE a.subscription_id IN ({placeholders}) AND a.id=("
@@ -344,23 +348,27 @@ def list_media_subscription_workflows(
         admission_status = str(row["admission_status"] or "")
         request_status = str(row["status"] or "")
         target_error = _completed_request_target_error(row)
+        issues = download_postprocess_issues(row)
+        needs_review = any(item["status"] in {"requires_manual", "partial"} for item in issues)
         # 准入已进入终态就代表这一集不再有进行中的工作。下载请求行可能仍
         # 停留在 submitted（例如网盘侧完成后没有回写），若继续按请求状态
         # 判定，已入库的订阅会永远显示「已推送，等待下载」。
-        if admission_status in {"released", "cancelled"} or (admission_status == "completed" and not target_error):
+        if admission_status in {"released", "cancelled"} or (admission_status == "completed" and not target_error and not needs_review):
             continue
-        post_statuses = {
-            str(row["organize_status"] or ""),
-            str(row["local_import_status"] or ""),
-            str(row["strm_status"] or ""),
-        }
+        reasons = [target_error] if target_error else [
+            f"{item['label']}：{item['error'] or '需要处理，请查看原任务'}" for item in issues
+        ]
+        for reason in reasons:
+            reason = redact_sensitive_text(reason)[:500]
+            if reason not in workflow["attention_reasons"] and len(workflow["attention_reasons"]) < 3:
+                workflow["attention_reasons"].append(reason)
         backend_statuses = {str(row["qb_status"] or ""), str(row["gy_status"] or "")}
-        if target_error or request_status == "manual_review" or "requires_manual" in post_statuses:
+        if target_error or request_status == "manual_review" or needs_review:
             workflow["manual_review_count"] += 1
         elif (
             admission_status == "failed"
             or request_status == "failed"
-            or "failed" in post_statuses
+            or any(item["status"] == "failed" for item in issues)
         ):
             workflow["failed_count"] += 1
         elif admission_status == "processing" or request_status == "completed":
@@ -1201,24 +1209,15 @@ def _download_request_admission_projection(
         completed_at = stamp
         error = str(request["error"] or "下载请求失败")[:500]
     elif request_status == "completed":
-        failed_stage = next((
-            (label, str(request[error_key] or ""))
-            for state_key, error_key, label in (
-                ("organize_status", "organize_error", "自动整理"),
-                ("local_import_status", "local_import_error", "本地入库"),
-                ("strm_status", "strm_error", "STRM 联动"),
-            )
-            if str(request[state_key] or "") == "failed"
-        ), None)
-        if failed_stage is None and int(request["organize_started"] or 0) < 0:
-            failed_stage = ("自动整理", str(request["organize_error"] or ""))
+        issues = download_postprocess_issues(request)
+        failed_stage = next((item for item in issues if item["status"] == "failed"), None)
         if failed_stage is not None:
-            label, detail = failed_stage
             status = "failed"
             completed_at = stamp
-            error = f"下载后处理失败（{label}）：{detail or '请在下载记录中重试'}"[:500]
+            error = f"下载后处理失败（{failed_stage['label']}）：{failed_stage['error'] or '请在下载记录中重试'}"[:500]
         else:
             status = "processing"
+            error = "；".join(f"{item['label']}：{item['error'] or '需要处理，请查看原任务；无需重复下载'}" for item in issues)
     elif request_status in {"submitted", "downloading"}:
         status = request_status
     elif request_status == "manual_review":
@@ -1357,7 +1356,9 @@ def reconcile_media_download_admissions(
             status = ""
             error = ""
             completed_at = None
-            if media_key in keys and not _completed_request_target_error(row):
+            pending_postprocess = any(item["status"] in {"partial", "requires_manual"}
+                                      for item in download_postprocess_issues(row))
+            if media_key in keys and not _completed_request_target_error(row) and not pending_postprocess:
                 status = "completed"
                 completed_at = stamp
             else:

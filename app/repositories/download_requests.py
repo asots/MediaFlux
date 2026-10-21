@@ -150,12 +150,33 @@ def delete_download_logs(log_ids: list[int]) -> list[int]:
     return [value for value in normalized if value in existing]
 
 
+# 后处理异常的唯一阶段定义，SQL 待处理查询和各端结果投影共用。
+_POSTPROCESS_ATTENTION_STAGES = (
+    ("local_import", "本地入库", ("failed", "requires_manual")),
+    ("organize", "自动整理", ("failed", "requires_manual", "partial")),
+    ("strm", "STRM 同步", ("failed", "partial")),
+)
+
+
+def download_postprocess_issues(row) -> list[dict[str, str]]:
+    values = dict(row)
+    issues = []
+    for key, label, states in _POSTPROCESS_ATTENTION_STAGES:
+        status = str(values.get(f"{key}_status") or "")
+        if key == "organize" and int(values.get("organize_started") or 0) < 0 and status not in states:
+            status = "failed"
+        if status in states:
+            issues.append({"key": key, "label": label, "status": status,
+                           "error": str(values.get(f"{key}_error") or "")[:500]})
+    return issues
+
+
 _DOWNLOAD_ATTENTION_BASE_WHERE = (
     "status IN ('failed','manual_review') OR "
     "qb_status IN ('failed','manual_review') OR gy_status IN ('failed','manual_review') OR "
-    "local_import_status='failed' OR organize_started<0 OR "
-    "organize_status IN ('failed','requires_manual') OR strm_status IN ('failed','partial') OR "
-    "gy_staging_cleanup_status IN ('retained','failed')"
+    "organize_started<0 OR gy_staging_cleanup_status IN ('retained','failed') OR "
+    + " OR ".join(f"{key}_status IN ({','.join(repr(state) for state in states)})"
+                  for key, _label, states in _POSTPROCESS_ATTENTION_STAGES)
 )
 
 

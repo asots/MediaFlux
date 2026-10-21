@@ -12,6 +12,7 @@ from app import config
 from app import database as db
 from app.agent.errors import AgentToolError
 from app.agent.models import Evidence, ToolResult
+from app.agent.public_safety import sanitize_public_text
 from app.clients.qbittorrent import (
     QBittorrentClient,
     TorrentTask,
@@ -20,7 +21,8 @@ from app.clients.qbittorrent import (
 )
 from app.logger import get_logger
 from app.modules.download_dispatcher import public_download_error
-from app.repositories.download_requests import download_display_title
+from app.modules.local_media_models import LOCAL_TASK_STATUSES
+from app.repositories.download_requests import download_display_title, download_postprocess_issues
 
 logger = get_logger(__name__)
 
@@ -108,7 +110,7 @@ def _safe_request_status(value: Any) -> str:
             "cancelled",
             "outcome_unknown",
             "not_started",
-        }
+        } | LOCAL_TASK_STATUSES
         else "unknown"
     )
 
@@ -165,6 +167,9 @@ def download_request_public_summary(row: Any) -> dict[str, Any]:
             review_required=review_required,
             error=raw_error,
         )
+    postprocess = [{**item, "error": sanitize_public_text(item["error"], limit=500, preserve_format=True) or "需要处理，请查看原任务；无需重复下载"}
+                   for item in download_postprocess_issues(row)]
+    error = "；".join(filter(None, (error, *(f"{item['label']}：{item['error']}" for item in postprocess))))
     return {
         "request_number": int(row["id"]),
         "title": _safe_title(download_display_title(row)),
@@ -174,7 +179,9 @@ def download_request_public_summary(row: Any) -> dict[str, Any]:
         "qb_status": stage_statuses["qb"],
         "guangya_status": stage_statuses["guangya"],
         "organize_status": _safe_request_status(row["organize_status"]),
+        "local_import_status": _safe_request_status(row["local_import_status"] if "local_import_status" in row.keys() else ""),
         "strm_status": _safe_request_status(row["strm_status"]),
+        "postprocess_issues": postprocess,
         "updated_at": str(row["updated_at"] or "")[:32],
         "error": error,
     }

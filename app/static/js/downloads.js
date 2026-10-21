@@ -481,7 +481,12 @@ function renderIssues(data) {
         const selected=selectedIssueIds.has(id);
         const parsed=parseEntryTitle(r.title);
         const stages=Array.isArray(r.stages)?r.stages:[];
-        const issues=stages.map(stage=>`<div class="download-attention-issue"><span class="download-attention-stage">${esc(stage.label||stage.key||'异常')}</span><span class="download-attention-message">${esc(stage.error||'状态异常，请核对相关服务与运行日志。')}</span></div>`).join('')||'<div class="download-attention-issue"><span class="download-attention-message">状态异常，请核对相关服务与运行日志。</span></div>';
+        const issues=stages.map(stage=>{
+            const recovery=stage.key==='local_import'
+                ? `<a class="rss-btn download-attention-action" href="/local-media#${stage.status==='requires_manual'?'review':'tasks'}">处理本地整理</a>`
+                : stage.key==='strm'?'<a class="rss-btn download-attention-action" href="/guangya/strm">查看同步</a>':'';
+            return `<div class="download-attention-issue"><span class="download-attention-stage">${esc(stage.label||stage.key||'异常')}</span><span class="download-attention-message">${esc(stage.error||'状态异常，请核对相关服务与运行日志。')}${recovery}</span></div>`;
+        }).join('')||'<div class="download-attention-issue"><span class="download-attention-message">状态异常，请核对相关服务与运行日志。</span></div>';
         const meta=[`请求 #${r.id}`,origins[r.origin]||r.origin,kinds[r.kind]||r.kind].filter(Boolean).join(' · ');
         const capabilities=r.retry_targets||{};
         const rowBusy=issueActionBusy.has(id);

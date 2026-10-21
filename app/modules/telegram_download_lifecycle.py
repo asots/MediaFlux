@@ -26,6 +26,7 @@ from app.modules.telegram_notification_policy import (
     NotificationTopic,
 )
 from app.notifier import NotificationEvent, safe_int
+from app.repositories.download_requests import download_postprocess_issues
 from app.repositories.download_requests import (
     download_display_title,
     usable_download_title,
@@ -137,6 +138,7 @@ def _overall_state(row, *, archive_status: str, verification_status: str = "", r
         )
         if _status(_value(row, key))
     } | {archive_status}
+    states.update(item["status"] for item in download_postprocess_issues(row))
     verification = _status(verification_status)
     if states.intersection(_ATTENTION_STATES) or verification == "attention":
         return "attention"

@@ -285,6 +285,7 @@ def _subscription_workflow(row: Any, aggregate: Mapping[str, Any] | None = None)
         "processing_count": int(values.get("processing_count") or 0),
         "manual_review_count": int(values.get("manual_review_count") or 0),
         "failed_count": int(values.get("failed_count") or 0),
+        "attention_reasons": list(values.get("attention_reasons") or []),
     }
     active_count = sum(
         workflow[key]

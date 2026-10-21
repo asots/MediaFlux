@@ -10,6 +10,57 @@ from tests.support import isolated_test_database
 
 
 class MediaAdmissionProjectionConsistencyTests(unittest.TestCase):
+    def test_postprocessing_attention_is_consistent_and_retains_admission_until_recovered(self):
+        from app.routes.downloads_api import _attention_stages
+        from app.agent.domains.downloads.actions import download_request_public_summary
+        from app.modules.telegram_download_lifecycle import build_download_lifecycle_event
+
+        cases = (
+            ("local_import", "requires_manual", "请确认本地匹配结果"),
+            ("strm", "partial", "STRM 同步部分完成，请查看运行记录"),
+            ("strm", "partial", "STRM 已完成，媒体库刷新等待后台重试"),
+            ("organize", "partial", "整理部分完成，仍有文件需要处理"),
+        )
+        for episode, (stage, state, reason) in enumerate(cases, 200):
+            with self.subTest(stage=stage, state=state, reason=reason):
+                fields = dict(status="completed", targets="both", qb_status="completed", gy_status="completed",
+                              organize_status="completed", local_import_status="completed", strm_status="completed")
+                fields.update({f"{stage}_status": state, f"{stage}_error": reason})
+                request, admission, key = self.seed(episode, **fields)
+                db.sync_media_download_admission_for_request(request)
+                expected = self.view(admission)
+                self.assertEqual(expected[0], "processing")
+                self.assertIn(reason, expected[1])
+                self.assertIsNone(expected[2])
+                db.reconcile_startup_media_download_admissions()
+                for present in (False, True):
+                    db.reconcile_media_download_admissions(self.subscription, {key} if present else set(), expected_revision=1)
+                    self.assertEqual(self.view(admission), expected)
+                row = db.get_download_request(request)
+                self.assertEqual(db.count_download_requests_requiring_attention(request), 1)
+                issues = _attention_stages(row)
+                self.assertTrue(any(item["key"] == stage and item["error"] == reason for item in issues))
+                summary = download_request_public_summary(row)
+                self.assertEqual(summary["status"], "completed")
+                self.assertEqual(summary["local_import_status"], fields["local_import_status"])
+                self.assertIn(reason, summary["error"])
+                self.assertTrue(str(build_download_lifecycle_event(row).title).startswith("⚠️"))
+                workflow = db.list_media_subscription_workflows([self.subscription])[self.subscription]
+                self.assertEqual(workflow["manual_review_count"], 1)
+                self.assertEqual(workflow["processing_count"], 0)
+                self.assertIn(reason, "；".join(workflow["attention_reasons"]))
+                alternative = db.replace_media_subscription_candidates(self.subscription, key, season=1, episode=episode,
+                    candidates=[{"result_id": f"alternative-{episode}", "title": key}], expires_at="2099-01-01 00:00:00")[0]
+                self.assertIsNone(db.claim_media_download_admission(media_key=key, tmdb_id="1", media_type="tv",
+                    subscription_id=self.subscription, candidate_id=alternative, season=1, episode=episode, subscription_revision=1))
+                db.update_download_request(request, **{f"{stage}_status": "completed", f"{stage}_error": ""})
+                db.reconcile_media_download_admissions(self.subscription, {key}, expected_revision=1)
+                self.assertEqual(self.view(admission)[:2], ("completed", ""))
+                self.assertEqual(db.count_download_requests_requiring_attention(request), 0)
+                saved = db.get_download_request(request)
+                assert saved is not None
+                self.assertEqual((saved["qb_status"], saved["gy_status"]), ("completed", "completed"))
+
     def setUp(self):
         self.path = self.enterContext(isolated_test_database("mediaflux.db"))
         self.enterContext(patch.object(db, "now", return_value="2026-09-08 12:00:00"))

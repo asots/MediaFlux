@@ -217,7 +217,7 @@
         if (primary === 'submitted') return `缺失 ${missing || active} ${unit} · 已推送至 ${target}，等待下载`;
         if (primary === 'downloading') return `缺失 ${missing || active} ${unit} · ${target} 正在下载，完成后将自动整理入库`;
         if (primary === 'processing') return `缺失 ${missing || active} ${unit} · 下载已完成，正在整理并等待媒体库入库`;
-        if (primary === 'manual_review') return `有 ${Number(workflow.manual_review_count || active)} 个任务需要人工核验，请查看资源候选或下载任务`;
+        if (primary === 'manual_review') return (workflow.attention_reasons || []).join('；') || `有 ${Number(workflow.manual_review_count || active)} 个任务需要人工核验，请查看资源候选或下载任务`;
         if (primary === 'delivery_failed') return `缺失 ${missing} ${unit} · 最近一次下载失败，可打开候选重新提交`;
         if (primary === 'candidate_waiting_auto') return `缺失 ${missing} ${unit} · 已找到 ${available} 个候选，尚未满足自动下载条件`;
         if (primary === 'candidate_waiting_confirm') return `缺失 ${missing} ${unit} · ${available} 个候选等待你确认后推送`;
