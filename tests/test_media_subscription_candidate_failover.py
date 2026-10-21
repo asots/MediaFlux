@@ -304,6 +304,29 @@ class MediaSubscriptionCandidateFailoverTests(IsolatedDatabaseTestCase):
         self.assertEqual(len(admissions), 1)
         self.assertEqual(admissions[0]["request_id"], request_id)
 
+    def test_failed_historical_request_creates_successor_before_marking_candidate_submitted(self):
+        subscription_id, source, _indexer, backend = self.scenario(failures=())
+        existing = download_dispatcher.create_request(
+            download_dispatcher.normalize_download_url(source.items[0].magnet),
+            "", "", origin="indexer:nyaa",
+        )
+        request_id = int(existing["id"])
+        db.update_download_request(request_id, targets="qb", status="failed", qb_status="failed", error="历史下载失败")
+        checked = asyncio.run(MediaSubscriptionService().check_subscription(subscription_id))
+        backend.assert_called_once()
+        self.assertEqual(checked["result"]["auto_submitted"], 1)
+        candidates = db.list_media_subscription_candidates(subscription_id, statuses=("available", "submitted"))
+        submitted = [row for row in candidates if row["status"] == "submitted"]
+        self.assertEqual(len(submitted), 1)
+        successor = db.get_download_request(submitted[0]["request_id"])
+        previous = db.get_download_request(request_id)
+        assert successor is not None and previous is not None
+        self.assertNotEqual(successor["id"], previous["id"])
+        self.assertEqual((previous["status"], successor["status"]), ("failed", "submitted"))
+        admissions = db.list_active_media_download_admissions(subscription_id)
+        self.assertEqual(len(admissions), 1)
+        self.assertEqual(admissions[0]["request_id"], successor["id"])
+
     def test_lost_public_result_after_backend_acceptance_does_not_switch_source(self):
         subscription_id, source, _indexer, backend = self.scenario(failures=())
         # 故障注入在受理后的展示映射；使用真实创建 / 准入绑定 / 后端提交。
