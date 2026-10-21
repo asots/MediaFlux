@@ -653,9 +653,9 @@ def enqueue_strm_refresh_paths(
 
 def resolve_strm_failure_with_refresh(
     failure_id: int, paths: Iterable[object] | None, *, allow_emby: bool = True,
-    expected_status: str = "retrying",
+    expected_status: str = "retrying", metadata_job: dict[str, Any] | None = None,
 ) -> bool:
-    """失败恢复的 ACK 与刷新意图同事务；入队失败不得丢失可重试台账。"""
+    """失败恢复、同快照后台队列 ACK 与刷新意图同事务；不重新排队已安装文件。"""
     database = db
     stamp = database.now()
     with database.get_conn() as conn:
@@ -666,6 +666,27 @@ def resolve_strm_failure_with_refresh(
         )
         if cur.rowcount != 1:
             return False
+        if metadata_job is not None:
+            job = conn.execute(
+                "SELECT * FROM strm_metadata_queue WHERE provider='guangya' "
+                "AND source_id=? AND file_id=? AND status='failed'",
+                (metadata_job["source_id"], metadata_job["file_id"]),
+            ).fetchone()
+            if job is not None:
+                policy = StrmRefreshPolicy(**json.loads(job["refresh_policy_json"] or "{}"))
+                installed_policy = StrmRefreshPolicy(**metadata_job["refresh_policy"])
+                # 显示名不是文件身份；已取消/活跃/新快照及冻结旧根的任务不能被覆盖。
+                same_file = _metadata_snapshot(dict(job))[1:7] == _metadata_snapshot(metadata_job)[1:7]
+                same_root = not policy.media_root or policy.media_root == installed_policy.media_root
+                if same_file and same_root:
+                    conn.execute(
+                        "UPDATE strm_metadata_queue SET status='completed',dirty=0,attempts=0,"
+                        "next_attempt_at=?,completed_at=?,lease_owner='',lease_until=0,"
+                        "last_error_type='',last_error='',updated_at=? WHERE id=? AND status='failed'",
+                        (stamp, stamp, stamp, job["id"]),
+                    )
+                    # 原后台任务的刷新范围及下载归属继续履约，不借人工重试扩大其权限。
+                    policy.record(conn, [metadata_job["installed_path"]])
         _enqueue_strm_refresh_paths(conn, paths, stamp=stamp, allow_emby=allow_emby)
         return True
 

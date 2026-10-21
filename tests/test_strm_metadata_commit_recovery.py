@@ -8,6 +8,7 @@ from app.clients.guangya import GuangYaClient
 from typing import cast
 
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -63,6 +64,94 @@ class StrmMetadataCommitRecoveryTests(unittest.TestCase):
             conn.execute(
                 "UPDATE strm_metadata_queue SET next_attempt_at='2000-01-01 00:00:00'"
             )
+
+    def fail_manual_job(self):
+        self.job.update(rel_dir="", target_rel_path=f"{STRM_SUBDIR}/Movie.nfo")
+        self.target = self.root / STRM_SUBDIR / "Movie.nfo"
+        db.enqueue_strm_metadata_jobs([self.job], max_attempts=1)
+        with patch("app.modules.strm.requests.get", side_effect=OSError("isolated download failure")):
+            self.worker._process_one()
+        self.assertEqual(self.queue_row()["status"], "failed")
+
+    def retry_manually(self):
+        return strm.retry_all_strm_failures("source", "metadata", "test", client=cast(GuangYaClient, self.client), runtime_config={
+            "sources": strm.plan_strm_sources([{"id": "source", "name": "整理"}]),
+            "strm_root": str(self.root), "base_url": "http://play.invalid", "media_server_refresh": True,
+        })
+
+    def test_manual_recovery_closes_failed_job_without_requeuing_installed_file(self):
+        self.fail_manual_job()
+        with patch("app.modules.strm.requests.get", return_value=_Response()) as download:
+            result = self.retry_manually()
+        self.assertEqual(result["resolved"], 1)
+        self.assertEqual(self.target.read_bytes(), b"metadata")
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(self.queue_row()["status"], "completed")
+        self.assertEqual(db.count_strm_metadata_jobs()["failed"], 0)
+        self.assertEqual(db.list_strm_failures(status="open"), [])
+        self.assertEqual(len(db.list_strm_refresh_entries()), 1)
+        self.assertEqual(db.claim_due_strm_metadata_jobs(owner="after-repair"), [])
+
+    def test_manual_recovery_keeps_original_refresh_scope_and_request_owner(self):
+        from app.repositories.strm_request_ownership import refresh_work_key
+
+        request, _ = db.create_download_request("manual-recovery-owner", "magnet")
+        owners = db.current_strm_request_owners([request])
+        media_root = str(self.root / STRM_SUBDIR)
+        self.job["refresh_policy"] = {"media_root": media_root, "allow_emby": False, "request_owners": owners}
+        self.fail_manual_job()
+        with patch("app.modules.strm.requests.get", return_value=_Response()):
+            result = self.retry_manually()
+        self.assertEqual(result["resolved"], 1)
+        self.assertEqual(self.queue_row()["status"], "completed")
+        with db.get_conn() as conn:
+            work = list(conn.execute("SELECT request_id,work_key FROM strm_request_work WHERE kind='refresh'"))
+        # 根下单文件只刷新文件本身，不把人工恢复扩大为全媒体根扫描。
+        refresh_target = str(self.target)
+        self.assertEqual([(row["request_id"], row["work_key"]) for row in work], [(request, refresh_work_key(refresh_target, False))])
+        self.assertIn((refresh_target, False), [(event["path"], event["allow_emby"]) for event in db.list_strm_refresh_entries()])
+
+    def test_manual_recovery_ack_failure_rolls_back_and_reuses_installed_file(self):
+        self.fail_manual_job()
+        with db.get_conn() as conn:
+            conn.execute("CREATE TRIGGER reject_manual_refresh BEFORE INSERT ON strm_refresh_outbox BEGIN SELECT RAISE(ABORT,'isolated refresh failure'); END")
+        with patch("app.modules.strm.requests.get", return_value=_Response()):
+            result = self.retry_manually()
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(self.target.read_bytes(), b"metadata")
+        self.assertEqual(self.queue_row()["status"], "failed")
+        self.assertEqual(len(db.list_strm_failures(status="open")), 1)
+        self.assertEqual(db.list_strm_refresh_entries(), [])
+        with db.get_conn() as conn:
+            conn.execute("DROP TRIGGER reject_manual_refresh")
+        with patch("app.modules.strm.requests.get", side_effect=AssertionError("installed metadata must not download again")) as download:
+            result = self.retry_manually()
+        self.assertEqual(result["resolved"], 1)
+        download.assert_not_called()
+        self.assertEqual(self.queue_row()["status"], "completed")
+
+    def test_manual_recovery_does_not_ack_cancelled_active_or_newer_snapshot(self):
+        self.fail_manual_job()
+        original_ack = strm.resolve_strm_failure_with_refresh
+        for state in ("cancelled", "running", "queued", "changed", "relocated"):
+            with self.subTest(state=state):
+                with db.get_conn() as conn:
+                    conn.execute("UPDATE strm_metadata_queue SET status='failed',etag='m1'")
+                    conn.execute("UPDATE strm_failures SET status='open'")
+                def changed_ack(*args, **kwargs):
+                    with db.get_conn() as conn:
+                        if state == "changed":
+                            conn.execute("UPDATE strm_metadata_queue SET etag='m2',revision=revision+1")
+                        elif state == "relocated":
+                            conn.execute("UPDATE strm_metadata_queue SET refresh_policy_json=?", (json.dumps({"media_root": str(self.root / "old-root")}),))
+                        else:
+                            conn.execute("UPDATE strm_metadata_queue SET status=?", (state,))
+                    return original_ack(*args, **kwargs)
+                with patch.object(strm, "resolve_strm_failure_with_refresh", side_effect=changed_ack), patch("app.modules.strm.requests.get", return_value=_Response()):
+                    result = self.retry_manually()
+                self.assertEqual(result["resolved"], 1)
+                self.assertEqual(self.queue_row()["status"], "failed" if state in {"changed", "relocated"} else state)
+                self.assertEqual(self.target.read_bytes(), b"metadata")
 
     def test_extension_rejection_settles_only_its_claimed_snapshot(self):
         for change in ("unchanged", "revision", "lease"):

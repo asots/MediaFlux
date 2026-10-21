@@ -1175,6 +1175,7 @@ def _prepare_strm_metadata_job_with_client(
     strm_root: str,
     *,
     client: GuangYaClient,
+    remote: GuangYaFile | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """使用已确定所有权的客户端准备一个元数据任务。"""
@@ -1184,7 +1185,7 @@ def _prepare_strm_metadata_job_with_client(
         raise ValueError("元数据任务缺少 file_id")
     if should_stop and should_stop():
         raise _STRMStopped("元数据后台任务已停止")
-    remote = runtime_client.file_info(file_id)
+    remote = remote if remote is not None else runtime_client.file_info(file_id)
     if remote is None or remote.is_dir:
         raise RuntimeError("远端元数据文件不存在")
     expected_snapshot = GuangYaFile(
@@ -1280,7 +1281,9 @@ def commit_strm_metadata_job(
     recover_pending_paths(
         metadata_source_key, strm_root, recovery,
         valid_ids={file_id}, only_file_ids={file_id}, should_stop=should_stop,
-        on_refresh_paths=StrmRefreshPolicy(**json.loads(job.get("refresh_policy_json") or "{}")),
+        on_refresh_paths=StrmRefreshPolicy(**(
+            job.get("refresh_policy") or json.loads(job.get("refresh_policy_json") or "{}")
+        )),
     )
     if recovery.get("stopped"):
         raise _STRMStopped("元数据旧路径交接已停止，保留任务待重试")
@@ -3234,6 +3237,11 @@ def _process_claimed_strm_failures(
     located = lookup.located
     base_url = runtime["base_url"]
     strm_root = runtime["strm_root"]
+    refresh_policy = StrmRefreshPolicy(
+        media_root=str((Path(strm_root).expanduser() / STRM_SUBDIR).resolve()),
+        enabled=bool(runtime.get("media_server_refresh", True)),
+        allow_emby=bool(runtime.get("allow_emby", True)),
+    )
     # “全部”重试跨 claim 分页共享，避免每 1000 项重新全读来源索引。
     index_maps = {} if index_maps is None else index_maps
     for completed, row in enumerate(rows, 1):
@@ -3287,6 +3295,8 @@ def _process_claimed_strm_failures(
             )
             try:
                 target = _require_target_within_root(target, strm_root)
+                metadata_job = None
+                refresh_paths = [str(target)]
                 if action == "generate":
                     source_key = source["source_key"]
                     maps = index_maps.get(source_key)
@@ -3303,41 +3313,34 @@ def _process_claimed_strm_failures(
                         existing_by_id, existing_by_path, file, target,
                         installed_fingerprint,
                     )
+                    if cleaned and current_before_install:
+                        refresh_paths.append(str(_row_field(current_before_install, "strm_path", "")))
                 elif action == "metadata":
-                    url = (client.get_download_url(file.file_id) or "")
-                    if not url:
-                        raise RuntimeError("无法获取元数据下载直链")
-                    source_key = source["metadata_source_key"]
-                    maps = index_maps.get(source_key)
-                    if maps is None:
-                        maps = _build_video_index_maps(db.list_strm_index(source_key))
-                        index_maps[source_key] = maps
-                    existing_by_id, existing_by_path = maps
-                    current_before_install = existing_by_id.get(file.file_id)
-                    # 安装器只需当前 file_id 与目标路径所有者，不逐项复制/扫描
-                    # 全来源索引；仍保留同路径多所有者的冲突与回滚语义。
-                    related = dict(existing_by_path.get(str(target), {}))
-                    if current_before_install is not None:
-                        related[file.file_id] = current_before_install
-                    cleaned = _install_metadata_candidate(
-                        file, rel_dir, target, strm_root, source_key,
-                        list(related.values()), url, should_stop=should_stop,
+                    metadata_job = _metadata_queue_payload(
+                        file, rel_dir, strm_root, source_id=source["id"],
+                        source_name=source["name"], refresh_policy=refresh_policy,
                     )
-                    _update_video_index_snapshot(
-                        existing_by_id, existing_by_path, file, target
+                    # 人工恢复与后台任务共用准备/安装链；扫描已提供远端快照。
+                    prepared_job = _prepare_strm_metadata_job_with_client(
+                        metadata_job, strm_root, client=client, remote=file, should_stop=should_stop,
                     )
+                    try:
+                        installed = commit_strm_metadata_job(
+                            metadata_job, prepared_job, strm_root, should_stop=should_stop,
+                        )
+                        cleaned = installed["cleaned"]
+                        metadata_job["installed_path"] = installed["path"]
+                    finally:
+                        prepared = prepared_job.get("prepared")
+                        if isinstance(prepared, PreparedMetadataDownload):
+                            prepared.temp.unlink(missing_ok=True)
                 else:
                     raise ValueError("未知 STRM 重试动作")
-                refresh_paths = [str(target)]
-                if cleaned:
-                    previous = current_before_install
-                    if previous:
-                        refresh_paths.append(str(_row_field(previous, "strm_path", "")))
                 if not resolve_strm_failure_with_refresh(
                     failure_id,
-                    refresh_paths if runtime.get("media_server_refresh", True) else [],
-                    allow_emby=bool(runtime.get("allow_emby", True)),
-                    expected_status="retrying",
+                    refresh_paths if refresh_policy.enabled else [],
+                    allow_emby=refresh_policy.allow_emby,
+                    expected_status="retrying", metadata_job=metadata_job,
                 ):
                     raise RuntimeError("STRM 失败项状态已变化，拒绝覆盖")
                 result["resolved"] += 1

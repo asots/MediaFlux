@@ -130,10 +130,12 @@ def test_metadata_retry_only_visits_related_index_rows(tmp_path, count):
             visits.append(len(args[5]))
             return original(*args, **kwargs)
 
-        with patch.object(strm, "prepare_metadata_download", side_effect=download), patch.object(strm, "_install_metadata_candidate", side_effect=install), patch.object(db, "list_strm_index", wraps=db.list_strm_index) as reads:
+        with patch.object(strm, "prepare_metadata_download", side_effect=download), patch.object(strm, "_install_metadata_candidate", side_effect=install), patch.object(db, "list_strm_index", wraps=db.list_strm_index) as reads, patch.object(db, "list_strm_installation_rows", wraps=db.list_strm_installation_rows) as point_reads:
             result = strm.retry_all_strm_failures("s", "metadata", "test", client=cast(GuangYaClient, client), runtime_config=runtime)
         assert result["resolved"] == count, result
-        assert reads.call_count == 1
+        # 共享准备/安装链只作 file_id/目标路径定点读取，不再整源装载索引。
+        assert reads.call_count == 0
+        assert point_reads.call_count == 2 * count
         assert sum(visits) <= count * 2, {"n": count, "visited": sum(visits)}
 
 
@@ -220,3 +222,33 @@ def test_metadata_retry_download_stop_releases_instead_of_failing(tmp_path):
         row = db.list_strm_failures(status="open")[0]
         assert row["failure_count"] == 1
         assert not list(tmp_path.rglob("*.nfo"))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_metadata_manual_move_honors_refresh_policy_for_old_and_new_paths(tmp_path, enabled):
+    from tests.test_strm_metadata_queue import _Response
+
+    with isolated_test_database(), patch("socket.socket.connect", side_effect=AssertionError("network forbidden")):
+        file = GuangYaFile("m", "Movie.nfo", False, 8, "e", "s")
+        old = tmp_path / strm.STRM_SUBDIR / "Old" / file.name
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"metadata")
+        db.upsert_strm_index("guangya-meta:s", file.file_id, file.etag, file.size,
+                            file.name, str(old), strm._content_fingerprint(old))
+        db.record_strm_failure(source_id="s", source_name="S", file_id="m", parent_id="s",
+                               filename=file.name, action="metadata", rel_dir="",
+                               target_rel_path=f"{strm.STRM_SUBDIR}/{file.name}", error="previous failure")
+        runtime = {"sources": strm.plan_strm_sources([{"id": "s", "name": "S"}]),
+                   "strm_root": str(tmp_path), "base_url": "http://play.invalid",
+                   "media_server_refresh": enabled, "allow_emby": False}
+        with patch("app.modules.strm.requests.get", return_value=_Response()):
+            result = strm.retry_all_strm_failures("s", "metadata", "test",
+                client=cast(GuangYaClient, _TreeClient({"s": [file]})), runtime_config=runtime)
+        target = tmp_path / strm.STRM_SUBDIR / file.name
+        assert result["resolved"] == 1, result
+        assert target.read_bytes() == b"metadata"
+        assert not old.exists()
+        assert db.list_strm_path_cleanup("guangya-meta:s") == []
+        events = db.list_strm_refresh_entries()
+        assert {event["path"] for event in events} == ({str(old.parent), str(target)} if enabled else set())
+        assert all(event["allow_emby"] is False for event in events)
