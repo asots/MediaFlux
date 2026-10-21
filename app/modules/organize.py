@@ -39,7 +39,7 @@ from app import database as db
 from app.clients.guangya import GuangYaClient, GuangYaFile, close_guangya_client
 from app.config import get, get_bool, get_int
 from app.database import add_organize_log, add_organize_log_items, get_media_probe_cache
-from app.logger import get_logger, log_throttled
+from app.logger import get_logger, log_throttled, redact_sensitive_text
 from app.repositories.organize_probe import normalize_notification_context
 from app.modules.directory_scrape_errors import (
     DirectoryScrapeConflictError,
@@ -3569,7 +3569,7 @@ class Organizer:
                 logger.error("联动 STRM 失败 type=%s", type(e).__name__)
                 stats["strm"] = {
                     "ok": False, "error_code": "strm_trigger_failed",
-                    "error": f"STRM 联动启动失败: {str(e)[:300]}",
+                    "error": f"STRM 联动启动失败: {redact_sensitive_text(e)[:300]}",
                 }
 
 

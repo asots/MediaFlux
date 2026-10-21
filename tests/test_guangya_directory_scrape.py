@@ -2238,6 +2238,7 @@ class DirectoryScrapeExecutionTests(IsolatedDatabaseTestCase):
                     self.assertEqual(task["status"], "completed" if outcome == "accepted" else "partial")
                     self.assertGreater(result["stats"]["moved"], 0)
                     self.assertEqual(result["stats"]["strm"]["ok"], outcome == "accepted")
+                    self.assertNotIn("private-audit-token", json.dumps(result))
                     with self.assertRaises(DirectoryScrapeGoneError):
                         self.service.execute_preview("owner", preview["preview_id"])
                     if durable:

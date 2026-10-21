@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from app.sensitive_data import redact_sensitive_text
+
 # 递增规则：仅追加字段不升版本；语义变化或字段移除必须升版本并保留读取兼容。
 ORGANIZE_RESULT_SCHEMA_VERSION = 1
 
@@ -30,7 +32,7 @@ def organize_strm_error(stats: Mapping[str, Any]) -> str:
     """联动拒绝与云端执行分开结算；已排队或主动跳过不伪报同步失败。"""
     handoff = stats.get("strm")
     if isinstance(handoff, dict) and handoff.get("ok") is False and not handoff.get("skipped"):
-        return str(handoff.get("error") or "STRM 联动未受理")[:500]
+        return redact_sensitive_text(handoff.get("error") or "STRM 联动未受理")[:500]
     return "STRM 联动未受理" if _int(stats.get("strm_trigger_failed")) > 0 else ""
 
 

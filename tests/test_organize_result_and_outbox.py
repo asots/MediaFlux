@@ -32,6 +32,13 @@ class OrganizeResultSchemaTests(unittest.TestCase):
         self.assertEqual(event.state, "partial")
         self.assertTrue(str(event.title).startswith("⚠️"))
 
+    def test_handoff_error_shared_with_notifications_redacts_credentials(self):
+        from app.modules.organize_results import organize_strm_error
+
+        error = organize_strm_error({"strm": {"ok": False, "error": "STRM 联动失败 token=private-audit-token"}})
+        self.assertIn("STRM 联动失败", error)
+        self.assertNotIn("private-audit-token", error)
+
     def test_result_exposes_counters_groups_and_strm_without_log_parsing(self):
         result = build_organize_result(
             {
