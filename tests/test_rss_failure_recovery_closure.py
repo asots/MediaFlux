@@ -95,6 +95,34 @@ class RSSFailureRecoveryClosureTests(InitializedWebTestCase):
         assert (db.get_rss_entry(failed)) is not None
         assert (db.get_rss_entry(unknown)) is not None
 
+    def test_retry_preflight_keeps_receipt_when_target_is_not_ready(self):
+        for backend in ("qb", "guangya"):
+            with self.subTest(backend=backend):
+                rid, eid, _ = self.accepted(backend)
+                self.fail_request(rid, backend)
+                before = dict(assert_present(db.get_rss_entry(eid)))
+                with patch.object(dispatcher, "get", return_value=""), patch.object(
+                    dispatcher, "analyze_offline_url",
+                    return_value=SimpleNamespace(allowed=False, reason="已暂停光鸭离线下载"),
+                ), patch.object(dispatcher, "_submit_qb") as qb, patch.object(
+                    dispatcher, "_submit_guangya"
+                ) as gy:
+                    result = RSSEngine().download(eid)
+                qb.assert_not_called()
+                gy.assert_not_called()
+                self.assertFalse(result["ok"])
+                after = dict(assert_present(db.get_rss_entry(eid)))
+                self.assertEqual(after, before, "准入失败不能改写历史受理回执或消耗重试次数")
+                self.assertIn("未配置" if backend == "qb" else "已暂停", result["error"])
+                with patch.object(dispatcher, "_submit_qb", side_effect=self.success) as qb, patch.object(
+                    dispatcher, "_submit_guangya", side_effect=self.success
+                ) as gy:
+                    recovered = RSSEngine().download(eid)
+                self.assertTrue(recovered["ok"], recovered)
+                self.assertEqual(qb.call_count, int(backend == "qb"))
+                self.assertEqual(gy.call_count, int(backend == "guangya"))
+                self.assertNotEqual(recovered["request_id"], rid)
+
     def test_explicit_retry_uses_original_identity_and_backend_then_updates_same_entry(self):
         for backend in ("qb", "guangya"):
             with self.subTest(backend=backend):

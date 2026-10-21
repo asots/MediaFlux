@@ -894,12 +894,26 @@ class RSSEngine:
             if isinstance(payload, dict) else ""
         )
         infohash = self._torrent_infohash(torrent_url) if torrent_url else ""
-        if entry["status"] == "downloaded" or bool(entry["processed"]):
-            # 受理回执与交付状态分离；只有显式操作能重开当前请求的确定失败。
-            if (entry["status"] == "downloaded" and auto_guard is None
-                    and db.update_rss_entries_processed([entry_id], False)):
+        from app.modules.download_dispatcher import (
+            download_resubmit_capabilities, public_dispatch_summary,
+            resubmit_download_request,
+        )
+
+        linked_key = str(self._entry_value(entry, "download_request_key", "") or "")
+        retry_source = db.get_download_request_by_request_key(linked_key) if linked_key else None
+        runtime = qb_runtime_config if isinstance(qb_runtime_config, dict) else None
+        # 先复用下载中心的准入判断，再重开历史回执。配置/规则拒绝不等于
+        # 后端提交失败，不得覆盖原受理记录或让用户丢失再次重试的入口。
+        if delivery["retryable"] and auto_guard is None and not entry_already_claimed:
+            capability = download_resubmit_capabilities(retry_source, qb_runtime_config=runtime)[method] if retry_source else {}
+            if not capability.get("enabled"):
+                return {"ok": False, "existing": True, "method": method,
+                        "request_id": delivery["request_id"], "status": delivery["status"],
+                        "error": capability.get("reason") or "原下载请求不存在"}
+            if db.update_rss_entries_processed([entry_id], False):
                 entry = db.get_rss_entry(entry_id)
-            elif entry["status"] == "downloaded" and (delivery["failed"] or delivery["review_required"]):
+        if entry["status"] == "downloaded" or bool(entry["processed"]):
+            if entry["status"] == "downloaded" and (delivery["failed"] or delivery["review_required"]):
                 return {
                     "ok": False, "existing": True, "method": method, "status": delivery["status"],
                     "request_id": delivery["request_id"], "review_required": delivery["review_required"],
@@ -914,10 +928,6 @@ class RSSEngine:
                     "infohash": infohash,
                     "already_processed": True,
                 }
-        linked_key = str(self._entry_value(entry, "download_request_key", "") or "")
-        if (entry["status"] == "failed" and delivery["retryable"] and auto_guard is None
-                and db.update_rss_entries_processed([entry_id], False)):
-            entry = db.get_rss_entry(entry_id)
         if not torrent_url and not linked_key:
             code, message = ("missing_torrent_url", "条目无种子链接") if isinstance(payload, dict) else ("invalid_payload", "条目数据无效")
             if entry_already_claimed or db.claim_rss_entry(entry_id):
@@ -942,7 +952,6 @@ class RSSEngine:
         request_id = 0
         stage = "submit"
         try:
-            runtime = qb_runtime_config if isinstance(qb_runtime_config, dict) else None
             qb_options = {
                 "qb_save_path": str(
                     self._entry_value(entry, "qb_save_path", "")
@@ -954,12 +963,6 @@ class RSSEngine:
                 "qb_runtime_config": runtime,
             }
             from app.indexers.downloads import submit_download_input
-            from app.modules.download_dispatcher import (
-                public_dispatch_summary,
-                resubmit_download_request,
-            )
-
-            retry_source = db.get_download_request_by_request_key(linked_key) if linked_key else None
             if linked_key:
                 from app.repositories.rss import bind_rss_entry_download
 
