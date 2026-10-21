@@ -232,6 +232,59 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.page.close()
         self.assertEqual(self.errors, [])
 
+    def test_clear_freezes_filters_across_confirmation_and_disables_duplicate_submit(self):
+        self.page.select_option('#orgOrigin', 'guangya')
+        self.page.select_option('#orgStatus', 'failed')
+        self.page.fill('#orgKeyword', '  Exact title  ')
+        self.page.evaluate("""() => {
+            window.appConfirm = options => {window.__confirmCalls.push(options); return new Promise(resolve=>window.__confirmClear=resolve);};
+            const oldApi=window.api;
+            window.api=(url,options={})=>options.method==='DELETE'
+                ? new Promise(resolve=>{window.__clearBody=JSON.parse(options.body);window.__finishClear=resolve;})
+                : oldApi(url,options);
+        }""")
+        button = self.page.locator('#clearOrganizeLogsBtn')
+        size = button.bounding_box()
+        button.click()
+        self.assertTrue(button.is_disabled())
+        self.assertEqual(button.bounding_box(), size)
+        self.assertIn('光鸭整理 · 失败 · 关键词：Exact title', self.page.evaluate('window.__confirmCalls.at(-1).message'))
+        self.page.evaluate("""() => {
+            document.getElementById('orgOrigin').value='all';
+            document.getElementById('orgStatus').value='';
+            document.getElementById('orgKeyword').value='changed';
+            window.__confirmClear(true);
+        }""")
+        self.page.wait_for_function('() => Boolean(window.__clearBody)')
+        self.assertEqual(self.page.evaluate('window.__clearBody'), {
+            'confirm': 'CLEAR', 'origin': 'guangya', 'status': 'failed', 'q': 'Exact title',
+        })
+        self.assertTrue(button.is_disabled())
+        self.page.evaluate("window.__finishClear({ok:true,json:async()=>({deleted:205,skipped_busy:1})})")
+        self.page.wait_for_function("() => !document.getElementById('clearOrganizeLogsBtn').disabled")
+        self.assertIn('已清理 205 条', self.page.locator('#organizeBatchState').inner_text())
+        self.assertIn('保留 1 条', self.page.locator('#organizeBatchState').inner_text())
+
+    def test_clear_cancel_and_failed_request_leave_rows_and_selection_intact(self):
+        self.page.locator('.organize-row-select').first.check()
+        before = self.page.locator('#organizeList').inner_html()
+        self.page.evaluate('window.__confirmAnswer=false')
+        self.page.locator('#clearOrganizeLogsBtn').click()
+        self.assertFalse(any(call['method']=='DELETE' for call in self.calls()))
+        self.assertTrue(self.page.locator('.organize-row-select').first.is_checked())
+        self.page.evaluate("""() => {
+            window.__confirmAnswer=true;
+            window.appAlert=async options=>{window.__clearError=options.message;};
+            const oldApi=window.api;
+            window.api=(url,options={})=>options.method==='DELETE'
+                ? Promise.resolve({ok:false,json:async()=>({error:'test failure'})}) : oldApi(url,options);
+        }""")
+        self.page.locator('#clearOrganizeLogsBtn').click()
+        self.page.wait_for_function("() => window.__clearError==='test failure'")
+        self.assertEqual(self.page.locator('#organizeList').inner_html(), before)
+        self.assertTrue(self.page.locator('.organize-row-select').first.is_checked())
+        self.assertFalse(self.page.locator('#clearOrganizeLogsBtn').is_disabled())
+
     def _serve_local_page(self, route):
         path = urlsplit(route.request.url).path
         if path == "/logs":

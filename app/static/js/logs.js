@@ -93,13 +93,19 @@ function revealOrganizePagination() {
     pagination.removeAttribute('aria-hidden');
 }
 
+function currentOrganizeFilters() {
+    return {
+        origin: document.getElementById('orgOrigin').value || 'all',
+        status: document.getElementById('orgStatus').value || '',
+        q: document.getElementById('orgKeyword').value.trim(),
+    };
+}
+
 function loadOrganize(page=organizePage) {
     const requestSerial = ++organizeRequestSerial;
     loadingOrg = true;
     organizePage=Math.max(1,Number(page)||1);
-    const origin = document.getElementById('orgOrigin').value;
-    const status = document.getElementById('orgStatus').value;
-    const q = document.getElementById('orgKeyword').value.trim();
+    const {origin,status,q} = currentOrganizeFilters();
     const params = [`page=${organizePage}`,`page_size=${ORGANIZE_LOG_PAGE_SIZE}`,`origin=${encodeURIComponent(origin)}`];
     if (status) params.push('status='+encodeURIComponent(status));
     if (q) params.push('q='+encodeURIComponent(q));
@@ -527,27 +533,40 @@ document.getElementById('organizeBatchRevertBtn').addEventListener('click',()=>r
 document.getElementById('organizeBatchDeleteBtn').addEventListener('click',()=>runOrganizeBatch('delete'));
 document.getElementById('organizeBatchExecuteBtn').addEventListener('click',executeBatchCorrection);
 document.getElementById('clearOrganizeLogsBtn').addEventListener('click',async(event)=>{
-    const confirmed=await appConfirm({
-        trigger:event.currentTarget,
-        title:'清理整理记录',
-        message:'清理数据库中的光鸭与本地整理记录、媒体组快照和操作步骤。不会删除或移动任何云端、本地媒体文件；排队中或正在执行的记录会自动跳过。',
-        confirmText:'清理记录',
-        danger:true,
-        verifyText:'CLEAR',
-        verifyLabel:'输入 CLEAR 确认清理整理记录',
-    });
-    if(!confirmed)return;
+    const button=event.currentTarget;
+    if(button.disabled)return;
+    // 以确认弹窗展示的筛选为准；异步等待期间不重新读取控件扩大范围。
+    const filters=currentOrganizeFilters();
+    const filterLabel=[
+        document.getElementById('orgOrigin').selectedOptions[0].textContent,
+        document.getElementById('orgStatus').selectedOptions[0].textContent,
+        filters.q?`关键词：${filters.q}`:'无关键词',
+    ].join(' · ');
+    button.disabled=true;
+    button.setAttribute('aria-busy','true');
     try{
-        const response=await api('/api/logs/organize',{method:'DELETE',body:JSON.stringify({confirm:'CLEAR'})});
+        const confirmed=await appConfirm({
+            trigger:button,
+            title:'清理当前筛选的整理记录',
+            message:`将清理「${filterLabel}」匹配的全部记录（不限当前页），包括对应快照和操作步骤。运行中、待确认及其关联记录会保留；不会删除或移动任何云端、本地媒体文件。`,
+            confirmText:'清理匹配记录',danger:true,
+            verifyText:'CLEAR',verifyLabel:'输入 CLEAR 确认清理当前筛选记录',
+        });
+        if(!confirmed){button.disabled=false;button.focus({preventScroll:true});return;}
+        const response=await api('/api/logs/organize',{method:'DELETE',body:JSON.stringify({confirm:'CLEAR',...filters})});
         const data=await response.json();
         if(!response.ok)throw new Error(data.error||'清理整理记录失败');
         selectedOrganizeLogs.clear();
-        _setOrganizeBatchState(`已清理 ${data.deleted||0} 条记录${data.skipped_busy?`，跳过 ${data.skipped_busy} 条运行中记录`:''}`,'success');
-        loadOverview();loadOrganize();
+        _setOrganizeBatchState(`已清理 ${data.deleted||0} 条记录${data.skipped_busy?`，保留 ${data.skipped_busy} 条运行中/待确认或关联记录`:''}`,'success');
+        await Promise.all([loadOverview(),loadOrganize(1)]);
     }catch(error){
         await appAlert({type:'error',title:'清理失败',message:error.message||'清理整理记录失败'});
+    }finally{
+        button.disabled=false;
+        button.setAttribute('aria-busy','false');
     }
 });
+
 
 function _operationToken(){return (crypto.randomUUID?.()||String(Date.now())+'-'+Math.random().toString(16).slice(2)).replaceAll('-','');}
 function _setOrganizeState(message,type=''){const el=document.getElementById('organizeOperationState');if(el){el.textContent=message||'';el.className='inline-save-state'+(type?' is-'+type:'');}}

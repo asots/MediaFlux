@@ -307,18 +307,35 @@ def organize_timeline(
 
 @router.delete("/organize")
 def clear_organize_log_records(request: Request, data: dict | None = Body(default=None)):
-    """清理光鸭与本地整理记录，不执行任何媒体文件删除。"""
+    """按当前时间线筛选清理记录；不执行任何媒体文件删除。"""
     require_api_login(request)
     data = data or {}
     if str(data.get("confirm") or "") != "CLEAR":
         return api_error("请输入 CLEAR 确认清理整理记录", 400)
+    origin = data.get("origin", "all")
+    status = data.get("status", "")
+    keyword = data.get("q", "")
+    if not all(isinstance(value, str) for value in (origin, status, keyword)):
+        return api_error("整理来源、状态和关键词必须是字符串", 400)
+    keyword = keyword.strip()
     try:
-        result = db.clear_organize_logs()
+        result = db.clear_organize_logs(
+            owner="admin", origin=origin, status=status, keyword=keyword,
+        )
         return {
             **result,
             "success": True,
-            "message": "光鸭与本地整理记录已清理；未删除任何云端或本地媒体文件",
+            "origin": origin,
+            "status": status,
+            "q": keyword,
+            "message": (
+                f"已按当前筛选清理 {result['deleted']} 条整理记录"
+                f"，保留 {result['skipped_busy']} 条运行中/待确认或关联记录"
+                "；未删除任何云端或本地媒体文件"
+            ),
         }
+    except ValueError as exc:
+        return api_error(str(exc), 400)
     except Exception as exc:
         logger.error("清理整理日志失败 type=%s", type(exc).__name__)
         return api_error("清理整理日志失败", 500)

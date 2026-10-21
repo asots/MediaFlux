@@ -1596,75 +1596,71 @@ def recover_interrupted_organize_operations() -> dict[str, int]:
     return {"logs": logs, "steps": steps, "delete_audits": audits}
 
 
-def clear_organize_logs() -> dict[str, int]:
-    """清理可安全删除的光鸭与本地整理记录，不触碰任何媒体文件。"""
-    guangya_busy_statuses = ("reorganizing", "returning", "reverting", "deleting")
-    local_busy_statuses = (
-        "waiting_stable",
-        "recognizing",
-        "planned",
-        "moving",
-        "verifying",
-        "refreshing",
-        "rolling_back",
+def clear_organize_logs(
+    *, owner: str = "admin", origin: str = "all", status: str = "", keyword: str = ""
+) -> dict[str, int]:
+    """清理当前时间线全部匹配记录；保留运行中、待确认及其关联记录。"""
+    sql, params = _organize_timeline_query(
+        owner=owner, origin=origin, status=status, keyword=keyword,
     )
-    guangya_placeholders = ",".join("?" for _ in guangya_busy_statuses)
-    local_placeholders = ",".join("?" for _ in local_busy_statuses)
+    deleted = {"guangya": 0, "local": 0}
+    skipped = {"guangya": 0, "local": 0}
     with get_conn() as conn:
-        guangya_busy = int(
-            conn.execute(
-                f"SELECT COUNT(*) FROM organize_log WHERE status IN ({guangya_placeholders})",
-                guangya_busy_statuses,
-            ).fetchone()[0]
-        )
-        local_busy = int(
-            conn.execute(
-                f"SELECT COUNT(*) FROM local_media_tasks WHERE status IN ({local_placeholders})",
-                local_busy_statuses,
-            ).fetchone()[0]
-        )
-
+        # 选取范围和删除同一事务，避免状态转为执行中后仍按旧快照清理。
+        conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
-            f"SELECT id FROM organize_log WHERE status NOT IN ({guangya_placeholders})",
-            guangya_busy_statuses,
+            f"SELECT t.origin,t.id,t.status,l.file_id,l.operation_token FROM ({sql}) t "
+            "LEFT JOIN organize_log l ON t.origin='guangya' AND l.id=t.id", params,
         ).fetchall()
-        log_ids = [int(row["id"]) for row in rows]
-        deleted_guangya = 0
-        if log_ids:
-            id_placeholders = ",".join("?" for _ in log_ids)
-            conn.execute(
-                f"UPDATE organize_log SET parent_log_id=NULL WHERE parent_log_id IN ({id_placeholders})",
-                log_ids,
-            )
-            conn.execute(
-                f"DELETE FROM organize_operation_steps WHERE log_id IN ({id_placeholders})",
-                log_ids,
-            )
-            conn.execute(
-                f"DELETE FROM organize_delete_audit WHERE organize_log_id IN ({id_placeholders})",
-                log_ids,
-            )
-            conn.execute(
-                f"DELETE FROM organize_log_items WHERE log_id IN ({id_placeholders})",
-                log_ids,
-            )
-            deleted_guangya = conn.execute(
-                f"DELETE FROM organize_log WHERE id IN ({id_placeholders})",
-                log_ids,
-            ).rowcount or 0
-
-        deleted_local = conn.execute(
-            f"DELETE FROM local_media_tasks WHERE status NOT IN ({local_placeholders})",
-            local_busy_statuses,
-        ).rowcount or 0
-
+        active_files, active_local, active_tokens = set(), set(), set()
+        for ref in conn.execute(
+            "SELECT token,payload_json FROM organize_confirmations "
+            "WHERE status IN ('pending','queued','running')"
+        ):
+            active_tokens.add("recognition-confirm:" + ref["token"])
+            try:
+                payload = json.loads(ref["payload_json"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            active_local.add(str(payload.get("local_task_id") or ""))
+            files = payload.get("files")
+            if isinstance(files, list):
+                active_files.update(str(item.get("file_id") or "") for item in files if isinstance(item, dict))
+        active_files.discard("")
+        selected: dict[str, list[int]] = {"guangya": [], "local": []}
+        for row in rows:
+            row_origin = row["origin"]
+            protected = row["status"] in {"manual", "processing"} or (
+                row_origin == "local" and str(row["id"]) in active_local
+            ) or (row_origin == "guangya" and (
+                row["file_id"] in active_files or row["operation_token"] in active_tokens
+            ))
+            if protected:
+                skipped[row_origin] += 1
+            else:
+                selected[row_origin].append(int(row["id"]))
+        if selected["guangya"]:
+            ids = (json.dumps(selected["guangya"]),)
+            scope = "IN (SELECT value FROM json_each(?))"
+            # 只解除已删日志的历史引用，不扩大清理到不匹配的子记录。
+            conn.execute(f"UPDATE organize_log SET parent_log_id=NULL WHERE parent_log_id {scope}", ids)
+            for table, key in (
+                ("organize_operation_steps", "log_id"), ("organize_delete_audit", "organize_log_id"),
+                ("organize_log_items", "log_id"),
+            ):
+                conn.execute(f"DELETE FROM {table} WHERE {key} {scope}", ids)
+            deleted["guangya"] = conn.execute(f"DELETE FROM organize_log WHERE id {scope}", ids).rowcount
+        if selected["local"]:
+            deleted["local"] = conn.execute(
+                "DELETE FROM local_media_tasks WHERE owner=? AND id IN (SELECT value FROM json_each(?))",
+                (_local_media_owner(owner), json.dumps(selected["local"])),
+            ).rowcount
     return {
-        "deleted": deleted_guangya + deleted_local,
-        "skipped_busy": guangya_busy + local_busy,
-        "deleted_guangya": deleted_guangya,
-        "deleted_local": deleted_local,
-        "skipped_busy_guangya": guangya_busy,
-        "skipped_busy_local": local_busy,
+        "deleted": sum(deleted.values()), "skipped_busy": sum(skipped.values()),
+        "deleted_guangya": deleted["guangya"], "deleted_local": deleted["local"],
+        "skipped_busy_guangya": skipped["guangya"], "skipped_busy_local": skipped["local"],
     }
 
 
