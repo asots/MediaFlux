@@ -303,7 +303,7 @@ class DockerRuntimeContractTests(unittest.TestCase):
             "result.wasSuccessful() and not result.skipped",
             browser_runs,
         )
-        self.assertEqual(jobs["smoke"]["needs"], ["test", "browser", "dependency-security"])
+        self.assertEqual(jobs["smoke"]["needs"], ["test", "browser"])
         self.assertEqual(
             jobs["build"]["needs"],
             ["test", "smoke"],

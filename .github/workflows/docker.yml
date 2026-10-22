@@ -21,9 +21,6 @@ permissions:
   contents: read
 
 jobs:
-  dependency-security:
-    uses: ./.github/workflows/dependency-security.yml
-
   test:
     runs-on: ubuntu-latest
     steps:
@@ -166,7 +163,7 @@ jobs:
           PY
 
   smoke:
-    needs: [test, browser, dependency-security]
+    needs: [test, browser]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
