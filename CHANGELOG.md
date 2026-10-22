@@ -6,8 +6,6 @@
 
 ## [0.1.14] - 2026-10-22
 
-> 发布候选说明，尚未发布。以上日期为本次整理日期，已核对范围为 `v0.1.13..262b1e06`；正式发布时需按最终标签目标再次核对日期与提交范围。文末涉及 `v0.1.14` 的版本比较链接在创建并推送该标签后生效。
-
 ### Added
 - 设置页新增 Tavily API Key 只读连接测试，支持测试尚未保存的输入，并区分认证失败和服务暂不可用（[`319f1887`](https://github.com/li88iioo/MediaFlux/commit/319f1887)）。
 - 新增独立的本地网页正文读取及开关、超时和缓存配置；Tavily 保留搜索职责，正文读取不再依赖 Tavily Extract 或消耗搜索额度，仅抓取公开 HTTPS HTML/文本，不执行网页 JavaScript（[`1431bc85`](https://github.com/li88iioo/MediaFlux/commit/1431bc85)）。
