@@ -193,10 +193,12 @@ async function runOrganizeBatch(action){
         const task=await waitOrganizeTask(data.task_id,null);
         if(serial!==organizeBatchTaskSerial)return;
         const failed=Array.isArray(task.result?.failed)?task.result.failed:[];
+        const warnings=Array.isArray(task.result?.warnings)?task.result.warnings:[];
+        const warningText=warnings.length?`；${warnings.join('；')}`:'';
         if(failed.length){
             const details=failed.map(item=>`${item.log_id!==undefined?`#${item.log_id} `:''}${item.error||item.message||'执行失败'}`).join('；');
-            _setOrganizeBatchState(`批次完成，${failed.length} 条失败：${details}`,'error');
-        }else _setOrganizeBatchState(`批次完成，共处理 ${rows.length} 条`,'success');
+            _setOrganizeBatchState(`批次完成，${failed.length} 条失败：${details}${warningText}`,'error');
+        }else _setOrganizeBatchState(`批次完成，共处理 ${rows.length} 条${warningText}`,warnings.length?'error':'success');
     }catch(error){if(serial===organizeBatchTaskSerial)_setOrganizeBatchState(error.message,'error');}
 }
 

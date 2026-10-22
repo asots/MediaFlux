@@ -228,6 +228,28 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.page.goto("http://mediaflux.test/logs", wait_until="domcontentloaded")
         self.page.wait_for_function("() => window.__apiCalls?.some(call => call.path === '/api/logs/organize/timeline')")
 
+    def enable_batch_delete_fixture(self, task_status='completed', task_result=None):
+        rows = [
+            {**ROWS[0], "media_type": "tv"},
+            {**ROWS[1], "media_type": "tv"},
+        ]
+        self.page.evaluate("""([rows, taskStatus, taskResult]) => Object.assign(window.__testConfig, {
+            rows, taskStatus, taskResult,
+        })""", [rows, task_status, task_result or {
+            "success": True, "action": "delete", "requested": 2,
+            "completed": [], "failed": [], "warnings": [],
+        }])
+        self.page.evaluate("() => loadOrganize()")
+        self.page.wait_for_function("() => document.querySelectorAll('.organize-row-select').length === 2")
+
+    def run_batch_delete(self):
+        self.page.locator('.organize-row-select').nth(0).check()
+        self.page.locator('.organize-row-select').nth(1).check()
+        self.page.locator('#organizeBatchDeleteBtn').click()
+        self.page.wait_for_function("() => window.__apiCalls.some(call => call.path === '/api/logs/organize/batch' && call.method === 'POST')")
+        self.page.wait_for_function("() => document.getElementById('organizeBatchState').textContent.includes('批次完成')")
+        return self.page.locator('#organizeBatchState')
+
     def tearDown(self):
         self.page.close()
         self.assertEqual(self.errors, [])
@@ -598,6 +620,42 @@ class LogsBatchCorrectionBrowserTests(unittest.TestCase):
         self.assertFalse(any(call["path"].endswith("/reorganize") or call["path"].endswith("/reorganize/preview") for call in calls))
         # 唯一 POST 是明确无副作用的整批预览，没有云盘写入/执行请求。
         self.assertEqual([call["path"] for call in calls if call["method"] == "POST"], ["/api/logs/organize/batch/preview"])
+
+    def test_batch_delete_warning_without_failures_is_visible_as_error(self):
+        warning = 'STRM 精准收尾未完成：目标文件暂不可写'
+        self.enable_batch_delete_fixture(task_result={
+            'success': True, 'action': 'delete', 'requested': 2,
+            'completed': [], 'failed': [], 'warnings': [warning],
+        })
+        state = self.run_batch_delete()
+        self.assertIn('批次完成，共处理 2 条', state.inner_text())
+        self.assertIn(warning, state.inner_text())
+        self.assertIn('is-error', state.get_attribute('class') or '')
+        confirmation = self.page.evaluate('window.__confirmCalls.at(-1)')
+        self.assertEqual(confirmation['title'], '批量移入光鸭回收站')
+        self.assertEqual(confirmation['verifyText'], 'DELETE')
+        request = self.execute_calls()[-1]['body']
+        self.assertEqual(request['action'], 'delete')
+        self.assertEqual(request['confirm'], 'DELETE')
+        self.assertEqual([item['log_id'] for item in request['entries']], [10, 11])
+
+    def test_batch_delete_failure_and_warning_are_both_visible(self):
+        warning = 'STRM 精准收尾未完成：目标文件暂不可写'
+        error = '日志状态或版本已变化，请刷新后重试'
+        self.enable_batch_delete_fixture(task_status='partial', task_result={
+            'success': False, 'action': 'delete', 'requested': 2,
+            'completed': [], 'failed': [{'log_id': 11, 'error': error}],
+            'warnings': [warning],
+        })
+        state = self.run_batch_delete()
+        text = state.inner_text()
+        self.assertIn('1 条失败', text)
+        self.assertIn(error, text)
+        self.assertIn(warning, text)
+        self.assertIn('is-error', state.get_attribute('class') or '')
+        request = self.execute_calls()[-1]['body']
+        self.assertEqual(request['action'], 'delete')
+        self.assertEqual(request['confirm'], 'DELETE')
 
     def test_partial_task_result_uses_completed_and_failed_contract(self):
         self.page.evaluate("() => window.__testConfig.taskResult={success:false,action:'reorganize',requested:2,completed:[{log_id:10,result:{file_name:'done.mkv'}}],failed:[{log_id:11,error:'目标已存在'}],warnings:[]}")

@@ -48,7 +48,12 @@ from app.logger import get_logger, redact_sensitive_text
 from app.modules.process_lock import CrossProcessLock
 from app.modules.strm_notifications import append_change, relative_change
 from app.modules.strm_recovery import reconcile_historical_strm, recover_pending_paths
-from app.repositories.strm import StrmRefreshPolicy, resolve_strm_failure_with_refresh
+from app.repositories.strm import (
+    StrmRefreshPolicy,
+    list_strm_path_cleanup_sources,
+    resolve_strm_failure_with_refresh,
+    retire_deleted_strm_files,
+)
 
 logger = get_logger(__name__)
 
@@ -1339,6 +1344,39 @@ def _remove_indexed_item(
     if not path_bucket:
         existing_by_path.pop(str(current["strm_path"]), None)
     return (1 if deleted else 0), indexed_path
+
+def cleanup_deleted_cloud_files(file_ids: set[str], *, allow_emby: bool) -> dict:
+    """按已确认回收的对象精准收尾，复用旧路径凭据，不扫描云端来源。"""
+    stats: dict = {"cleaned": 0, "metadata_cleaned": 0}
+    if not file_ids:
+        return stats
+    strm_root = get("STRM_ROOT", "").strip()
+    if not STRM_OPERATION_LOCK.acquire():
+        raise RuntimeError("STRM 写锁不可用")
+    try:
+        stats.update(retire_deleted_strm_files(
+            {"file_id": file_id} for file_id in sorted(file_ids)
+        ))
+        sources = list_strm_path_cleanup_sources(file_ids)
+        if sources and not strm_root:
+            raise ValueError("未配置 STRM 本地根目录，已保留清理凭据")
+        policy = StrmRefreshPolicy(
+            media_root=str(Path(strm_root) / STRM_SUBDIR), allow_emby=allow_emby,
+        )
+        for source in sources:
+            recover_pending_paths(
+                source, strm_root, stats, valid_ids=set(), only_file_ids=file_ids,
+                on_refresh_paths=policy,
+            )
+    finally:
+        STRM_OPERATION_LOCK.release()
+    # 只唤醒既有刷新 outbox 消费者；没有本地路径变化就不启动后处理。
+    if stats.get("changed_strm_paths"):
+        from app.modules.strm_metadata_worker import get_strm_metadata_worker
+
+        get_strm_metadata_worker().wake()
+    return stats
+
 
 def _incremental_rel_dir(rel_dir: str, rel_prefix: str = "") -> str:
     raw_parts = [

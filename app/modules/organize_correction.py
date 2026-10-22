@@ -54,6 +54,7 @@ from app.modules.scraper import (
     TMDBScraper,
     extract_recognition_context,
 )
+from app.modules.strm import cleanup_deleted_cloud_files
 
 logger = get_logger(__name__)
 
@@ -376,7 +377,7 @@ class OrganizeCorrectionService:
         failed: list[dict] = []
         warnings: list[str] = []
 
-        prepared_deletes: dict[int, tuple[list[CorrectionItem], list[CorrectionItem]]] = {}
+        prepared_deletes: dict[int, list[CorrectionItem]] = {}
         if action == "delete":
             if confirm_text != "DELETE":
                 raise ValueError("请输入 DELETE 确认批量移入光鸭回收站")
@@ -413,8 +414,7 @@ class OrganizeCorrectionService:
                 elif action == "revert":
                     result = self.revert_latest(log_id, token, version)
                 else:
-                    items, ordered = prepared_deletes[log_id]
-                    result = self._execute_claimed_delete(log_id, token, items, ordered)
+                    result = self._execute_claimed_delete(log_id, token, prepared_deletes[log_id])
                 completed.append({"log_id": log_id, "result": result})
                 warnings.extend(result.get("warnings") or [])
             except Exception as exc:
@@ -1886,7 +1886,7 @@ class OrganizeCorrectionService:
 
     def _prepare_delete_group(
         self, log_id: int, confirm_text: str,
-    ) -> tuple[list[CorrectionItem], list[CorrectionItem]]:
+    ) -> list[CorrectionItem]:
         detail = self.detail(log_id)
         if confirm_text != "DELETE":
             raise ValueError("请输入 DELETE 确认移入光鸭回收站")
@@ -1907,13 +1907,14 @@ class OrganizeCorrectionService:
                     organize_log_id=log_id,
                 )
             raise
-        return items, ordered
+        return ordered
 
     def _execute_claimed_delete(
         self, log_id: int, operation_token: str,
-        items: list[CorrectionItem], ordered: list[CorrectionItem],
+        ordered: list[CorrectionItem],
     ) -> dict:
-        deleted: int = 0
+        deleted: set[str] = set()
+        error: Exception | None = None
         try:
             for index, item in enumerate(ordered, start=1):
                 step_id = db.add_organize_operation_step(
@@ -1931,35 +1932,45 @@ class OrganizeCorrectionService:
                         ),
                         organize_log_id=log_id,
                     )
-                    deleted += 1
+                    deleted.add(item.file_id)
                     db.update_organize_log_item(item.id, status="deleted", error="")
                     db.finish_organize_operation_step(step_id, "success")
                 except Exception as exc:
                     db.finish_organize_operation_step(step_id, "failed", str(exc))
                     raise
         except Exception as exc:
-            db.update_organize_log(
-                log_id, status="partial_failed" if deleted else "failed", error=str(exc)
-            )
-            raise
-        db.update_organize_log(
-            log_id, status="deleted", operation_type="delete", error=""
-        )
+            error = exc
+        warnings: list[str] = []
         rules = OrganizeRules.from_config()
-        warnings = self._run_post_actions(items=items, rules=rules, moved=deleted)
+        if deleted and rules.link_strm:
+            try:
+                cleanup = cleanup_deleted_cloud_files(deleted, allow_emby=rules.emby_refresh)
+                warnings = list(cleanup.get("error_samples") or [])
+            except Exception as exc:
+                logger.warning("日志删除后 STRM 收尾失败 log=%s type=%s", log_id, type(exc).__name__)
+                warnings.append("云端文件已移入回收站，但 STRM 本地收尾未完成，请核对后同步")
+        if error is not None:
+            message = "；".join([str(error), *warnings])
+            db.update_organize_log(
+                log_id, status="partial_failed" if deleted else "failed", error=message,
+            )
+            raise RuntimeError(message) from error
+        db.update_organize_log(
+            log_id, status="deleted", operation_type="delete", error="；".join(warnings)
+        )
         return {
-            "success": True, "log_id": log_id, "deleted": deleted,
+            "success": True, "log_id": log_id, "deleted": len(deleted),
             "warnings": warnings,
         }
 
     def delete_group(self, log_id: int, operation_token: str,
                      expected_version: int, confirm_text: str) -> dict:
-        items, ordered = self._prepare_delete_group(log_id, confirm_text)
+        ordered = self._prepare_delete_group(log_id, confirm_text)
         if not db.claim_organize_log_operation(
             log_id, operation_token, "deleting", tuple(DELETE_STATUSES), expected_version,
         ):
             raise RuntimeError("日志状态或版本已变化，请刷新后重试")
-        return self._execute_claimed_delete(log_id, operation_token, items, ordered)
+        return self._execute_claimed_delete(log_id, operation_token, ordered)
 
 
 

@@ -6,6 +6,7 @@ from app.clients.guangya import GuangYaClient
 from app.modules.scraper import TMDBScraper
 
 import json
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 import unittest
@@ -13,6 +14,7 @@ import unittest.mock
 from unittest.mock import patch
 
 from app import database as db
+from app.modules import strm
 from app.clients.guangya import GuangYaFile
 from app.modules.subtitle_identity import SubtitleIdentity, plan_subtitle_companions
 from app.modules.organize import OrganizePlan, OrganizeRules, Organizer
@@ -233,8 +235,8 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
         with patch.object(Organizer, "_post_organize_link") as post_action:
             result = service.delete_group(log_id, "manual-token", version, "DELETE")
 
-        post_action.assert_called_once()
-        self.assertEqual(post_action.call_args.args[0], {"moved": 2})
+        post_action.assert_not_called()
+        self.assertEqual(result["warnings"], [])
         self.assertEqual(result["deleted"], 2)
         self.assertEqual({row["status"] for row in db.list_organize_delete_audits(log_id)}, {"success"})
         self.assertEqual(len(service.detail(log_id)["delete_audits"]), 2)
@@ -369,6 +371,291 @@ class ManualRecycleBinDeleteTests(IsolatedDatabaseTestCase):
         get_organize_log_result_3 = db.get_organize_log(log_id)
         assert get_organize_log_result_3 is not None
         self.assertEqual(get_organize_log_result_3["status"], "success")
+
+
+class LogDeleteSTRMClosureTests(IsolatedDatabaseTestCase):
+    def setUp(self):
+        super().setUp()
+        # 每个用例独立安装目录和数据库，禁止测试副作用流入后续用例。
+        from tests.support import isolated_test_database
+
+        self.enterContext(isolated_test_database())
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        original_get = strm.get
+        self.enterContext(patch.object(strm, "get", side_effect=lambda key, default="":
+            str(self.root) if key == "STRM_ROOT" else original_get(key, default)))
+        self.rules = OrganizeRules(link_strm=True, emby_refresh=False)
+        self.enterContext(patch.object(OrganizeRules, "from_config", return_value=self.rules))
+        self.sync = self.enterContext(patch.object(Organizer, "_post_organize_link"))
+        self.wake = self.enterContext(patch("app.modules.strm_metadata_worker.get_strm_metadata_worker"))
+        self.remote: dict[str, GuangYaFile] = {}
+        self.client = unittest.mock.Mock(spec=GuangYaClient)
+        self.client.file_info.side_effect = self.remote.get
+        self.client.list_dir.side_effect = lambda parent: [f for f in self.remote.values() if f.parent_id == parent]
+        self.client.delete.side_effect = lambda ids: self.remote.pop(ids[0])
+        self.service = OrganizeCorrectionService(client=self.client, scraper=cast(TMDBScraper, object()))
+        self.addCleanup(self.service.close)
+        self.addCleanup(self.sync.assert_not_called)
+
+    def seed(self, file_id="video", *, subtitle=False, status="skipped"):
+        files = [cloud_file(file_id, file_id + ".mkv", etag="gcid-" + file_id)]
+        if subtitle:
+            files.append(cloud_file(file_id + "-sub", file_id + ".srt", size=2, etag="subtitle"))
+        for file in files:
+            self.remote[file.file_id] = file
+        log_id = db.add_organize_log(
+            "guangya", "incoming", files[0].name, file_id, status, "1", media_type="tv",
+            original_parent_id="source", original_name=files[0].name,
+            current_parent_id="source", current_name=files[0].name, legacy_incomplete=False,
+        )
+        db.add_organize_log_items(log_id, [{
+            "file_id": f.file_id, "role": "video" if f is files[0] else "subtitle",
+            "original_parent_id": f.parent_id, "current_parent_id": f.parent_id,
+            "original_name": f.name, "current_name": f.name, "size": f.size, "etag": f.etag,
+        } for f in files])
+        return log_id, files
+
+    def index(self, file, *, source="library", path=None, fingerprint=True):
+        metadata = not file.name.endswith(".mkv")
+        path = path or self.root / strm.STRM_SUBDIR / source / (
+            file.name if metadata else file.file_id + ".strm"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("managed-" + file.file_id)
+        db.upsert_strm_index(
+            ("guangya-meta:" if metadata else "guangya:") + source,
+            file.file_id, file.etag, file.size, file.name, str(path),
+            strm._content_fingerprint(path) if fingerprint else "",
+        )
+        return path
+
+    def delete(self, log_id):
+        return self.service.delete_group(log_id, "delete-token", self.service.detail(log_id)["version"], "DELETE")
+
+    def pending(self):
+        with db.get_conn() as conn:
+            return conn.execute("SELECT * FROM strm_path_cleanup ORDER BY id").fetchall()
+
+    def test_unindexed_skipped_file_does_not_schedule_any_local_work(self):
+        log_id, _ = self.seed()
+        result = self.delete(log_id)
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual(self.pending(), [])
+        self.wake.assert_not_called()
+        self.assertEqual(db.list_strm_refresh_entries(), [])
+
+    def test_indexed_skipped_group_removes_only_owned_paths_and_hands_off_refresh(self):
+        log_id, files = self.seed(subtitle=True)
+        paths = [self.index(file) for file in files]
+        paths.append(self.index(files[0], source="second-library"))
+        _, neighbors = self.seed("neighbor")
+        neighbor = self.index(neighbors[0])
+        result = self.delete(log_id)
+        self.assertEqual(result["deleted"], 2)
+        self.assertEqual(result["warnings"], [])
+        self.assertTrue(all(not path.exists() for path in paths))
+        self.assertTrue(neighbor.exists())
+        self.assertEqual(len(db.list_strm_index("guangya:library")), 1)
+        self.assertEqual(db.list_strm_index("guangya-meta:library"), [])
+        self.assertEqual(self.pending(), [])
+        refresh = db.list_strm_refresh_entries()
+        self.assertTrue(refresh)
+        self.assertTrue(all(not row["allow_emby"] for row in refresh))
+        self.wake.return_value.wake.assert_called_once()
+        calls = self.client.delete.call_count
+        with self.assertRaises(ValueError):
+            self.delete(log_id)
+        self.assertEqual(self.client.delete.call_count, calls)
+        repeated = strm.cleanup_deleted_cloud_files({f.file_id for f in files}, allow_emby=False)
+        self.assertEqual(repeated["cleaned"], 0)
+        self.assertEqual(repeated["metadata_cleaned"], 0)
+        self.assertEqual(self.client.delete.call_count, calls)
+
+    def test_only_confirmed_cloud_deletions_are_cleaned_after_partial_failure(self):
+        log_id, files = self.seed(subtitle=True)
+        video, subtitle = [self.index(file) for file in files]
+
+        def delete(ids):
+            if ids == ["video"]:
+                raise RuntimeError("provider rejected video")
+            self.remote.pop(ids[0])
+
+        self.client.delete.side_effect = delete
+        with self.assertRaisesRegex(RuntimeError, "provider rejected video"):
+            self.delete(log_id)
+        self.assertTrue(video.exists())
+        self.assertFalse(subtitle.exists())
+        log = db.get_organize_log(log_id)
+        assert log is not None
+        self.assertEqual(log["status"], "partial_failed")
+        self.assertEqual(len(db.list_strm_index("guangya:library")), 1)
+        self.assertEqual(db.list_strm_index("guangya-meta:library"), [])
+
+    def test_changed_local_file_is_preserved_with_persistent_cleanup_warning(self):
+        log_id, files = self.seed()
+        path = self.index(files[0])
+        path.write_text("user edited contents")
+        result = self.delete(log_id)
+        self.assertTrue(result["success"])
+        self.assertTrue(result["warnings"])
+        self.assertEqual(path.read_text(), "user edited contents")
+        self.assertEqual(len(self.pending()), 1)
+        log = db.get_organize_log(log_id)
+        assert log is not None
+        self.assertIn("STRM", log["error"])
+        self.assertEqual(log["status"], "deleted")
+        self.wake.assert_not_called()
+        # 人工核对恢复受管内容后，只重试本地收尾，无须重放云盘删除。
+        path.write_text("managed-video")
+        recovery = strm.cleanup_deleted_cloud_files({"video"}, allow_emby=False)
+        self.assertEqual(recovery["cleaned"], 1)
+        self.assertFalse(path.exists())
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.client.delete.call_count, 1)
+
+    def test_missing_fingerprint_never_loses_cleanup_ownership(self):
+        log_id, files = self.seed()
+        path = self.index(files[0], fingerprint=False)
+        result = self.delete(log_id)
+        self.assertTrue(path.exists())
+        self.assertTrue(result["warnings"])
+        self.assertEqual(len(self.pending()), 1)
+        self.assertEqual(self.pending()[0]["content_fingerprint"], "")
+
+    def test_shared_local_path_keeps_other_cloud_file_owner(self):
+        log_id, files = self.seed()
+        path = self.index(files[0])
+        other = cloud_file("neighbor", "neighbor.mkv")
+        self.index(other, source="other-library", path=path)
+        result = self.delete(log_id)
+        self.assertEqual(result["warnings"], [])
+        self.assertTrue(path.exists())
+        self.assertEqual(len(db.list_strm_index("guangya:other-library")), 1)
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(db.list_strm_refresh_entries(), [])
+
+    def test_outside_root_and_symlink_paths_are_preserved(self):
+        outside = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        symlink = self.root / strm.STRM_SUBDIR / "link"
+        symlink.parent.mkdir(parents=True)
+        symlink.symlink_to(outside, target_is_directory=True)
+        for file_id, path in (("outside", outside / "outside.strm"), ("linked", symlink / "linked.strm")):
+            with self.subTest(file_id=file_id):
+                log_id, files = self.seed(file_id)
+                self.index(files[0], path=path)
+                result = self.delete(log_id)
+                self.assertTrue(result["warnings"])
+                self.assertTrue(path.is_file())
+        self.assertEqual(len(self.pending()), 2)
+        self.wake.assert_not_called()
+
+    def test_batch_continues_after_failure_and_cleans_only_successful_objects(self):
+        entries, paths = [], []
+        for file_id in ("first", "rejected", "last"):
+            log_id, files = self.seed(file_id, status="success")
+            paths.append(self.index(files[0]))
+            entries.append({"log_id": log_id, "operation_token": "batch-" + file_id,
+                            "expected_version": self.service.detail(log_id)["version"]})
+
+        def delete(ids):
+            if ids == ["rejected"]:
+                raise RuntimeError("provider rejected file")
+            self.remote.pop(ids[0])
+
+        self.client.delete.side_effect = delete
+        result = self.service.run_batch("delete", entries, "DELETE")
+        self.assertFalse(result["success"])
+        self.assertEqual([r["log_id"] for r in result["completed"]], [entries[0]["log_id"], entries[2]["log_id"]])
+        self.assertEqual([r["log_id"] for r in result["failed"]], [entries[1]["log_id"]])
+        self.assertEqual([path.exists() for path in paths], [False, True, False])
+        self.assertEqual(self.client.delete.call_count, 3)
+
+    def test_batch_keeps_cleanup_warning_in_cloud_success_receipt(self):
+        log_id, files = self.seed(status="success")
+        path = self.index(files[0])
+        path.write_text("changed locally")
+        second, _ = self.seed("second", status="success")
+        result = self.service.run_batch("delete", [{
+            "log_id": item, "operation_token": "batch-warning-" + str(item),
+            "expected_version": self.service.detail(item)["version"],
+        } for item in (log_id, second)], "DELETE")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["failed"], [])
+        self.assertEqual(result["completed"][0]["result"]["deleted"], 1)
+        self.assertTrue(result["warnings"])
+        self.assertTrue(path.exists())
+
+    def test_metadata_only_queue_is_cancelled_without_triggering_sync(self):
+        log_id, files = self.seed(subtitle=True)
+        db.enqueue_strm_metadata_jobs([{
+            "source_id": "library", "file_id": files[1].file_id,
+            "filename": files[1].name, "size": files[1].size, "etag": files[1].etag,
+        }])
+        self.delete(log_id)
+        with db.get_conn() as conn:
+            self.assertEqual(conn.execute("SELECT status FROM strm_metadata_queue").fetchone()[0], "cancelled")
+        self.assertEqual(self.pending(), [])
+        self.wake.assert_not_called()
+
+    def test_cleanup_works_after_cloud_rename_with_an_older_index_name(self):
+        log_id, files = self.seed()
+        path = self.index(files[0])
+        with db.get_conn() as conn:
+            conn.execute("UPDATE strm_index SET filename='previous-name.mkv'")
+        result = self.delete(log_id)
+        self.assertEqual(result["warnings"], [])
+        self.assertFalse(path.exists())
+
+    def test_disabled_strm_link_keeps_existing_behavior(self):
+        log_id, files = self.seed()
+        path = self.index(files[0])
+        self.rules.link_strm = False
+        self.delete(log_id)
+        self.assertTrue(path.exists())
+        self.assertEqual(len(db.list_strm_index("guangya:library")), 1)
+        self.wake.assert_not_called()
+
+    def test_cleanup_failure_does_not_replay_successful_cloud_delete(self):
+        log_id, files = self.seed()
+        path = self.index(files[0])
+        with patch.object(strm, "retire_deleted_strm_files", side_effect=RuntimeError("storage secret")):
+            result = self.delete(log_id)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["deleted"], 1)
+        self.assertTrue(result["warnings"])
+        self.assertNotIn("storage secret", json.dumps(result))
+        log = db.get_organize_log(log_id)
+        assert log is not None
+        self.assertEqual(log["status"], "deleted")
+        self.assertTrue(path.exists())
+        self.assertTrue(strm.STRM_OPERATION_LOCK.acquire(blocking=False))
+        strm.STRM_OPERATION_LOCK.release()
+        self.assertEqual(self.client.delete.call_count, 1)
+
+    def test_cleanup_ack_failure_keeps_receipt_for_idempotent_local_recovery(self):
+        log_id, files = self.seed()
+        path = self.index(files[0])
+        with patch.object(db, "delete_strm_path_cleanup", side_effect=RuntimeError("ACK interrupted")):
+            result = self.delete(log_id)
+        self.assertTrue(result["warnings"])
+        self.assertFalse(path.exists())
+        self.assertEqual(len(self.pending()), 1)
+        self.assertTrue(db.list_strm_refresh_entries())
+        restored = strm.cleanup_deleted_cloud_files({"video"}, allow_emby=False)
+        self.assertEqual(restored["cleaned"], 0)
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.client.delete.call_count, 1)
+
+    def test_local_cleanup_includes_cloud_success_when_log_item_write_fails(self):
+        log_id, files = self.seed()
+        path = self.index(files[0])
+        with patch.object(db, "update_organize_log_item", side_effect=RuntimeError("log write failed")):
+            with self.assertRaisesRegex(RuntimeError, "log write failed"):
+                self.delete(log_id)
+        self.assertFalse(path.exists())
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.client.delete.call_count, 1)
 
 
 class AutomaticReplacementDeleteTests(IsolatedDatabaseTestCase):

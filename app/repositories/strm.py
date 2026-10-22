@@ -296,6 +296,17 @@ def delete_strm_path_cleanup(ids: list[int]) -> None:
             )
 
 
+def list_strm_path_cleanup_sources(file_ids: set[str]) -> list[str]:
+    """定位已确认删除对象的旧路径来源，不读取无关文件的清理凭据。"""
+    with db.get_conn() as conn:
+        return [row[0] for row in conn.execute(
+            "SELECT DISTINCT source FROM strm_path_cleanup "
+            "WHERE file_id IN (SELECT value FROM json_each(?)) "
+            "AND (source LIKE 'guangya:%' OR source LIKE 'guangya-meta:%')",
+            (json.dumps(sorted(file_ids)),),
+        )]
+
+
 def list_strm_indexes_by_file_id(file_id: str) -> list[sqlite3.Row]:
     """查询所有来源中引用同一远端文件的 STRM 索引。"""
     with db.get_conn() as conn:
@@ -335,40 +346,67 @@ def retire_deleted_strm_files(files: Iterable[dict[str, Any]]) -> dict[str, int]
     """退役已确认回收的对象，不碰本地文件、不触发扫描或媒体库刷新。
 
     调用方持有 STRM_OPERATION_LOCK，防止扫描及元数据安装重建索引。
-    旧路径凭据沿用既有恢复流程：Jellyfin 本地删除失败时，下次同步仍能
-    按指纹处理残留，而不是丢失所有权后留下孤儿文件。
+    提供 source_id 时核对调用方冻结的索引快照；仅提供 file_id 时退役该
+    已确认回收对象的全部光鸭引用。旧路径凭据交由统一恢复器处理。
     """
     counts = {"strm_indexes_retired": 0, "metadata_jobs_cancelled": 0}
     stamp = db.now()
+    files = list(files)
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        scopes: dict[str, list[str]] = {}
+        unscoped = [item["file_id"] for item in files if "source_id" not in item]
+        if unscoped:
+            rows = conn.execute(
+                "WITH selected AS (SELECT value AS file_id FROM json_each(?)), "
+                "paths AS (SELECT source,file_id FROM strm_index "
+                "UNION ALL SELECT source,file_id FROM strm_path_cleanup) "
+                "SELECT file_id,substr(source,instr(source,':')+1) AS source_id "
+                "FROM paths WHERE file_id IN selected "
+                "AND (source LIKE 'guangya:%' OR source LIKE 'guangya-meta:%') "
+                "UNION SELECT file_id,source_id FROM strm_metadata_queue "
+                "WHERE provider='guangya' AND file_id IN selected "
+                "UNION SELECT file_id,source_id FROM strm_failures WHERE file_id IN selected",
+                (json.dumps(unscoped),),
+            ).fetchall()
+            for row in rows:
+                scopes.setdefault(row["file_id"], []).append(row["source_id"])
         for item in files:
-            source_id, file_id = item["source_id"], item["file_id"]
-            for prefix in ("guangya:", "guangya-meta:"):
-                source = prefix + source_id
-                row = conn.execute(
-                    "SELECT * FROM strm_index WHERE source=? AND file_id=?",
-                    (source, file_id),
-                ).fetchone()
-                if row is not None:
-                    if (tuple(row[key] for key in ("etag", "size", "filename"))
+            file_id = item["file_id"]
+            sources = [item["source_id"]] if "source_id" in item else scopes.get(file_id, [])
+            for source_id in sources:
+                for prefix in ("guangya:", "guangya-meta:"):
+                    source = prefix + source_id
+                    row = conn.execute(
+                        "SELECT * FROM strm_index WHERE source=? AND file_id=?",
+                        (source, file_id),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    if "source_id" in item and (tuple(row[key] for key in ("etag", "size", "filename"))
                         != (item["etag"], item["size"], item["name"]) or (
                             prefix == "guangya:" and item.get("path") and
                             (row["strm_path"], row["content_fingerprint"])
                             != (item["path"], item["fingerprint"])
                         )):
                         raise ValueError("已回收对象的 STRM 索引身份发生变化，已保留索引等待核对")
-                    conn.execute(_RECORD_PATHS + "AND file_id=?", (stamp, source, file_id))
+                    if row["strm_path"]:
+                        # 缺少指纹也保留凭据；清理器会拒绝删除，不能丢失归属。
+                        conn.execute(
+                            "INSERT OR IGNORE INTO strm_path_cleanup("
+                            "source,file_id,strm_path,content_fingerprint,created_at) VALUES(?,?,?,?,?)",
+                            (source, file_id, row["strm_path"], row["content_fingerprint"], stamp),
+                        )
                     conn.execute("DELETE FROM strm_index WHERE id=?", (row["id"],))
                     counts["strm_indexes_retired"] += 1
-            counts["metadata_jobs_cancelled"] += conn.execute(
-                _CANCEL_METADATA_JOB,
-                ("Jellyfin 已确认云端对象移入回收站", stamp, "guangya", source_id, file_id),
-            ).rowcount
-            for action in ("generate", "metadata"):
-                db._resolve_strm_failure_for_item_conn(
-                    conn, source_id, file_id, action, timestamp=stamp,
-                )
+                counts["metadata_jobs_cancelled"] += conn.execute(
+                    _CANCEL_METADATA_JOB,
+                    ("已确认云端对象移入回收站", stamp, "guangya", source_id, file_id),
+                ).rowcount
+                for action in ("generate", "metadata"):
+                    db._resolve_strm_failure_for_item_conn(
+                        conn, source_id, file_id, action, timestamp=stamp,
+                    )
     return counts
 
 
