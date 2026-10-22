@@ -4,10 +4,14 @@
 
 ## [Unreleased]
 
-## [0.1.14] - 2026-10-20
+## [0.1.14] - 2026-10-22
+
+> 发布候选说明，尚未发布。以上日期为本次整理日期，已核对范围为 `v0.1.13..262b1e06`；正式发布时需按最终标签目标再次核对日期与提交范围。文末涉及 `v0.1.14` 的版本比较链接在创建并推送该标签后生效。
 
 ### Added
 - 设置页新增 Tavily API Key 只读连接测试，支持测试尚未保存的输入，并区分认证失败和服务暂不可用（[`319f1887`](https://github.com/li88iioo/MediaFlux/commit/319f1887)）。
+- 新增独立的本地网页正文读取及开关、超时和缓存配置；Tavily 保留搜索职责，正文读取不再依赖 Tavily Extract 或消耗搜索额度，仅抓取公开 HTTPS HTML/文本，不执行网页 JavaScript（[`1431bc85`](https://github.com/li88iioo/MediaFlux/commit/1431bc85)）。
+- Agent 支持按名称、扩展名、大小与类型规则筛选光鸭目录，预览并确认后批量移动、移入回收站、平铺目录或清理本次变空的子目录；重名可保留两份，不提供覆盖模式，扫描不完整时不生成执行计划（[`654139a9`](https://github.com/li88iioo/MediaFlux/commit/654139a9)）。
 - Telegram 支持话题隔离、会话模型选择与分页菜单；选择或取消后收起按钮，首条消息及后续回复使用相同话题路由（[`6d8d73a7`](https://github.com/li88iioo/MediaFlux/commit/6d8d73a7)、[`be6fb4f3`](https://github.com/li88iioo/MediaFlux/commit/be6fb4f3)、[`e545d4aa`](https://github.com/li88iioo/MediaFlux/commit/e545d4aa)）。
 - Agent 增加流式显示开关、按实际媒体库范围查询最近入库、核对公网推荐与本地库存，以及整批资源预检与提交能力（[`37f56dae`](https://github.com/li88iioo/MediaFlux/commit/37f56dae)、[`be7ac825`](https://github.com/li88iioo/MediaFlux/commit/be7ac825)、[`2015239c`](https://github.com/li88iioo/MediaFlux/commit/2015239c)、[`6809bb3b`](https://github.com/li88iioo/MediaFlux/commit/6809bb3b)）。
 - 整理日志支持通过预览批量修正媒体身份；RSS 增加 12/24 小时刷新间隔；探索页增加空闲隐藏的返回顶部按钮（[`781d4329`](https://github.com/li88iioo/MediaFlux/commit/781d4329)、[`1bf0632b`](https://github.com/li88iioo/MediaFlux/commit/1bf0632b)、[`4d200b93`](https://github.com/li88iioo/MediaFlux/commit/4d200b93)）。
@@ -16,10 +20,14 @@
 - Agent 按领域拆分业务与内核职责，分离回合、模型流、工具执行和终态处理；只读探索使用固定有界额度，不再靠成功读取逐次增加规划额度（[`852dbb4d`](https://github.com/li88iioo/MediaFlux/commit/852dbb4d)、[`479131ae`](https://github.com/li88iioo/MediaFlux/commit/479131ae)、[`10ec9bdd`](https://github.com/li88iioo/MediaFlux/commit/10ec9bdd)、[`68eeee23`](https://github.com/li88iioo/MediaFlux/commit/68eeee23)）。
 - 整理统一单文件身份与季集规划、主文件和伴随文件事务及失败补偿；媒体推荐和偏好下沉到共享业务层，避免 Web 与 Agent 各自实现（[`3fe15878`](https://github.com/li88iioo/MediaFlux/commit/3fe15878)、[`50b1e996`](https://github.com/li88iioo/MediaFlux/commit/50b1e996)、[`1163b31c`](https://github.com/li88iioo/MediaFlux/commit/1163b31c)）。
 - 首次安装收敛为 Web 初始化流程；配置校验、持久发布与运行快照使用统一事务入口（[`bc9d6e85`](https://github.com/li88iioo/MediaFlux/commit/bc9d6e85)、[`4dea3297`](https://github.com/li88iioo/MediaFlux/commit/4dea3297)）。
+- RSS 条目统一分页浏览，批量全选限定当前页；媒体订阅与收藏清单支持逐页读全，按真实媒体身份解析订阅状态，不再将首批返回当作完整清单。同批订阅复用相同范围的库存快照，减少重复读取（[`5f914b97`](https://github.com/li88iioo/MediaFlux/commit/5f914b97)、[`76ac2027`](https://github.com/li88iioo/MediaFlux/commit/76ac2027)、[`0d770bc7`](https://github.com/li88iioo/MediaFlux/commit/0d770bc7)）。
+- Jellyfin 插件删除媒体后，仅在云盘回收已确认时精准退役对应 STRM／元数据索引及关联任务，不再触发整个来源的扫描与媒体库刷新；本地媒体删除仍由 Jellyfin 负责（[`85258af7`](https://github.com/li88iioo/MediaFlux/commit/85258af7)）。
 - 索引站独立配置，区分前端搜索和 Agent 来源权限；资源目录先完成分页再应用结果上限。公网磁力在下载接入边界补充 Tracker，移除固定片名别名推断（[`275fe24b`](https://github.com/li88iioo/MediaFlux/commit/275fe24b)、[`4c867b68`](https://github.com/li88iioo/MediaFlux/commit/4c867b68)、[`9facc6d6`](https://github.com/li88iioo/MediaFlux/commit/9facc6d6)、[`705471ba`](https://github.com/li88iioo/MediaFlux/commit/705471ba)、[`5bcba2a5`](https://github.com/li88iioo/MediaFlux/commit/5bcba2a5)）。
+- 刷新 Python 3.13 发布哈希锁，升级 FastAPI、Starlette、Pydantic、HTTP 客户端及加密依赖；更新 Node/Python 基础镜像摘要，构建使用 Node 24.22.1、npm 12.2.0，并升级静态压缩、Ruff 和 Playwright 工具链（[`78c1a25e`](https://github.com/li88iioo/MediaFlux/commit/78c1a25e)、[`f3bc1a21`](https://github.com/li88iioo/MediaFlux/commit/f3bc1a21)、[`5a0bae21`](https://github.com/li88iioo/MediaFlux/commit/5a0bae21)）。
+- 本地 Lucide/GSAP 更新并纳入 npm 精确锁定，测试校验分发文件与锁定包字节一致；Jellyfin 插件测试依赖更新，运行兼容目标仍保持 Jellyfin 12.2（[`5a0bae21`](https://github.com/li88iioo/MediaFlux/commit/5a0bae21)、[`765cf6dc`](https://github.com/li88iioo/MediaFlux/commit/765cf6dc)）。
 
 ### Fixed
-- 按 TMDB ID 的单项存在性／剧集候选查询复用统一分页库存读取，移除未受支持的服务端等值过滤；库存未扫描完整时不再把未命中报告为不存在。
+- 按 TMDB ID 的单项存在性／剧集候选查询复用统一分页库存读取，移除未受支持的服务端等值过滤；库存未扫描完整时不再把未命中报告为不存在（[`de66b8ce`](https://github.com/li88iioo/MediaFlux/commit/de66b8ce)）。
 - 媒体库存统一展开电影合集成员，不再把 Jellyfin / Emby 的界面折叠清单当作完整库存，避免推荐重复的已入库影片（[`c099e8e9`](https://github.com/li88iioo/MediaFlux/commit/c099e8e9)）。
 - 连续对话按窗口剩余容量保留最近查询工具的 Schema，仍重新核验当前权限；修复能力召回把工具示例中的“排除已入库”误当成工具动作，导致推荐工具被压低的问题（[`59d4ed53`](https://github.com/li88iioo/MediaFlux/commit/59d4ed53)、[`73c65809`](https://github.com/li88iioo/MediaFlux/commit/73c65809)）。
 - 修复 Agent 中断流、跨轮约束、部分查询失败和确认后后台任务的状态交接；停止、过期确认及重试保留执行身份，不把提交、检查或文件移动当作入库完成（[`077ea313`](https://github.com/li88iioo/MediaFlux/commit/077ea313)、[`fc9adc27`](https://github.com/li88iioo/MediaFlux/commit/fc9adc27)、[`0f7fae6b`](https://github.com/li88iioo/MediaFlux/commit/0f7fae6b)、[`42f2cd6c`](https://github.com/li88iioo/MediaFlux/commit/42f2cd6c)）。
@@ -29,16 +37,34 @@
 - STRM 元数据输出与刷新绑定同一冻结根目录，恢复中断后的未索引安装，保留同步期间到达的增量变化；完整性不足时不执行删除型清理（[`7e74db7d`](https://github.com/li88iioo/MediaFlux/commit/7e74db7d)、[`49b7aa4f`](https://github.com/li88iioo/MediaFlux/commit/49b7aa4f)、[`1188ccb4`](https://github.com/li88iioo/MediaFlux/commit/1188ccb4)、[`7f288bfc`](https://github.com/li88iioo/MediaFlux/commit/7f288bfc)）。
 - 修复索引器取消请求后浏览器会话提前释放，以及媒体代理握手取消时连接泄漏；探索弹窗释放关闭后的结果，侧栏展开收起时文字不再换行跳变（[`9a2e9301`](https://github.com/li88iioo/MediaFlux/commit/9a2e9301)、[`cd437066`](https://github.com/li88iioo/MediaFlux/commit/cd437066)、[`ab799610`](https://github.com/li88iioo/MediaFlux/commit/ab799610)、[`daed6895`](https://github.com/li88iioo/MediaFlux/commit/daed6895)）。
 - 启动与备份并发测试显式隔离首次模块导入，消除单独运行与全量套件之间的顺序依赖，保留原锁顺序与备份完整性断言（[`acb41080`](https://github.com/li88iioo/MediaFlux/commit/acb41080)）。
+- 整理人工确认重新核对冻结文件与实际执行规则，避免无关配置变化误报“整理规则已变化”；排队受理持久化后再回复，迟到的受理回执不覆盖已完成结果，Telegram 确认回执按序交付（[`eb66e30c`](https://github.com/li88iioo/MediaFlux/commit/eb66e30c)、[`479762ad`](https://github.com/li88iioo/MediaFlux/commit/479762ad)）。
+- NSFW 自动识别、日志重新整理与分段处理复用相同番号清洗逻辑，正确处理紧凑文件名、字幕／版本后缀和域名噪声，修复搜索能找到候选却因原文件名校验失败而无法重新整理的问题（[`1c9fe966`](https://github.com/li88iioo/MediaFlux/commit/1c9fe966)、[`3d77a09d`](https://github.com/li88iioo/MediaFlux/commit/3d77a09d)）。
+- 整理日志重新执行须有当前成功预览，提交前检查日志快照及云端文件是否过期；切换记录后，旧请求或错误不再覆盖当前详情（[`0b8793e3`](https://github.com/li88iioo/MediaFlux/commit/0b8793e3)、[`d1d323a9`](https://github.com/li88iioo/MediaFlux/commit/d1d323a9)、[`a9220e33`](https://github.com/li88iioo/MediaFlux/commit/a9220e33)）。
+- 整理日志清除仅作用于当前来源、状态及关键词匹配的记录，保留运行中和待确认关联记录；本地整理补齐历史分页与分批清除，清除记录不删除媒体文件（[`3f01d952`](https://github.com/li88iioo/MediaFlux/commit/3f01d952)、[`7a5d6867`](https://github.com/li88iioo/MediaFlux/commit/7a5d6867)）。
+- 统一下载、订阅和通知中的后处理状态：部分目标失败、整理或 STRM 交接失败仍标为“需要处理”，不会被下载已完成掩盖；错误通知脱敏，并保留对应恢复入口（[`a4b50ce1`](https://github.com/li88iioo/MediaFlux/commit/a4b50ce1)、[`a5cb2d85`](https://github.com/li88iioo/MediaFlux/commit/a5cb2d85)、[`8a6fd2de`](https://github.com/li88iioo/MediaFlux/commit/8a6fd2de)、[`8b7409f3`](https://github.com/li88iioo/MediaFlux/commit/8b7409f3)、[`0a374cd8`](https://github.com/li88iioo/MediaFlux/commit/0a374cd8)）。
+- STRM 选中重试与批量重试共用失败恢复链路；元数据手动恢复与后台安装、确认及刷新交接统一，已安装但确认中断的文件可复用，避免重复下载或排队（[`f9d872ae`](https://github.com/li88iioo/MediaFlux/commit/f9d872ae)、[`e06b5790`](https://github.com/li88iioo/MediaFlux/commit/e06b5790)）。
+- RSS 刷新结果绑定同一订阅配置修订并原子提交；重试预检失败保留原下载受理回执与状态，不把已受理任务误当作未提交（[`09f30581`](https://github.com/li88iioo/MediaFlux/commit/09f30581)、[`6ae00fae`](https://github.com/li88iioo/MediaFlux/commit/6ae00fae)）。
+- 分享转存的回执绑定确认时的预览、文件选择与目标目录；修改链接或切换预览后，旧异步结果不再覆盖当前状态（[`50a9f0de`](https://github.com/li88iioo/MediaFlux/commit/50a9f0de)）。
+- 库存查询的降级与缺集审计保留扫描不完整状态，不将未知库存报告为未入库；自动化通知保留创建时的 Telegram 话题，局部修改每日摘要规则不再重置未修改的发送时间（[`a046ad79`](https://github.com/li88iioo/MediaFlux/commit/a046ad79)、[`e6b6918b`](https://github.com/li88iioo/MediaFlux/commit/e6b6918b)、[`c14c961f`](https://github.com/li88iioo/MediaFlux/commit/c14c961f)）。
+
+### Security
+- 更新 certifi 至 2026.10.19，并提高 aiohttp、urllib3、multidict 和 pip 的安装下限；Node 构建阶段先更新同发行版 Alpine 系统包与 CA bundle，再安装 npm 依赖，修复固定基础镜像仍携带受影响的 emSign G3 根证书及旧版 zlib 的问题（[`78c1a25e`](https://github.com/li88iioo/MediaFlux/commit/78c1a25e)、[`5a0bae21`](https://github.com/li88iioo/MediaFlux/commit/5a0bae21)）。
+
+### Removed
+- 退役未使用的 `POST /api/offline/preview`、`POST /api/offline/submit`，资源接入复用统一下载链路；离线规则查询与配置保留（[`fa894152`](https://github.com/li88iioo/MediaFlux/commit/fa894152)）。
+- 移除独立依赖安全扫描工作流及其发布前置依赖，不再定时扫描或因此阻塞构建；已有依赖更新、证书修复、单元测试、浏览器测试和容器冒烟门禁保留（[`262b1e06`](https://github.com/li88iioo/MediaFlux/commit/262b1e06)）。
 
 ### 升级说明
 - 本版本数据库由 schema31 → 35；从 v0.1.13 升级时自动执行连续迁移，增加下载展示名称、后台轮询索引、巡检周期身份和独立下载提交时钟，保留已有任务与历史记录。
 - 升级前请停止服务，对配置、凭据和数据库进行完整离线备份；WAL 模式下不要在运行中只复制主 `.db` 文件。先确认数据卷与 STRM 输出目录的挂载和运行账户权限。
 - 回退必须停止服务，并按离线恢复流程恢复升级前配置和数据库；不要直接让 schema31 程序打开 schema35 数据库。
 - Web 与 Telegram 功能及外部来源仍取决于各自配置。已有历史确认、未知远端写入结果需要按当前状态复核，不应通过反复提交来验证升级。
+- 自建 API 客户端需适配分页响应：`/api/rss/entries` 的响应数据改为含 `items/total/offset/limit/has_more` 的对象；`/api/subscriptions/media`、`/api/subscriptions/watchlist`、`/api/discovery/watchlist` 改为含 `items/total/has_more/next` 的对象。旧离线预览与提交接口已移除，外部脚本不能继续调用；项目内 Web、Telegram 与 Agent 调用已迁移。
 
 ### 已知限制
 - 外部索引、云盘离线下载与模型服务可能超时或限流；下载受理不代表媒体已传输完成。发布组季集映射仍需可核验依据。
 - 自动化通过与有界真实对话验收不等于所有模型、所有媒体和全部生产任务都已验证；未覆盖的第三方环境仍需部署后按自身配置验收。
+- 依赖更新不代表镜像已无漏洞：本次核查仍发现 Debian 运行系统包及 npm/pip 内置依赖的已知公告，其中部分尚无发行方修复；安全核查需单独执行，不能据此保证规避未知零日漏洞。
 
 ## [0.1.13] - 2026-09-19
 
